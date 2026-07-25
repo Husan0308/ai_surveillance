@@ -1,0 +1,125 @@
+app:
+  name: AI Surveillance System
+  version: '3.0'
+  ui_locked: true
+environment:
+  device: auto
+  gpu_id: 0
+  threads: 4
+database:
+  type: sqlite
+  sqlite_path: data/surveillance.db
+  wal: false
+  busy_timeout_ms: 5000
+logging:
+  level: INFO
+  dir: logs
+  max_mb: 10
+  backup_count: 5
+cameras_config: config/cameras.yaml
+ai:
+  detector:
+    model: models/yolov8n.pt
+    conf: 0.15
+    imgsz: 640
+    device: auto
+  tracker:
+    type: bytetrack
+    track_buffer: 30
+    match_thresh: 0.25
+    track_high_thresh: 0.25
+    track_low_thresh: 0.1
+    new_track_thresh: 0.2
+  pose:
+    enabled: true
+    model: models/yolov8n-pose.pt
+    conf: 0.15
+    imgsz: 640
+  face:
+    enabled: true
+    provider: insightface
+    model: buffalo_l
+    det_size: 320
+    match_threshold: 0.56
+    min_face_size_px: 50
+  reid:
+    enabled: false
+    model: osnet_x0_25
+    threshold: 0.65
+  ai_fps: 15
+  face_interval_frames: 6
+  detection_interval_frames: 1
+  face_recognition_timeout_sec: 7
+  face_min_quality: 50
+  reid_timeout_sec: 15
+  pose_interval_frames: 3
+  max_people_per_camera: 20
+heatmap:
+  use_pose_ankle: true
+  collect_when_off: true
+  decay: normal
+  history_days: 7
+  grid_w: 64
+  grid_h: 36
+  blur: true
+  opacity: 0.6
+enrollment:
+  source: 0
+  images_count: 10
+  countdown_seconds: 3
+  shutter_sound: true
+  flash_animation: true
+  min_face_quality: 45
+  min_face_size_px: 80
+  reject_blur: true
+  reject_dark: true
+  reject_bad_angle: false
+  duplicate_check: true
+  duplicate_threshold: 0.62
+  hot_reload_recognition: true
+person_management:
+  delete_embeddings_on_delete: true
+  allow_unknown_to_employee: true
+events:
+  retention_days: 30
+  ui_limit: 300
+  types:
+  - person_detected
+  - person_recognized
+  - unknown_detected
+  - camera_offline
+  - camera_online
+  - enrollment_completed
+  - snapshot
+  - error
+  - intrusion
+  - overstay
+storage:
+  snapshots_dir: snapshots
+  recordings_dir: recordings
+  exports_dir: exports
+  backups_dir: backups
+  models_dir: models
+  recordings_enabled: false
+  recording_format: mp4
+  segment_minutes: 5
+  retention_days: 14
+  auto_delete_old: true
+  max_disk_gb: 500
+security:
+  login_username: admin
+  login_password: admin
+  settings_password: admin
+  auto_lock_minutes: 15
+alerts:
+  sound_enabled: true
+  sound_events:
+  - intrusion
+  - camera_offline
+  - overstay
+  - error
+performance:
+  db_queue_size: 10000
+  frame_queue_size: 2
+  camera_thread_per_camera: true
+  ui_refresh_fps: 25

@@ -1,0 +1,36 @@
+# Python Cache
+__pycache__/
+*.py[cod]
+
+# AI Models (YOLO weights)
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+models/
+
+# Snapshots and Media
+snapshots/
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.avi
+
+# Virtual Environment & Settings
+venv/
+.venv/
+.env
+.vscode/
+.idea/
+
+# Database & Backups
+*.db
+*.sqlite3
+data/*.db
+backups/
+
+# Logs
+*.log
+logs/
