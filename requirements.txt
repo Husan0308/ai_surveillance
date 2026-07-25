@@ -3,7 +3,9 @@ opencv-python>=4.9
 numpy>=1.26
 ultralytics>=8.2
 insightface>=0.7.3
-onnxruntime>=1.17
+# GPU bor bo'lsa: onnxruntime-gpu
+# GPU yo'q bo'lsa: onnxruntime
+onnxruntime>=1.16.0
 psutil>=5.9
 nvidia-ml-py>=11.5
 PyYAML>=6.0

@@ -47,11 +47,16 @@ class FaceEngine:
 
             self.app = FaceAnalysis(
                 name=model_name,
-                providers=["CPUExecutionProvider"],
+                # Auto GPU/CPU tanlash
+                providers=(
+                    ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                    if "CUDAExecutionProvider" in __import__("onnxruntime").get_available_providers()
+                    else ["CPUExecutionProvider"]
+                ),
             )
 
             self.app.prepare(
-                ctx_id=-1,
+                ctx_id=0 if "CUDAExecutionProvider" in __import__("onnxruntime").get_available_providers() else -1,
                 det_size=(self.det_size, self.det_size),
             )
 
