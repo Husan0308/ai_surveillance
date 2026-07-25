@@ -4831,7 +4831,7 @@ class SettingsPage(Page):
         # self.tabs.addTab(emp_tab, "👥 Employees")  # Olib tashlandi
 
         # Jadvalni to'ldirish
-        self._load_employees()
+        # self._load_employees()  # EMPLOYEES REMOVED
 
         save = QPushButton("💾  Save Settings")
         save.setObjectName("btnPrimary")
@@ -4861,19 +4861,19 @@ class SettingsPage(Page):
 
         self.hub.toast("✅ Settings saved")
 
-    def _load_employees(self):
-        """Settings dagi employee jadvalini to'ldirish"""
+    # def _load_employees(self):  # EMPLOYEES REMOVED
+        # """Settings dagi employee jadvalini to'ldirish"""
         # self.emp_table.setRowCount(0)  # Employees removed
         
-        people = self.hub.sys.people
+        # people = self.hub.sys.people
         
-        for rec in people:
+        # for rec in people:
             # r = self.emp_table.rowCount()  # Employees removed
             # self.emp_table.insertRow(r)  # Employees removed
 
             # Name
-            name_item = QTableWidgetItem(rec.name)
-            name_item.setData(Qt.UserRole, rec)  # Record ob'ektini saqlaymiz
+            # name_item = QTableWidgetItem(rec.name)
+            # name_item.setData(Qt.UserRole, rec)  # Record ob'ektini saqlaymiz
             # self.emp_table.setItem(r, 0, name_item)  # Employees removed
 
             # Department
@@ -4883,17 +4883,17 @@ class SettingsPage(Page):
             # self.emp_table.setItem(r, 2, QTableWidgetItem(rec.emp_id))  # Employees removed
 
             # Delete tugmasi
-            del_btn = QPushButton("🗑 Delete")
-            del_btn.setObjectName("btnGhost")
-            del_btn.setCursor(Qt.PointingHandCursor)
-            del_btn.setFixedWidth(90)
+            # del_btn = QPushButton("🗑 Delete")
+            # del_btn.setObjectName("btnGhost")
+            # del_btn.setCursor(Qt.PointingHandCursor)
+            # del_btn.setFixedWidth(90)
             # del_btn.clicked.connect(lambda checked, row=r: self._delete_employee(row))  # EMP REMOVED
 
-            btn_widget = QWidget()
-            btn_layout = QHBoxLayout(btn_widget)
-            btn_layout.setContentsMargins(4, 2, 4, 2)
-            btn_layout.addWidget(del_btn)
-            btn_layout.setAlignment(Qt.AlignCenter)
+            # btn_widget = QWidget()
+            # btn_layout = QHBoxLayout(btn_widget)
+            # btn_layout.setContentsMargins(4, 2, 4, 2)
+            # btn_layout.addWidget(del_btn)
+            # btn_layout.setAlignment(Qt.AlignCenter)
 
             # self.emp_table.setCellWidget(r, 3, btn_widget)  # Employees removed
             # self.emp_table.setRowHeight(r, 36)  # Employees removed
@@ -4917,49 +4917,49 @@ class SettingsPage(Page):
             # self.emp_table.setRowHidden(row, not match)  # Employees removed
 
     # def _delete_employee(self, row):  # EMP REMOVED
-        """Xodimni o'chirish (embeddinglar bilan birga)"""
+        # """Xodimni o'chirish (embeddinglar bilan birga)"""
         # name_item = self.emp_table.item(row, 0)  # Employees removed
-        if not name_item:
-            return
+        # if not name_item:
+            # return
             
-        rec = name_item.data(Qt.UserRole)
+        # rec = name_item.data(Qt.UserRole)
         
-        reply = QMessageBox.question(
-            self,
-            "Delete Employee",
-            f"Are you sure you want to delete '{rec.name}'?\n\n"
-            f"All face embeddings and recognition history will be permanently removed.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        # reply = QMessageBox.question(
+            # self,
+            # "Delete Employee",
+            # f"Are you sure you want to delete '{rec.name}'?\n\n"
+            # f"All face embeddings and recognition history will be permanently removed.",
+            # QMessageBox.Yes | QMessageBox.No,
+            # QMessageBox.No
+        # )
 
-        if reply == QMessageBox.Yes:
-            try:
+        # if reply == QMessageBox.Yes:
+            # try:
                 # Backend orqali o'chirish (embeddings ham o'chadi)
-                self.hub.sys.sm.person_service.delete_person(rec.db_id)
+                # self.hub.sys.sm.person_service.delete_person(rec.db_id)
                 
                 # UI dan o'chirish
                 # self.emp_table.removeRow(row)  # Employees removed
                 
                 # Person Management sahifasini ham yangilash
-                self.hub.pm.rebuild()
+                # self.hub.pm.rebuild()
                 
-                self.hub.toast(f"✅ {rec.name} deleted successfully")
-            except Exception as e:
-                self.hub.toast(f"⚠ Failed to delete: {str(e)}")
+                # self.hub.toast(f"✅ {rec.name} deleted successfully")
+            # except Exception as e:
+                # self.hub.toast(f"⚠ Failed to delete: {str(e)}")
 
 
 # ======================= SPLASH & LOGIN ===========================
-SPLASH_STEPS = [
-    (0, "Initializing core engine…"),
-    (12, "Loading AI models (YOLOv11m-pose)…"),
-    (30, "Loading face recognition (ArcFace-R100)…"),
-    (50, "Connecting to cameras (8/8)…"),
-    (68, "Initializing database (PostgreSQL)…"),
-    (82, "Starting inference pipeline…"),
-    (93, "Loading user preferences…"),
-    (100, "Ready!"),
-]
+# SPLASH_STEPS = [
+    # (0, "Initializing core engine…"),
+    # (12, "Loading AI models (YOLOv11m-pose)…"),
+    # (30, "Loading face recognition (ArcFace-R100)…"),
+    # (50, "Connecting to cameras (8/8)…"),
+    # (68, "Initializing database (PostgreSQL)…"),
+    # (82, "Starting inference pipeline…"),
+    # (93, "Loading user preferences…"),
+    # (100, "Ready!"),
+# ]
 
 
 class SplashScreen(QDialog):
