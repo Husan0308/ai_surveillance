@@ -442,7 +442,12 @@ class AIWorker(QThread):
         """
         import time as _t2
         _now2 = _t2.time()
-        key = (tr.id, person_id)
+        # ✅ KAMERA-BASED DEDUP: bir kamera+person = 30s ichida bir marta
+        # Boshqa kameraga o'tsa → yangi event (cross-camera)
+        if person_id is not None:
+            key = (self.camera_id, person_id)  # kamera + person (track_id emas!)
+        else:
+            key = (self.camera_id, tr.id)  # kamera + track_id (unknown uchun)
         _cur = tr.box[:4] if (tr.box is not None and len(tr.box) >= 4) else None
         _cx = _cy = None
         if _cur is not None:
@@ -487,8 +492,8 @@ class AIWorker(QThread):
         if self._emitted.get(key) == name:
             return
         self._emitted[key] = name
-        if len(self._emitted) > 500:
-            for k in list(self._emitted.keys())[:-250]:
+        if len(self._emitted) > 2000:
+            for k in list(self._emitted.keys())[:-1000]:
                 self._emitted.pop(k, None)
 
         # recognized -> zona ga yozish
@@ -723,8 +728,9 @@ class AIWorker(QThread):
                 self.identity_cache.cache[tr.id]["source"] = "reid"
             except Exception:
                 pass
-            self._emit_dedup(frame, tr, pid, name, score, "person_recognized", "ok", {"source": "reid"})
-            print(f"[AIWorker {self.camera_id}] ReID MATCH: {name} score={score:.3f} eff={_eff:.2f} track={tr.id}", flush=True)
+            # ✅ _emit_dedup OLIB TASHLANDI (chunki _process_faces allaqachon event emit qiladi)
+            # self._emit_dedup(frame, tr, pid, name, score, "person_recognized", "ok", {"source": "reid"})
+            print(f"[AIWorker {self.camera_id}] ReID MATCH: {name} score={score:.3f} eff={_eff:.2f} track={tr.id} (event yo'q, faqat cache)", flush=True)
 
 
     def _cleanup_cache(self, tracks):
