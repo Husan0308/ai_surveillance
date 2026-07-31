@@ -119,6 +119,11 @@ class EventsService(QObject):
         e["camera_id"] = e.get("camera_id") or e.get("cam") or "SYS"
         e["person_name"] = e.get("person_name") or e.get("person") or ""
         e["confidence"] = float(e.get("confidence", e.get("conf", 0.0)) or 0.0)
+
+        # ✅ UI aliaslari (cam/person/conf) — barcha consumerlar uchun
+        e["cam"] = e["camera_id"]
+        e["person"] = e["person_name"]
+        e["conf"] = e["confidence"]
         e["level"] = e.get("level", "info")
         e["type"] = e.get("type", "system")
         e["ack"] = bool(e.get("ack", False))
@@ -160,16 +165,31 @@ class EventsService(QObject):
 
     # ---------------- publish ----------------
     def publish_event(self, event: dict, frame=None):
+        print(f"[EventsService] 📨 RECEIVED: type={event.get('type','?')} person={event.get('person_name','?')} cam={event.get('camera_id','?')}", flush=True)
         e = self._normalize(event)
 
         # cooldown for very frequent events
+        now = time.time()
+
         if e["type"] == "person_detected":
             key = ("person_detected", e["camera_id"])
-            now = time.time()
-
             if now - self._cooldowns.get(key, 0) < 10.0:
                 return e
+            self._cooldowns[key] = now
 
+        # ✅ GLOBAL person cooldown: bir odam 30 sek ichida 1 marta
+        # (barcha kameralar bo'ylab, camera_id dan qat'i nazar)
+        if e["type"] in ("person_recognized", "recognized") and e.get("person_id"):
+            key = ("person_recognized", e["person_id"])
+            if now - self._cooldowns.get(key, 0) < 30.0:
+                return e
+            self._cooldowns[key] = now
+
+        # ✅ Unknown cooldown: bir xil unknown 15 sek ichida 1 marta
+        if e["type"] in ("unknown_detected", "unknown", "unknown_person"):
+            key = ("unknown_detected", e.get("camera_id"), e.get("person_name"))
+            if now - self._cooldowns.get(key, 0) < 15.0:
+                return e
             self._cooldowns[key] = now
 
         # attach snapshot if frame provided
@@ -188,7 +208,7 @@ class EventsService(QObject):
         # database
         try:
             if self.db_writer is not None:
-                self.db_writer.submit("add_event", event=self._to_db_dict(e))
+                self.db_writer.submit("add_event", self._to_db_dict(e))
             else:
                 self.db.add_event(self._to_db_dict(e))
         except Exception as ex:
@@ -200,6 +220,7 @@ class EventsService(QObject):
         if len(self.events) > self.ui_limit:
             self.events = self.events[: self.ui_limit]
 
+        print(f"[EventsService] 📢 EMIT event_added: type={e.get('type')} person={e.get('person_name')}", flush=True)
         self.event_added.emit(e)
 
         return e

@@ -21,11 +21,19 @@ class DBWriter(QThread):
         self.queue = queue.Queue(maxsize=maxsize)
         self._running = False
 
-    def submit(self, method_name: str, **kwargs):
-        try:
-            self.queue.put_nowait((method_name, kwargs))
-        except queue.Full:
-            log.error("DBWriter queue full: %s", method_name)
+    def submit(self, method_name: str, *args, **kwargs):
+        """
+        Queue a DB operation.
+        Supports both: submit("add_event", {...}) and submit("add_event", key=val)
+        """
+        if args and isinstance(args[0], dict):
+            # Dict format: submit("add_event", {"key": "val"})
+            self.queue.put((method_name, args[0]))
+        elif kwargs:
+            # Kwargs format: submit("add_event", key="val")
+            self.queue.put((method_name, kwargs))
+        else:
+            self.queue.put((method_name, args))
 
     def stop(self):
         self._running = False
@@ -42,10 +50,17 @@ class DBWriter(QThread):
 
             try:
                 method = getattr(self.db, method_name)
-                result = method(**kwargs)
+                if isinstance(kwargs, dict):
+                    try:
+                        result = method(kwargs)
+                    except TypeError:
+                        result = method(**kwargs)
+                else:
+                    result = method(*kwargs) if kwargs else method()
                 self.task_done.emit(method_name, result)
             except Exception as e:
                 log.exception("DBWriter task failed: %s", method_name)
                 self.task_failed.emit(method_name, str(e))
 
         log.info("DBWriter stopped")
+

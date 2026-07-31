@@ -128,6 +128,8 @@ class IdentityManager(QObject):
         heatmap.update(persons, frame_w, frame_h, online=True)
 
         now = time.time()
+        if not hasattr(self, "_closed_by_person"):
+            self._closed_by_person = {}   # camera_id -> person_id -> [duration,...] (DB siz, thread-safe)
         current = {}
 
         for p in persons:
@@ -203,6 +205,11 @@ class IdentityManager(QObject):
 
             if duration > 0:
                 state.closed_stays.append(duration)
+                if info.get("known") and info.get("person_id") is not None:
+                    _cb = self._closed_by_person.setdefault(camera_id, {}).setdefault(info["person_id"], [])
+                    _cb.append(duration)
+                    if len(_cb) > 50:
+                        self._closed_by_person[camera_id][info["person_id"]] = _cb[-50:]
 
                 if len(state.closed_stays) > 200:
                     state.closed_stays.pop(0)
@@ -226,18 +233,26 @@ class IdentityManager(QObject):
             "heatmap_on": heatmap.on,
         }
 
-        # Online persons ni aniqlash va signal yuborish
+        # Online persons: active_tracks asosida BARQAROR (5s oyna -> miltillash YOQ)
         online_persons = []
-        for p in persons:
-            pdata = {
-                "person_id": getattr(p, "person_id", None),
-                "name": getattr(p, "name", "Unknown"),
-                "known": getattr(p, "known", False),
-                "track_id": getattr(p, "track_id", None),
+        for tid, info in list(state.active_tracks.items()):
+            if now - info.get("last_seen", 0) > 5.0:
+                continue
+            pid = info.get("person_id")
+            if pid is None:
+                continue
+            stay_sec = max(0.0, now - info.get("first_seen", now))
+            closed_sum = sum(self._closed_by_person.get(camera_id, {}).get(pid, []))
+            total_stay = closed_sum + stay_sec
+            online_persons.append({
+                "person_id": pid,
+                "name": info.get("name", "Unknown"),
+                "known": bool(info.get("known")),
+                "track_id": tid,
                 "camera_id": camera_id,
-            }
-            online_persons.append(pdata)
-        
+                "stay_sec": round(stay_sec, 1),
+                "total_stay": round(total_stay, 1),
+            })
         self.persons_online.emit(camera_id, online_persons)
         self.metrics_updated.emit(camera_id, metrics)
         self.identity_updated.emit(camera_id, result)

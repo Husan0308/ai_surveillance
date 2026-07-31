@@ -1284,13 +1284,13 @@ class Header(QFrame):
         h.addSpacing(8)
         h.addStretch(1)
 
-        # self.search = QLineEdit()  # ✅ Search removed
-        # self.search.setPlaceholderText("🔍  Search events, people, cameras…   ( / )")  # ✅ Search removed
-        # self.search.setMaximumWidth(340)  # ✅ Search removed
-        # self.search.setMinimumWidth(160)  # ✅ Search removed
-        # self.search.returnPressed.connect(lambda: mw.navigate("events"))  # ✅ Search removed
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("🔍  Search events, people, cameras…   ( / )")
+        self.search.setMaximumWidth(340)
+        self.search.setMinimumWidth(160)
+        self.search.returnPressed.connect(lambda: mw.navigate("events"))
 
-        # h.addWidget(self.search)  # ✅ Search removed
+        h.addWidget(self.search)
         h.addStretch(1)
 
         self.chip_gpu = Chip("GPU")
@@ -1404,7 +1404,7 @@ class SideBar(QFrame):
         ("live", "🎥", "Dashboard"),
         ("people", "👥", "Person Management"),
         ("enroll", "🪪", "Enrollment"),
-        # ("analytics", "📈", "Analytics"),  # ✅ Analytics nav removed
+        ("analytics", "📈", "Analytics"),
         ("events", "⚡", "Events"),
         ("settings", "⚙️", "Settings"),
     ]
@@ -1755,7 +1755,7 @@ class QuickInfo(QFrame):
 
         self.vals["camera"].setText(f"{s.id} — {s.name}")
 
-        # self.vals["status"].setText("🟢 Online" if on else "🔴 Offline")  # ✅ Status label removed
+        self.vals["status"].setText("🟢 Online" if on else "🔴 Offline")
         self.vals["status"].setStyleSheet(
             f"color:{TH.OK if on else TH.ERR}; font-size:9.5px; font-weight:700;"
         )
@@ -1815,14 +1815,14 @@ class CameraCard(QFrame):
 
         self.dot = PulsingDot(TH.OK)
 
-        # self.lbl_status = QLabel("Online")  # ✅ Status label removed
-        # self.lbl_status.setStyleSheet(f"color:{TH.OK}; font-size:10px; font-weight:700;")  # ✅ Status label removed
+        self.lbl_status = QLabel("Online")
+        self.lbl_status.setStyleSheet(f"color:{TH.OK}; font-size:10px; font-weight:700;")
 
         self.top.lay.addWidget(self.lbl_id)
         self.top.lay.addWidget(self.lbl_loc)
         self.top.lay.addStretch(1)
         self.top.lay.addWidget(self.dot)
-        # self.top.lay.addWidget(self.lbl_status)  # ✅ Status label removed
+        self.top.lay.addWidget(self.lbl_status)
 
         self.bot = GradientBar(30, top=False)
         self.bot.setParent(self)
@@ -1981,10 +1981,10 @@ class CameraCard(QFrame):
         s = self.sim
         on = s.online
 
-        # self.lbl_status.setText("Online" if on else "Offline")  # ✅ Status label removed
-        # self.lbl_status.setStyleSheet(  # ✅ Status label removed
-            # f"color:{TH.OK if on else TH.ERR}; font-size:10px; font-weight:700;"  # ✅ Status label removed
-        # )  # ✅ Status label removed
+        self.lbl_status.setText("Online" if on else "Offline")
+        self.lbl_status.setStyleSheet(
+            f"color:{TH.OK if on else TH.ERR}; font-size:10px; font-weight:700;"
+        )
 
         self.dot.set_color(TH.OK if on else TH.ERR)
 
@@ -2212,70 +2212,77 @@ class LineChart(QWidget):
 class BarChart(QWidget):
     def __init__(self, horizontal=False):
         super().__init__()
+
         self.values, self.labels = [], []
+
         self.color, self.horizontal = TH.ACCENT, horizontal
-        self._value_formatter = None
-        self._max_value = None
-        self._top_values = None
-        self._show_minutes = False
+
         self.setMinimumHeight(120)
 
-    def set_data(self, values, labels, color=None, formatter=None, max_value=None, top_values=None):
+    def set_data(self, values, labels, color=None):
         self.values, self.labels = values, labels
-        if color: self.color = color
-        self._value_formatter = formatter
-        self._max_value = max_value
-        self._top_values = top_values
+
+        if color:
+            self.color = color
+
         self.update()
 
-    def _label_text(self, v):
-        if callable(self._value_formatter): return self._value_formatter(v)
-        if self._show_minutes: return f"{int(v)}m"
-        return str(int(v))
-
     def paintEvent(self, e):
-        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
         w, h = self.width(), self.height()
+
         n = len(self.values)
-        if n == 0: p.end(); return
-        mx = self._max_value if self._max_value else max(1, max(self.values))
+
+        if n == 0:
+            p.end()
+            return
+
+        mx = max(1, max(self.values))
+
         p.setFont(QFont("Segoe UI", 7))
+
         if self.horizontal:
             bh = max(6, (h - 4 * (n - 1)) // n)
+
             for i, (v, l) in enumerate(zip(self.values, self.labels)):
-                y = i * (bh + 4); bw = int(v / mx * (w - 70))
-                p.setPen(QColor(TH.DIM)); p.drawText(QRect(0, y, 52, bh), Qt.AlignVCenter | Qt.AlignRight, l)
-                p.setPen(Qt.NoPen); p.setBrush(QColor(TH.CARD2)); p.drawRoundedRect(56, y, w - 56, bh, 3, 3)
+                y = i * (bh + 4)
+
+                bw = int(v / mx * (w - 70))
+
+                p.setPen(QColor(TH.DIM))
+                p.drawText(QRect(0, y, 52, bh), Qt.AlignVCenter | Qt.AlignRight, l)
+
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(TH.CARD2))
+                p.drawRoundedRect(56, y, w - 56, bh, 3, 3)
+
                 p.setBrush(QColor(self.color))
-                if bw > 2: p.drawRoundedRect(56, y, bw, bh, 3, 3)
-                if v > 0:
-                    text = self._label_text(v)
-                    if text:
-                        p.setPen(QColor("#ffffff")); fnt = p.font(); fnt.setPixelSize(9); fnt.setBold(True); p.setFont(fnt)
-                        fm = p.fontMetrics(); tw = fm.horizontalAdvance(text)
-                        tx = 56 + bw - tw - 6 if bw > tw + 10 else 56 + bw + 4
-                        p.drawText(tx, y + bh // 2 + fm.ascent() // 2 - 2, text)
+
+                if bw > 2:
+                    p.drawRoundedRect(56, y, bw, bh, 3, 3)
+
         else:
             bw = max(4, (w - 6 * (n - 1)) // n)
+
             for i, (v, l) in enumerate(zip(self.values, self.labels)):
-                x = i * (bw + 6); bh2 = int(v / mx * (h - 16))
-                p.setPen(Qt.NoPen); p.setBrush(QColor(TH.CARD2)); p.drawRoundedRect(x, 0, bw, h - 14, 3, 3)
+                x = i * (bw + 6)
+
+                bh2 = int(v / mx * (h - 16))
+
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(TH.CARD2))
+                p.drawRoundedRect(x, 0, bw, h - 14, 3, 3)
+
                 p.setBrush(QColor(self.color))
-                if bh2 > 2: p.drawRoundedRect(x, h - 14 - bh2, bw, bh2, 3, 3)
-                if self._top_values and i < len(self._top_values) and self._top_values[i] > 0:
-                    tv = self._top_values[i]
-                    p.setPen(QColor("#f59e0b")); fnt = p.font(); fnt.setPixelSize(10); fnt.setBold(True); p.setFont(fnt)
-                    tt = f"{int(tv)} kishi"; fm = p.fontMetrics(); tw = fm.horizontalAdvance(tt)
-                    p.drawText(x + (bw - tw) // 2, max(10, (h - 14 - bh2) - 6), tt)
-                if v > 0:
-                    text = self._label_text(v)
-                    if text:
-                        p.setPen(QColor("#ffffff")); fnt = p.font(); fnt.setPixelSize(9); fnt.setBold(True); p.setFont(fnt)
-                        fm = p.fontMetrics(); tw = fm.horizontalAdvance(text); tx = x + (bw - tw) // 2
-                        ty = (h - 14 - bh2) + bh2 // 2 + fm.ascent() // 2 - 2 if bh2 > 18 else (h - 14 - bh2) - 4
-                        p.drawText(tx, ty, text)
-                p.setPen(QColor(TH.FAINT)); p.setFont(QFont("Segoe UI", 7))
+
+                if bh2 > 2:
+                    p.drawRoundedRect(x, h - 14 - bh2, bw, bh2, 3, 3)
+
+                p.setPen(QColor(TH.FAINT))
                 p.drawText(QRect(x - 6, h - 13, bw + 12, 12), Qt.AlignHCenter, l)
+
         p.end()
 
 
@@ -2499,12 +2506,12 @@ class LivePage(Page):
             "Double-click → fullscreen · scroll → zoom",
         )
 
-        # self.search = QLineEdit()  # ✅ Search removed
-        # self.search.setPlaceholderText("🔍 Filter cameras…")  # ✅ Search removed
-        # self.search.setMaximumWidth(200)  # ✅ Search removed
-        # self.search.textChanged.connect(self.filter_cards)  # ✅ Search removed
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("🔍 Filter cameras…")
+        self.search.setMaximumWidth(200)
+        self.search.textChanged.connect(self.filter_cards)
 
-        # row.addWidget(self.search)  # ✅ Search removed
+        row.addWidget(self.search)
 
         self.layout_cb = QComboBox()
         self.layout_cb.addItems(["3 × 3", "2 × 3", "3 × 2", "2 × 2", "1 × 1"])
@@ -2534,7 +2541,7 @@ class LivePage(Page):
         self.v.addLayout(self.grid, 1)
 
     def filter_cards(self):
-        # q = self.search.text().lower()  # ✅ Search removed
+        q = self.search.text().lower()
 
         for card in self.cards:
             s = card.sim
@@ -2562,103 +2569,159 @@ class LivePage(Page):
             self.grid.setRowStretch(i, 1 if i < rows else 0)
 
 
-# class AnalyticsPage(Page):
-#     def __init__(self, hub):
-#         super().__init__()
-#         self.hub = hub
-#         self.title_row("Analytics", "● real-time")
-#         g = QGridLayout(); g.setSpacing(10)
-# 
-#         self.occ = LineChart()
-#         c1 = ChartCard("OCCUPANCY (people, all cameras)"); c1.body.addWidget(self.occ)
-# 
-#         self.gpu_fps = LineChart()
-#         c2 = ChartCard("GPU %  /  FPS"); c2.body.addWidget(self.gpu_fps)
-# 
-#         self.donut = Donut()
-#         c3 = ChartCard("KNOWN vs UNKNOWN"); c3.body.addWidget(self.donut)
-# 
-#         self.visitors = BarChart()
-#         c4 = ChartCard("VISITORS PER CAMERA"); c4.body.addWidget(self.visitors)
-# 
-#         self.peak = BarChart()
-#         c5 = ChartCard("PEAK HOURS · aniq vaqt")
-#         peak_scroll = QScrollArea()
-#         peak_scroll.setWidgetResizable(True)
-#         peak_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-#         peak_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-#         peak_scroll.setMinimumHeight(200)
-#         peak_container = QWidget(); peak_container.setMinimumWidth(1400)
-#         peak_layout = QHBoxLayout(peak_container); peak_layout.setContentsMargins(4, 4, 4, 4)
-#         peak_layout.addWidget(self.peak)
-#         peak_scroll.setWidget(peak_container); c5.body.addWidget(peak_scroll)
-# 
-#         self.heatsum = HeatSummary(hub.sys.sims)
-#         c7 = ChartCard("HEATMAP SUMMARY"); c7.body.addWidget(self.heatsum)
-# 
-#         g.addWidget(c1, 0, 0, 1, 2)
-#         g.addWidget(c3, 0, 2)
-#         g.addWidget(c2, 0, 3)
-#         g.addWidget(c4, 1, 0)
-#         g.addWidget(c5, 1, 1, 1, 2)
-#         g.addWidget(c7, 1, 3)
-#         for i in range(4): g.setColumnStretch(i, 1)
-#         g.setRowStretch(0, 1); g.setRowStretch(1, 1)
-#         self.v.addLayout(g, 1)
-# 
-#         self.occ_d, self.gpu_d, self.fps_d = [], [], []
-#         self.push()
-# 
-#     def push(self):
-#         sy = self.hub.sys
-#         sims = [s for s in sy.sims if s.online]
-# 
-#         occ = sum(len(s.people) for s in sims)
-#         self.occ_d.append(occ)
-#         if len(self.occ_d) > 90: self.occ_d.pop(0)
-#         self.occ.set_series([(self.occ_d, TH.ACCENT, "occ")])
-# 
-#         self.gpu_d.append(sy.gpu)
-#         self.fps_d.append(sum(s.fps for s in sims) / max(1, len(sims)))
-#         if len(self.gpu_d) > 90: self.gpu_d.pop(0); self.fps_d.pop(0)
-#         self.gpu_fps.set_series([(self.gpu_d, TH.WARN, "gpu"), (self.fps_d, TH.OK, "fps")])
-# 
-#         self.donut.set_values(sum(s.known_count for s in sims), sum(s.unknown_count for s in sims))
-# 
-#         self.visitors.set_data(
-#             [sy.visitors.get(s.id, 0) for s in sy.sims[:6]],
-#             [s.id[-2:] for s in sy.sims[:6]],
-#             formatter=lambda v: str(int(v)), max_value=10,
-#         )
-#         self.visitors._show_minutes = True
-# 
-#         peak_minutes, peak_people = [0]*24, [0]*24
-#         peak_labels = [f"{i:02d}:00" if i % 3 == 0 else "" for i in range(24)]
-#         try:
-#             today_str = datetime.now().strftime("%Y-%m-%d")
-#             for row in sy.sm.db.get_analytics_hourly(today_str):
-#                 h = int(row.get("hour", 0))
-#                 occ_sum = int(row.get("occupancy_sum", 0) or 0)
-#                 samples = max(1, int(row.get("int_samples", 0) or 1))
-#                 maxp = int(row.get("max_occupancy", 0) or 0)
-#                 minutes = max(0, min(60, round(occ_sum / samples * 5)))
-#                 if 0 <= h < 24:
-#                     peak_minutes[h] = minutes
-#                     peak_people[h] = maxp if maxp > 0 else round(occ_sum / samples)
-#                     if minutes > 0 or maxp > 0:
-#                         peak_labels[h] = f"{h:02d}:00→{h:02d}:{max(minutes,1):02d}"
-#         except Exception as e:
-#             print(f"[Analytics] ⚠ peak hours error: {e}", flush=True)
-#         self.peak.set_data(
-#             peak_minutes, peak_labels, QColor("#3b82f6"),
-#             formatter=lambda v: f'{int(v)}min' if v > 0 else '',
-#             max_value=60, top_values=peak_people,
-#         )
-#         self.peak._show_minutes = True
-#         self.heatsum.update()
-# 
-# 
-# 
+class AnalyticsPage(Page):
+    def __init__(self, hub):
+        super().__init__()
+
+        self.hub = hub
+
+        self.title_row("Analytics", "● real-time")
+
+        g = QGridLayout()
+        g.setSpacing(10)
+
+        self.occ = LineChart()
+
+        c1 = ChartCard("OCCUPANCY (people, all cameras)")
+        c1.body.addWidget(self.occ)
+
+        self.gpu_fps = LineChart()
+
+        c2 = ChartCard("GPU %  /  FPS")
+        c2.body.addWidget(self.gpu_fps)
+
+        self.donut = Donut()
+
+        c3 = ChartCard("KNOWN vs UNKNOWN")
+        c3.body.addWidget(self.donut)
+
+        self.visitors = BarChart()
+
+        c4 = ChartCard("VISITORS PER CAMERA")
+        c4.body.addWidget(self.visitors)
+
+        self.peak = BarChart()
+
+        c5 = ChartCard("PEAK HOURS · aniq vaqt")
+        c5.body.addWidget(self.peak)
+
+        self.usage = BarChart(horizontal=True)
+
+        c6 = ChartCard("CAMERA USAGE (min)")
+        c6.body.addWidget(self.usage)
+
+        self.heatsum = HeatSummary(hub.sys.sims)
+
+        c7 = ChartCard("HEATMAP SUMMARY")
+        c7.body.addWidget(self.heatsum)
+
+        g.addWidget(c1, 0, 0, 1, 2)
+        g.addWidget(c3, 0, 2)
+        g.addWidget(c2, 0, 3)
+
+        g.addWidget(c4, 1, 0)
+        g.addWidget(c5, 1, 1)
+        g.addWidget(c6, 1, 2)
+        g.addWidget(c7, 1, 3)
+
+        for i in range(4):
+            g.setColumnStretch(i, 1)
+
+        g.setRowStretch(0, 1)
+        g.setRowStretch(1, 1)
+
+        self.v.addLayout(g, 1)
+
+        self.occ_d = []
+        self.gpu_d = []
+        self.fps_d = []
+
+        self.push()
+
+    def push(self):
+        sy = self.hub.sys
+
+        sims = [s for s in sy.sims if s.online]
+
+        occ = sum(len(s.people) for s in sims)
+
+        self.occ_d.append(occ)
+
+        if len(self.occ_d) > 90:
+            self.occ_d.pop(0)
+
+        self.gpu_d.append(sy.gpu)
+
+        self.fps_d.append(sum(s.fps for s in sims) / max(1, len(sims)))
+
+        if len(self.gpu_d) > 90:
+            self.gpu_d.pop(0)
+            self.fps_d.pop(0)
+
+        self.occ.set_series([(self.occ_d, TH.ACCENT, "occ")])
+
+        self.gpu_fps.set_series([
+            (self.gpu_d, TH.WARN, "gpu"),
+            (self.fps_d, TH.OK, "fps"),
+        ])
+
+        self.donut.set_values(
+            sum(s.known_count for s in sims),
+            sum(s.unknown_count for s in sims),
+        )
+
+        self.visitors.set_data(
+            [sy.visitors.get(s.id, 0) for s in sy.sims[:6]],
+            [s.id[-2:] for s in sy.sims[:6]],
+        )
+
+        # Haqiqiy analytics_hourly dan peak hour hisoblash
+        try:
+            sm = self.hub.sys.sm
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            hourly_rows = sm.db.get_analytics_hourly(today_str)
+            
+            # Har bir soat uchun occupancy + samples
+            hour_data = {}
+            for row in hourly_rows:
+                h = int(row.get("hour", 0))
+                occ = int(row.get("occupancy_sum", 0))
+                det = int(row.get("detection_count", 0) or 0)
+                samples = max(1, int(row.get("int_samples", 0) or 1))
+                hour_data[h] = {"occ": occ, "samples": samples, "det": det}
+            
+            # Peak hours topish
+            if hour_data:
+                sorted_hours = sorted(hour_data.items(), key=lambda x: x[1]["occ"], reverse=True)
+                
+                peak_values = []
+                peak_labels = []
+                for h, data in sorted_hours[:12]:
+                    occ = data["occ"]
+                    samples = data["samples"]
+                    # Davomiylik: occupancy_sum ga qarab minut hisoblash
+                    minutes = max(1, min(59, occ // max(1, samples) * 5))
+                    end_min = str(minutes).zfill(2)
+                    peak_values.append(minutes)
+                    peak_labels.append(f"{h:02d}:00 → {h:02d}:{end_min}  ({minutes} min)")
+                
+                self.peak.set_data(peak_values, peak_labels, TH.ACC2)
+            else:
+                # Hali data yo'q — bo'sh chart
+                self.peak.set_data([0]*24, [f"{i:02d}" for i in range(24)], TH.ACC2)
+                
+        except Exception as e:
+            print(f"[Analytics] ⚠ peak hour error: {e}", flush=True)
+            self.peak.set_data([0]*24, [f"{i:02d}" for i in range(24)], TH.ACC2)
+
+        self.usage.set_data(
+            [sy.usage.get(s.id, 0) // 60 for s in sy.sims[:6]],
+            [s.id[-2:] for s in sy.sims[:6]],
+            TH.OK,
+        )
+
+        self.heatsum.update()
+
 
 class EventDetailDialog(QDialog):
     TYPES = {
@@ -2815,10 +2878,10 @@ class EventsPage(Page):
 
         row = self.title_row("Events", f"{len(hub.sys.events)} records | 📅 Bugun")
 
-        # self.search = QLineEdit()  # ✅ Search removed
-        # self.search.setPlaceholderText("🔍 Search…")  # ✅ Search removed
-        # self.search.setMaximumWidth(200)  # ✅ Search removed
-        # self.search.textChanged.connect(self.rebuild)  # ✅ Search removed
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("🔍 Search…")
+        self.search.setMaximumWidth(200)
+        self.search.textChanged.connect(self.rebuild)
 
         self.flt = QComboBox()
         self.flt.addItems([
@@ -2858,7 +2921,7 @@ class EventsPage(Page):
         row.addWidget(self.date_picker)
         row.addWidget(today_btn)
         row.addWidget(self.flt)
-        # row.addWidget(self.search)  # ✅ Search removed
+        row.addWidget(self.search)
         row.addWidget(exp)
 
         self.tbl = QTableWidget(0, 6)
@@ -2887,19 +2950,16 @@ class EventsPage(Page):
 
         self.v.addWidget(self.tbl, 1)
 
-        self._events = []
-        self._load_events_for_date(QDate.currentDate().toString("yyyy-MM-dd"))
         self.rebuild()
 
     def _match(self, e):
-        q = ""  # ✅ Search removed
         f = self.flt.currentText()
-        # q = self.search.text().lower()  # ✅ Search removed
+        q = self.search.text().lower()
 
         ok = (
             f == "All"
-            or (f == "Recognized" and e["type"] in ("recognized", "person_recognized"))
-            or (f == "Unknown" and e["type"] in ("unknown", "unknown_person", "unknown_detected"))
+            or (f == "Recognized" and e["type"] == "recognized")
+            or (f == "Unknown" and e["type"] == "unknown")
             or (f == "Alerts" and e["level"] in ("warn", "err"))
             or (f == "Offline" and e["type"] == "offline")
             or (f == "Snapshot" and e["type"] == "snapshot")
@@ -2912,198 +2972,95 @@ class EventsPage(Page):
 
         return ok
 
-    def _load_events_for_date(self, date_str):
-        """EventsService dan shu sanadagi eventlarni lokal ro'yxatga yuklash"""
-        try:
-            sm = self.hub.sys.sm
-            if hasattr(sm, 'events_service') and sm.events_service:
-                sm.events_service.load_by_date(date_str)
-                self._events = [self._normalize_event(x) for x in sm.events_service.events]
-            else:
-                self._events = []
-        except Exception as ex:
-            print(f"[Events] ⚠ load error: {ex}", flush=True)
-            self._events = []
-        # Fallback: EventsService bo'sh bo'lsa, hub.sys.events dan ol (sana filtri rebuild da)
-        if not self._events:
-            self._events = [self._normalize_event(x) for x in getattr(self.hub.sys, 'events', [])]
-        print(f"[Events] 📥 {date_str} → {len(self._events)} events", flush=True)
-
-    @staticmethod
-    def _normalize_event(e):
-        n = dict(e)
-        n.setdefault("cam", n.get("camera_id", ""))
-        n.setdefault("person", n.get("person_name", ""))
-        n.setdefault("conf", n.get("confidence", 0.0))
-        return n
-
-    @staticmethod
-    def _event_date(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%Y-%m-%d")
-        if isinstance(t, str):
-            return t[:10]
-        return ""
-
-    @staticmethod
-    def _event_time(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%H:%M:%S")
-        s = str(t)
-        return s[11:19] if len(s) >= 19 else s
-
-    def _load_events_for_date(self, date_str):
-        """EventsService dan shu sanadagi eventlarni lokal ro'yxatga yuklash"""
-        try:
-            sm = self.hub.sys.sm
-            if hasattr(sm, 'events_service') and sm.events_service:
-                sm.events_service.load_by_date(date_str)
-                self._events = [self._normalize_event(x) for x in sm.events_service.events]
-            else:
-                self._events = []
-        except Exception as ex:
-            print(f"[Events] ⚠ load error: {ex}", flush=True)
-            self._events = []
-        # Fallback: EventsService bo'sh bo'lsa, hub.sys.events dan ol (sana filtri rebuild da)
-        if not self._events:
-            self._events = [self._normalize_event(x) for x in getattr(self.hub.sys, 'events', [])]
-        print(f"[Events] 📥 {date_str} → {len(self._events)} events", flush=True)
-
-    @staticmethod
-    def _normalize_event(e):
-        n = dict(e)
-        n.setdefault("cam", n.get("camera_id", ""))
-        n.setdefault("person", n.get("person_name", ""))
-        n.setdefault("conf", n.get("confidence", 0.0))
-        return n
-
-    @staticmethod
-    def _event_date(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%Y-%m-%d")
-        if isinstance(t, str):
-            return t[:10]
-        return ""
-
-    @staticmethod
-    def _event_time(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%H:%M:%S")
-        s = str(t)
-        return s[11:19] if len(s) >= 19 else s
-
-    def _load_events_for_date(self, date_str):
-        """EventsService dan shu sanadagi eventlarni lokal ro'yxatga yuklash"""
-        try:
-            sm = self.hub.sys.sm
-            if hasattr(sm, 'events_service') and sm.events_service:
-                sm.events_service.load_by_date(date_str)
-                self._events = [self._normalize_event(x) for x in sm.events_service.events]
-            else:
-                self._events = []
-        except Exception as ex:
-            print(f"[Events] ⚠ load error: {ex}", flush=True)
-            self._events = []
-        # Fallback: EventsService bo'sh bo'lsa, hub.sys.events dan ol (sana filtri rebuild da)
-        if not self._events:
-            self._events = [self._normalize_event(x) for x in getattr(self.hub.sys, 'events', [])]
-        print(f"[Events] 📥 {date_str} → {len(self._events)} events", flush=True)
-
-    @staticmethod
-    def _normalize_event(e):
-        n = dict(e)
-        n.setdefault("cam", n.get("camera_id", ""))
-        n.setdefault("person", n.get("person_name", ""))
-        n.setdefault("conf", n.get("confidence", 0.0))
-        return n
-
-    @staticmethod
-    def _event_date(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%Y-%m-%d")
-        if isinstance(t, str):
-            return t[:10]
-        return ""
-
-    @staticmethod
-    def _event_time(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%H:%M:%S")
-        s = str(t)
-        return s[11:19] if len(s) >= 19 else s
-
     def _on_date_changed(self, qdate):
         """Date picker o'zgarganda events ni qayta yuklash"""
         date_str = qdate.toString("yyyy-MM-dd")
         print(f"[Events] 📅 Date changed: {date_str}", flush=True)
-        self._load_events_for_date(date_str)
+        
+        # DB dan shu sananing eventlarini yuklash
+        try:
+            sm = self.hub.sys.sm
+            if hasattr(sm, 'events_service') and sm.events_service:
+                sm.events_service.load_by_date(date_str)
+        except Exception as e:
+            print(f"[Events] ⚠ load_by_date error: {e}", flush=True)
+        
         self.rebuild()
 
     def rebuild(self):
         self.tbl.setRowCount(0)
-        if not hasattr(self, '_events'):
-            self._events = []
+        
+        # Hozirgi sana
         selected_date = self.date_picker.date().toString("yyyy-MM-dd") if hasattr(self, 'date_picker') else None
-        for e in self._events[:300]:
-            if selected_date and self._event_date(e) != selected_date:
-                continue
+
+        for e in self.hub.sys.events[:300]:
+            # Sana filtri
+            if selected_date:
+                event_date = e["time"].strftime("%Y-%m-%d") if hasattr(e.get("time"), 'strftime') else ""
+                if event_date != selected_date:
+                    continue
+            
             if self._match(e):
                 self._insert(e)
 
     def add_event(self, e):
-        e = self._normalize_event(e)
-        selected_date = self.date_picker.date().toString("yyyy-MM-dd") if hasattr(self, 'date_picker') else None
-        if selected_date and self._event_date(e) != selected_date:
-            return
-        if not hasattr(self, '_events'):
-            self._events = []
-        self._events.insert(0, e)
         if self._match(e):
             self._insert(e, top=True)
 
     def _insert(self, e, top=False):
         r = 0 if top else self.tbl.rowCount()
+
         self.tbl.insertRow(r)
+
         name, col = self.TYPES.get(e["type"], (e["type"], TH.DIM))
+
         vals = [
-            self._event_time(e),
+            e["time"].strftime("%H:%M:%S"),
             e["cam"],
             e["person"],
             name,
             f'{e["conf"] * 100:.1f}%' if e["conf"] < 1 else "—",
         ]
+
         for c, txt in enumerate(vals):
             it = QTableWidgetItem(txt)
+
             it.setTextAlignment(
                 Qt.AlignCenter
                 if c in (0, 1, 4)
                 else Qt.AlignVCenter | Qt.AlignLeft
             )
+
             if c == 3:
                 it.setForeground(QColor(col))
+
             if c == 0:
                 it.setFont(QFont("Consolas", 9))
+
             if e.get("ack"):
                 it.setForeground(QColor(TH.FAINT))
+
             self.tbl.setItem(r, c, it)
+
         b = QPushButton("📸")
         b.setFixedSize(30, 24)
         b.setObjectName("camTool")
+
         cid = e["cam"]
+
         b.clicked.connect(lambda _=False, i=cid: self._snap(i))
+
         w = QWidget()
+
         hl = QHBoxLayout(w)
         hl.setContentsMargins(0, 2, 0, 2)
         hl.addWidget(b)
         hl.setAlignment(Qt.AlignCenter)
+
         self.tbl.setCellWidget(r, 5, w)
+
         self.tbl.setRowHeight(r, 30)
+
         if self.tbl.rowCount() > 300:
             self.tbl.removeRow(self.tbl.rowCount() - 1)
 
@@ -3117,28 +3074,45 @@ class EventsPage(Page):
 
     def _detail(self, r, c):
         it = self.tbl.item(r, 1)
+
         if not it:
             return
+
         cam = it.text()
-        time_str = self.tbl.item(r, 0).text() if self.tbl.item(r, 0) else ""
-        for e in getattr(self, '_events', []):
-            if e["cam"] == cam and self._event_time(e) == time_str:
+
+        for e in self.hub.sys.events:
+            if e["cam"] == cam and e["time"].strftime("%H:%M:%S") == (
+                self.tbl.item(r, 0).text() if self.tbl.item(r, 0) else ""
+            ):
                 EventDetailDialog(e, self.hub.sys, self).exec()
+
                 self.rebuild()
+
                 return
 
     def export_csv(self):
         os.makedirs("exports", exist_ok=True)
+
         fn = f"exports/events_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
         with open(fn, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
+
             w.writerow(["Time", "Camera", "Person", "Type", "Confidence", "Level"])
-            for e in getattr(self, '_events', []):
+
+            for e in self.hub.sys.events:
                 if self._match(e):
-                    t = e.get("time")
-                    tstr = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                    w.writerow([tstr, e["cam"], e["person"], e["type"], f'{e["conf"]:.3f}', e["level"]])
+                    w.writerow([
+                        e["time"].isoformat(),
+                        e["cam"],
+                        e["person"],
+                        e["type"],
+                        f'{e["conf"]:.3f}',
+                        e["level"],
+                    ])
+
         self.hub.toast(f"📄 Exported {self.tbl.rowCount()} events → {fn}")
+
 
 class PersonManagementPage(Page):
     def __init__(self, hub):
@@ -3175,17 +3149,17 @@ class PersonManagementPage(Page):
         # self._refresh_timer.timeout.connect(self.force_refresh)
         # self._refresh_timer.start()
 
-        # self.search = QLineEdit()  # ✅ Search removed
-        # self.search.setPlaceholderText("🔍 Search people…")  # ✅ Search removed
-        # self.search.setMaximumWidth(220)  # ✅ Search removed
-        # self.search.textChanged.connect(self.rebuild)  # ✅ Search removed
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("🔍 Search people…")
+        self.search.setMaximumWidth(220)
+        self.search.textChanged.connect(self.rebuild)
 
         enr = QPushButton("＋ Enroll New")
         enr.setObjectName("btnPrimary")
         enr.setCursor(Qt.PointingHandCursor)
         enr.clicked.connect(lambda: hub.navigate("enroll"))
 
-        # row.addWidget(self.search)  # ✅ Search removed
+        row.addWidget(self.search)
         row.addWidget(enr)
 
         self.tbl = QTableWidget(0, 6)
@@ -3237,8 +3211,6 @@ class PersonManagementPage(Page):
                     "track_id": p.get("track_id"),
                     "name": p.get("name", "Unknown"),
                     "known": p.get("known", False),
-                    "stay_sec": p.get("stay_sec", 0),
-                    "total_stay": p.get("total_stay", 0),
                 }
         # Offline bo'lganlarni tozalash (bu kamerada ko'rinmayotganlar)
         cam_person_ids = {p.get("person_id") for p in persons_list if p.get("person_id")}
@@ -3267,10 +3239,10 @@ class PersonManagementPage(Page):
             )
             
             if is_online:
-                # status_item.setText("🟢 Online")  # ✅ Status label removed
+                status_item.setText("🟢 Online")
                 status_item.setForeground(QColor("#2ecc71"))
             else:
-                pass  # block emptied
+                status_item.setText("⚫ Offline")
                 status_item.setForeground(QColor("#95a5a6"))
 
     def rebuild(self):
@@ -3285,7 +3257,7 @@ class PersonManagementPage(Page):
             people = list(self.hub.sys.people)
             print(f"[PM] rebuild: {len(people)} people to display", flush=True)
 
-            q = ""  # ✅ Search removed (disabled)
+            q = self.search.text().lower().strip() if hasattr(self, 'search') else ""
             sm = self.hub.sys.sm
             visible_count = 0
 
@@ -3376,10 +3348,9 @@ class PersonManagementPage(Page):
                 pid = getattr(rec, 'id', None) or getattr(rec, 'person_id', None)
                 is_online = pid in self._online_persons if hasattr(self, '_online_persons') and pid else False
                 if is_online:
-                    _cam = self._online_persons.get(pid, {}).get("camera_id", "")
-                    status_text, status_color = f"🟢 Online · {_cam}", "#2ecc71"
+                    status_text, status_color = "🟢 Online", "#2ecc71"
                 else:
-                    status_text, status_color = "", "#95a5a6"  # ✅ No offline label
+                    status_text, status_color = "⚫ Offline", "#95a5a6"
                 st = QTableWidgetItem(status_text)
                 st.setForeground(QColor(status_color))
                 st.setData(Qt.UserRole, rec)
@@ -3397,11 +3368,8 @@ class PersonManagementPage(Page):
                 ls_item.setData(Qt.UserRole, rec)
                 self.tbl.setItem(r, 4, ls_item)
 
-                # ===== RECOGNITIONS + STAY TOTAL =====
-                rc_val = getattr(rec, 'rec_count', 0) or 0
-                stay_val = getattr(rec, 'stay_total', 0) or 0
-                stay_text = f"{int(stay_val//60)}m {int(stay_val%60)}s" if stay_val else "0m"
-                rc = QTableWidgetItem(f"{rc_val}\n{stay_text}")
+                # ===== RECOGNITIONS =====
+                rc = QTableWidgetItem(str(getattr(rec, 'rec_count', 0) or 0))
                 rc.setTextAlignment(Qt.AlignCenter)
                 rc.setData(Qt.UserRole, rec)
                 self.tbl.setItem(r, 5, rc)
@@ -3431,7 +3399,7 @@ class PersonManagementPage(Page):
         """last_seen asosida jonli status matni va rangi"""
         from datetime import datetime
         if not rec.last_seen:
-            return ("", TH.FAINT)  # ✅ No offline label
+            return ("⚫ Never seen", TH.FAINT)
         try:
             secs = (datetime.now() - rec.last_seen).total_seconds()
         except Exception:
@@ -3462,7 +3430,7 @@ class PersonManagementPage(Page):
                 if is_online:
                     status_text, status_color = "🟢 Online", "#2ecc71"
                 else:
-                    pass  # block emptied
+                    status_text, status_color = "⚫ Offline", "#95a5a6"
                 st = QTableWidgetItem(status_text)
                 st.setForeground(QColor(status_color))
                 self.tbl.setItem(r, 3, st)
@@ -3534,7 +3502,7 @@ class PersonManagementPage(Page):
 
             people_records = []
             for row in people_data:
-                rec = row
+                rec = PersonRecordUI(row, sm.person_service)
                 # Agar avatar bo'sh bo'lsa, cache dan yuklash
                 if (not hasattr(rec, 'avatar') or rec.avatar is None or rec.avatar.isNull()):
                     pid = row.get("id")
@@ -3671,7 +3639,7 @@ class PersonManagementPage(Page):
 
                 # Status (jonli)
                 if rec.last_seen is None:
-                    status_text, status_color = "—", TH.FAINT
+                    status_text, status_color = ("⚫ Never seen", TH.FAINT)
                 else:
                     secs = (datetime.now() - rec.last_seen).total_seconds()
                     if secs < 60:
@@ -3720,16 +3688,19 @@ class ProfileDialog(QDialog):
         super().__init__()
         self.rec = rec
         self.sm = sm
+
         self.setWindowTitle(f"Profile — {rec.name}")
         self.setModal(True)
-        self.resize(780, 720)
+        self.resize(720, 640)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 18, 18, 18)
-        outer.setSpacing(12)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 18, 18, 18)
+        v.setSpacing(12)
 
-        # ===== HEADER (FIXED) =====
-        top = QHBoxLayout(); top.setSpacing(14)
+        # ===== HEADER: Avatar + Info + Jonli Status =====
+        top = QHBoxLayout()
+        top.setSpacing(14)
+
         av = QLabel()
         if hasattr(rec, 'avatar') and rec.avatar is not None and not rec.avatar.isNull():
             av.setPixmap(rec.avatar.scaled(84, 84, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
@@ -3740,149 +3711,231 @@ class ProfileDialog(QDialog):
         info = QVBoxLayout()
         nm = QLabel(rec.name)
         nm.setStyleSheet("font-size:17px; font-weight:800; color:white;")
+
+        # dp = QLabel(f"{rec.dept} · {rec.emp_id}")  # EMP REMOVED
+        # dp.setStyleSheet(f"color:{TH.DIM}; font-size:11px;")  # dp removed (EMP REMOVED)
+
+        # Jonli status badge
         from datetime import datetime
-        st_text, st_color = "—", TH.FAINT  # default
         if rec.last_seen:
-            try: secs = (datetime.now() - rec.last_seen).total_seconds()
-            except Exception: secs = 999999
-            if secs < 60: st_text, st_color = "🟢 Online", TH.OK
-            elif secs < 300: st_text, st_color = f"🟡 {int(secs // 60)}m ago", TH.WARN
-            else: st_text, st_color = "—", TH.FAINT
-        # else: st_text, st_color = "⚫ Never seen", TH.FAINT  # ✅ Offline removed
+            try:
+                secs = (datetime.now() - rec.last_seen).total_seconds()
+            except Exception:
+                secs = 999999
+            if secs < 60:
+                st_text, st_color = "🟢 Online", TH.OK
+            elif secs < 300:
+                st_text, st_color = f"🟡 {int(secs // 60)}m ago", TH.WARN
+            else:
+                st_text, st_color = "⚫ Offline", TH.FAINT
+        else:
+            st_text, st_color = "⚫ Never seen", TH.FAINT
+
         st = QLabel(st_text)
         st.setStyleSheet(f"color:{st_color}; font-size:11px; font-weight:700;")
-        info.addWidget(nm); info.addWidget(st); info.addStretch(1)
-        top.addWidget(av); top.addLayout(info); top.addStretch(1)
-        outer.addLayout(top)
 
-        # ===== STATS (FIXED) =====
+        info.addWidget(nm)
+        # info.addWidget(dp)  # dp removed (EMP REMOVED)
+        info.addWidget(st)
+        info.addStretch(1)
+
+        top.addWidget(av)
+        top.addLayout(info)
+        top.addStretch(1)
+        v.addLayout(top)
+
+        # ===== STATS CARDS =====
         stats = QHBoxLayout()
         ls_text = rec.last_seen.strftime("%d %b %H:%M") if rec.last_seen else "—"
-        for label, val in [("LAST SEEN", ls_text), ("RECOGNITIONS", str(rec.rec_count)), ("STAY TOTAL", f"{rec.stay_total} min")]:
-            f = QFrame(); f.setObjectName("statCard")
-            fl = QVBoxLayout(f); fl.setContentsMargins(10, 8, 10, 8); fl.setSpacing(2)
-            a = QLabel(val); a.setStyleSheet("color:white; font-size:13px; font-weight:800;")
-            b = QLabel(label); b.setStyleSheet(f"color:{TH.FAINT}; font-size:8px; font-weight:800;")
-            fl.addWidget(a); fl.addWidget(b); stats.addWidget(f)
-        outer.addLayout(stats)
 
-        # ===== VISIT HISTORY (SCROLL ICHIDA) =====
+        for label, val in [
+            ("LAST SEEN", ls_text),
+            ("RECOGNITIONS", str(rec.rec_count)),
+            ("STAY TOTAL", f"{rec.stay_total} min"),
+        ]:
+            f = QFrame()
+            f.setObjectName("statCard")
+            fl = QVBoxLayout(f)
+            fl.setContentsMargins(10, 8, 10, 8)
+            fl.setSpacing(2)
+            a = QLabel(val)
+            a.setStyleSheet("color:white; font-size:13px; font-weight:800;")
+            b = QLabel(label)
+            b.setStyleSheet(f"color:{TH.FAINT}; font-size:8px; font-weight:800;")
+            fl.addWidget(a)
+            fl.addWidget(b)
+            stats.addWidget(f)
+
+        v.addLayout(stats)
+
+        # ===== VISIT HISTORY (DB dan) =====
         vc = ChartCard("VISIT HISTORY (last 7 days)")
-        visit_scroll = QScrollArea()
-        visit_scroll.setWidgetResizable(True)
-        visit_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        visit_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        visit_scroll.setMaximumHeight(180)
-        visit_scroll.setStyleSheet("QScrollArea{border:none; background:transparent;}")
-        visit_content = QWidget()
-        vv = QVBoxLayout(visit_content); vv.setContentsMargins(0,0,0,0); vv.setSpacing(4)
+        vv = QVBoxLayout()
+        vv.setSpacing(4)
+
         visits_loaded = False
         if self.sm and hasattr(rec, 'db_id') and rec.db_id:
             try:
                 visits = self.sm.db.get_visits(person_id=rec.db_id, limit=20)
                 for vis in visits:
-                    cam = vis.get("camera_id", "?"); entered = vis.get("entered_at", "?")
-                    dur = vis.get("duration_sec", 0) or 0; dur_min = dur // 60
+                    cam = vis.get("camera_id", "?")
+                    entered = vis.get("entered_at", "?")
+                    dur = vis.get("duration_sec", 0) or 0
+                    dur_min = dur // 60
                     left = vis.get("left_at", "")
                     line = f"🎥 {cam}   ·   {str(entered)[:16]}   ·   {dur_min} min"
-                    if left: line += f"   → {str(left)[:16]}"
-                    l = QLabel(line); l.setStyleSheet(f"color:{TH.DIM}; font-size:10.5px;")
-                    l.setWordWrap(True); vv.addWidget(l)
+                    if left:
+                        line += f"   → {str(left)[:16]}"
+                    l = QLabel(line)
+                    l.setStyleSheet(f"color:{TH.DIM}; font-size:10.5px;")
+                    vv.addWidget(l)
                 visits_loaded = len(visits) > 0
-            except Exception as e: print(f"[Profile] visits error: {e}", flush=True)
-        if not visits_loaded:
-            l = QLabel("No visit records yet"); l.setStyleSheet(f"color:{TH.FAINT}; font-size:10.5px; font-style:italic;"); vv.addWidget(l)
-        vv.addStretch(1)
-        visit_scroll.setWidget(visit_content)
-        vc.body.addWidget(visit_scroll)
-        outer.addWidget(vc)
+            except Exception as e:
+                print(f"[Profile] visits error: {e}", flush=True)
 
-        # ===== RECENT EVENTS (SCROLL ICHIDA) =====
+        if not visits_loaded:
+            l = QLabel("No visit records yet")
+            l.setStyleSheet(f"color:{TH.FAINT}; font-size:10.5px; font-style:italic;")
+            vv.addWidget(l)
+
+        vc.body.addLayout(vv)
+        v.addWidget(vc)
+
+        # ===== EVENTS / ALERTS (DB dan) =====
         ec = ChartCard("RECENT EVENTS")
-        event_scroll = QScrollArea()
-        event_scroll.setWidgetResizable(True)
-        event_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        event_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        event_scroll.setMaximumHeight(180)
-        event_scroll.setStyleSheet("QScrollArea{border:none; background:transparent;}")
-        event_content = QWidget()
-        ev = QVBoxLayout(event_content); ev.setContentsMargins(0,0,0,0); ev.setSpacing(4)
+        ev = QVBoxLayout()
+        ev.setSpacing(4)
+
         events_loaded = False
         if self.sm and hasattr(rec, 'db_id') and rec.db_id:
             try:
                 events = self.sm.db.get_events_by_person(rec.db_id, limit=10)
                 for evt in events:
-                    t = evt.get("time", "?"); typ = evt.get("type", "?"); cam = evt.get("camera_id", "?")
-                    conf = evt.get("confidence", 0); level = evt.get("level", "info")
-                    icon = "🔔" if level == "warn" else "✅" if level == "ok" else "ℹ"
+                    t = evt.get("time", "?")
+                    typ = evt.get("type", "?")
+                    cam = evt.get("camera_id", "?")
+                    conf = evt.get("confidence", 0)
+                    level = evt.get("level", "info")
+                    icon = "🔔" if level == "warn" else "✅" if level == "ok" else "ℹ️"
                     line = f"{icon} {str(t)[:19]}  {typ}  [{cam}]  {conf:.0%}"
                     l = QLabel(line)
                     color = TH.WARN if level == "warn" else TH.OK if level == "ok" else TH.DIM
                     l.setStyleSheet(f"color:{color}; font-size:10.5px; font-family:Consolas,monospace;")
-                    l.setWordWrap(True); ev.addWidget(l)
+                    ev.addWidget(l)
                 events_loaded = len(events) > 0
-            except Exception as e: print(f"[Profile] events error: {e}", flush=True)
+            except Exception as e:
+                print(f"[Profile] events error: {e}", flush=True)
+
         if not events_loaded:
-            l = QLabel("No events recorded yet"); l.setStyleSheet(f"color:{TH.FAINT}; font-size:10.5px; font-style:italic;"); ev.addWidget(l)
-        ev.addStretch(1)
-        event_scroll.setWidget(event_content)
-        ec.body.addWidget(event_scroll)
-        outer.addWidget(ec)
+            l = QLabel("No events recorded yet")
+            l.setStyleSheet(f"color:{TH.FAINT}; font-size:10.5px; font-style:italic;")
+            ev.addWidget(l)
 
-        # ===== TIMELINE =====
-        tl = ChartCard("TIMELINE (presence min/hour - Today, 60min=full)")
+        ec.body.addLayout(ev)
+        v.addWidget(ec)
+
+        # ===== TIMELINE CHART =====
+        tl = ChartCard("TIMELINE (detections per hour)")
         ch = BarChart()
-        timeline_data = [0] * 24
-        try:
-            pid = getattr(rec, 'db_id', None) or getattr(rec, 'id', None)
-            if pid and self.sm and hasattr(self.sm, 'person_service'):
-                rt = self.sm.person_service._get_realtime_timeline(pid)
-                if rt and len(rt) == 24: timeline_data = rt
-        except Exception as e: print(f"[Profile] timeline error: {e}", flush=True)
-        ch.set_data(timeline_data, [f"{i:02d}" for i in range(24)], QColor("#3b82f6"),
-                   formatter=lambda v: f"{int(v)}m" if v > 0 else "", max_value=60)
-        ch._show_minutes = True; ch.setMinimumHeight(90)
-        tl.body.addWidget(ch); outer.addWidget(tl)
+        timeline_data = getattr(rec, 'timeline', [0] * 24)
+        ch.set_data(timeline_data, [f"{i:02d}" for i in range(24)], TH.ACCENT)
+        ch.setMinimumHeight(90)
+        tl.body.addWidget(ch)
+        v.addWidget(tl)
 
-        # ===== BUTTONS (FIXED) =====
-        btn_row = QHBoxLayout(); btn_row.addStretch(1)
-        edit_btn = QPushButton("✏ Edit"); edit_btn.setObjectName("btnGhost")
-        edit_btn.setCursor(Qt.PointingHandCursor); edit_btn.clicked.connect(self._edit_person)
-        del_btn = QPushButton("🗑 Delete"); del_btn.setObjectName("btnGhost")
-        del_btn.setCursor(Qt.PointingHandCursor); del_btn.setStyleSheet(f"color:{TH.ERR};")
+        v.addStretch(1)
+
+        # ===== EDIT / DELETE BUTTONS =====
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+
+        edit_btn = QPushButton("✏️ Edit")
+        edit_btn.setObjectName("btnGhost")
+        edit_btn.setCursor(Qt.PointingHandCursor)
+        edit_btn.clicked.connect(self._edit_person)
+
+        del_btn = QPushButton("🗑 Delete")
+        del_btn.setObjectName("btnGhost")
+        del_btn.setCursor(Qt.PointingHandCursor)
+        del_btn.setStyleSheet(f"color:{TH.ERR};")
         del_btn.clicked.connect(self._delete_person)
-        close_btn = QPushButton("Close"); close_btn.setObjectName("btnPrimary")
-        close_btn.setCursor(Qt.PointingHandCursor); close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(edit_btn); btn_row.addWidget(del_btn); btn_row.addWidget(close_btn)
-        outer.addLayout(btn_row)
+
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("btnPrimary")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(edit_btn)
+        btn_row.addWidget(del_btn)
+        btn_row.addWidget(close_btn)
+
+        v.addLayout(btn_row)
 
     def _edit_person(self):
+        """Shaxsni tahrirlash dialog"""
         from PySide6.QtWidgets import QInputDialog
+
         sm = self.sm
-        if not sm or not hasattr(self.rec, 'db_id') or not self.rec.db_id: return
-        new_name, ok1 = QInputDialog.getText(self, "Edit Name", "Name:", text=self.rec.name)
-        if not ok1 or not new_name.strip(): return
-        new_dept, ok2 = QInputDialog.getText(self, "Edit Department", "Department:", text=getattr(self.rec, 'dept', ''))
-        if not ok2: return
+        if not sm or not hasattr(self.rec, 'db_id') or not self.rec.db_id:
+            return
+
+        # Ism
+        new_name, ok = QInputDialog.getText(self, "Edit Name", "Name:", text=self.rec.name)
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+
+        # Bo'lim
+        new_dept, ok = QInputDialog.getText(self, "Edit Department", "Department:", text=self.rec.dept)
+        if not ok:
+            return
+        new_dept = new_dept.strip()
+
+        # Employee ID
+        # new_emp, ok = QInputDialog.getText(self, "Edit Employee ID", "Employee ID:", text=self.rec.emp_id)  # EMP REMOVED
+        if not ok:
+            return
+        new_emp = new_emp.strip()
+
+        # DB ga yozish
         try:
             with sm.db.lock:
-                sm.db.conn.execute("UPDATE persons SET name=?, department=?, updated_at=? WHERE id=?",
-                    (new_name.strip(), new_dept.strip(), datetime.now().isoformat(), self.rec.db_id))
+                sm.db.conn.execute(
+                    "UPDATE persons SET name=?, department=?, employee_id=?, updated_at=? WHERE id=?",
+                    (new_name, new_dept, new_emp, datetime.now().isoformat(), self.rec.db_id)
+                )
                 sm.db.conn.commit()
-            self.accept()
-        except Exception as e: print(f"[Edit] ERROR: {e}", flush=True)
+            print(f"[Edit] Updated person {self.rec.db_id}: {new_name}", flush=True)
+            self.accept()  # Dialog yopish
+        except Exception as e:
+            print(f"[Edit] ERROR: {e}", flush=True)
 
     def _delete_person(self):
+        """Shaxsni o'chirish (tasdiqlash bilan)"""
         from PySide6.QtWidgets import QMessageBox
+
         sm = self.sm
-        if not sm or not hasattr(self.rec, 'db_id') or not self.rec.db_id: return
-        reply = QMessageBox.question(self, "Delete Person",
-            f"Are you sure you want to delete '{self.rec.name}'?\n\nThis will remove all records.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply != QMessageBox.Yes: return
+        if not sm or not hasattr(self.rec, 'db_id') or not self.rec.db_id:
+            return
+
+        reply = QMessageBox.question(
+            self, "Delete Person",
+            f"Are you sure you want to delete '{self.rec.name}'?\n\n"
+            "This will remove all records, embeddings, and visit history.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
         try:
-            sm.db.delete_person(self.rec.db_id); self.accept()
-        except Exception as e: print(f"[Delete] ERROR: {e}", flush=True)
+            sm.db.delete_person(self.rec.db_id)
+            print(f"[Delete] Deleted person {self.rec.db_id}: {self.rec.name}", flush=True)
+            self.accept()  # Dialog yopish
+        except Exception as e:
+            print(f"[Delete] ERROR: {e}", flush=True)
+
 
 
 class EnrollmentPage(Page):
@@ -4373,7 +4426,7 @@ class EnrollmentPage(Page):
                     new_people = []
                     for row in raw_rows:
                         try:
-                            rec = row
+                            rec = PersonRecordUI(row, sm.person_service)
                             new_people.append(rec)
                         except Exception:
                             pass
@@ -5081,7 +5134,7 @@ class MainWindow(QMainWindow):
         self.live = LivePage(self)
         self.pm = PersonManagementPage(self)
         self.enroll = EnrollmentPage(self)
-        # self.analytics = AnalyticsPage(self)  # ✅ Analytics commented out
+        self.analytics = AnalyticsPage(self)
         self.events_pg = EventsPage(self)
         self.settings_pg = SettingsPage(self)
 
@@ -5092,7 +5145,7 @@ class MainWindow(QMainWindow):
             ("live", self.live),
             ("people", self.pm),
             ("enroll", self.enroll),
-            # ("analytics", self.analytics),  # ✅ Analytics removed
+            ("analytics", self.analytics),
             ("events", self.events_pg),
             ("settings", self.settings_pg),
         ]:
@@ -5170,12 +5223,12 @@ class MainWindow(QMainWindow):
             "live",
             "people",
             "enroll",
-            # "analytics",  # ✅ Analytics nav removed
+            "analytics",
             "events",
             "settings",
         ]
 
-        for i, key in enumerate("123456"):  # ✅ 6 pages (analytics removed)
+        for i, key in enumerate("1234567"):
             QShortcut(QKeySequence(key), self, lambda k=pages[i]: self.navigate(k))
 
         QShortcut(QKeySequence("/"), self, self._focus_search)
@@ -5351,7 +5404,7 @@ class MainWindow(QMainWindow):
         self.header.update_stats()
         self.header.tick_clock()
 
-        # self.analytics.push()  # ✅ Analytics commented out
+        self.analytics.push()
 
     def open_fullscreen(self, sim):
         dlg = FullscreenCam(sim, self)

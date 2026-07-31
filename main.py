@@ -2,6 +2,9 @@
 #  AI SURVEILLANCE SYSTEM — PRODUCTION ENTRY
 # =====================================================================
 
+import signal
+import sys
+import os
 import os
 import sys
 import traceback
@@ -64,6 +67,35 @@ def build_palette():
     return pal
 
 def main():
+    # ═══ GRACEFUL SHUTDOWN ═══
+    def _shutdown(signum=None, frame=None):
+        print("\n[Shutdown] Dastur to'xtatilmoqda...", flush=True)
+        try:
+            # Barcha thread larni to'xtatish
+            import threading
+            for t in threading.enumerate():
+                if t != threading.main_thread() and t.is_alive():
+                    print(f"  Stopping thread: {t.name}", flush=True)
+            
+            # Qt app ni to'xtatish
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app:
+                # Barcha oynalarni yopish
+                for w in app.allWindows():
+                    w.close()
+                app.quit()
+        except Exception as e:
+            print(f"  Shutdown error: {e}", flush=True)
+        
+        print("[Shutdown] ✅ To'liq to'xtadi", flush=True)
+        os._exit(0)  # Majburiy chiqish — barcha thread/process larni o'ldirish
+    
+    signal.signal(signal.SIGINT, _shutdown)   # Ctrl+C
+    signal.signal(signal.SIGTERM, _shutdown)  # kill command
+
+    import sys
+    WEBCAM_DEMO = "--webcam" in sys.argv
     app = QApplication(sys.argv)
 
     app.setStyle("Fusion")
@@ -124,6 +156,19 @@ def main():
 
     # MainWindow ga ham saqlaymiz
     win._service_manager = sm
+    # Events → UI signal zanjiri
+    try:
+        sys_obj = getattr(win, 'sys', None)
+        if sys_obj and hasattr(sys_obj, 'new_event'):
+            def _on_event_to_ui(evt):
+                print(f"[MAIN] 🎯 UI EVENT: type={evt.get('type')} person={evt.get('person_name')}", flush=True)
+                sys_obj.new_event.emit(evt)
+            sm.events_service.event_added.connect(_on_event_to_ui)
+            print("[MAIN] ✅ event_added → sys.new_event ulandi", flush=True)
+        else:
+            print("[MAIN] ⚠ sys.new_event topilmadi", flush=True)
+    except Exception as e:
+        print(f"[MAIN] ⚠ Event connect error: {e}", flush=True)
     win._real_system = real_system
 
     def on_quit():

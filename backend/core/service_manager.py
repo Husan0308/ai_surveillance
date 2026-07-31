@@ -1,3 +1,4 @@
+import threading
 from PySide6.QtCore import QObject, Signal
 
 from backend.core.config import ConfigService
@@ -17,6 +18,9 @@ from backend.ai.pose_engine import PoseEngine
 from backend.ai.face_engine import FaceEngine
 from backend.ai.reid_engine import ReIDEngine
 from backend.ai.ai_worker import AIWorker
+from backend.features.unknown_registry import UnknownRegistry
+from backend.features.global_identity_cache import GlobalIdentityCache
+from backend.features.room_manager import RoomManager
 
 from backend.features.identity_manager import IdentityManager
 from backend.features.enrollment import EnrollmentService
@@ -31,6 +35,8 @@ from backend.features.settings_service import SettingsService
 from backend.storage.recording_service import RecordingService
 from backend.storage.cleanup_service import CleanupService
 from backend.storage.export_service import ExportService
+from backend.core.global_registry import GlobalIdentityRegistry
+from backend.core.person_pool import GlobalPersonPool
 
 log = get_logger("core.service_manager")
 
@@ -70,6 +76,21 @@ class ServiceManager(QObject):
         self.pose_engine = PoseEngine(self.config)
         self.face_engine = FaceEngine(self.config, db=self.db)
         self.reid_engine = ReIDEngine(self.config)
+
+        # 🌐 Cross-camera shared ReID gallery (bitta instance → hamma kamera ulashadi)
+        try:
+            import importlib.util as _iu, os as _os
+            _gp = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "ai", "reid_gallery.py")
+            _spec = _iu.spec_from_file_location("_reid_gallery_mod", _gp)
+            _gm = _iu.module_from_spec(_spec); _spec.loader.exec_module(_gm)
+            self.reid_gallery = _gm.SharedReIDGallery()
+            print("[SM] 🌐 SharedReIDGallery yaratildi (cross-camera)", flush=True)
+        except Exception as _ge:
+            print(f"[SM] ⚠ reid_gallery error: {_ge}", flush=True)
+            self.reid_gallery = None
+        self.unknown_registry = UnknownRegistry()
+        self.global_identity_cache = GlobalIdentityCache()
+        self.room_manager = RoomManager()
 
         # ---------------- camera ----------------
         self.camera_manager = CameraManager(
@@ -114,7 +135,7 @@ class ServiceManager(QObject):
             db=self.db,
             face_engine=self.face_engine,       # ✅ ENDI MAVJUD
             db_writer=self.db_writer,
-        )
+            identity_manager=self.identity_manager,)
 
         self.unknown_service = UnknownService(
             config=self.config,
@@ -128,7 +149,7 @@ class ServiceManager(QObject):
             db=self.db,
             face_engine=self.face_engine,
             db_writer=self.db_writer,
-        )
+)
 
         self.settings_service = SettingsService(
             config=self.config,
@@ -261,7 +282,7 @@ class ServiceManager(QObject):
             reid_engine=self.reid_engine,
             config=self.config,
             db_writer=self.db_writer,
-        )
+)
 
         # MUHIM: Signal ulanish
         ai_worker.result_ready.connect(self.identity_manager.process_result)
@@ -269,13 +290,14 @@ class ServiceManager(QObject):
         # DEBUG
         print(f"[DEBUG] AIWorker {camera_id} -> IdentityManager connected", flush=True)
 
-        ai_worker.event_detected.connect(self.events_service.publish_event)
+        ai_worker.event_detected.connect(lambda cam_id, evt: self.events_service.publish_event(evt))
 
         try:
             worker.frame_bgr_ready.connect(self.recording_service.write_frame)
         except Exception as e:
             log.error("frame_bgr_ready connect error: %s", e)
 
+        ai_worker.shared_gallery = getattr(self, "reid_gallery", None)
         ai_worker.start()
 
         self.ai_workers[camera_id] = ai_worker
@@ -308,6 +330,12 @@ class ServiceManager(QObject):
             log.error("_on_camera_removed error: %s", e)
 
     # ---------------- start ----------------
+    def get_next_global_id(self) -> int:
+        """Thread-safe global ID generator. 1 dan boshlanadi."""
+        with self._global_id_lock:
+            self._global_id_counter += 1
+            return self._global_id_counter
+
     def start(self):
         log.info("ServiceManager starting")
 
@@ -316,6 +344,10 @@ class ServiceManager(QObject):
 
         # create AI workers for all cameras
         for camera_id in self.camera_manager.all_camera_ids():
+            _cam = self.camera_manager.cameras.get(camera_id, {})
+            if not _cam.get("online", False):
+                print(f"[SM] ⏭ {camera_id} offline — AI worker YARATILMADI", flush=True)
+                continue
             self._ensure_ai_worker(camera_id)
 
         # initial gallery reload

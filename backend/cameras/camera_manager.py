@@ -37,6 +37,26 @@ class CameraManager(QObject):
 
     # ---------------- load ----------------
     def load(self):
+        # ✅ YAML USTUVOR: cameras.yaml dagi online qiymatini DB ga sinxronlash.
+        # Endi kamerani YAML dan o'chirish/yoqish mumkin (dastur qayta ishga tushganda).
+        try:
+            import yaml as _yaml, os as _os
+            _yp = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "config", "cameras.yaml")
+            if _os.path.exists(_yp):
+                with open(_yp, "r", encoding="utf-8") as _f:
+                    _ycams = (_yaml.safe_load(_f) or {}).get("cameras", [])
+                with self.db.lock:
+                    for _yc in _ycams:
+                        _cid = _yc.get("id")
+                        if _cid and "online" in _yc:
+                            self.db.conn.execute(
+                                "UPDATE camera_config SET online=? WHERE id=?",
+                                (1 if _yc.get("online") else 0, _cid))
+                    self.db.conn.commit()
+                print(f"[CameraManager] ✅ YAML→DB online sinxronlandi ({len(_ycams)} kamera)", flush=True)
+        except Exception as _ye:
+            print(f"[CameraManager] ⚠ YAML sinxron xato: {_ye}", flush=True)
+
         cams = self.db.get_camera_configs()
 
         if not cams:
@@ -65,7 +85,7 @@ class CameraManager(QObject):
         if persist:
             self.db.save_camera_config(cam)
 
-        worker = CameraWorker(cam)
+        worker = CameraWorker(cam, target_size=(1280, 720))
 
         worker.status_changed.connect(self.status_changed)
         worker.frame_captured.connect(self.frame_captured)

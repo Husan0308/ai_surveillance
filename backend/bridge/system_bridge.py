@@ -136,7 +136,7 @@ class PersonRecordUI:
         self.emp_id = data.get("employee_id", "")
         self.status = data.get("status", "Active")
 
-        self.last_seen = parse_time(data.get("last_seen")) or datetime.now()
+        self.last_seen = parse_time(data.get("last_seen"))  # None = never seen
         self.rec_count = int(data.get("rec_count", 0) or 0)
 
         # ✅ AVATAR YUKLASH - ishonchli usul
@@ -649,7 +649,7 @@ class RealSystem(QObject):
     def _reload_people(self):
         print(f"[RealSystem] _reload_people called", flush=True)
         try:
-            rows = self.sm.person_service.load_persons()
+            rows = self.sm.person_service.load_persons(identity_manager=getattr(sm, 'identity_manager', None))
             print(f"[RealSystem] Loaded {len(rows)} persons from DB", flush=True)
 
             self.people = [
@@ -689,6 +689,21 @@ class RealSystem(QObject):
                 usage[camera_id] = int(seconds // 60)
 
             self.usage = usage
+            
+            # ✅ Occupancy (real-time odam soni) ni ham qo'shish
+            occupancy = {}
+            try:
+                for cam_id, state in self.sm.identity_manager.states.items():
+                    occupancy[cam_id] = len(state.active_tracks) if hasattr(state, 'active_tracks') else 0
+            except Exception:
+                pass
+            
+            # Signal orqali UI ga yuborish (usage + occupancy + original data)
+            enriched_data = dict(data)
+            enriched_data["usage_min"] = usage
+            enriched_data["occupancy"] = occupancy
+            if hasattr(self, 'analytics_updated'):
+                self.analytics_updated.emit(enriched_data)
 
         except Exception as e:
             log.error("_on_analytics error: %s", e)

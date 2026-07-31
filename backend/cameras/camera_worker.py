@@ -28,7 +28,7 @@ class CameraWorker(QThread):
     health_updated = Signal(str, dict)  
     frame_bgr_ready = Signal(str, object)   # camera_id, BGR frame     # camera_id, metrics
 
-    def __init__(self, cam_cfg: dict, target_size=(640, 360)):
+    def __init__(self, cam_cfg: dict, target_size=(1280, 720)):
         super().__init__()
 
         self.cam_id = cam_cfg.get("id", "CAM-XX")
@@ -69,6 +69,29 @@ class CameraWorker(QThread):
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
+
+            # ─── Stream sifat sozlamalari ───
+            target_w = int(self.cfg.get("width", self.cfg.get("resolution_w", 1920)))
+            target_h = int(self.cfg.get("height", self.cfg.get("resolution_h", 1080)))
+            target_fps = int(self.cfg.get("fps", 25))
+
+            try:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
+                cap.set(cv2.CAP_PROP_FPS, target_fps)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+
+            # Haqiqiy qiymatlarni log qilish
+            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = cap.get(cv2.CAP_PROP_FPS)
+            log.info(
+                "Camera %s stream: %dx%d @ %.1f fps (requested %dx%d @ %d)",
+                self.cam_id, actual_w, actual_h, actual_fps,
+                target_w, target_h, target_fps
+            )
 
         return cap
 
@@ -124,10 +147,14 @@ class CameraWorker(QThread):
 
                 fail = 0
 
+                # Frame ni AIWorker uchun optimal o'lchamga resize
                 if self.target_size:
-                    frame = cv2.resize(frame, self.target_size)
+                    frame = cv2.resize(frame, self.target_size, interpolation=cv2.INTER_AREA)
 
+                # Buffer ga qo'yish (AIWorker shu frame ni oladi)
                 self.buffer.put(frame)
+                
+                # Recording service uchun ham shu frame ni yuborish
                 self.frame_bgr_ready.emit(self.cam_id, frame)
                 self.frame_captured.emit(self.cam_id)
 
@@ -137,7 +164,7 @@ class CameraWorker(QThread):
                 if now - last_fps_time >= 1.0:
                     self.health.set_fps(frames / max(1e-6, now - last_fps_time))
                     frames = 0
-                    last_fps_time = now
+                    last_fps_time = time.time()
                     self.health_updated.emit(self.cam_id, self.health.metrics())
 
                 elapsed = time.time() - loop_t

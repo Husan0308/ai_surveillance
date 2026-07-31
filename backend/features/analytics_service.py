@@ -69,10 +69,22 @@ class AnalyticsService(QObject):
         self._db_recognition_total = 0
         self._db_totals_ts = 0.0
 
+        # ✅ Global unikal identity tracking (cross-camera)
+        self._known_person_ids = {}    # person_id → last_seen_time
+        self._unknown_tracks = {}      # (camera_id, track_name) → last_seen_time
+        self._identity_ttl = 60.0      # 60 sek ko'rinmasa → o'chirish
+
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+
+        # ✅ EventsService dan identity event larini tinglash
+        if events_service is not None:
+            try:
+                events_service.event_added.connect(self._on_identity_event)
+            except Exception as e:
+                log.error("analytics event connect error: %s", e)
 
         log.info("AnalyticsService started")
 
@@ -88,18 +100,50 @@ class AnalyticsService(QObject):
 
     # ---------------- helpers ----------------
     def _get_peak_hour(self):
+        """
+        Peak hour: bugungi eng ko'p odam ko'rilgan soat.
+        Har soat 60 minut. Faqat o'tgan soatlar hisobga olinadi.
+        """
         now = time.time()
 
-        if self._peak_cache is None or now - self._peak_ts > 10.0:
-            try:
-                date_str = datetime.now().strftime("%Y-%m-%d")
-                self._peak_cache = self.db.get_peak_hour(date_str)
-                self._peak_ts = now
-            except Exception as e:
-                log.error("get_peak_hour error: %s", e)
+        if self._peak_cache is not None and now - self._peak_ts < 30.0:
+            return self._peak_cache
+
+        try:
+            from datetime import datetime
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            current_hour = datetime.now().hour
+
+            # DB dan soatlik ma'lumot
+            raw = self.db.get_peak_hour(date_str)
+
+            if raw and len(raw) == 24:
+                # Faqat o'tgan soatlar (hozirgi soatni hisobga olmaslik)
+                peak_data = list(raw)
+                # Hozirgi va kelgusi soatlarni 0 qilish
+                for h in range(current_hour + 1, 24):
+                    peak_data[h] = 0
+                self._peak_cache = peak_data
+            else:
+                # DB dan ma'lumot yo'q → real-time dan hisoblash
+                peak_data = [0] * 24
+                # IdentityManager dan hozirgi occupancy ni olish
+                if self.identity_manager is not None:
+                    total = 0
+                    for cam_id, state in self.identity_manager.states.items():
+                        total += state.occupancy
+                    peak_data[current_hour] = total
+                self._peak_cache = peak_data
+
+            self._peak_ts = now
+
+        except Exception as e:
+            log.error("get_peak_hour error: %s", e)
+            if self._peak_cache is None:
                 self._peak_cache = [0] * 24
 
         return self._peak_cache
+
 
     def _get_db_totals(self):
         now = time.time()
@@ -151,24 +195,52 @@ class AnalyticsService(QObject):
         return out
 
     # ---------------- main tick ----------------
+
+    # ---------------- identity tracking ----------------
+    def _on_identity_event(self, event: dict):
+        """EventsService dan identity event larini qabul qilish"""
+        now = time.time()
+        etype = event.get('type', '')
+        if etype == 'person_recognized':
+            pid = event.get('person_id')
+            if pid is not None:
+                self._known_person_ids[pid] = now
+        elif etype == 'unknown_detected':
+            cam = event.get('camera_id', '?')
+            name = event.get('person_name', '?')
+            self._unknown_tracks[(cam, name)] = now
+
+    def _cleanup_identities(self):
+        """60 sek ko'rinmagan identity larni o'chirish"""
+        now = time.time()
+        ttl = getattr(self, '_identity_ttl', 60.0)
+        self._known_person_ids = {
+            k: v for k, v in self._known_person_ids.items() if now - v < ttl
+        }
+        self._unknown_tracks = {
+            k: v for k, v in self._unknown_tracks.items() if now - v < ttl
+        }
+
     def _tick(self):
         occupancy = 0
-        known = 0
-        unknown = 0
-
         live_detections = 0
         live_recognitions = 0
-
         fps_values = []
 
         if self.identity_manager is not None:
             for camera_id, state in self.identity_manager.states.items():
                 occupancy += state.occupancy
-                known += state.known
-                unknown += state.unknown
-
                 live_detections += state.detections_total
                 live_recognitions += state.recognitions_total
+
+        # ✅ Eski identity larni tozalash
+        self._cleanup_identities()
+
+        # ✅ Known: unikal person_id lar (cross-camera, 1 odam = 1 known)
+        known = len(self._known_person_ids)
+
+        # ✅ Unknown: unikal track lar (har kamera alohida, 4 track = 4 unknown)
+        unknown = len(self._unknown_tracks)
 
         for camera_id, fps in self.camera_fps.items():
             if fps > 0:

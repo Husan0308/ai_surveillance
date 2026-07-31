@@ -31,7 +31,7 @@ class Database:
 
         print("DB connect...", flush=True)
 
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
         self.conn.row_factory = sqlite3.Row
 
         print("DB pragma...", flush=True)
@@ -429,11 +429,19 @@ class Database:
             self.conn.commit()
 
     # ================= events =================
-    def add_event(self, event: dict):
+    def add_event(self, event=None, **kwargs):
+        """Add event — accepts dict or keyword args"""
+        if event is None:
+            event = kwargs
+        elif isinstance(event, dict) and kwargs:
+            event.update(kwargs)
+        elif not isinstance(event, dict):
+            event = kwargs
+
         with self.lock:
             extra = event.get("extra")
-
             if extra is not None and not isinstance(extra, str):
+                import json
                 extra = json.dumps(extra, ensure_ascii=False)
 
             self.conn.execute(
@@ -445,15 +453,15 @@ class Database:
                 VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    event.get("time", self._now()),
-                    event.get("camera_id"),
+                    event.get("time", ""),
+                    event.get("camera_id", ""),
                     event.get("person_id"),
-                    event.get("person_name"),
-                    event.get("type"),
+                    event.get("person_name", ""),
+                    event.get("type", ""),
                     event.get("level", "info"),
-                    float(event.get("confidence", 0.0)),
-                    event.get("snapshot_path"),
-                    1 if event.get("ack") else 0,
+                    event.get("confidence", 0.0),
+                    event.get("snapshot_path", ""),
+                    event.get("ack", 0),
                     extra,
                 ),
             )
@@ -595,7 +603,7 @@ class Database:
         with self.lock:
             row = self.conn.execute(
                 """
-                SELECT id, entered_at FROM visits
+                SELECT id, person_id, entered_at FROM visits
                 WHERE camera_id=? AND track_id=? AND left_at IS NULL
                 ORDER BY id DESC LIMIT 1
                 """,
@@ -615,6 +623,15 @@ class Database:
                 "UPDATE visits SET left_at=?, duration_sec=? WHERE id=?",
                 (self._now(), duration, row["id"]),
             )
+            
+            # ✅ stay_total ni persons jadvaliga yozish
+            person_id = row["person_id"]
+            if person_id is not None and duration > 0:
+                self.conn.execute(
+                    "UPDATE persons SET stay_total = stay_total + ? WHERE id=?",
+                    (duration, person_id),
+                )
+            
             self.conn.commit()
 
             return row["id"], duration

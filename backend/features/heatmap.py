@@ -1,3 +1,4 @@
+import time
 import math
 from datetime import datetime
 
@@ -84,10 +85,10 @@ class HeatmapEngine:
         decay_name = str(config.get("heatmap.decay", "normal")).lower()
 
         self.decay_rate = {
-            "fast": 0.985,
-            "normal": 0.9965,
-            "slow": 0.9992,
-        }.get(decay_name, 0.9965)
+            "fast": 0.992,
+            "normal": 0.9985,
+            "slow": 0.9997,
+        }.get(decay_name, 0.9985)
 
         self.live = np.zeros((self.gh, self.gw), dtype=np.float32)
         self.hist = np.zeros((self.gh, self.gw), dtype=np.float32)
@@ -98,8 +99,9 @@ class HeatmapEngine:
             for h in range(24)
         }
 
+        self._start_time = time.time()
         self.mode = "live"
-        self.on = False
+        self.on = True  # Har doim yoqilgan
 
     # ---------------- controls ----------------
     def set_on(self, on: bool):
@@ -110,6 +112,8 @@ class HeatmapEngine:
             self.mode = mode
 
     def reset(self, mode: str = None):
+        self._start_time = time.time()  # Sovish qaytadan boshlanadi
+        self._start_time = time.time()  # Reset qilinganda sovish qaytadan boshlanadi
         mode = mode or self.mode
 
         if mode == "live":
@@ -160,8 +164,53 @@ class HeatmapEngine:
 
 
     def update(self, persons, frame_w: int, frame_h: int, online: bool = True):
-        print("HEATMAP update persons:", len(persons), flush=True)
-
+        """Haqiqiy heatmap: har bir qadam iz qoldiradi (YOLO-style)"""
+        if not online and not self.collect_when_off:
+            return
+        if frame_w <= 0 or frame_h <= 0:
+            return
+    
+        from datetime import datetime
+        current_hour = datetime.now().hour
+    
+        # Decay
+        self._decay(self.live, self.decay_rate)
+        if current_hour in self.hourly:
+            self._decay(self.hourly[current_hour], 0.9995)
+        self._decay(self.daily, 0.9999)
+        self._decay(self.hist, 0.9999)
+    
+        if not persons:
+            return
+    
+        for p in persons:
+            ankle = getattr(p, "ankle", None)
+            if ankle is None:
+                box = getattr(p, "box", None) or getattr(p, "bbox", None)
+                if box and len(box) >= 4:
+                    ankle = ((box[0] + box[2]) / 2.0, box[3])
+                else:
+                    continue
+    
+            ax, ay = float(ankle[0]), float(ankle[1])
+            gx = int(ax / max(1, frame_w) * self.gw)
+            gy = int(ay / max(1, frame_h) * self.gh)
+            gx = max(0, min(self.gw - 1, gx))
+            gy = max(0, min(self.gh - 1, gy))
+    
+            # To'g'ridan-to'g'ri nuqtaga yozish + atrof
+            w = 0.8
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    ny, nx = gy + dy, gx + dx
+                    if 0 <= ny < self.gh and 0 <= nx < self.gw:
+                        wt = w if (dx == 0 and dy == 0) else w * 0.4
+                        self.live[ny, nx] = min(2.0, self.live[ny, nx] + wt)
+                        self.hist[ny, nx] = min(3.0, self.hist[ny, nx] + wt * 0.1)
+                        if current_hour in self.hourly:
+                            self.hourly[current_hour][ny, nx] = min(3.0, self.hourly[current_hour][ny, nx] + wt * 0.3)
+                        self.daily[ny, nx] = min(3.0, self.daily[ny, nx] + wt * 0.15)
+    
     def _splat(self, grid, nx, ny, base_weight):
         ix = int(nx * self.gw)
         iy = int(ny * self.gh)
@@ -182,9 +231,18 @@ class HeatmapEngine:
                 grid[yy, xx] = min(1.6, grid[yy, xx] + w * base_weight)
 
     def _decay(self, grid, rate):
-        grid *= rate
-
-    # ---------------- image ----------------
+        """1 soatlik sovish: dastlabki 60 min iz qoladi, keyin soviydi"""
+        import time
+        elapsed_min = (time.time() - getattr(self, '_start_time', time.time())) / 60.0
+        
+        # Agar 60 minutdan kam bo'lsa → deyarli sovimaydi (iz qoladi)
+        # Agar 60 minutdan ko'p bo'lsa → normal sovish
+        if elapsed_min < 60.0:
+            effective_rate = 0.99995  # Juda sekin (1 soatda ~3% yo'qoladi)
+        else:
+            effective_rate = rate  # Config dan kelgan normal rate
+        
+        grid *= effective_rate
     def _grid_for_mode(self, mode: str = None):
         mode = mode or self.mode
 
@@ -201,24 +259,37 @@ class HeatmapEngine:
         return self.live
 
     def get_image(self, mode: str = None):
-        grid = self._grid_for_mode(mode)
-
-        if self.blur_enabled:
-            grid = blur_grid(grid)
-
-        img = QImage(self.gw, self.gh, QImage.Format_RGBA8888)
+        """Heatmap tasvirini qaytarish — raw grid + minimal blur"""
+        m = mode or self.mode
+        
+        if m == "hourly":
+            from datetime import datetime
+            h = datetime.now().hour
+            grid = self.hourly.get(h, self.live)
+        elif m == "daily":
+            grid = self.daily
+        else:
+            grid = self.live
+        
+        if grid is None or np.max(grid) < 0.01:
+            return QImage(self.gw, self.gh, QImage.Format_RGBA8888)
+        
+        # Minimal blur — faqat vizual silliq uchun, iz yo'qolmaydi
+        display = blur_grid(grid.copy()) if self.blur_enabled else grid.copy()
+        
+        gh, gw = display.shape
+        img = QImage(gw, gh, QImage.Format_RGBA8888)
         img.fill(Qt.transparent)
-
-        for y in range(self.gh):
-            for x in range(self.gw):
-                v = float(grid[y, x])
-
-                if v <= 0.05:
-                    continue
-
-                r, g, b = heat_color(min(1.0, v))
-                a = min(235, int(60 + v * 160))
-
-                img.setPixelColor(x, y, QColor(r, g, b, a))
-
+        
+        max_val = max(0.01, np.max(display))
+        
+        for y in range(gh):
+            for x in range(gw):
+                v = float(display[y, x])
+                if v > 0.02:
+                    norm = min(1.0, v / max_val)
+                    alpha = min(255, int(norm * 220 * self.opacity))
+                    r, g, b = heat_color(norm)
+                    img.setPixelColor(x, y, QColor(r, g, b, alpha))
+        
         return img
