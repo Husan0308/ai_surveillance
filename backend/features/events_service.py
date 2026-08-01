@@ -180,15 +180,15 @@ class EventsService(QObject):
         # ✅ GLOBAL person cooldown: bir odam 30 sek ichida 1 marta
         # (barcha kameralar bo'ylab, camera_id dan qat'i nazar)
         if e["type"] in ("person_recognized", "recognized") and e.get("person_id"):
-            key = ("person_recognized", e["person_id"])
-            if now - self._cooldowns.get(key, 0) < 30.0:
+            key = ("person_recognized", e["camera_id"], e["person_id"])
+            if now - self._cooldowns.get(key, 0) < 5.0:
                 return e
             self._cooldowns[key] = now
 
         # ✅ Unknown cooldown: bir xil unknown 15 sek ichida 1 marta
         if e["type"] in ("unknown_detected", "unknown", "unknown_person"):
             key = ("unknown_detected", e.get("camera_id"), e.get("person_name"))
-            if now - self._cooldowns.get(key, 0) < 15.0:
+            if now - self._cooldowns.get(key, 0) < 5.0:
                 return e
             self._cooldowns[key] = now
 

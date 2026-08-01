@@ -163,7 +163,7 @@ def main():
             def _on_event_to_ui(evt):
                 print(f"[MAIN] 🎯 UI EVENT: type={evt.get('type')} person={evt.get('person_name')}", flush=True)
                 sys_obj.new_event.emit(evt)
-            sm.events_service.event_added.connect(_on_event_to_ui)
+            # sm.events_service.event_added.connect(_on_event_to_ui)  # system_bridge.py:714 allaqachon ulagan
             print("[MAIN] ✅ event_added → sys.new_event ulandi", flush=True)
         else:
             print("[MAIN] ⚠ sys.new_event topilmadi", flush=True)

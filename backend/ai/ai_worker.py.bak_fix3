@@ -126,7 +126,6 @@ class AIWorker(QThread):
 
         # ===== ReID + Tracking: body feature gallery =====
         self._emitted = {}              # ✅ dedup: (track_id,person_id)→name
-        self._unknown_zone_ts = []
         self.shared_gallery = None      # 🌐 cross-camera gallery (ServiceManager set qiladi)
         self.body_gallery = {}          # person_id → [HSV histogram feature]
         # ✅ SHARED unknown gallery (barcha kamera bitta — cross-camera unknown ReID)
@@ -490,10 +489,28 @@ class AIWorker(QThread):
         """
         import time as _t2
         _now2 = _t2.time()
-        # ✅ Global dedup OLIB TASHLANDI — faqat kamera+track based dedup ishlaydi
+        # ✅ KUCHLI DEDUP: person_recognized bir person uchun 10 min ichida faqat 1 marta
+        if etype == "person_recognized" and person_id is not None:
+            _cls = type(self)
+            if not hasattr(_cls, "_global_rec_logged"):
+                _cls._global_rec_logged = set()
+            if person_id in _cls._global_rec_logged:
+                return  # allaqachon ko'rilgan → qayta yozma
+            _cls._global_rec_logged.add(person_id)
+        # ✅ GLOBAL DEDUP: unknown_detected — ko'rdimi boldi, qayta yozmaydi (permanent)
+        if etype == "unknown_detected":
+            _cls2 = type(self)
+            if not hasattr(_cls2, "_global_unknown_logged"):
+                _cls2._global_unknown_logged = set()
+            if name in _cls2._global_unknown_logged:
+                return  # allaqachon ko'rilgan → qayta yozma
+            _cls2._global_unknown_logged.add(name)
         # ✅ KAMERA-BASED DEDUP: bir kamera+person = 30s ichida bir marta
         # Boshqa kameraga o'tsa → yangi event (cross-camera)
-        key = (self.camera_id, tr.id)  # kamera + track: bitta track=bitta log, boshqa kamera=yangi log
+        if person_id is not None:
+            key = (self.camera_id, person_id)  # kamera + person (track_id emas!)
+        else:
+            key = (self.camera_id, tr.id)  # kamera + track_id (unknown uchun)
         _cur = tr.box[:4] if (tr.box is not None and len(tr.box) >= 4) else None
         _cx = _cy = None
         if _cur is not None:

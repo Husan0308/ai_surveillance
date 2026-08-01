@@ -2810,7 +2810,16 @@ class EventsPage(Page):
 
     def __init__(self, hub):
 
-        # PM_AUTO_TIMER_FIX — OLIB TASHLANDI (showEvent + persons_online signal yetarli)
+        # PM_AUTO_TIMER_FIX
+        try:
+            from PySide6.QtCore import QTimer
+
+            if not hasattr(self, "_pm_auto_timer"):
+                self._pm_auto_timer = QTimer(self)
+                self._pm_auto_timer.timeout.connect(self._pm_auto_refresh)
+                self._pm_auto_timer.start(3000)
+        except Exception:
+            pass
         super().__init__()
 
         self.hub = hub
@@ -3193,7 +3202,16 @@ class EventsPage(Page):
 class PersonManagementPage(Page):
     def __init__(self, hub):
 
-        # PM_AUTO_TIMER_FIX — OLIB TASHLANDI (showEvent + persons_online signal yetarli)
+        # PM_AUTO_TIMER_FIX
+        try:
+            from PySide6.QtCore import QTimer
+
+            if not hasattr(self, "_pm_auto_timer"):
+                self._pm_auto_timer = QTimer(self)
+                self._pm_auto_timer.timeout.connect(self._pm_auto_refresh)
+                self._pm_auto_timer.start(3000)
+        except Exception:
+            pass
         super().__init__()
 
         self.hub = hub
@@ -3326,6 +3344,33 @@ class PersonManagementPage(Page):
                 status_item.setForeground(QColor("#95a5a6"))
 
     def showEvent(self, e):
+
+        # PM_AUTO_SYNC_FIX
+        try:
+            if hasattr(self, "sync_db"):
+                self.sync_db()
+        except Exception as e:
+            print(f"[PM] sync_db error: {e}", flush=True)
+
+        try:
+            if hasattr(self, "load_persons"):
+                self.load_persons()
+        except Exception as e:
+            print(f"[PM] load_persons error: {e}", flush=True)
+
+        try:
+            if hasattr(self, "rebuild"):
+                self.rebuild()
+        except Exception as e:
+            print(f"[PM] rebuild error: {e}", flush=True)
+
+        try:
+            if hasattr(self, "refresh"):
+                self.refresh()
+        except Exception:
+            pass
+
+        print("[PM] ✅ Auto DB sync on enter", flush=True)
         """Person Management ochilganda DB dan avto-sync."""
         super().showEvent(e)
         import time as _st
@@ -3333,8 +3378,7 @@ class PersonManagementPage(Page):
         if not hasattr(self, "_last_db_sync") or _n - self._last_db_sync > 3:
             self._last_db_sync = _n
             try:
-                self.db_sync()
-                print("[PM] ✅ Auto DB sync on enter", flush=True)
+                self.force_refresh()
             except Exception as _se:
                 print(f"[PM] showEvent sync xato: {_se}", flush=True)
 
@@ -3527,7 +3571,7 @@ class PersonManagementPage(Page):
                 if is_online:
                     status_text, status_color = "🟢 Online", "#2ecc71"
                 else:
-                    status_text, status_color = "", "#95a5a6"
+                    pass  # block emptied
                 st = QTableWidgetItem(status_text)
                 st.setForeground(QColor(status_color))
                 self.tbl.setItem(r, 3, st)
@@ -5138,7 +5182,16 @@ class LoginScreen(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
 
-        # PM_AUTO_TIMER_FIX — OLIB TASHLANDI (showEvent + persons_online signal yetarli)
+        # PM_AUTO_TIMER_FIX
+        try:
+            from PySide6.QtCore import QTimer
+
+            if not hasattr(self, "_pm_auto_timer"):
+                self._pm_auto_timer = QTimer(self)
+                self._pm_auto_timer.timeout.connect(self._pm_auto_refresh)
+                self._pm_auto_timer.start(3000)
+        except Exception:
+            pass
         super().__init__()
 
         self.setWindowTitle("AI Surveillance System — MUKAMMAL Edition")

@@ -169,8 +169,22 @@ class EnrollmentService(QObject):
         if not employee_id:
             employee_id = f"EMP-{random.randint(1000, 9999)}"
 
-        avatar_pm = self.captures_pix[0] if self.captures_pix else QPixmap()
-        avatar_bytes = _pixmap_to_png_bytes(avatar_pm)
+        # ✅ Avatar: captures_bgr dan (UPLOAD da to'ldirilgan), captures_pix fallback
+        avatar_bytes = b""
+        avatar_pm = QPixmap()
+        try:
+            if self.captures_bgr:
+                avatar_bytes = _jpg_bytes(self.captures_bgr[0])
+                if avatar_bytes:
+                    avatar_pm.loadFromData(avatar_bytes)
+            if not avatar_bytes and self.captures_pix:
+                avatar_pm = self.captures_pix[0]
+                avatar_bytes = _pixmap_to_png_bytes(avatar_pm)
+            print(f"[Enroll] avatar: bgr={len(self.captures_bgr) if self.captures_bgr else 0} "
+                  f"pix={len(self.captures_pix) if self.captures_pix else 0} "
+                  f"bytes={len(avatar_bytes)}", flush=True)
+        except Exception as _ae:
+            print(f"[Enroll] avatar xato: {_ae}", flush=True)
 
         # ✅ TO'G'RIDAN-TO'G'RI SQL YOZISH
         try:

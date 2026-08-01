@@ -430,28 +430,6 @@ class Database:
 
     # ================= events =================
     def add_event(self, event=None, **kwargs):
-
-        # GLOBAL_EVENT_DEDUP_FIX
-        try:
-            _locals = locals()
-            _gid = (
-                _locals.get("global_id")
-                or _locals.get("person_id")
-                or _locals.get("unknown_id")
-                or _locals.get("person_name")
-                or _locals.get("name")
-            )
-            _etype = (
-                _locals.get("event_type")
-                or _locals.get("type")
-                or _locals.get("event")
-                or "event"
-            )
-
-            if not self._global_event_allowed(_gid, _etype, 10):
-                return
-        except Exception:
-            pass
         """Add event — accepts dict or keyword args"""
         if event is None:
             event = kwargs
@@ -953,30 +931,3 @@ class Database:
     def close(self):
         with self.lock:
             self.conn.close()
-
-    def _global_event_allowed(self, identity, event_type="event", interval=10.0):
-        # GLOBAL_EVENT_METHOD_FIX
-        import time
-        import threading
-
-        if identity in (None, "", "temp"):
-            return True
-
-        if not hasattr(self, "_global_event_last"):
-            self._global_event_last = {}
-
-        if not hasattr(self, "_global_event_lock"):
-            self._global_event_lock = threading.Lock()
-
-        key = f"{identity}|{event_type}"
-        now = time.time()
-
-        with self._global_event_lock:
-            last = self._global_event_last.get(key, 0)
-
-            if now - last < interval:
-                return False
-
-            self._global_event_last[key] = now
-            return True
-

@@ -26,7 +26,7 @@ ai:
   reid:
     enabled: true
     model: osnet_x1_0_market1501
-    threshold: 0.6
+    threshold: 0.75
     min_transition_seconds: 20
   reid_timeout_sec: 15
   tracker:
@@ -56,7 +56,7 @@ database:
 enrollment:
   countdown_seconds: 3
   duplicate_check: true
-  duplicate_threshold: 0.62
+  duplicate_threshold: 0.752
   flash_animation: true
   hot_reload_recognition: true
   images_count: 10
@@ -135,3 +135,11 @@ storage:
 camera_rooms:
   CAM-01: Xona-A
   CAM-06: Xona-A
+
+# ===== GEMINI AI =====
+gemini:
+  enabled: true
+  model: gemini-2.5-flash
+  api_key: ""
+  min_face_score: 0.5
+  max_calls_per_min: 30
