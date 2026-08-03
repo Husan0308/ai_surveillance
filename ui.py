@@ -1039,7 +1039,8 @@ class VideoSurface(QWidget):
 
             dwell = ps.age / 25.0
 
-            lbl = f"{ps.name}  #{ps.track_id}  {int(ps.conf * 100)}%"
+            lbl = f"{ps.name if ps.known else 'Notanish'}: #{ps.track_id}"
+            lbl += f" · {int(ps.conf * 100)}%"
 
             if dwell > 5:
                 lbl += f"  ⏱{int(dwell)}s"
@@ -4567,34 +4568,24 @@ class PasswordDialog(QDialog):
 class SettingsPage(Page):
     def __init__(self, hub):
         super().__init__()
-
         self.hub = hub
-
         self.title_row("Settings", "administrator access granted")
-
         self.tabs = QTabWidget()
-
         self.v.addWidget(self.tabs, 1)
-
         st = self.hub.sys.settings
 
-        # Cameras
+        # ==== Cameras ====
         w = QWidget()
-
         lay = QVBoxLayout(w)
         lay.setSpacing(8)
-
         for s in hub.sys.sims:
             row = QHBoxLayout()
-
             cb = QCheckBox(f"{s.id}  —  {s.name}")
             cb.setChecked(s.online)
-
             def mk(on=s, box=cb):
                 def f(state):
                     on.online = box.isChecked()
                     on.render()
-
                     hub.sys.push_event(
                         dict(
                             type="online" if on.online else "offline",
@@ -4604,388 +4595,87 @@ class SettingsPage(Page):
                             conf=1.0,
                         )
                     )
-
                 return f
-
             cb.stateChanged.connect(mk())
-
             res = QComboBox()
-            res.addItems(["1920×1080", "2560×1440", "1280×720"])
-
+            res.addItems(["1920x1080", "2560x1440", "1280x720"])
             fps = QSpinBox()
             fps.setRange(5, 60)
             fps.setValue(25)
-
             row.addWidget(cb, 1)
             row.addWidget(res)
             row.addWidget(fps)
-
             lay.addLayout(row)
-
         lay.addStretch(1)
-
         self.tabs.addTab(w, "🎥 Cameras")
 
-        # AI
+        # ==== Database ====
         w = QWidget()
-
         fm = QFormLayout(w)
         fm.setSpacing(12)
-
-        model = QComboBox()
-        model.addItems([
-            "YOLOv11m-pose",
-            "YOLOv11n-pose",
-            "YOLOv8m-pose",
-            "RTMPose-m",
-        ])
-        model.setCurrentText(st["model"])
-
-        self.det = QSlider(Qt.Horizontal)
-        self.det.setRange(10, 95)
-        self.det.setValue(int(st["det_conf"] * 100))
-
-        self.det_lbl = QLabel(f'{st["det_conf"]:.2f}')
-
-        self.det.valueChanged.connect(lambda v: self.det_lbl.setText(f"{v / 100:.2f}"))
-
-        dr = QHBoxLayout()
-        dr.addWidget(self.det)
-        dr.addWidget(self.det_lbl)
-
-        dw = QWidget()
-        dw.setLayout(dr)
-
-        face = QCheckBox("Enable Face Recognition")
-        face.setChecked(True)
-
-        track = QSpinBox()
-        track.setRange(10, 300)
-        track.setValue(60)
-
-        fm.addRow("Detection model", model)
-        fm.addRow("Confidence threshold", dw)
-        fm.addRow("", face)
-        fm.addRow("Max track age (frames)", track)
-
-        self.tabs.addTab(w, "🤖 AI")
-
-        # Database
-        w = QWidget()
-
-        fm = QFormLayout(w)
-        fm.setSpacing(12)
-
         fm.addRow("Path", QLineEdit("./data/surveillance.db"))
         fm.addRow("Size", QLabel("412 MB · 84,210 records"))
-
         br = QHBoxLayout()
-
         bb = QPushButton("Backup Now")
         bb.setObjectName("btnGhost")
         bb.clicked.connect(lambda: hub.toast("💾 Database backup started"))
-
         bv = QPushButton("Vacuum")
         bv.setObjectName("btnGhost")
         bv.clicked.connect(lambda: hub.toast("✅ Database optimized"))
-
         br.addWidget(bb)
         br.addWidget(bv)
         br.addStretch(1)
-
         fm.addRow("", br)
-
         self.tabs.addTab(w, "🗄 Database")
 
-        # Performance
+        # ==== Security ====
         w = QWidget()
-
         fm = QFormLayout(w)
         fm.setSpacing(12)
-
-        gpu = QComboBox()
-        gpu.addItems([
-            "NVIDIA RTX 4070 (CUDA)",
-            "NVIDIA GTX 1660 (CUDA)",
-            "CPU only",
-        ])
-
-        thr = QSpinBox()
-        thr.setRange(1, 16)
-        thr.setValue(4)
-
-        q = QSlider(Qt.Horizontal)
-        q.setRange(1, 100)
-        q.setValue(80)
-
-        hw = QCheckBox("Hardware acceleration (NVDEC)")
-        hw.setChecked(True)
-
-        fm.addRow("GPU device", gpu)
-        fm.addRow("Inference threads", thr)
-        fm.addRow("Stream quality", q)
-        fm.addRow("", hw)
-
-        self.tabs.addTab(w, "⚡ Performance")
-
-        # Recognition
-        w = QWidget()
-
-        fm = QFormLayout(w)
-        fm.setSpacing(12)
-
-        self.face_th = QSlider(Qt.Horizontal)
-        self.face_th.setRange(30, 95)
-        self.face_th.setValue(int(st["face_th"] * 100))
-
-        self.face_th_lbl = QLabel(f'{st["face_th"]:.2f}')
-
-        self.face_th.valueChanged.connect(
-            lambda v: self.face_th_lbl.setText(f"{v / 100:.2f}")
-        )
-
-        fr = QHBoxLayout()
-        fr.addWidget(self.face_th)
-        fr.addWidget(self.face_th_lbl)
-
-        fw = QWidget()
-        fw.setLayout(fr)
-
-        mf = QSpinBox()
-        mf.setRange(20, 200)
-        mf.setValue(60)
-
-        ae = QCheckBox("Auto-enroll unknown after 5 detections")
-
-        fm.addRow("Face match threshold", fw)
-        fm.addRow("Min face size (px)", mf)
-        fm.addRow("", ae)
-
-        self.tabs.addTab(w, "🆔 Recognition")
-
-        # Storage
-        w = QWidget()
-
-        fm = QFormLayout(w)
-        fm.setSpacing(12)
-
-        ret = QSpinBox()
-        ret.setRange(1, 365)
-        ret.setValue(st["retention"])
-
-        ow = QCheckBox("Overwrite oldest recordings")
-        ow.setChecked(True)
-
-        disk = QProgressBar()
-        disk.setRange(0, 100)
-        disk.setValue(62)
-        disk.setFixedHeight(10)
-
-        fm.addRow("Retention (days)", ret)
-        fm.addRow("", ow)
-        fm.addRow("Disk usage 62% (3.7 / 6 TB)", disk)
-
-        self.tabs.addTab(w, "💽 Storage")
-
-        # Security + Sound
-        w = QWidget()
-
-        fm = QFormLayout(w)
-        fm.setSpacing(12)
-
         self.pw1 = QLineEdit()
         self.pw1.setEchoMode(QLineEdit.Password)
-
         self.pw2 = QLineEdit()
         self.pw2.setEchoMode(QLineEdit.Password)
-
         ch = QPushButton("Change Password")
         ch.setObjectName("btnPrimary")
         ch.clicked.connect(self._change_pwd)
-
         al = QSpinBox()
         al.setRange(1, 120)
         al.setValue(15)
-
         https = QCheckBox("HTTPS / TLS only")
         https.setChecked(True)
-
         self.snd = QCheckBox("🔊 Sound alerts for critical events")
         self.snd.setChecked(st.get("sound", True))
-
         fm.addRow("New password", self.pw1)
         fm.addRow("Repeat password", self.pw2)
         fm.addRow("", ch)
         fm.addRow("Auto-lock (min)", al)
         fm.addRow("", https)
         fm.addRow("", self.snd)
-
         self.tabs.addTab(w, "🔐 Security")
 
-        # 👥 Employee Management (Settings ichida)
-        # emp_tab = QWidget()  # Employees tab olib tashlandi
-        # emp_lay = QVBoxLayout(emp_tab)
-        # emp_lay.setSpacing(8)  # Employees removed
-
-        # Qidiruv va sarlavha
-        # emp_header = QHBoxLayout()  # EMP REMOVED
-        # emp_title = QLabel("Registered Employees")  # Employees removed
-        # emp_title.setStyleSheet("font-size:12px; font-weight:700; color:white;")  # Employees removed
-        
-        # self.emp_search = QLineEdit()  # EMP REMOVED
-        # self.emp_search.setPlaceholderText("🔍 Search name or ID...")  # EMP REMOVED
-        # self.emp_search.setMaximumWidth(250)  # EMP REMOVED
-        # self.emp_search.textChanged.connect(self._filter_employees)  # EMP REMOVED
-
-        # emp_header.addWidget(emp_title)  # EMP REMOVED
-        # emp_header.addStretch(1)  # EMP REMOVED
-        # emp_header.addWidget(self.emp_search)  # EMP REMOVED
-        # emp_lay.addLayout(emp_header)  # Employees removed
-
-        # Xodimlar jadvali
-        # self.emp_table = QTableWidget(0, 4)  # Employees removed
-        # self.emp_table.setHorizontalHeaderLabels(["Name", "Department", "Employee ID", "Action"])  # Employees removed
-        # self.emp_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)  # Employees removed
-        # self.emp_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Employees removed
-        # self.emp_table.verticalHeader().setVisible(False)  # Employees removed
-        # self.emp_table.setEditTriggers(QTableWidget.NoEditTriggers)  # Employees removed
-        # self.emp_table.setSelectionBehavior(QAbstractItemView.SelectRows)  # Employees removed
-        # self.emp_table.setShowGrid(False)  # Employees removed
-        # self.emp_table.setAlternatingRowColors(True)  # Employees removed
-        
-        # emp_lay.addWidget(self.emp_table, 1)  # Employees removed
-
-        # self.tabs.addTab(emp_tab, "👥 Employees")  # Olib tashlandi
-
-        # Jadvalni to'ldirish
-        # self._load_employees()  # EMPLOYEES REMOVED
-
-        save = QPushButton("💾  Save Settings")
-        save.setObjectName("btnPrimary")
-        save.setCursor(Qt.PointingHandCursor)
-        save.clicked.connect(self._save)
-
-        self.v.addWidget(save, 0, Qt.AlignRight)
-
     def _change_pwd(self):
-        if self.pw1.text() and self.pw1.text() == self.pw2.text():
-            self.hub.sys.settings["password"] = self.pw1.text()
-
-            self.hub.toast("🔐 Password changed")
-
-            self.pw1.clear()
-            self.pw2.clear()
-
-        else:
-            self.hub.toast("⚠ Passwords do not match")
-
-    def _save(self):
-        st = self.hub.sys.settings
-
-        st["det_conf"] = self.det.value() / 100
-        st["face_th"] = self.face_th.value() / 100
-        st["sound"] = self.snd.isChecked()
-
-        self.hub.toast("✅ Settings saved")
-
-    # def _load_employees(self):  # EMPLOYEES REMOVED
-        # """Settings dagi employee jadvalini to'ldirish"""
-        # self.emp_table.setRowCount(0)  # Employees removed
-        
-        # people = self.hub.sys.people
-        
-        # for rec in people:
-            # r = self.emp_table.rowCount()  # Employees removed
-            # self.emp_table.insertRow(r)  # Employees removed
-
-            # Name
-            # name_item = QTableWidgetItem(rec.name)
-            # name_item.setData(Qt.UserRole, rec)  # Record ob'ektini saqlaymiz
-            # self.emp_table.setItem(r, 0, name_item)  # Employees removed
-
-            # Department
-            # self.emp_table.setItem(r, 1, QTableWidgetItem(rec.dept))  # Employees removed
-
-            # Employee ID
-            # self.emp_table.setItem(r, 2, QTableWidgetItem(rec.emp_id))  # Employees removed
-
-            # Delete tugmasi
-            # del_btn = QPushButton("🗑 Delete")
-            # del_btn.setObjectName("btnGhost")
-            # del_btn.setCursor(Qt.PointingHandCursor)
-            # del_btn.setFixedWidth(90)
-            # del_btn.clicked.connect(lambda checked, row=r: self._delete_employee(row))  # EMP REMOVED
-
-            # btn_widget = QWidget()
-            # btn_layout = QHBoxLayout(btn_widget)
-            # btn_layout.setContentsMargins(4, 2, 4, 2)
-            # btn_layout.addWidget(del_btn)
-            # btn_layout.setAlignment(Qt.AlignCenter)
-
-            # self.emp_table.setCellWidget(r, 3, btn_widget)  # Employees removed
-            # self.emp_table.setRowHeight(r, 36)  # Employees removed
-
-    # def _filter_employees(self, text):
-        # """Qidiruv bo'yicha filtrlash"""
-        # search_text = text.lower()
-        # for row in range(self.emp_table.rowCount()):  # Employees removed
-            # name_item = self.emp_table.item(row, 0)  # Employees removed
-            # dept_item = self.emp_table.item(row, 1)  # Employees removed
-            # id_item = self.emp_table.item(row, 2)  # Employees removed
-            
-            # match = False
-            # if name_item and search_text in name_item.text().lower():
-                # match = True
-            # elif dept_item and search_text in dept_item.text().lower():
-                # match = True
-            # elif id_item and search_text in id_item.text().lower():
-                # match = True
-                
-            # self.emp_table.setRowHidden(row, not match)  # Employees removed
-
-    # def _delete_employee(self, row):  # EMP REMOVED
-        # """Xodimni o'chirish (embeddinglar bilan birga)"""
-        # name_item = self.emp_table.item(row, 0)  # Employees removed
-        # if not name_item:
-            # return
-            
-        # rec = name_item.data(Qt.UserRole)
-        
-        # reply = QMessageBox.question(
-            # self,
-            # "Delete Employee",
-            # f"Are you sure you want to delete '{rec.name}'?\n\n"
-            # f"All face embeddings and recognition history will be permanently removed.",
-            # QMessageBox.Yes | QMessageBox.No,
-            # QMessageBox.No
-        # )
-
-        # if reply == QMessageBox.Yes:
-            # try:
-                # Backend orqali o'chirish (embeddings ham o'chadi)
-                # self.hub.sys.sm.person_service.delete_person(rec.db_id)
-                
-                # UI dan o'chirish
-                # self.emp_table.removeRow(row)  # Employees removed
-                
-                # Person Management sahifasini ham yangilash
-                # self.hub.pm.rebuild()
-                
-                # self.hub.toast(f"✅ {rec.name} deleted successfully")
-            # except Exception as e:
-                # self.hub.toast(f"⚠ Failed to delete: {str(e)}")
+        p1 = self.pw1.text().strip()
+        p2 = self.pw2.text().strip()
+        if not p1:
+            self.hub.toast("⚠ Parol bo'sh bo'lmasin")
+            return
+        if p1 != p2:
+            self.hub.toast("⚠ Parollar mos emas")
+            return
+        self.hub.sys.settings["password"] = p1
+        self.hub.toast("✅ Parol o'zgartirildi")
+        self.pw1.clear()
+        self.pw2.clear()
 
 
-# ======================= SPLASH & LOGIN ===========================
 SPLASH_STEPS = [
-    (0, "Initializing core engine…"),
-    (12, "Loading AI models (YOLOv11m-pose)…"),
-    (30, "Loading face recognition (ArcFace-R100)…"),
-    (50, "Connecting to cameras (8/8)…"),
-    (68, "Initializing database (PostgreSQL)…"),
-    (82, "Starting inference pipeline…"),
-    (93, "Loading user preferences…"),
-    (100, "Ready!"),
+    (0, "Tizim ishga tushmoqda..."),
+    (20, "Sozlamalar yuklanmoqda..."),
+    (40, "Kameralar ulanmoqda..."),
+    (60, "AI modellar tayyorlanmoqda..."),
+    (80, "Ma'lumotlar bazasi ochilmoqda..."),
+    (100, "Tayyor!"),
 ]
 
 
