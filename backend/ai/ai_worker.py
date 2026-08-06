@@ -1,4 +1,5 @@
 import time
+import threading
 
 from dataclasses import dataclass, field
 
@@ -125,18 +126,25 @@ class AIWorker(QThread):
         self.reid = reid_engine
 
         # ===== ReID + Tracking: body feature gallery =====
-        self._emitted = {}              # ✅ dedup: (track_id,person_id)→name
+        self._emitted = set()           # (event_type, camera_id, track_id)
         self._unknown_zone_ts = []
+        self._recent_person_event_boxes = []
         self.shared_gallery = None      # 🌐 cross-camera gallery (ServiceManager set qiladi)
+        self.unknown_registry = None    # shared face-embedding unknown IDs
+        self.global_identity_cache = None
         self.body_gallery = {}          # person_id → [HSV histogram feature]
         # ✅ SHARED unknown gallery (barcha kamera bitta — cross-camera unknown ReID)
         if not hasattr(type(self), "_shared_unknown_gallery"):
             type(self)._shared_unknown_gallery = {}
+            type(self)._shared_unknown_lock = threading.RLock()
+            type(self)._shared_unknown_next_id = 1
+            type(self)._shared_unknown_reservations = {}
         self.unknown_gallery = type(self)._shared_unknown_gallery
         self._current_track_ids = set()   # hozirgi frame dagi barcha track id
         self._recent_recognized = []   # 🧠 [(box4,person_id,name,time)] yuz burilgan odam xotirasi
         self.body_gallery_names = {}    # person_id → name
-        self.track_body_features = {}   # track_id → oxirgi body feature
+        self.track_body_features = {}
+        self._reid_last_ts = {}   # track_id → oxirgi body feature
         try:
             self.reid_threshold = float(config.get("ai", {}).get("reid", {}).get("threshold", 0.65))
         except Exception:
@@ -170,8 +178,26 @@ class AIWorker(QThread):
 
         self._running = False
 
+        # ===== MEGA BATCH =====
+        self.batch_scheduler = None
+        self._detection_result = None
+        self._detection_lock = threading.Lock()
+        self._detection_event = threading.Event()
+
     def stop(self):
         self._running = False
+
+
+    def set_batch_scheduler(self, scheduler):
+        """Batch scheduler ni sozlash."""
+        self.batch_scheduler = scheduler
+
+    def _on_batch_detections(self, detections):
+        """Batch scheduler dan natijani qabul qilish."""
+        with self._detection_lock:
+            self._detection_result = detections
+            self._detection_event.set()
+
 
     # ---------------- main loop ----------------
     def run(self):
@@ -201,22 +227,15 @@ class AIWorker(QThread):
 
             self.frame_count += 1
 
-            # Har 10 frame da debug
-            if self.frame_count % 10 == 1:
-                print(f"[AIWorker {self.camera_id}] FRAME #{self.frame_count} fid={fid} shape={getattr(frame,'shape','?')}", flush=True)
-
             run_detection = (self.frame_count % self.detection_interval == 0)
 
-            if run_detection:
-                try:
-                    persons = self._run_pipeline(frame, fid)
-                    self.last_persons = persons
-                except Exception as _pe:
-                    # ✅ GLOBAL FIX: thread hech qachon o'lmaydi
-                    print(f"[AIWorker {self.camera_id}] ⚠ pipeline xato (thread yashaydi): {_pe}", flush=True)
-                    import traceback as _tb; _tb.print_exc()
-                    persons = self.last_persons
-            else:
+            try:
+                persons = self._run_pipeline(frame, fid, do_detection=run_detection)
+                self.last_persons = persons
+            except Exception as _pe:
+                # ✅ GLOBAL FIX: thread hech qachon o'lmaydi
+                print(f"[AIWorker {self.camera_id}] ⚠ pipeline xato (thread yashaydi): {_pe}", flush=True)
+                import traceback as _tb; _tb.print_exc()
                 persons = self.last_persons
 
             infer_ms = (time.time() - loop_t) * 1000.0
@@ -240,35 +259,55 @@ class AIWorker(QThread):
         print(f"[AIWorker {self.camera_id}] THREAD STOPPED", flush=True)
 
     # ---------------- pipeline ----------------
-    def _run_pipeline(self, frame, fid):
-        # ---------------- Stage 1: Detection ----------------
-        kpts = None
+    def _run_pipeline(self, frame, fid, do_detection=True):
+        # ---------------- Stage 1: Clean & Direct Person Detection ----------------
+        kpts = []
+        boxes = []
 
-        if self.pose is not None and self.pose.enabled and self.pose.available:
-            boxes, kpts = self.pose.detect(frame)
-            print(f"[AIWorker {self.camera_id}] POSE DETECT: {len(boxes)} boxes", flush=True)
-        elif self.detector is not None and self.detector.available:
-            boxes = self.detector.detect(frame)
-            print(f"[AIWorker {self.camera_id}] DET DETECT: {len(boxes)} boxes", flush=True)
-        else:
-            boxes = []
-            print(f"[AIWorker {self.camera_id}] NO ENGINE AVAILABLE!", flush=True)
+        if do_detection:
+            detector_ok = self.detector is not None and self.detector.available
+            pose_ok = self.pose is not None and self.pose.enabled and self.pose.available
+            # ===== MEGA BATCH: central GPU call =====
+            if detector_ok:
+                if self.batch_scheduler is not None:
+                    self._detection_event.clear()
+                    self.batch_scheduler.submit(
+                        self.camera_id, frame, fid, self._on_batch_detections
+                    )
+                    if self._detection_event.wait(timeout=0.10):
+                        with self._detection_lock:
+                            boxes = self._detection_result or []
+                    else:
+                        # Timeout bo'lsa tracker bashorat bilan silliq davom etadi (GPU qotmasligi uchun)
+                        boxes = []
+                else:
+                    boxes = self.detector.detect(frame)
+                kpts = [None] * len(boxes)
+            elif pose_ok:
+                boxes, kpts = self.pose.detect(frame)
+            else:
+                log.warning("No detection engine available for %s", self.camera_id)
+
 
         # ---------------- Stage 2: Tracking ----------------
-        # ✅ DEBUG: detection conf qiymatlarini ko'rsatish
-        if boxes:
-            confs = [b[4] if len(b) > 4 else -1 for b in boxes]
-            print(f"[AIWorker {self.camera_id}] BOX CONFS: {[round(c, 3) for c in confs]}", flush=True)
-        
-        tracks = self.tracker.update(boxes)
-        print(f"[AIWorker {self.camera_id}] TRACKS: {len(tracks)} (thresh={self.tracker.new_track_thresh})", flush=True)
+        if do_detection:
+            tracks = self.tracker.update(boxes)
+            self._last_tracks = tracks
+        else:
+            tracks = getattr(self, "_last_tracks", [])
 
         # ---------------- Stage 3: Face Recognition ----------------
-        self._process_faces(frame, tracks, fid)
+        if do_detection and tracks:
+            self._process_faces(frame, tracks, fid)
 
         # ---------------- Stage 4: ReID ----------------
-        if self.reid is not None and self.reid.enabled and self.reid.available:
+        if do_detection and self.reid is not None and self.reid.enabled and self.reid.available:
             self._process_reid(frame, tracks, fid)
+
+        # Event source is person detection/tracking; face only enriches identity.
+        if do_detection:
+            for tr in tracks:
+                self._emit_person_detected(frame, tr)
 
         # ---------------- Stage 6: Track termination ----------------
         self._cleanup_cache(tracks)
@@ -354,15 +393,50 @@ class AIWorker(QThread):
                     if now - cache["last_recognition_time"] > self.face_timeout * 5:
                         need_face_tracks.append(tr)
 
-        if self.frame_count % 15 == 1:
-            print(f"[AIWorker {self.camera_id}] 🎯 FACE-STAGE: tracks={len(tracks)} need_face={len(need_face_tracks)}", flush=True)
-
         if not need_face_tracks:
             return
 
+        # Start retry timeout even if the person is back-facing/no face is visible.
+        # Otherwise InsightFace is invoked on every detection cycle.
+        for tr in need_face_tracks:
+            if self.identity_cache.get(tr.id) is None:
+                self.identity_cache.set(
+                    tr.id, None, f"Unknown-{tr.id}", None, 0.0,
+                    self.camera_id, fid,
+                )
+
         faces = self.face.detect(frame)
-        if self.frame_count % 15 == 1:
-            print(f"[AIWorker {self.camera_id}] 🔍 FACE-DETECT: raw={len(faces) if faces else 0}", flush=True)
+
+        # Distant-face fallback: scan the upper body crop only when the global
+        # frame scan did not find a face inside that person track.
+        covered = set()
+        for face in faces:
+            matched = self._match_face_to_track(face, need_face_tracks)
+            if matched is not None:
+                covered.add(matched.id)
+        
+        # Throttled distant-face fallback to preserve GPU resources
+        if fid % 10 == 0:
+            h, w = frame.shape[:2]
+            fallback_tracks = [tr for tr in need_face_tracks if tr.id not in covered]
+            fallback_tracks.sort(key=lambda tr: (tr.box[2]-tr.box[0])*(tr.box[3]-tr.box[1]), reverse=True)
+            for tr in fallback_tracks[:1]:
+                x1, y1, x2, y2 = [int(v) for v in tr.box[:4]]
+                bw, bh = x2-x1, y2-y1
+                if bw < 24 or bh < 60:
+                    continue
+                px1 = max(0, x1-int(bw*0.12)); px2 = min(w, x2+int(bw*0.12))
+                py1 = max(0, y1-int(bh*0.08)); py2 = min(h, y1+int(bh*0.62))
+                crop = frame[py1:py2, px1:px2]
+                if crop.size == 0:
+                    continue
+                local_faces = self.face.detect(crop)
+                if not local_faces:
+                    continue
+                local = max(local_faces, key=lambda f: (f["bbox"][2]-f["bbox"][0])*(f["bbox"][3]-f["bbox"][1]))
+                local["bbox"] = [local["bbox"][0]+px1, local["bbox"][1]+py1,
+                                 local["bbox"][2]+px1, local["bbox"][3]+py1]
+                faces.append(local)
 
         if not faces:
             return
@@ -394,9 +468,12 @@ class AIWorker(QThread):
 
                 continue
 
-            person_id, name, score = self.face.recognize(face["embedding"])
-            if self.frame_count % 15 == 1:
-                print(f"[AIWorker {self.camera_id}] 🧠 RECOGNIZE: pid={person_id} name={name} score={score:.3f} thresh={self.face.threshold}", flush=True)
+            # Batched face recognition (vectorized matrix dot product)
+            if hasattr(self.face, "recognize_batch"):
+                res_rec = self.face.recognize_batch([face["embedding"]])[0]
+                person_id, name, score = res_rec
+            else:
+                person_id, name, score = self.face.recognize(face["embedding"])
 
             if person_id is not None and score >= self.face.threshold:
                 # ✅ MUHIM: odam tanilganda last_seen yangilanadi
@@ -422,24 +499,41 @@ class AIWorker(QThread):
                 self._store_body_feature(frame, tr, person_id, name, score)
                 self._maybe_save_avatar(frame, face, person_id, q.get('score', 0))
 
-                self._emit_dedup(frame, tr, person_id, name, score, "person_recognized", "ok")
-
             else:
-                # Tanilmadi → unknown cache
+                # Unknown face embedding receives one thread-safe global ID,
+                # so the same face has the same label on every camera.
+                _uname = f"Unknown-{tr.id}"
+                if self.unknown_registry is not None and face.get("embedding") is not None:
+                    try:
+                        _uname, _ = self.unknown_registry.match_or_create(face["embedding"])
+                    except Exception as exc:
+                        log.debug("Unknown face registry error: %s", exc)
                 self.identity_cache.set(
-                    tr.id,
-                    None,
-                    f"Unknown-{tr.id}",
-                    face["embedding"],
-                    score,
-                    self.camera_id,
-                    fid,
+                    tr.id, None, _uname, face["embedding"], score,
+                    self.camera_id, fid,
                 )
+                try:
+                    self.identity_cache.cache[tr.id]["source"] = "face_unknown"
+                except Exception:
+                    pass
 
-                _uc = self.identity_cache.get(tr.id)
-                _uid = _uc.get("unknown_id") if _uc else None
-                _uname = f"Unknown-{_uid}" if _uid is not None else f"Unknown-{tr.id}"
-                self._emit_dedup(frame, tr, None, _uname, score, "unknown_detected", "warn")
+    def _emit_person_detected(self, frame, tr):
+        if int(getattr(tr, "hits", 0)) < 2:
+            return
+        cache = self.identity_cache.get(tr.id)
+        # ✅ TOZA FORMAT: unk:ID yoki ism:ID
+        cached_name = (cache or {}).get("name")
+        if not cached_name or cached_name.startswith("Person-") or cached_name.startswith("Unknown-"):
+            unk_id = (cache or {}).get("unknown_id") or f"UNK-{tr.id}"
+            name = f"unk:{unk_id}"
+        else:
+            p_id = (cache or {}).get("person_id") or tr.id
+            name = f"{cached_name}:{p_id}"
+        person_id = (cache or {}).get("person_id")
+        self._emit_dedup(
+            frame, tr, person_id, name, float(getattr(tr, "conf", 0.0) or 0.0),
+            "person_detected", "info", {"source": "person_detector", "track_id": tr.id},
+        )
 
     def _maybe_save_avatar(self, frame, face, person_id, quality=0.0):
         """Yuz crop ini avatar sifatida saqlash (verbose diagnostika bilan)."""
@@ -493,7 +587,7 @@ class AIWorker(QThread):
         # ✅ Global dedup OLIB TASHLANDI — faqat kamera+track based dedup ishlaydi
         # ✅ KAMERA-BASED DEDUP: bir kamera+person = 30s ichida bir marta
         # Boshqa kameraga o'tsa → yangi event (cross-camera)
-        key = (self.camera_id, tr.id)  # kamera + track: bitta track=bitta log, boshqa kamera=yangi log
+        key = (etype, self.camera_id, tr.id)
         _cur = tr.box[:4] if (tr.box is not None and len(tr.box) >= 4) else None
         _cx = _cy = None
         if _cur is not None:
@@ -526,12 +620,11 @@ class AIWorker(QThread):
                 self._unknown_zone_ts = self._unknown_zone_ts[-100:]
 
         # Oddiy dedup (bir track+person = bir marta)
-        if self._emitted.get(key) == name:
+        if key in self._emitted:
             return
-        self._emitted[key] = name
+        self._emitted.add(key)
         if len(self._emitted) > 2000:
-            for k in list(self._emitted.keys())[:-1000]:
-                self._emitted.pop(k, None)
+            self._emitted = set(list(self._emitted)[-1000:])
 
         # recognized -> zona ga yozish
         if etype == "person_recognized" and _cur is not None:
@@ -625,7 +718,7 @@ class AIWorker(QThread):
 
     def _store_body_feature(self, frame, tr, person_id, name, face_score=1.0):
         """Yuz tanilganda tana ReID feature ni gallery ga saqlash"""
-        if face_score < 0.6:
+        if face_score < self.face.threshold:
             return  # ✅ faqat SIFATLI face dan gallery (false positive kamayadi)
         try:
             if self.reid is None or not getattr(self.reid, "available", False):
@@ -655,10 +748,6 @@ class AIWorker(QThread):
         if self.reid is not None and not getattr(self.reid, "available", False):
             return
         _has_shared = (self.shared_gallery is not None and self.shared_gallery.size() > 0)
-        if self.frame_count % 30 == 1:
-            print(f"[AIWorker {self.camera_id}] REID-STAGE: tracks={len(tracks)} shared={self.shared_gallery.size() if self.shared_gallery else 0} local={len(self.body_gallery)} unknown={len(self.unknown_gallery)}", flush=True)
-        if not self.body_gallery and not _has_shared and not self.unknown_gallery:
-            return
 
         def _crop_safe(box):
             if box is None or len(box) < 4: return None
@@ -668,18 +757,37 @@ class AIWorker(QThread):
             c = frame[y1:y2, x1:x2]
             return c if c.size > 0 else None
 
-        # 1-PASS: barcha track lar uchun match (known + unknown)
+        # 1-PASS: barcha track lar uchun batch ReID feature extraction (GPU Batched)
         candidates = []
+        pending_tracks = []
+        pending_crops = []
+
+        reid_now = time.time()
         for tr in tracks:
             cache = self.identity_cache.get(tr.id)
             if cache is not None and cache.get("person_id") is not None:
                 continue  # known, skip
+            if reid_now - self._reid_last_ts.get(tr.id, 0.0) < 1.0:
+                continue
+            self._reid_last_ts[tr.id] = reid_now
 
             crop = _crop_safe(tr.box)
             if crop is None:
                 continue
 
-            feat = self.reid.extract_features(crop)
+            pending_tracks.append(tr)
+            pending_crops.append(crop)
+
+        if not pending_tracks:
+            return
+
+        # Batched feature extraction on GPU
+        if hasattr(self.reid, "extract_features_batch"):
+            feats = self.reid.extract_features_batch(pending_crops)
+        else:
+            feats = [self.reid.extract_features(c) for c in pending_crops]
+
+        for tr, feat in zip(pending_tracks, feats):
             if feat is None:
                 continue
 
@@ -693,7 +801,7 @@ class AIWorker(QThread):
 
             best_pid, best_name, best_score = None, None, 0.0
             if self.shared_gallery is not None and _gs > 0:
-                best_pid, best_name, best_score = self.shared_gallery.match(feat, _eff)
+                best_pid, best_name, best_score = self.shared_gallery.match(feat, _eff, self.camera_id, tr.id)
             if best_pid is None:
                 for pid, feats in self.body_gallery.items():
                     for gf in feats:
@@ -708,27 +816,44 @@ class AIWorker(QThread):
                 candidates.append((best_score, tr, best_pid, best_name, _eff))
                 continue
 
-            # ✅ UNKNOWN MATCH (unknown_gallery)
-            best_uid, best_uscore = None, 0.0
-            for uid, feats in self.unknown_gallery.items():
-                for gf in feats:
-                    sim = self.reid.compute_similarity(feat, gf)
-                    if sim > best_uscore:
-                        best_uscore = sim
-                        best_uid = uid
+            # UNKNOWN MATCH: shared and locked across all camera workers.
+            with type(self)._shared_unknown_lock:
+                best_uid, best_uscore = None, 0.0
+                now_reid = time.time()
+                reservations = type(self)._shared_unknown_reservations
+                reservations_copy = dict(reservations)
+                for uid, feats in self.unknown_gallery.items():
+                    held = reservations_copy.get((uid, self.camera_id))
+                    if held and held[0] == self.camera_id and held[1] != tr.id and now_reid - held[2] < 3.0:
+                        continue
+                    for gf in feats:
+                        sim = self.reid.compute_similarity(feat, gf)
+                        if sim > best_uscore:
+                            best_uscore, best_uid = sim, uid
 
-            if best_uid is not None and best_uscore > 0.65:
-                unknown_id = best_uid
-                self.unknown_gallery[unknown_id].append(feat)
-                if len(self.unknown_gallery[unknown_id]) > 10:
-                    self.unknown_gallery[unknown_id] = self.unknown_gallery[unknown_id][-10:]
-            else:
-                unknown_id = max(self.unknown_gallery.keys(), default=0) + 1
-                self.unknown_gallery[unknown_id] = [feat]
-                best_uscore = 0.0
+                current = self.identity_cache.get(tr.id)
+                face_uid = (current or {}).get("name") if (current or {}).get("source") == "face_unknown" else None
+                face_held = reservations.get((face_uid, self.camera_id)) if face_uid else None
+                if face_uid and not (face_held and face_held[0] == self.camera_id and face_held[1] != tr.id and now_reid - face_held[2] < 3.0):
+                    unknown_id = face_uid
+                elif best_uid is not None and best_uscore > self.reid_threshold:
+                    unknown_id = best_uid
+                else:
+                    if self.unknown_registry is not None:
+                        unknown_id, _ = self.unknown_registry.match_or_create(None)
+                    else:
+                        unknown_id = f"UNK-{type(self)._shared_unknown_next_id}"
+                        type(self)._shared_unknown_next_id += 1
+                    best_uscore = 0.0
+                self.unknown_gallery.setdefault(unknown_id, []).append(feat)
+                self.unknown_gallery[unknown_id] = self.unknown_gallery[unknown_id][-10:]
+                reservations[(unknown_id, self.camera_id)] = (self.camera_id, tr.id, now_reid)
+                for rid, held in list(reservations.items()):
+                    if now_reid - held[2] > 15.0:
+                        reservations.pop(rid, None)
 
             # identity_cache ga yozish (track davom etsin)
-            self.identity_cache.set(tr.id, None, f"Unknown-{unknown_id}", None, best_uscore, self.camera_id, fid)
+            self.identity_cache.set(tr.id, None, str(unknown_id), None, best_uscore, self.camera_id, fid)
             try:
                 self.identity_cache.cache[tr.id]["unknown_id"] = unknown_id
                 self.identity_cache.cache[tr.id]["source"] = "unknown_reid"
@@ -770,11 +895,15 @@ class AIWorker(QThread):
 
 
     def _cleanup_cache(self, tracks):
-        active_ids = {tr.id for tr in tracks}
+        # Keep identity while ByteTracker keeps a lost track recoverable.
+        tracker_tracks = getattr(self.tracker, "tracks", tracks)
+        active_ids = {tr.id for tr in tracker_tracks
+                      if getattr(tr, "missing", 0) <= getattr(self.tracker, "track_buffer", 30)}
 
         for tid in list(self.identity_cache.active_ids()):
             if tid not in active_ids:
                 self.identity_cache.remove(tid)
+                self._reid_last_ts.pop(tid, None)
 
     # ---------------- build persons ----------------
     def _build_persons(self, tracks, ankle_map):
@@ -806,7 +935,7 @@ class AIWorker(QThread):
                 face_conf = cache["confidence"]
             else:
                 known = False
-                name = f"Unknown-{tr.id}"
+                name = f"UNK-{tr.id}"
                 person_id = None
                 face_conf = 0.0
 

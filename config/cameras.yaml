@@ -3,6 +3,8 @@ cameras:
     name: "Camera 1"
     location: "Channel 101"
     source: "rtsp://192.168.1.210:554/Streaming/Channels/101"
+    codec: "h264"
+    latency_ms: 20
     username: "apsidal"
     password: "aps@2026"
     online: true
@@ -11,8 +13,8 @@ cameras:
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "1920x1080"
-    fps: 30
+    resolution: "640x360"
+    fps: 25
     reconnect_interval: 10
     connection_timeout: 5
     latency_warn_ms: 200
@@ -22,15 +24,17 @@ cameras:
     name: "Camera 2"
     location: "Channel 201"
     source: "rtsp://192.168.1.210:554/Streaming/Channels/201"
+    codec: "h264"
+    latency_ms: 20
     username: "apsidal"
     password: "aps@2026"
-    online: false
+    online: true
     ai_enabled: true
     heatmap_enabled: true
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "1920x1080"
+    resolution: "640x360"
     fps: 30
     reconnect_interval: 10
     connection_timeout: 5
@@ -40,7 +44,9 @@ cameras:
   - id: "CAM-03"
     name: "Camera 3"
     location: "Channel 301"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/301"
+    source: "rtsp://192.168.1.210:554/Streaming/Channels/302"
+    codec: "h265"
+    latency_ms: 20
     username: "apsidal"
     password: "aps@2026"
     online: true
@@ -49,7 +55,7 @@ cameras:
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "1920x1080"
+    resolution: "640x360"
     fps: 30
     reconnect_interval: 10
     connection_timeout: 5
@@ -59,16 +65,18 @@ cameras:
   - id: "CAM-04"
     name: "Camera 4"
     location: "Channel 401"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/601"
+    source: "rtsp://192.168.1.210:554/Streaming/Channels/602"
+    codec: "h265"
+    latency_ms: 20
     username: "apsidal"
     password: "aps@2026"
-    online: false
+    online: true
     ai_enabled: true
     heatmap_enabled: true
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "1920x1080"
+    resolution: "640x360"
     fps: 30
     reconnect_interval: 10
     connection_timeout: 5
@@ -78,16 +86,18 @@ cameras:
   - id: "CAM-05"
     name: "Camera 5"
     location: "Channel 501"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/501"
+    source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
+    codec: "h265"
+    latency_ms: 20
     username: "apsidal"
     password: "aps@2026"
-    online: false
+    online: true
     ai_enabled: true
     heatmap_enabled: true
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "1920x1080"
+    resolution: "640x360"
     fps: 30
     reconnect_interval: 10
     connection_timeout: 5
@@ -98,15 +108,17 @@ cameras:
     name: "Camera 6"
     location: "Channel 601"
     source: "rtsp://192.168.1.210:554/Streaming/Channels/401"
+    codec: "h265"
+    latency_ms: 20
     username: "apsidal"
     password: "aps@2026"
-    online: false
+    online: true
     ai_enabled: true
     heatmap_enabled: true
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "1920x1080"
+    resolution: "640x360"
     fps: 30
     reconnect_interval: 10
     connection_timeout: 5

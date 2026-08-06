@@ -38,6 +38,8 @@ class Database:
 
         with self.lock:
             self.conn.execute("PRAGMA busy_timeout = 5000")
+            self.conn.execute("PRAGMA journal_mode = WAL")
+            self.conn.execute("PRAGMA synchronous = NORMAL")
 
         print("DB schema...", flush=True)
 

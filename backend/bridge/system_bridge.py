@@ -274,7 +274,7 @@ class RealCameraSim(QObject):
             if result.frame is not None:
                 self.frame = bgr_to_qimage(result.frame)
 
-            frame_h, frame_w = 360, 640
+            frame_h, frame_w = 720, 1280
 
             if result.frame is not None:
                 frame_h, frame_w = result.frame.shape[:2]
@@ -285,11 +285,6 @@ class RealCameraSim(QObject):
             ]
 
             self.infer_ms = float(result.infer_ms)
-
-            # DEBUG
-            if len(self.people) > 0:
-                print(f"[DEBUG] {self.id}: {len(self.people)} persons, frame={frame_w}x{frame_h}", flush=True)
-
         except Exception as e:
             log.error("update_from_ai_result error: %s", e)
     def update_health(self, camera_id, metrics):
@@ -398,17 +393,9 @@ class RealEnrollmentSim(RealCameraSim):
         self.online = online
 
     def _open_camera(self):
-        import cv2
-        if self._cap is None or not self._cap.isOpened():
-            self._cap = cv2.VideoCapture(0)
-            if self._cap.isOpened():
-                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)   # ✅ 640 emas
-                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)   # ✅ 480 emas
-                # ✅ Autofocus va exposure yaxshilash
-                self._cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
-                log.info("Webkamera ochildi 1280x720 ✅")
-            else:
-                log.error("Webkamera ochilmadi ❌")
+        # Enrollment is image-only; never access a local webcam.
+        self._cap = None
+        log.info("Enrollment image-only mode")
 
     def _close_camera(self):
         if self._cap is not None:
@@ -649,7 +636,7 @@ class RealSystem(QObject):
     def _reload_people(self):
         print(f"[RealSystem] _reload_people called", flush=True)
         try:
-            rows = self.sm.person_service.load_persons(identity_manager=getattr(sm, 'identity_manager', None))
+            rows = self.sm.person_service.load_persons(identity_manager=getattr(self.sm, 'identity_manager', None))
             print(f"[RealSystem] Loaded {len(rows)} persons from DB", flush=True)
 
             self.people = [

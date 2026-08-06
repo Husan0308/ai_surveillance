@@ -1,9 +1,11 @@
 import threading
 import numpy as np
+import torch
 
 from backend.core.logger import get_logger
 
 log = get_logger("ai.pose")
+from backend.core.gpu_utils import resolve_torch_device
 
 
 class PoseEngine:
@@ -20,6 +22,8 @@ class PoseEngine:
         self.model = None
         self.available = False
         self.lock = threading.Lock()
+        requested = config.get("ai", {}).get("pose", {}).get("device", "auto")
+        self.device = resolve_torch_device(requested)
 
         self.conf = float(config.get("ai", {}).get("pose", {}).get("conf", 0.45))
         self.imgsz = int(config.get("ai", {}).get("pose", {}).get("imgsz", 640))
@@ -31,9 +35,8 @@ class PoseEngine:
             return
 
         try:
-            from ultralytics import YOLO
-
-            self.model = YOLO(model_name)
+            from backend.ai.shared_models import get_pose
+            self.model = get_pose(model_name, config)
             self.available = True
             log.info("Pose engine loaded: %s", model_name)
 
@@ -41,63 +44,80 @@ class PoseEngine:
             log.error("Pose engine unavailable: %s", e)
 
     def detect(self, bgr):
-        """
-        Returns:
-            boxes: list of [x1, y1, x2, y2, conf]  ← conf QO'SHILDI
-            keypoints: list of np.array shape (17,2) or None
-        """
-        if not self.enabled or not self.available or self.model is None or bgr is None:
-            return [], []
+        res = self.detect_batch([bgr])
+        return res[0] if res else ([], [])
+
+    def detect_batch(self, bgr_list):
+        if not self.enabled or not self.available or self.model is None or not bgr_list:
+            return [([], []) for _ in bgr_list]
+
+        valid_inputs = []
+        valid_indices = []
+        for i, img in enumerate(bgr_list):
+            if img is not None and img.size > 0:
+                valid_inputs.append(img)
+                valid_indices.append(i)
+
+        batch_results = [([], []) for _ in bgr_list]
+        if not valid_inputs:
+            return batch_results
 
         with self.lock:
             try:
-                results = self.model(
-                    bgr,
-                    conf=self.conf,
-                    imgsz=self.imgsz,
-                    verbose=False,
-                )
+                use_cuda = getattr(self.device, "type", str(self.device)) == "cuda"
+                with torch.inference_mode():
+                    with torch.amp.autocast('cuda', enabled=use_cuda):
+                        results = self.model(
+                            valid_inputs,
+                            classes=[0],
+                            conf=self.conf,
+                            imgsz=self.imgsz,
+                            device=self.device,
+                            batch=len(valid_inputs),
+                            verbose=False,
+                        )
             except Exception as e:
-                log.error("Pose inference error: %s", e)
-                return [], []
+                log.error("Pose batch inference error: %s", e)
+                return batch_results
 
-        boxes = []
-        keypoints = []
-
-        for r in results:
+        for idx, r in zip(valid_indices, results):
+            boxes = []
+            keypoints = []
             try:
-                if r.boxes is None or len(r.boxes) == 0:
-                    continue
+                if r.boxes is not None and len(r.boxes) > 0:
+                    xyxy = r.boxes.xyxy.cpu().numpy()
+                    confs = r.boxes.conf.cpu().numpy()
+                    has_kpts = hasattr(r, "keypoints") and r.keypoints is not None and r.keypoints.xy is not None
+                    raw_kpts = r.keypoints.xy.cpu().numpy() if has_kpts else None
 
-                xyxy = r.boxes.xyxy.cpu().numpy()
-                confs = r.boxes.conf.cpu().numpy()
+                    for i in range(len(xyxy)):
+                        b = xyxy[i]
+                        c = float(confs[i])
+                        w = b[2] - b[0]
+                        h = b[3] - b[1]
 
-                for i in range(len(xyxy)):
-                    b = xyxy[i]
-                    c = float(confs[i])
+                        # Sanity check: humans are vertical/seated silhouettes (height >= 30px, width >= 15px)
+                        # Filter out thin horizontal lines or tiny noise boxes (width > height * 2.8)
+                        if w < 15 or h < 30 or w > h * 2.8:
+                            continue
 
-                    # ✅ [x1, y1, x2, y2, conf] — tracker kutadigan format
-                    boxes.append([
-                        float(b[0]),
-                        float(b[1]),
-                        float(b[2]),
-                        float(b[3]),
-                        c,
-                    ])
+                        boxes.append([
+                            float(b[0]),
+                            float(b[1]),
+                            float(b[2]),
+                            float(b[3]),
+                            c,
+                        ])
 
-                if hasattr(r, "keypoints") and r.keypoints is not None and r.keypoints.xy is not None:
-                    kpts = r.keypoints.xy.cpu().numpy()
-                    for i in range(len(kpts)):
-                        keypoints.append(np.array(kpts[i], dtype=np.float32))
-                else:
-                    for _ in range(len(xyxy)):
-                        keypoints.append(None)
-
+                        if raw_kpts is not None and i < len(raw_kpts):
+                            keypoints.append(np.array(raw_kpts[i], dtype=np.float32))
+                        else:
+                            keypoints.append(None)
             except Exception as e:
                 log.error("Pose parse error: %s", e)
-                continue
+            batch_results[idx] = (boxes, keypoints)
 
-        return boxes, keypoints
+        return batch_results
 
     def ankle_point(self, kpt):
         """

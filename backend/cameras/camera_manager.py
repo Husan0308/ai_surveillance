@@ -34,6 +34,12 @@ class CameraManager(QObject):
 
         self.cameras = {}
         self.workers = {}
+        self.deepstream_enabled = bool(self.config.get("deepstream.enabled", False))
+        self.deepstream_max_streams = int(
+            self.config.get("deepstream.max_decode_streams", 3) or 3
+        )
+        if self.deepstream_enabled:
+            log.info("DeepStream enabled: max %s NVDEC streams", self.deepstream_max_streams)
 
     # ---------------- load ----------------
     def load(self):
@@ -64,6 +70,15 @@ class CameraManager(QObject):
             for cam in cams:
                 self.db.save_camera_config(cam)
 
+        yaml_by_id = {
+            item.get("id"): item for item in self.config.load_cameras()
+            if item.get("id")
+        }
+        for cam in cams:
+            yaml_cam = yaml_by_id.get(cam.get("id"), {})
+            for key in ("source", "codec", "latency_ms", "resolution", "fps", "online"):
+                if key in yaml_cam:
+                    cam[key] = yaml_cam[key]
         for cam in cams:
             self.add_camera(cam, persist=False)
 
@@ -85,7 +100,30 @@ class CameraManager(QObject):
         if persist:
             self.db.save_camera_config(cam)
 
-        worker = CameraWorker(cam, target_size=(1280, 720))
+        active_deepstream = sum(
+            1 for worker_id, existing in self.workers.items()
+            if worker_id != cid and getattr(existing, "use_deepstream", False)
+        )
+        use_deepstream = (
+            self.deepstream_enabled
+            and str(cam.get("backend", "auto")).lower() != "opencv"
+            and active_deepstream < self.deepstream_max_streams
+        )
+        # Parse per-camera target_size, default to 640x360 for AI-optimal bandwidth
+        _res = cam.get("resolution", "640x360")
+        if isinstance(_res, str) and "x" in _res:
+            _rw, _rh = _res.lower().split("x")
+            _target_size = (int(_rw), int(_rh))
+        else:
+            _target_size = (640, 360)
+        worker = CameraWorker(
+            cam,
+            target_size=_target_size,
+            use_deepstream=use_deepstream,
+            use_gstreamer=not use_deepstream,
+        )
+        backend_name = "DeepStream/NVDEC" if use_deepstream else "GStreamer/software"
+        log.info("Camera %s backend: %s", cid, backend_name)
 
         worker.status_changed.connect(self.status_changed)
         worker.frame_captured.connect(self.frame_captured)

@@ -995,15 +995,6 @@ class VideoSurface(QWidget):
         )
 
     def _draw_ai(self, p, vr, fw, fh):
-        # DEBUG
-        if hasattr(self, '_debug_count'):
-            self._debug_count += 1
-        else:
-            self._debug_count = 1
-        
-        if self._debug_count % 50 == 0:  # har 50 frame da bir marta
-            print(f"[DEBUG UI] Camera {self.sim.id}: {len(self.sim.people)} persons in UI", flush=True)
-        
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
 
@@ -1039,7 +1030,8 @@ class VideoSurface(QWidget):
 
             dwell = ps.age / 25.0
 
-            lbl = f"{ps.name if ps.known else 'Notanish'}: #{ps.track_id}"
+            display_name = ps.name if (ps.known or str(ps.name).startswith(("UNK-", "Unknown-"))) else f"UNK-{ps.track_id}"
+            lbl = f"{display_name}"
             lbl += f" · {int(ps.conf * 100)}%"
 
             if dwell > 5:
@@ -3975,53 +3967,44 @@ class EnrollmentPage(Page):
 
         self.title_row(
             "Person Enrollment",
-            "auto face detection · 10 samples · embedding",
+            "upload 1–10 clear face images · GPU embedding",
         )
 
         body = QHBoxLayout()
         body.setSpacing(12)
 
-        # ==================== LEFT: CAMERA ====================
+        # ==================== LEFT: IMAGE UPLOAD ====================
         left = QFrame()
         left.setObjectName("camCard")
-
         ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(0)
+        ll.setContentsMargins(28, 28, 28, 28)
+        ll.setSpacing(16)
 
-        self.surface = VideoSurface(self.sim, face_box=True)
-        ll.addWidget(self.surface, 1)
+        upload_icon = QLabel("🖼️")
+        upload_icon.setAlignment(Qt.AlignCenter)
+        upload_icon.setStyleSheet("font-size:72px; border:none;")
+        upload_title = QLabel("Upload face images")
+        upload_title.setAlignment(Qt.AlignCenter)
+        upload_title.setStyleSheet(f"color:{TH.TXT}; font-size:22px; font-weight:800; border:none;")
+        upload_hint = QLabel("Choose 1–10 clear photos. Front-facing and well-lit images give the best recognition.")
+        upload_hint.setWordWrap(True)
+        upload_hint.setAlignment(Qt.AlignCenter)
+        upload_hint.setStyleSheet(f"color:{TH.DIM}; font-size:12px; border:none;")
+        self.face_status = QLabel("No images selected")
+        self.face_status.setAlignment(Qt.AlignCenter)
+        self.face_status.setStyleSheet(f"color:{TH.DIM}; font-size:11px; font-weight:700; border:none;")
+        self.btn_upload_main = QPushButton("📁  Select face images")
+        self.btn_upload_main.setObjectName("btnPrimary")
+        self.btn_upload_main.setCursor(Qt.PointingHandCursor)
+        self.btn_upload_main.clicked.connect(self.upload_images)
 
-        sbar = QFrame()
-        sbar.setFixedHeight(36)
-        sbar.setStyleSheet(
-            f"background:{TH.CARD2}; border-top:1px solid {TH.BORDER};"
-        )
-
-        sh = QHBoxLayout(sbar)
-        sh.setContentsMargins(12, 0, 12, 0)
-        sh.setSpacing(10)
-
-        self.face_status = QLabel("⏹ Camera off — press Camera ON")
-        self.face_status.setStyleSheet(
-            f"color:{TH.DIM}; font-size:10.5px; font-weight:700;"
-        )
-
-        hint = QLabel("Look straight, then slowly turn left/right during capture")
-        hint.setStyleSheet(f"color:{TH.DIM}; font-size:9.5px;")
-
-        # ✅ Camera ON/OFF tugmasi (sbar da)
-        self.btn_cam = QPushButton("📷 Camera ON")
-        self.btn_cam.setObjectName("btnGhost")
-        self.btn_cam.setCursor(Qt.PointingHandCursor)
-        self.btn_cam.clicked.connect(self.toggle_camera)
-
-        sh.addWidget(self.face_status)
-        sh.addStretch(1)
-        sh.addWidget(self.btn_cam)       # ✅ cam_toggle emas, btn_cam
-        sh.addWidget(hint)
-
-        ll.addWidget(sbar)
+        ll.addStretch(1)
+        ll.addWidget(upload_icon)
+        ll.addWidget(upload_title)
+        ll.addWidget(upload_hint)
+        ll.addWidget(self.btn_upload_main, 0, Qt.AlignHCenter)
+        ll.addWidget(self.face_status)
+        ll.addStretch(1)
         body.addWidget(left, 1)
 
         # ==================== RIGHT: FORM ====================
@@ -4067,7 +4050,7 @@ class EnrollmentPage(Page):
         self.prog.setFixedHeight(8)
         self.prog.setTextVisible(False)
 
-        self.prog_lbl = QLabel("Captured 0 / 10")
+        self.prog_lbl = QLabel("Uploaded 0 / 10")
         self.prog_lbl.setStyleSheet(
             f"color:{TH.DIM}; font-size:10px; font-weight:700;"
         )
@@ -4086,22 +4069,13 @@ class EnrollmentPage(Page):
         f.addWidget(self.emb)
         f.addStretch(1)
 
-        # ✅ Tugmalar
-        self.btn_cap = QPushButton("📸  Capture (10 samples)")
-        self.btn_cap.setObjectName("btnGhost")
-        self.btn_cap.setCursor(Qt.PointingHandCursor)
-        self.btn_cap.clicked.connect(self.start_capture)
-
-        self.btn_upload = QPushButton("📁 Upload Images")
+        # Image-only enrollment; webcam capture is intentionally unavailable.
+        self.btn_upload = QPushButton("📁 Select Images")
         self.btn_upload.setObjectName("btnGhost")
         self.btn_upload.setCursor(Qt.PointingHandCursor)
         self.btn_upload.clicked.connect(self.upload_images)
-
-        # ✅ btn_row SHU YERDA yaratiladi
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        btn_row.addWidget(self.btn_cap)
-        btn_row.addWidget(self.btn_upload)
+        self.btn_cap = QPushButton()
+        self.btn_cap.hide()
 
         self.btn_reg = QPushButton("💾  Register")
         self.btn_reg.setObjectName("btnPrimary")
@@ -4109,7 +4083,7 @@ class EnrollmentPage(Page):
         self.btn_reg.setCursor(Qt.PointingHandCursor)
         self.btn_reg.clicked.connect(self.register)
 
-        f.addLayout(btn_row)
+        f.addWidget(self.btn_upload)
         f.addWidget(self.btn_reg)
 
         body.addWidget(right)
@@ -4157,7 +4131,7 @@ class EnrollmentPage(Page):
 
         self.captures = []
         self.prog.setValue(0)
-        self.prog_lbl.setText("Captured 0 / 10")
+        self.prog_lbl.setText("Uploaded 0 / 10")
         self.emb.setText("Embedding: —")
         self.btn_reg.setEnabled(False)
         self.btn_cap.setEnabled(False)
@@ -4374,8 +4348,8 @@ class EnrollmentPage(Page):
         self.prog.setValue(len(valid_bgr))
         self.prog_lbl.setText(f"Uploaded {len(valid_bgr)} / {len(files)}")
 
-        if len(valid_bgr) < 3:
-            self.face_status.setText(f"⚠ Only {len(valid_bgr)} valid images. Need ≥3.")
+        if len(valid_bgr) < 1:
+            self.face_status.setText(f"⚠ No valid face images.")
             self.btn_cap.setEnabled(True)
             self.btn_reg.setEnabled(False)
             return
@@ -4425,7 +4399,7 @@ class EnrollmentPage(Page):
         svc = self.hub.sys.sm.enrollment_service
 
         if svc.state != "ready" or svc.current_embedding is None:
-            self.hub.toast("⚠ Capture or upload images first")
+            self.hub.toast("⚠ Upload a face image first")
             return
 
         dept = self.dept.currentText()
@@ -4483,7 +4457,7 @@ class EnrollmentPage(Page):
 
         self.captures = []
         self.prog.setValue(0)
-        self.prog_lbl.setText("Captured 0 / 10")
+        self.prog_lbl.setText("Uploaded 0 / 10")
         self.emb.setText("Embedding: —")
         self.emb.setStyleSheet(f"color:{TH.FAINT}; font-size:9.5px; font-family:Consolas,monospace;")
         self.btn_reg.setEnabled(False)

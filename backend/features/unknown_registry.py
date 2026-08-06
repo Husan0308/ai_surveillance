@@ -9,7 +9,7 @@ import threading
 
 
 class UnknownRegistry:
-    def __init__(self, match_threshold=0.35, ttl=300.0):
+    def __init__(self, match_threshold=0.45, ttl=300.0):
         self.entries = []  # [(unk_id, embedding, first_seen, last_seen)]
         self.next_id = 1
         self.threshold = match_threshold

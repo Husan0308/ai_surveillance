@@ -77,7 +77,7 @@ class BodyReIDEngine:
             combined = head_hist * 0.4 + body_hist * 0.4 + legs_hist * 0.2
             
             # Normalize
-            cv2.normalize(combined, combined, 0, 1, cv2.NORM_MINMAX)
+            cv2.normalize(combined, combined, 1.0, 0.0, cv2.NORM_L2)
             
             # 1D array ga aylantirish
             return combined.flatten()
@@ -127,6 +127,24 @@ class HybridReIDEngine:
     """Deep (ResNet50) primary, HSV fallback. Bir xil API."""
 
     def __init__(self, config=None):
+        self.enabled = bool(config.get("ai.reid.enabled", True)) if config else True
+        if not self.enabled:
+            self.deep = None
+            self.hsv = None
+            self.available = False
+            self.backend = "disabled"
+            print("[ReID] disabled", flush=True)
+            return
+
+        deep_enabled = bool(config.get("ai.reid.deep_enabled", True)) if config else True
+        self.hsv = BodyReIDEngine(config)
+        if not deep_enabled:
+            self.deep = None
+            self.available = True
+            self.backend = "hsv"
+            print("[ReID] HSV-only cross-camera enabled", flush=True)
+            return
+
         # Circular import dan qochish: to'g'ridan-to'g'ri fayldan yuklash
         import importlib.util, os
         _p = os.path.join(os.path.dirname(__file__), "deep_reid.py")
@@ -135,7 +153,6 @@ class HybridReIDEngine:
         _spec.loader.exec_module(_m)
         DeepReIDEngine = _m.DeepReIDEngine
         self.deep = DeepReIDEngine(config)
-        self.hsv = BodyReIDEngine(config)
         self.enabled = True
         self.available = self.deep.available or self.hsv.available
         self.backend = "deep" if self.deep.available else "hsv"
@@ -143,13 +160,18 @@ class HybridReIDEngine:
               f"(deep={self.deep.available}, hsv={self.hsv.available})", flush=True)
 
     def extract_features(self, crop_bgr):
-        if self.backend == "deep":
-            f = self.deep.extract_features(crop_bgr)
-            if f is not None:
-                return f
-            # deep muvaffaqiyatsiz → hsv fallback
-            return self.hsv.extract_features(crop_bgr)
-        return self.hsv.extract_features(crop_bgr)
+        res = self.extract_features_batch([crop_bgr])
+        return res[0] if res else None
+
+    def extract_features_batch(self, crops_bgr):
+        if self.backend == "deep" and hasattr(self.deep, "extract_features_batch"):
+            feats = self.deep.extract_features_batch(crops_bgr)
+            # fallback for any missing crops
+            for i, f in enumerate(feats):
+                if f is None and crops_bgr[i] is not None:
+                    feats[i] = self.hsv.extract_features(crops_bgr[i])
+            return feats
+        return [self.hsv.extract_features(c) for c in crops_bgr]
 
     def compute_similarity(self, a, b):
         if self.backend == "deep":

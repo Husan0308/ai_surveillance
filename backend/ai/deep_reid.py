@@ -8,6 +8,7 @@ import numpy as np
 import os
 import torch
 import torch.nn as nn
+from backend.core.gpu_utils import resolve_torch_device
 
 try:
     from torchvision import transforms as T
@@ -21,7 +22,7 @@ class DeepReIDEngine:
         self.enabled = True
         self.available = False
         self.backend = "none"
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(resolve_torch_device("auto"))
 
         if not _TV_OK:
             print("[DeepReID] torchvision yo'q", flush=True)
@@ -68,28 +69,60 @@ class DeepReIDEngine:
 
     @torch.no_grad()
     def extract_features(self, crop_bgr):
-        if crop_bgr is None or crop_bgr.size == 0:
-            return None
-        h, w = crop_bgr.shape[:2]
-        if h < 30 or w < 20:
-            return None
+        res = self.extract_features_batch([crop_bgr])
+        return res[0] if res else None
+
+    @torch.no_grad()
+    def extract_features_batch(self, crops_bgr):
+        if not crops_bgr:
+            return []
+
+        out = [None for _ in crops_bgr]
+        tensors = []
+        valid_indices = []
+
+        for i, crop in enumerate(crops_bgr):
+            if crop is None or crop.size == 0:
+                continue
+            h, w = crop.shape[:2]
+            if h < 30 or w < 20:
+                continue
+            try:
+                rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                t = self.transform(rgb)
+                tensors.append(t)
+                valid_indices.append(i)
+            except Exception:
+                continue
+
+        if not tensors:
+            return out
+
         try:
-            rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-            tensor = self.transform(rgb).unsqueeze(0).to(self.device)
-            if self.backend.startswith("osnet"):
-                try:
-                    feat = self.model(tensor, return_feats=True)
-                except TypeError:
-                    feat = self.model(tensor)
-                if isinstance(feat, (list, tuple)):
-                    feat = feat[0]
-            else:
-                feat = self.model(tensor).squeeze()
-            feat = feat.view(feat.size(0), -1) if feat.dim() > 1 else feat.unsqueeze(0)
-            feat = feat / (feat.norm(dim=-1, keepdim=True) + 1e-8)
-            return feat.cpu().numpy().flatten().astype(np.float32)
-        except Exception:
-            return None
+            batch_tensor = torch.stack(tensors).to(self.device)
+            use_cuda = getattr(self.device, "type", str(self.device)) == "cuda"
+            with torch.amp.autocast('cuda', enabled=use_cuda):
+                if self.backend.startswith("osnet"):
+                    try:
+                        feats = self.model(batch_tensor, return_feats=True)
+                    except TypeError:
+                        feats = self.model(batch_tensor)
+                    if isinstance(feats, (list, tuple)):
+                        feats = feats[0]
+                else:
+                    feats = self.model(batch_tensor)
+
+            feats = feats.view(feats.size(0), -1)
+            feats = feats / (feats.norm(dim=-1, keepdim=True) + 1e-8)
+            feats_np = feats.cpu().numpy().astype(np.float32)
+
+            for row_idx, orig_idx in enumerate(valid_indices):
+                out[orig_idx] = feats_np[row_idx]
+
+        except Exception as e:
+            print(f"[DeepReID] batch extract error: {e}", flush=True)
+
+        return out
 
     def compute_similarity(self, f1, f2):
         if f1 is None or f2 is None:

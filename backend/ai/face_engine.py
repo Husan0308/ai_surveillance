@@ -1,6 +1,16 @@
 import threading
 import numpy as np
 import cv2
+# NumPy 1.20+ uchun np.long monkey-patch (InsightFace uchun)
+import numpy as np
+if not hasattr(np, 'long'):
+    np.long = np.int64
+if not hasattr(np, 'ulong'):
+    np.ulong = np.uint64
+
+
+from backend.core.gpu_utils import setup_gpu_environment
+setup_gpu_environment()
 
 from backend.core.logger import get_logger
 
@@ -25,10 +35,14 @@ class FaceEngine:
         self.config = config
         self.db = db
 
-        self.enabled = bool(config.get("enabled", config.get("ai.face.enabled", True)))
-        self.threshold = float(config.get("threshold", config.get("match_threshold", config.get("ai.face.match_threshold", 0.45))))
-        self.min_face_size = int(config.get("min_face_size", config.get("min_face_size_px", config.get("ai.face.min_face_size_px", 8))))
-        _ds = config.get("det_size", config.get("ai.face.det_size", 1280))
+        self.enabled = bool(config.get("face", config.get("ai.face", {})).get("enabled",
+                                        config.get("enabled", True)))
+        self.threshold = float(config.get("face", {}).get("threshold",
+                               config.get("threshold", config.get("match_threshold", 0.45))))
+        self.min_face_size = int(config.get("face", {}).get("min_face_size",
+                                 config.get("min_face_size", config.get("min_face_size_px", 8))))
+        # det_size: use face section first, fallback to 320 (saves 4x GPU memory vs 1280)
+        _ds = config.get("face", {}).get("det_size", config.get("det_size", 320))
         if isinstance(_ds, (list, tuple)):
             self.det_size = int(_ds[0])
         else:
@@ -51,6 +65,7 @@ class FaceEngine:
 
             self.app = FaceAnalysis(
                 name=model_name,
+                allowed_modules=["detection", "recognition"],
                 # Auto GPU/CPU tanlash
                 providers=(
                     ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -114,7 +129,7 @@ class FaceEngine:
                     continue
 
                 import numpy as np
-                emb = np.frombuffer(raw_emb, dtype=np.float32)
+                emb = self._normalize(np.frombuffer(raw_emb, dtype=np.float32))
                 if len(emb) >= 128:
                     self.gallery.append((pid, pname or f"Person-{pid}", emb))
                     seen_ids.add(pid)
@@ -270,9 +285,7 @@ class FaceEngine:
             except Exception:
                 continue
 
-        # DEBUG: har safar log
-        if raw_count > 0 or True:
-            log.info("Face detect: raw=%d passed=%d frame_shape=%s", raw_count, len(out), getattr(bgr, 'shape', '?'))
+        log.debug("Face detect: raw=%d passed=%d", raw_count, len(out))
 
         return out
 
@@ -338,43 +351,68 @@ class FaceEngine:
         return result
 
     # ---------------- recognition ----------------
-    def recognize(self, embedding):
-        emb = self._normalize(embedding)
-
-        if emb is None or not self.gallery:
-            return None, "Unknown", 0.0
-
-        # Top-5 eng yaqin embeddinglarni topish
-        scores = []
+    def _update_gal_matrix(self):
+        if not self.gallery:
+            self._gal_matrix = None
+            self._gal_meta = []
+            return
+        embs = []
+        meta = []
         for g in self.gallery:
-            # Tuple (pid, name, emb) yoki dict format
             if isinstance(g, dict):
-                gal_emb = g.get("embedding")
+                pid, pname, emb = g.get("person_id"), g.get("name", ""), g.get("embedding")
             else:
-                gal_emb = g[2]  # tuple: (pid, name, embedding)
+                pid, pname, emb = g[0], g[1], g[2]
+            if emb is not None:
+                embs.append(emb)
+                meta.append((pid, pname))
+        if embs:
+            self._gal_matrix = np.array(embs, dtype=np.float32)
+            self._gal_meta = meta
+        else:
+            self._gal_matrix = None
+            self._gal_meta = []
 
-            if gal_emb is None:
-                continue
+    def recognize(self, embedding):
+        res = self.recognize_batch([embedding])
+        return res[0] if res else (None, "Unknown", 0.0)
 
-            score = float(np.dot(emb, gal_emb))
-            scores.append((score, g))
+    def recognize_batch(self, embeddings_list):
+        if not embeddings_list:
+            return []
 
-        scores.sort(key=lambda x: x[0], reverse=True)
+        norm_embs = [self._normalize(e) for e in embeddings_list]
 
-        # Agar biror biri threshold dan yuqori bo'lsa — tanildi
-        for score, g in scores[:5]:
-            if score >= self.threshold:
-                if isinstance(g, dict):
-                    return g.get("person_id"), g.get("name", ""), score
-                else:
-                    return g[0], g[1], score  # tuple: (pid, name, emb)
+        if not hasattr(self, "_gal_matrix") or self._gal_matrix is None or len(self._gal_meta) != len(self.gallery):
+            self._update_gal_matrix()
 
-        # Hech biri threshold dan o'tmasa — eng yaxshisini qaytarish
-        if scores:
-            best_score, best_g = scores[0]
-            return None, "Unknown", max(0.0, best_score)
+        if self._gal_matrix is None or len(self._gal_matrix) == 0:
+            return [(None, "Unknown", 0.0) for _ in embeddings_list]
 
-        return None, "Unknown", 0.0
+        results = []
+        valid_indices = [i for i, e in enumerate(norm_embs) if e is not None]
+        valid_queries = [e for e in norm_embs if e is not None]
+
+        out = [(None, "Unknown", 0.0) for _ in embeddings_list]
+        if not valid_queries:
+            return out
+
+        query_mat = np.array(valid_queries, dtype=np.float32)  # shape (M, D)
+        # Vectorized Matrix Multiplication: (M, D) x (D, N) -> (M, N)
+        sim_mat = np.dot(query_mat, self._gal_matrix.T)
+
+        for row_idx, q_idx in enumerate(valid_indices):
+            scores = sim_mat[row_idx]
+            best_idx = int(np.argmax(scores))
+            best_score = float(scores[best_idx])
+            pid, pname = self._gal_meta[best_idx]
+
+            if best_score >= self.threshold:
+                out[q_idx] = (pid, pname, best_score)
+            else:
+                out[q_idx] = (None, "Unknown", max(0.0, best_score))
+
+        return out
     
     # ---------------- registration ----------------
     def compute_embedding_from_images(self, images_bgr):

@@ -2,17 +2,20 @@
 #  AI SURVEILLANCE SYSTEM — PRODUCTION ENTRY
 # =====================================================================
 
+import os
+import sys
 import signal
-import sys
-import os
-import os
-import sys
-import traceback
+
+# ✅ Enable ultra-low latency async GPU execution for PyTorch / ONNX
+os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
+os.environ["PYTHONFAULTHANDLER"] = "1"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
+
+from backend.core.gpu_utils import setup_gpu_environment
+setup_gpu_environment()
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPalette, QColor

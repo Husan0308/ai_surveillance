@@ -1,52 +1,51 @@
+# AI Surveillance configuration (optimized)
 ai:
-  ai_fps: 10
-  detection_interval_frames: 2
   detector:
-    conf: 0.15
+    model: models/yolo26n.pt
+    conf: 0.18
     device: auto
     imgsz: 640
-    model: models/yolo26n.pt
-  face:
-    det_size: 640
-    enabled: true
-    match_threshold: 0.56
-    min_face_size_px: 20
-    model: buffalo_l
-    provider: insightface
-  face_interval_frames: 4
+  ai_fps: 12
+  batch_size: 6
+  batch_interval_ms: 40
+  detection_interval_frames: 1
+  face_interval_frames: 6
   face_min_quality: 0
   face_recognition_timeout_sec: 7
-  max_people_per_camera: 20
+  max_people_per_camera: 12
   pose:
-    conf: 0.15
-    enabled: true
+    conf: 0.20
+    device: auto
+    enabled: false
     imgsz: 640
     model: models/yolo26n-pose.pt
-  pose_interval_frames: 3
+  pose_interval_frames: 5   # reduced to lower GPU load while keeping pose
   reid:
     enabled: true
+    deep_enabled: false
+    device: cuda
+    batch_size: 6
     model: osnet_x1_0_market1501
-    threshold: 0.75
+    threshold: 0.85
     min_transition_seconds: 20
   reid_timeout_sec: 15
   tracker:
-    match_thresh: 0.25
-    new_track_thresh: 0.2
-    track_buffer: 60
-    track_high_thresh: 0.25
-    track_low_thresh: 0.1
+    match_thresh: 0.35
+    new_track_thresh: 0.28
+    track_buffer: 60   # keeps tracks stable during temporary occlusions
+    track_high_thresh: 0.22
+    track_low_thresh: 0.10
     type: bytetrack
 alerts:
   sound_enabled: true
   sound_events:
-  - intrusion
-  - camera_offline
-  - overstay
-  - error
+    - intrusion
+    - camera_offline
+    - overstay
 app:
   name: AI Surveillance System
   ui_locked: true
-  version: '3.0'
+  version: "3.0"
 cameras_config: config/cameras.yaml
 database:
   busy_timeout_ms: 5000
@@ -68,28 +67,32 @@ enrollment:
   shutter_sound: true
   source: 0
 environment:
-  device: auto
+  device: cuda
   gpu_id: 0
-  threads: 4
+  threads: 2   # reduced CPU thread pool
+deepstream:
+  enabled: true
+  fallback_to_opencv: false   # avoid CPU fallback
+  max_decode_streams: 16
 events:
   retention_days: 30
   types:
-  - person_detected
-  - person_recognized
-  - unknown_detected
-  - camera_offline
-  - camera_online
-  - enrollment_completed
-  - snapshot
-  - error
-  - intrusion
-  - overstay
+    - person_detected
+    - person_recognized
+    - unknown_detected
+    - camera_offline
+    - camera_online
+    - enrollment_completed
+    - snapshot
+    - error
+    - intrusion
+    - overstay
   ui_limit: 300
 face:
   det_size:
-  - 320
-  - 320
-  enabled: true
+    - 320
+    - 320
+  enabled: false
   min_face_size: 30
   model: buffalo_l
   threshold: 0.4

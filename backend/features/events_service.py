@@ -172,8 +172,8 @@ class EventsService(QObject):
         now = time.time()
 
         if e["type"] == "person_detected":
-            key = ("person_detected", e["camera_id"])
-            if now - self._cooldowns.get(key, 0) < 10.0:
+            key = ("person_detected", e["camera_id"], e.get("person_name"))
+            if now - self._cooldowns.get(key, 0) < 300.0:
                 return e
             self._cooldowns[key] = now
 

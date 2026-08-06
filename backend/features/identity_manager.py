@@ -109,9 +109,6 @@ class IdentityManager(QObject):
         """
         AIWorker.result_ready signaliga ulanadi.
         """
-        # DEBUG
-        print(f"[IdentityManager] {camera_id}: {len(result.persons)} persons", flush=True)
-        
         state = self.get_state(camera_id)
         heatmap = self.get_heatmap(camera_id)
 

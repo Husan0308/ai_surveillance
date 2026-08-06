@@ -6,6 +6,7 @@ from backend.core.logger import setup_logging, get_logger
 from backend.core.event_bus import EventBus
 from backend.core.log_service import LogService
 from backend.core.performance_monitor import PerformanceMonitor
+from backend.core.batch_scheduler import BatchScheduler
 
 from backend.db.database import Database
 from backend.db.db_writer import DBWriter
@@ -53,6 +54,8 @@ class ServiceManager(QObject):
 
     def __init__(self):
         super().__init__()
+        self._global_id_lock = threading.Lock()
+        self._global_id_counter = 0
         
 
         # ---------------- core ----------------
@@ -77,6 +80,13 @@ class ServiceManager(QObject):
         self.face_engine = FaceEngine(self.config, db=self.db)
         self.reid_engine = ReIDEngine(self.config)
 
+        # ===== MEGA BATCH =====
+        self.batch_scheduler = BatchScheduler(
+            detector=self.detector,
+            batch_size=int(self.config.get("ai.batch_size", 16)),
+            interval_ms=float(self.config.get("ai.batch_interval_ms", 30)),
+        )
+
         # 🌐 Cross-camera shared ReID gallery (bitta instance → hamma kamera ulashadi)
         try:
             import importlib.util as _iu, os as _os
@@ -88,7 +98,7 @@ class ServiceManager(QObject):
         except Exception as _ge:
             print(f"[SM] ⚠ reid_gallery error: {_ge}", flush=True)
             self.reid_gallery = None
-        self.unknown_registry = UnknownRegistry()
+        self.unknown_registry = UnknownRegistry(match_threshold=0.55)
         self.global_identity_cache = GlobalIdentityCache()
         self.room_manager = RoomManager()
 
@@ -257,7 +267,9 @@ class ServiceManager(QObject):
             match_thresh=float(self.config.get("ai.tracker.match_thresh", 0.25)),
             high_thresh=float(self.config.get("ai.tracker.track_high_thresh", 0.35)),
             low_thresh=float(self.config.get("ai.tracker.track_low_thresh", 0.1)),
-            new_track_thresh=0.3,
+            new_track_thresh=float(
+                self.config.get("ai.tracker.new_track_thresh", 0.18)
+            ),
             reid_weight=0.35 if self.reid_engine.enabled and self.reid_engine.available else 0.0,
         )
 
@@ -292,12 +304,17 @@ class ServiceManager(QObject):
 
         ai_worker.event_detected.connect(lambda cam_id, evt: self.events_service.publish_event(evt))
 
+        # ===== MEGA BATCH =====
+        ai_worker.set_batch_scheduler(self.batch_scheduler)
+
         try:
             worker.frame_bgr_ready.connect(self.recording_service.write_frame)
         except Exception as e:
             log.error("frame_bgr_ready connect error: %s", e)
 
         ai_worker.shared_gallery = getattr(self, "reid_gallery", None)
+        ai_worker.unknown_registry = self.unknown_registry
+        ai_worker.global_identity_cache = self.global_identity_cache
         ai_worker.start()
 
         self.ai_workers[camera_id] = ai_worker
@@ -350,6 +367,10 @@ class ServiceManager(QObject):
                 continue
             self._ensure_ai_worker(camera_id)
 
+        # ===== MEGA BATCH =====
+        self.batch_scheduler.start()
+        log.info("BatchScheduler started")
+
         # initial gallery reload
         try:
             self.face_engine.load_gallery()
@@ -363,6 +384,13 @@ class ServiceManager(QObject):
     # ---------------- shutdown ----------------
     def shutdown(self):
         log.info("ServiceManager shutting down")
+
+        # ===== MEGA BATCH =====
+        try:
+            self.batch_scheduler.stop()
+            self.batch_scheduler.wait(2000)
+        except Exception as e:
+            log.error("batch_scheduler shutdown error: %s", e)
 
         # stop AI workers
         for ai_worker in self.ai_workers.values():
