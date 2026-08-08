@@ -2,31 +2,73 @@
 ai:
   detector:
     model: models/yolo26n.pt
-    conf: 0.18
+    # Low-confidence boxes can recover an existing track, but cannot create
+    # a new ID until tracker.new_track_thresh is reached.
+    conf: 0.05
+    iou: 0.45
+    max_det: 50
+    min_box_width: 3
+    min_box_height: 6
+    # Observed bottle false box: ~18x34. Small missed person: ~39x56.
+    low_conf_size_threshold: 0.22
+    low_conf_min_width: 12
+    low_conf_min_height: 36
     device: auto
-    imgsz: 640
-  ai_fps: 12
+    # Offline miss-evidence benchmark: 61.7% recovery at 384x640 versus
+    # 82.5% at 448x800. 544x960 was slower and recovered fewer samples.
+    imgsz: [448, 800]
+  ai_fps: 10
   batch_size: 6
   batch_interval_ms: 40
+  batch_queue_size: 5
+  # Launch-time freshness ceiling; normal operation should stay well below it.
+  max_frame_age_ms: 120
+  batch_debug: true
+  batch_debug_interval_sec: 1.0
   detection_interval_frames: 1
   face_interval_frames: 6
-  face_min_quality: 0
+  face_min_quality: 60
   face_recognition_timeout_sec: 7
   max_people_per_camera: 12
   pose:
     conf: 0.20
-    device: auto
-    enabled: false
-    imgsz: 640
+    device: cpu
+    enabled: true
+    imgsz: 320
     model: models/yolo26n-pose.pt
+    batch_size: 6
+    min_crop_width: 28
+    min_crop_height: 60
+  secondary:
+    enabled: true
+    queue_size: 36
+    pose_batch_size: 6
+    pose_batch_wait_ms: 5.0
   pose_interval_frames: 5   # reduced to lower GPU load while keeping pose
   reid:
+    # Associate an already detected person across cameras. This does not
+    # fabricate boxes: every camera still requires a local YOLO detection.
     enabled: true
-    deep_enabled: false
-    device: cuda
+    deep_enabled: true
+    # Rare async OSNet events are faster/more predictable on this CPU than
+    # when contending with the latency-critical YOLO CUDA stream.
+    device: cpu
     batch_size: 6
-    model: osnet_x1_0_market1501
+    batch_wait_ms: 5.0
+    model: osnet_x0_25
+    checkpoint: models/osnet_x0_25_market1501.pt
     threshold: 0.85
+    ambiguous_threshold: 0.82
+    # Cross-camera unknowns require both similarity and top-2 separation.
+    unknown_threshold: 0.78
+    unknown_margin: 0.04
+    lost_memory_seconds: 4.0
+    embedding_refresh_seconds: 10.0
+    # At most one new/recovered/ambiguous ReID request per track in this window.
+    event_cooldown_seconds: 5.0
+    min_crop_height: 45
+    min_crop_width: 20
+    duplicate_iou: 0.65
     min_transition_seconds: 20
   reid_timeout_sec: 15
   tracker:
@@ -34,8 +76,25 @@ ai:
     new_track_thresh: 0.28
     track_buffer: 60   # keeps tracks stable during temporary occlusions
     track_high_thresh: 0.22
-    track_low_thresh: 0.10
+    # 0.05-0.22 detections only recover tracks; new_track_thresh stays 0.28.
+    track_low_thresh: 0.05
+    # Three consistent frames hide chair/bottle one-frame false positives.
+    min_confirmed_hits: 3
+    tentative_buffer: 12
+    confirmation_mean_thresh: 0.18
     type: bytetrack
+    visible_missing_frames: 5
+    debug: true
+    debug_interval_sec: 1.0
+    miss_debug:
+      enabled: true
+      dir: data/detection_miss_debug
+      miss_milestones: [2, 5]
+      per_track_limit: 3
+      per_camera_limit: 30
+      global_limit: 120
+      context_scale: 2.0
+      jpeg_quality: 85
 alerts:
   sound_enabled: true
   sound_events:
@@ -92,19 +151,27 @@ face:
   det_size:
     - 320
     - 320
-  enabled: false
+  enabled: true
+  device: cpu
+  refresh_seconds: 60
+  weak_retry_seconds: 3
   min_face_size: 30
   model: buffalo_l
   threshold: 0.4
 heatmap:
+  enabled: true
+  accumulation_mode: POINT
   blur: true
   collect_when_off: true
-  decay: normal
-  grid_h: 36
-  grid_w: 64
-  history_days: 7
+  grid_width: 160
+  grid_height: 90
+  kernel_radius: 4
+  sigma: 2.0
+  sample_interval_ms: 250
+  live_decay_enabled: true
+  live_decay_half_life_seconds: 30
+  max_tracked_keys: 4096
   opacity: 0.6
-  use_pose_ankle: true
 logging:
   backup_count: 5
   dir: logs
@@ -136,12 +203,15 @@ storage:
   segment_minutes: 5
   snapshots_dir: snapshots
 camera_rooms:
-  CAM-01: Xona-A
-  CAM-06: Xona-A
+  CAM-01: dev-room-1
+  CAM-04: dev-room-1
+  CAM-03: main-room-1
+  CAM-05: entrance-1
+  CAM-06: main-room-2
 
 # ===== GEMINI AI =====
 gemini:
-  enabled: true
+  enabled: false
   model: gemini-2.5-flash
   api_key: ""
   min_face_score: 0.5

@@ -13,7 +13,7 @@ cameras:
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "640x360"
+    resolution: "1280x720"
     fps: 25
     reconnect_interval: 10
     connection_timeout: 5
@@ -34,7 +34,7 @@ cameras:
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "640x360"
+    resolution: "1280x720"
     fps: 30
     reconnect_interval: 10
     connection_timeout: 5
@@ -55,7 +55,7 @@ cameras:
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "640x360"
+    resolution: "1280x720"
     fps: 30
     reconnect_interval: 10
     connection_timeout: 5
@@ -65,9 +65,9 @@ cameras:
   - id: "CAM-04"
     name: "Camera 4"
     location: "Channel 401"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/602"
+    source: "rtsp://192.168.1.210:554/Streaming/Channels/601"
     codec: "h265"
-    latency_ms: 20
+    latency_ms: 50
     username: "apsidal"
     password: "aps@2026"
     online: true
@@ -76,8 +76,8 @@ cameras:
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "640x360"
-    fps: 30
+    resolution: "1280x720"
+    fps: 20
     reconnect_interval: 10
     connection_timeout: 5
     latency_warn_ms: 200
@@ -97,7 +97,7 @@ cameras:
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "640x360"
+    resolution: "1280x720"
     fps: 30
     reconnect_interval: 10
     connection_timeout: 5
@@ -107,9 +107,9 @@ cameras:
   - id: "CAM-06"
     name: "Camera 6"
     location: "Channel 601"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/401"
+    source: "rtsp://192.168.1.210:554/Streaming/Channels/402"
     codec: "h265"
-    latency_ms: 20
+    latency_ms: 50
     username: "apsidal"
     password: "aps@2026"
     online: true
@@ -118,8 +118,8 @@ cameras:
     recording_enabled: false
     zone_enabled: false
     overstay_enabled: false
-    resolution: "640x360"
-    fps: 30
+    resolution: "1280x720"
+    fps: 20
     reconnect_interval: 10
     connection_timeout: 5
     latency_warn_ms: 200
@@ -137,7 +137,7 @@ cameras:
   #   recording_enabled: false
   #   zone_enabled: false
   #   overstay_enabled: false
-  #   resolution: "640x360"
+  #   resolution: "1280x720"
   #   fps: 30
   #   reconnect_interval: 10
   #   connection_timeout: 5

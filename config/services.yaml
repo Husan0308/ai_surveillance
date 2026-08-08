@@ -1,0 +1,14 @@
+services:
+  ml_service:
+    host: ${SURVEILLANCE_ML_HOST:-127.0.0.1}
+    port: ${SURVEILLANCE_ML_PORT:-8001}
+    api_url: ${SURVEILLANCE_API_URL:-http://127.0.0.1:8000}
+  api_service:
+    host: ${SURVEILLANCE_API_HOST:-127.0.0.1}
+    port: ${SURVEILLANCE_API_PORT:-8000}
+    database_path: ${SURVEILLANCE_DB_PATH:-data/surveillance.db}
+    ml_url: ${SURVEILLANCE_ML_URL:-http://127.0.0.1:8001}
+  frontend:
+    api_url: ${SURVEILLANCE_API_URL:-http://127.0.0.1:8000/api/v1}
+    websocket_url: ${SURVEILLANCE_WEBSOCKET_URL:-ws://127.0.0.1:8000/ws}
+    video_url: ${SURVEILLANCE_ML_URL:-http://127.0.0.1:8001}/video/{camera_id}

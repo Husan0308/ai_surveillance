@@ -1,0 +1,39 @@
+{
+  "camera_id": "CAM-01",
+  "track_id": 11,
+  "frame_id": 1634,
+  "consecutive_detector_misses": 5,
+  "yolo_candidate_confidence": 0.3597504496574402,
+  "yolo_candidate_iou": 0.6900691467944322,
+  "last_matched_yolo_confidence": 0.16543392837047577,
+  "bbox_xyxy": [
+    395.04913330078125,
+    329.3623962402344,
+    495.79888916015625,
+    359.6768798828125
+  ],
+  "bbox_width": 100.749755859375,
+  "bbox_height": 30.314483642578125,
+  "bbox_area_ratio": 0.013255975807260257,
+  "bbox_height_ratio": 0.08420689900716145,
+  "context_xyxy": [
+    344,
+    314,
+    546,
+    360
+  ],
+  "frame_width": 640,
+  "frame_height": 360,
+  "mean_brightness": 114.94575979337064,
+  "blur_laplacian_variance": 7517.13975783352,
+  "edge_distance_px": 0.3231201171875,
+  "near_frame_edge": true,
+  "detections": 38,
+  "tracker_only_frames": 5,
+  "lost_count": 0,
+  "recovered_count": 0,
+  "detector_recall": 0.8837209302325582,
+  "recall_class": "WEAK",
+  "full_frame_file": "CAM-01_T11_F1634_M5_1786104430299_full.jpg",
+  "context_file": "CAM-01_T11_F1634_M5_1786104430299_context.jpg"
+}

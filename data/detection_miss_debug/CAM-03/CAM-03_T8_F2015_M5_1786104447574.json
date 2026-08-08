@@ -1,0 +1,39 @@
+{
+  "camera_id": "CAM-03",
+  "track_id": 8,
+  "frame_id": 2015,
+  "consecutive_detector_misses": 5,
+  "yolo_candidate_confidence": null,
+  "yolo_candidate_iou": 0.0,
+  "last_matched_yolo_confidence": 0.2632201611995697,
+  "bbox_xyxy": [
+    318.38763427734375,
+    54.07838439941406,
+    356.46295166015625,
+    96.05453491210938
+  ],
+  "bbox_width": 38.0753173828125,
+  "bbox_height": 41.97615051269531,
+  "bbox_area_ratio": 0.006936871759025962,
+  "bbox_height_ratio": 0.11660041809082031,
+  "context_xyxy": [
+    299,
+    33,
+    375,
+    117
+  ],
+  "frame_width": 640,
+  "frame_height": 360,
+  "mean_brightness": 118.015664160401,
+  "blur_laplacian_variance": 11340.836429654964,
+  "edge_distance_px": 54.07838439941406,
+  "near_frame_edge": false,
+  "detections": 90,
+  "tracker_only_frames": 5,
+  "lost_count": 0,
+  "recovered_count": 0,
+  "detector_recall": 0.9473684210526315,
+  "recall_class": "OK",
+  "full_frame_file": "CAM-03_T8_F2015_M5_1786104447574_full.jpg",
+  "context_file": "CAM-03_T8_F2015_M5_1786104447574_context.jpg"
+}

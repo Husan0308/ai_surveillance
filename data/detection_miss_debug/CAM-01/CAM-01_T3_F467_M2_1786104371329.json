@@ -1,0 +1,39 @@
+{
+  "camera_id": "CAM-01",
+  "track_id": 3,
+  "frame_id": 467,
+  "consecutive_detector_misses": 2,
+  "yolo_candidate_confidence": 0.3785925805568695,
+  "yolo_candidate_iou": 0.5074404844940513,
+  "last_matched_yolo_confidence": 0.10164659470319748,
+  "bbox_xyxy": [
+    395.50885009765625,
+    327.5189514160156,
+    503.16961669921875,
+    359.69366455078125
+  ],
+  "bbox_width": 107.6607666015625,
+  "bbox_height": 32.174713134765625,
+  "bbox_area_ratio": 0.01503452379025273,
+  "bbox_height_ratio": 0.08937420315212674,
+  "context_xyxy": [
+    341,
+    311,
+    557,
+    360
+  ],
+  "frame_width": 640,
+  "frame_height": 360,
+  "mean_brightness": 118.73913454270597,
+  "blur_laplacian_variance": 7540.092555519204,
+  "edge_distance_px": 0.30633544921875,
+  "near_frame_edge": true,
+  "detections": 281,
+  "tracker_only_frames": 6,
+  "lost_count": 0,
+  "recovered_count": 2,
+  "detector_recall": 0.9790940766550522,
+  "recall_class": "GOOD",
+  "full_frame_file": "CAM-01_T3_F467_M2_1786104371329_full.jpg",
+  "context_file": "CAM-01_T3_F467_M2_1786104371329_context.jpg"
+}

@@ -1,0 +1,39 @@
+{
+  "camera_id": "CAM-01",
+  "track_id": 8,
+  "frame_id": 773,
+  "consecutive_detector_misses": 2,
+  "yolo_candidate_confidence": 0.1642117202281952,
+  "yolo_candidate_iou": 0.1479059129521236,
+  "last_matched_yolo_confidence": 0.11034778505563736,
+  "bbox_xyxy": [
+    440.1366882324219,
+    342.3301696777344,
+    467.947998046875,
+    360.0
+  ],
+  "bbox_width": 27.811309814453125,
+  "bbox_height": 17.669830322265625,
+  "bbox_area_ratio": 0.0021329041903704314,
+  "bbox_height_ratio": 0.0490828620062934,
+  "context_xyxy": [
+    426,
+    333,
+    481,
+    360
+  ],
+  "frame_width": 640,
+  "frame_height": 360,
+  "mean_brightness": 98.5077441077441,
+  "blur_laplacian_variance": 7354.612386491175,
+  "edge_distance_px": 0.0,
+  "near_frame_edge": true,
+  "detections": 88,
+  "tracker_only_frames": 5,
+  "lost_count": 0,
+  "recovered_count": 2,
+  "detector_recall": 0.946236559139785,
+  "recall_class": "OK",
+  "full_frame_file": "CAM-01_T8_F773_M2_1786104386756_full.jpg",
+  "context_file": "CAM-01_T8_F773_M2_1786104386756_context.jpg"
+}

@@ -1,0 +1,39 @@
+{
+  "camera_id": "CAM-03",
+  "track_id": 1,
+  "frame_id": 770,
+  "consecutive_detector_misses": 2,
+  "yolo_candidate_confidence": null,
+  "yolo_candidate_iou": 0.0,
+  "last_matched_yolo_confidence": 0.19868329167366028,
+  "bbox_xyxy": [
+    313.77581787109375,
+    58.14595031738281,
+    346.8434143066406,
+    90.73030090332031
+  ],
+  "bbox_width": 33.067596435546875,
+  "bbox_height": 32.5843505859375,
+  "bbox_area_ratio": 0.0046765892156690825,
+  "bbox_height_ratio": 0.0905120849609375,
+  "context_xyxy": [
+    297,
+    41,
+    363,
+    107
+  ],
+  "frame_width": 640,
+  "frame_height": 360,
+  "mean_brightness": 103.90840220385675,
+  "blur_laplacian_variance": 10344.934030808121,
+  "edge_distance_px": 58.14595031738281,
+  "near_frame_edge": false,
+  "detections": 9,
+  "tracker_only_frames": 2,
+  "lost_count": 0,
+  "recovered_count": 0,
+  "detector_recall": 0.8181818181818182,
+  "recall_class": "WEAK",
+  "full_frame_file": "CAM-03_T1_F770_M2_1786104384769_full.jpg",
+  "context_file": "CAM-03_T1_F770_M2_1786104384769_context.jpg"
+}

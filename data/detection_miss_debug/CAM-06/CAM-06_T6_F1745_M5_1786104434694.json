@@ -1,0 +1,39 @@
+{
+  "camera_id": "CAM-06",
+  "track_id": 6,
+  "frame_id": 1745,
+  "consecutive_detector_misses": 5,
+  "yolo_candidate_confidence": 0.222798690199852,
+  "yolo_candidate_iou": 0.8296380081560195,
+  "last_matched_yolo_confidence": 0.21881505846977234,
+  "bbox_xyxy": [
+    283.73681640625,
+    300.4930419921875,
+    366.3587646484375,
+    359.17535400390625
+  ],
+  "bbox_width": 82.6219482421875,
+  "bbox_height": 58.68231201171875,
+  "bbox_area_ratio": 0.021043606535434568,
+  "bbox_height_ratio": 0.1630064222547743,
+  "context_xyxy": [
+    242,
+    271,
+    407,
+    360
+  ],
+  "frame_width": 640,
+  "frame_height": 360,
+  "mean_brightness": 119.04031324480762,
+  "blur_laplacian_variance": 2369.169059726507,
+  "edge_distance_px": 0.82464599609375,
+  "near_frame_edge": true,
+  "detections": 85,
+  "tracker_only_frames": 7,
+  "lost_count": 0,
+  "recovered_count": 1,
+  "detector_recall": 0.9239130434782609,
+  "recall_class": "OK",
+  "full_frame_file": "CAM-06_T6_F1745_M5_1786104434694_full.jpg",
+  "context_file": "CAM-06_T6_F1745_M5_1786104434694_context.jpg"
+}

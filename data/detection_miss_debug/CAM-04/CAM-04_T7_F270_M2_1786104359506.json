@@ -1,0 +1,39 @@
+{
+  "camera_id": "CAM-04",
+  "track_id": 7,
+  "frame_id": 270,
+  "consecutive_detector_misses": 2,
+  "yolo_candidate_confidence": 0.5252817869186401,
+  "yolo_candidate_iou": 0.21840620162564042,
+  "last_matched_yolo_confidence": 0.10470244288444519,
+  "bbox_xyxy": [
+    156.07176208496094,
+    143.57366943359375,
+    221.04830932617188,
+    250.17095947265625
+  ],
+  "bbox_width": 64.97654724121094,
+  "bbox_height": 106.5972900390625,
+  "bbox_area_ratio": 0.030062169496563405,
+  "bbox_height_ratio": 0.2961035834418403,
+  "context_xyxy": [
+    123,
+    90,
+    253,
+    303
+  ],
+  "frame_width": 640,
+  "frame_height": 360,
+  "mean_brightness": 99.59371614301192,
+  "blur_laplacian_variance": 11556.059238485053,
+  "edge_distance_px": 109.82904052734375,
+  "near_frame_edge": false,
+  "detections": 37,
+  "tracker_only_frames": 10,
+  "lost_count": 0,
+  "recovered_count": 2,
+  "detector_recall": 0.7872340425531915,
+  "recall_class": "BAD",
+  "full_frame_file": "CAM-04_T7_F270_M2_1786104359506_full.jpg",
+  "context_file": "CAM-04_T7_F270_M2_1786104359506_context.jpg"
+}

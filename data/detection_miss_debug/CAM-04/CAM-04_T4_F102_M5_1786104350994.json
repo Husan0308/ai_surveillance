@@ -1,0 +1,39 @@
+{
+  "camera_id": "CAM-04",
+  "track_id": 4,
+  "frame_id": 102,
+  "consecutive_detector_misses": 5,
+  "yolo_candidate_confidence": null,
+  "yolo_candidate_iou": 0.0,
+  "last_matched_yolo_confidence": 0.19281251728534698,
+  "bbox_xyxy": [
+    209.80137634277344,
+    121.21087646484375,
+    262.2351379394531,
+    200.26646423339844
+  ],
+  "bbox_width": 52.43376159667969,
+  "bbox_height": 79.05558776855469,
+  "bbox_area_ratio": 0.017991240633427878,
+  "bbox_height_ratio": 0.2195988549126519,
+  "context_xyxy": [
+    183,
+    81,
+    288,
+    239
+  ],
+  "frame_width": 640,
+  "frame_height": 360,
+  "mean_brightness": 107.88372513562388,
+  "blur_laplacian_variance": 10474.422086876304,
+  "edge_distance_px": 121.21087646484375,
+  "near_frame_edge": false,
+  "detections": 15,
+  "tracker_only_frames": 10,
+  "lost_count": 0,
+  "recovered_count": 2,
+  "detector_recall": 0.6,
+  "recall_class": "BAD",
+  "full_frame_file": "CAM-04_T4_F102_M5_1786104350994_full.jpg",
+  "context_file": "CAM-04_T4_F102_M5_1786104350994_context.jpg"
+}
