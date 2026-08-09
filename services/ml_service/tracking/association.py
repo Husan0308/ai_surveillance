@@ -28,3 +28,13 @@ def greedy_match(scores, threshold):
             matches.append((int(row), int(col), float(scores[row, col])))
             used_rows.add(row); used_cols.add(col)
     return matches
+
+def motion_proximity_matrix(predicted_boxes,detection_boxes,max_normalized_distance=1.5):
+    """Bounded center-distance evidence relative to predicted person-box size."""
+    if not len(predicted_boxes) or not len(detection_boxes):return np.zeros((len(predicted_boxes),len(detection_boxes)),np.float32)
+    a=np.asarray(predicted_boxes,np.float32);b=np.asarray(detection_boxes,np.float32)
+    ac=(a[:,:2]+a[:,2:])/2;bc=(b[:,:2]+b[:,2:])/2
+    distance=np.linalg.norm(ac[:,None]-bc[None,:],axis=2)
+    scale=np.maximum(np.linalg.norm(a[:,2:]-a[:,:2],axis=1)[:,None],1.0)
+    normalized=distance/scale
+    return np.maximum(0.0,1.0-normalized/max(float(max_normalized_distance),1e-6)).astype(np.float32)

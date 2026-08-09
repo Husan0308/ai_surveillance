@@ -1,6 +1,7 @@
 """Thread-safe, event-driven fresh-frame scheduler with no inference code."""
 import threading
 import time
+from dataclasses import replace
 from .batch import BatchOutput
 
 class BatchScheduler:
@@ -67,7 +68,7 @@ class BatchScheduler:
                 state["duplicate_count"] += 1; continue
             if age > self.max_frame_age_ms:
                 state["stale_drops"] += 1; self._stale_drops += 1; self._window_stale += 1; continue
-            state["used_frame_id"] = packet.frame_id; packets.append(packet)
+            state["used_frame_id"] = packet.frame_id; packets.append(replace(packet, scheduler_selected_timestamp=now_wall))
         if not packets: return None
         self._batch_id += 1; self._window_batches += 1; self._window_processed += len(packets)
         self._last_batch = BatchOutput(self._batch_id, now_wall, tuple(packets))

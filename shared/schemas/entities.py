@@ -21,7 +21,9 @@ class Camera(ContractModel):
     id: str
     name: str
     room_id: Optional[str] = None
-    source: Optional[str] = Field(default=None, description="RTSP source; API responses should redact credentials")
+    source: Optional[str] = Field(default=None, description="Legacy RTSP source; API responses redact credentials")
+    ai_source: Optional[str] = Field(default=None, description="Inference RTSP source")
+    display_source: Optional[str] = Field(default=None, description="Optional on-demand display RTSP source")
     status: CameraStatus = CameraStatus.OFFLINE
     ai_enabled: bool = True
     heatmap_enabled: bool = False

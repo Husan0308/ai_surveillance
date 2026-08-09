@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 from services.ml_service.cameras.buffer import LatestFrameBuffer
 from services.ml_service.cameras.frame import FramePacket
-from services.ml_service.detection.person_detector import PersonDetector
+from services.ml_service.detection.person_detector import PersonDetector,filter_end2end_predictions
 from services.ml_service.pipeline.batch import BatchOutput
 from services.ml_service.pipeline.scheduler import BatchScheduler
 
@@ -23,6 +23,12 @@ def packet(camera, frame_id, timestamp=None):
     return FramePacket(camera, frame_id, stamp, stamp, frame, 200, 100)
 
 class PersonDetectorTests(unittest.TestCase):
+    def test_end2end_batch_filter_matches_threshold_class_and_order(self):
+        raw=np.array([[[1,2,3,4,.9,0],[2,3,4,5,.8,1],[3,4,5,6,.05,0]],[[5,6,7,8,.7,0],[6,7,8,9,.6,0],[7,8,9,10,.5,0]]],np.float32)
+        output=filter_end2end_predictions(raw,.05,[0],2)
+        np.testing.assert_array_equal(output[0],raw[0,:1]);np.testing.assert_array_equal(output[1],raw[1,:2])
+        output=filter_end2end_predictions(raw,.05,[0],1)
+        np.testing.assert_array_equal(output[0],raw[0,:1]);np.testing.assert_array_equal(output[1],raw[1,:1])
     def test_dynamic_batches_and_identity(self):
         for size in range(1, 7):
             with self.subTest(size=size):

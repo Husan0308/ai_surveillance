@@ -18,4 +18,6 @@ class MLClient:
    if required:raise HTTPException(503,"ML service unavailable") from exc
    return None
  async def health(self):return await self.request("GET","/health",required=False)
- async def command(self,message):return await self.request("POST","/commands",message.model_dump(mode="json"))
+ async def command(self,message):
+  payload=message if isinstance(message,dict) else message.model_dump(mode="json")
+  return await self.request("POST","/commands",payload)

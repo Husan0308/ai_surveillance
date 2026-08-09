@@ -1,5 +1,5 @@
 # =====================================================================
-#  AI SURVEILLANCE SYSTEM — MUKAMMAL (PERFECT) EDITION UI
+#  AI SURVEILLANCE SYSTEM — OPERATOR CONSOLE UI
 #  Python + PySide6  |  ui.py — LOCKED
 # =====================================================================
 
@@ -7,6 +7,7 @@ import sys
 import os
 import math
 import csv
+import time
 from datetime import datetime
 
 from PySide6.QtWidgets import *
@@ -15,6 +16,7 @@ from PySide6.QtGui import *
 from services.frontend.api_client import ApiClient
 from services.frontend.async_api import AsyncApi
 from services.frontend.websocket_client import WebSocketClient
+from shared.settings import ServiceSettings
 
 
 # ============================ THEME ==================================
@@ -37,7 +39,20 @@ class TH:
 
 FRAME_W, FRAME_H = 640, 360
 GW, GH = 64, 36
+CAMERA_GRID_COLUMNS = 2
 
+def camera_grid_position(index):
+    return index // CAMERA_GRID_COLUMNS, index % CAMERA_GRID_COLUMNS
+
+def aspect_fit_rect(container_width, container_height, frame_width, frame_height):
+    if frame_width <= 0 or frame_height <= 0:frame_width, frame_height = FRAME_W, FRAME_H
+    scale = min(container_width / frame_width, container_height / frame_height)
+    width, height = frame_width * scale, frame_height * scale
+    return QRectF((container_width - width) / 2, (container_height - height) / 2, width, height)
+
+
+def map_bbox_to_video_rect(video_rect, frame_width, frame_height, bbox):
+    return QRectF(video_rect.x() + bbox.x() / frame_width * video_rect.width(),video_rect.y() + bbox.y() / frame_height * video_rect.height(),bbox.width() / frame_width * video_rect.width(),bbox.height() / frame_height * video_rect.height())
 
 def heat_color(v):
     stops = [
@@ -68,19 +83,13 @@ def clamp(v, a, b):
 
 # ========================= REALTIME CAMERA STATE =====================
 class RealtimeTrack:
-    def __init__(self, payload):
-        self.track_id = payload.get("local_track_id")
-        self.global_id = payload.get("global_id")
-        self.person_id = payload.get("person_id")
-        self.name = payload.get("display_name") or self.global_id or self.track_id or "Unknown"
-        self.conf = float(payload.get("confidence") or 0.0)
-        self.known = bool(self.person_id or payload.get("display_name"))
-        self._bbox = tuple(float(v) for v in payload.get("bbox", (0, 0, 0, 0)))
-
-    def bbox(self, _width, _height):
-        x1, y1, x2, y2 = self._bbox
-        return QRectF(x1, y1, max(0.0, x2-x1), max(0.0, y2-y1))
-
+    def __init__(self,payload,previous=None,metadata_timestamp=0.0):
+        self.track_id=payload.get("local_track_id");self.global_id=payload.get("global_id");self.person_id=payload.get("person_id");self.name=payload.get("display_name") or self.global_id or self.track_id or "Unknown";self.conf=float(payload.get("confidence") or 0.0);self.known=bool(self.person_id or payload.get("display_name"));raw=tuple(float(v) for v in payload.get("bbox",(0,0,0,0)));self.metadata_timestamp=float(metadata_timestamp or time.time());self.velocity=(0.0,)*4
+        if previous is not None:
+            alpha=.65;old=previous._bbox;self._bbox=tuple(old[i]*(1-alpha)+raw[i]*alpha for i in range(4));dt=max(.02,self.metadata_timestamp-previous.metadata_timestamp);self.velocity=tuple((raw[i]-old[i])/dt for i in range(4))
+        else:self._bbox=raw
+    def bbox(self,width,height,display_timestamp=None):
+        ahead=min(.20,max(0.0,float(display_timestamp or self.metadata_timestamp)-self.metadata_timestamp));values=tuple(self._bbox[i]+self.velocity[i]*ahead for i in range(4));x1,y1,x2,y2=values;x1=max(0,min(width,x1));x2=max(x1,min(width,x2));y1=max(0,min(height,y1));y2=max(y1,min(height,y2));return QRectF(x1,y1,x2-x1,y2-y1)
 
 class CameraState(QObject):
     def __init__(self, cid, name, location, enabled=True, max_people=0):
@@ -94,23 +103,43 @@ class CameraState(QObject):
         self.frame_id = None
         self.frame_timestamp = None
         self.tracks = []
+        self.metadata_frame_id=-1;self.metadata_timestamp=0.0;self.visual_grace_seconds=.4
+        self.receive_fps=0.0;self.render_fps=0.0;self.transport_latency_ms=0.0;self.dropped_display_frames=0;self._last_rendered_frame_id=None;self._render_started=time.monotonic();self._render_frames=0
         self.surfaces = []
         self.heat = [[0.0] * GW for _ in range(GH)]
         self.hist = [[0.0] * GW for _ in range(GH)]
 
+    def apply_config(self,data):
+        self.name=data.get("name") or self.id;self.location=data.get("location") or ""
+        self.enabled=bool(data.get("enabled",data.get("online",False)))
+        self.res=str(data.get("resolution") or "—");self.fps=float(data.get("fps") or 0)
+        self.heat_on=bool(data.get("heatmap_enabled",False));self.recording=bool(data.get("recording_enabled",False))
+
     @property
     def people(self):
-        return self.tracks
+        if not self.metadata_timestamp:
+            return []
+        return self.tracks if time.time() - self.metadata_timestamp <= self.visual_grace_seconds else []
+
+    def note_render(self):
+        if self.frame_id is None or self.frame_id == self._last_rendered_frame_id:return
+        self._last_rendered_frame_id = self.frame_id
+        self._render_frames += 1
+        now = time.monotonic()
+        elapsed = now - self._render_started
+        if elapsed >= 1.0:
+            self.render_fps = self._render_frames / elapsed
+            self._render_frames = 0
+            self._render_started = now
 
     @property
     def conn_quality(self):
         return 4 if self.online and self.frame is not None else 0
 
-    def set_metadata(self, message):
-        if self.frame_id is None or int(message.get("frame_id", -1)) != int(self.frame_id):
-            return False
-        self.tracks = [RealtimeTrack(item) for item in message.get("tracks", ())]
-        return True
+    def set_metadata(self,message):
+        frame_id=int(message.get("frame_id",-1))
+        if frame_id<self.metadata_frame_id or self.frame_id is not None and frame_id>int(self.frame_id):return False
+        stamp=float(message.get("timestamp") or time.time());previous={track.track_id:track for track in self.tracks};self.tracks=[RealtimeTrack(item,previous.get(item.get("local_track_id")),stamp) for item in message.get("tracks",())];self.metadata_frame_id=frame_id;self.metadata_timestamp=stamp;return True
 
     def clear_frame(self):
         self.online = False
@@ -156,6 +185,7 @@ class PersonRecord:
 class System(QObject):
     new_event = Signal(dict)
     heatmap_updated=Signal(str)
+    cameras_changed=Signal()
 
     def __init__(self):
         super().__init__()
@@ -164,8 +194,6 @@ class System(QObject):
         self.websocket.message.connect(self._on_remote_message);self.websocket.connect()
 
         self.settings = {
-            "password": "admin",
-            "unlocked": False,
             "det_conf": 0.45,
             "face_th": 0.60,
             "model": "YOLOv11m-pose",
@@ -173,39 +201,41 @@ class System(QObject):
             "sound": True,
         }
 
-        specs = [
-            ("CAM-01", "Main Lobby", "HQ — Floor 1", True),
-            ("CAM-02", "Office Room A", "HQ — Floor 1", True),
-            ("CAM-03", "Corridor East", "HQ — Floor 1", True),
-            ("CAM-04", "Server Room", "HQ — Basement", True),
-            ("CAM-05", "Meeting Room B", "HQ — Floor 2", True),
-            ("CAM-06", "Entrance Gate", "Outdoor", True),
-            ("CAM-07", "Parking P1", "Outdoor", False),
-            ("CAM-08", "Warehouse", "HQ — Basement", True),
-        ]
-
         self.sims = []
-        self.video_clients = []
+        self.video_clients = {}
+        self.video_base_url=ServiceSettings.from_env().ml_url.rstrip("/")
         self.visitors = {}
         self.usage = {}
 
-        for cid, name, loc, on in specs:
-            s = CameraState(cid, name, loc, on)
-
-            self.sims.append(s)
-            self.usage[cid] = 0
-            if on:
-                from services.frontend.video_transport import MJPEGClient
-                client=MJPEGClient(cid,f"http://127.0.0.1:8001/video/{cid}",self)
-                client.frame.connect(self._on_video_frame);client.online.connect(self._on_video_status);client.start();self.video_clients.append(client)
-
-        self.enroll_sim = self.sims[0]
-
         self.events = []
 
-        self.gpu, self.cpu, self.ram = 0.0, 0.0, 0.0
+        self.gpu, self.cpu, self.ram = None, None, None
+        self.system_metrics, self.pipeline_metrics = {}, {}
+        self._closing = False
 
         self.people = []
+
+    def refresh_cameras(self):
+        self.async_api.submit(self.api.get_cameras,self._apply_cameras,lambda error:print(f"Camera API: {error}",flush=True))
+
+    def _apply_cameras(self,rows):
+        existing={camera.id:camera for camera in self.sims};ordered=[];wanted=set()
+        from services.frontend.video_transport import MJPEGClient
+        for data in sorted(rows,key=lambda item:str(item.get("id", ""))):
+            camera_id=str(data["id"]);wanted.add(camera_id)
+            camera=existing.get(camera_id) or CameraState(camera_id,data.get("name") or camera_id,data.get("location") or "",False)
+            camera.apply_config(data);ordered.append(camera);self.usage.setdefault(camera_id,0)
+            client=self.video_clients.get(camera_id)
+            if camera.enabled and client is None:
+                client=MJPEGClient(camera_id,f"{self.video_base_url}/video/{camera_id}",self)
+                client.frame.connect(self._on_video_frame);client.online.connect(self._on_video_status);client.start();self.video_clients[camera_id]=client
+            elif not camera.enabled and client is not None:
+                client.stop();self.video_clients.pop(camera_id,None);camera.clear_frame()
+        for camera_id in set(existing)-wanted:
+            client=self.video_clients.pop(camera_id,None)
+            if client:client.stop()
+            existing[camera_id].clear_frame();self.usage.pop(camera_id,None)
+        self.sims=ordered;self.cameras_changed.emit()
 
 
     def _on_remote_message(self,message):
@@ -219,11 +249,17 @@ class System(QObject):
             self.new_event.emit(message)
         elif kind.startswith("camera."):
             camera_id=message.get("camera_id")
+            if kind=="camera.config.changed":self.refresh_cameras();return
             for camera in self.sims:
                 if camera.id==camera_id and kind=="camera.offline":camera.clear_frame()
+            self.new_event.emit(message)
         elif kind.startswith("enrollment.") or kind.startswith("person."):
             self.new_event.emit(message)
+        elif kind=="identity.conflict":
+            self.new_event.emit(message)
         elif kind=="heatmap.updated":
+            camera=self.sim_by_id(message.get("camera_id"))
+            if camera:camera.apply_heatmap(message)
             self.heatmap_updated.emit(message.get("camera_id",""))
 
     def _on_video_frame(self,camera_id,frame_id,timestamp,image):
@@ -231,8 +267,9 @@ class System(QObject):
             if camera.id==camera_id:
                 camera.frame=image;camera.online=True;camera.frame_id=frame_id;camera.frame_timestamp=timestamp
                 metadata=self.metadata_buffer.match(camera_id,frame_id,timestamp)
-                camera.tracks=[]
                 if metadata:camera.set_metadata(metadata)
+                client=self.video_clients.get(camera_id)
+                if client:camera.receive_fps=client.receive_fps;camera.transport_latency_ms=client.transport_latency_ms;camera.dropped_display_frames=client.dropped_display_frames
                 for surface in camera.surfaces:surface.update()
                 break
 
@@ -283,8 +320,10 @@ class System(QObject):
         return sum(1 for s in self.sims if s.online)
 
     def shutdown(self):
-        self.websocket.close()
-        for client in self.video_clients:client.stop()
+        if self._closing:return
+        self._closing=True;self.websocket.close()
+        for client in self.video_clients.values():client.stop()
+        self.video_clients.clear()
         self.async_api.shutdown()
 
 
@@ -439,16 +478,10 @@ class VideoSurface(QWidget):
             self.doubleClicked.emit()
 
     def video_rect(self):
-        w, h = self.width(), self.height()
-
-        ar = FRAME_W / FRAME_H
-
-        if w / h > ar:
-            nw, nh = h * ar, h
-        else:
-            nw, nh = w, w / ar
-
-        return QRectF((w - nw) / 2, (h - nh) / 2, nw, nh)
+        frame = self.sim.frame
+        fw = frame.width() if frame is not None else FRAME_W
+        fh = frame.height() if frame is not None else FRAME_H
+        return aspect_fit_rect(self.width(), self.height(), fw, fh)
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -516,15 +549,11 @@ class VideoSurface(QWidget):
                 f"🔍 {self.zoom:.1f}×  (scroll · drag · dbl-click reset)",
             )
 
+        self.sim.note_render()
         p.end()
 
     def _map(self, vr, fw, fh, bb):
-        return QRectF(
-            vr.x() + bb.x() / fw * vr.width(),
-            vr.y() + bb.y() / fh * vr.height(),
-            bb.width() / fw * vr.width(),
-            bb.height() / fh * vr.height(),
-        )
+        return map_bbox_to_video_rect(vr, fw, fh, bb)
 
     def _draw_ai(self, p, vr, fw, fh):
         p.save()
@@ -539,7 +568,7 @@ class VideoSurface(QWidget):
         # p.drawLine(QPointF(vr.left(), zy), QPointF(vr.right(), zy))
 
         for ps in self.sim.people:
-            r = self._map(vr, fw, fh, ps.bbox(fw, fh))
+            r = self._map(vr, fw, fh, ps.bbox(fw, fh, self.sim.frame_timestamp))
 
             col = QColor(TH.OK) if ps.known else QColor("#f59e42")
 
@@ -618,6 +647,10 @@ class Chip(QFrame):
         h.addWidget(self.val)
 
     def set_value(self, v):
+        if v is None:
+            self.val.setText("—")
+            self.bar.setValue(0)
+            return
         self.val.setText(f"{int(v)}%")
         self.bar.setValue(int(v))
 
@@ -758,7 +791,7 @@ class Header(QFrame):
         t1 = QLabel("AI Surveillance System")
         t1.setStyleSheet("font-size:13.5px; font-weight:800; color:white;")
 
-        t2 = QLabel("Operator Console • v3.0 MUKAMMAL")
+        t2 = QLabel("Operator Console")
         t2.setStyleSheet(f"font-size:9px; color:{TH.DIM};")
 
         tt.addWidget(t1)
@@ -794,7 +827,7 @@ class Header(QFrame):
 
         h.addWidget(self.ai_chip)
 
-        self.cam_chip = QLabel("🎥 7/8")
+        self.cam_chip = QLabel("🎥 0/0")
         self.cam_chip.setStyleSheet(
             f"color:{TH.TXT}; font-size:10px; font-weight:700;"
             f"background:{TH.CARD2}; border:1px solid {TH.BORDER};"
@@ -971,6 +1004,7 @@ class RightPanel(QFrame):
         self.sys = sys_
 
         self.setMinimumWidth(250)
+        self.setMaximumWidth(310)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(12, 14, 12, 10)
@@ -998,10 +1032,11 @@ class RightPanel(QFrame):
 
         self.b_gpu = self._meter("GPU")
         self.b_cpu = self._meter("CPU")
-        self.b_fps = self._meter("FPS")
+        self.b_fps = self._meter("AI")
 
         for w in (self.b_gpu[0], self.b_cpu[0], self.b_fps[0]):
             v.addWidget(w)
+        self.metric_detail=QLabel("—");self.metric_detail.setWordWrap(True);self.metric_detail.setStyleSheet(f"color:{TH.DIM};font-size:8.5px;font-family:Consolas,monospace;");v.addWidget(self.metric_detail)
 
         v.addWidget(self._sep("ALERTS"))
 
@@ -1017,12 +1052,14 @@ class RightPanel(QFrame):
         self.evbox.addStretch(1)
 
         wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
         wrap.setLayout(self.evbox)
 
         sc = QScrollArea()
         sc.setWidgetResizable(True)
         sc.setWidget(wrap)
         sc.setFrameShape(QFrame.NoFrame)
+        sc.setStyleSheet("QScrollArea{border:none;background:transparent;} QScrollArea > QWidget > QWidget{background:transparent;}")
 
         v.addWidget(sc, 1)
 
@@ -1094,23 +1131,28 @@ class RightPanel(QFrame):
             ((self.b_gpu[1], self.b_gpu[2]), self.sys.gpu),
             ((self.b_cpu[1], self.b_cpu[2]), self.sys.cpu),
         ]:
-            bar.setValue(int(v))
-            val.setText(f"{int(v)}%")
+            bar.setValue(int(v or 0))
+            val.setText(f"{int(v)}%" if v is not None else "—")
 
-            c = TH.ERR if v > 85 else (TH.WARN if v > 65 else TH.ACCENT)
+            c = TH.ERR if v is not None and v > 85 else (TH.WARN if v is not None and v > 65 else TH.ACCENT)
 
             bar.setStyleSheet(
                 f"QProgressBar{{background:#232c37;border-radius:3px;}}"
                 f"QProgressBar::chunk{{background:{c};border-radius:3px;}}"
             )
 
-        avg = sum(s.fps for s in sims) / max(1, len(sims))
+        batch_rate = self.sys.pipeline_metrics.get("batch_rate")
 
-        self.b_fps[1].setValue(int(avg / 30 * 100))
-        self.b_fps[2].setText(f"{avg:.1f}")
+        self.b_fps[1].setValue(min(100, int((batch_rate or 0) / 10 * 100)))
+        self.b_fps[2].setText(f"{batch_rate:.1f}/s" if batch_rate is not None else "—")
         self.b_fps[2].setStyleSheet(
             f"color:{TH.OK}; font-size:9.5px; font-family:Consolas,monospace;"
         )
+        system=self.sys.system_metrics;profile=self.sys.pipeline_metrics.get("detector_profile",{});detector=(profile.get("pure_detector_wall") or {}).get("p50");used=system.get("gpu_memory_used_mb");total=system.get("gpu_memory_total_mb");temp=system.get("gpu_temperature_c");nvdec=system.get("nvdec_utilization_percent");ram_used=system.get("ram_used_bytes");ram_total=system.get("ram_total_bytes")
+        gpu_text=f"VRAM {used/1024:.1f}/{total/1024:.1f}GB  {temp:.0f}C  NVDEC {nvdec:.0f}%" if None not in (used,total,temp,nvdec) else "VRAM/TEMP/NVDEC —"
+        ram_text=f"RAM {ram_used/1073741824:.1f}/{ram_total/1073741824:.1f}GB" if None not in (ram_used,ram_total) else "RAM —"
+        ai_text=f"AI detector p50 {detector:.0f}ms  CAM {self.sys.cams_online}/{len(self.sys.sims)}" if detector is not None else f"AI —  CAM {self.sys.cams_online}/{len(self.sys.sims)}"
+        self.metric_detail.setText("\n".join((gpu_text,ram_text,ai_text)))
 
     def add_event(self, e):
         # Normalize timestamp - handle both datetime objects and ISO string timestamps
@@ -1284,7 +1326,8 @@ class CameraCard(QFrame):
 
         self.sim, self.hub = sim, hub
 
-        self.setMinimumSize(340, 215)
+        self.setMinimumSize(300, 200)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         self.glow = QGraphicsDropShadowEffect()
         self.glow.setBlurRadius(0)
@@ -1383,7 +1426,7 @@ class CameraCard(QFrame):
         self.btn_snap.clicked.connect(lambda: hub.snapshot(sim))
         self.btn_full.clicked.connect(lambda: hub.open_fullscreen(sim))
         self.btn_more.clicked.connect(self._menu)
-        self.hub.sys.heatmap_updated.connect(lambda camera_id:self._load_heatmap() if camera_id==self.sim.id and self.sim.heat_on else None)
+        self.hub.sys.heatmap_updated.connect(lambda camera_id:self.refresh() if camera_id==self.sim.id and self.sim.heat_on else None)
 
         self.qi = QuickInfo(sim)
         self.qi.setParent(self)
@@ -1469,7 +1512,7 @@ class CameraCard(QFrame):
 
         self.dot.set_color(TH.OK if on else TH.ERR)
 
-        self.lbl_fps.setText(f"{s.fps:.1f} FPS" if on else "-- FPS")
+        self.lbl_fps.setText(f"{s.receive_fps:.1f} FPS" if on else "-- FPS")
 
         self.lbl_ppl.setText(f"👥 {len(s.people)}" if on else "👥 —")
 
@@ -1976,76 +2019,40 @@ class DashboardPage(Page):
 class LivePage(Page):
     def __init__(self, hub):
         super().__init__()
-
         self.hub = hub
-
-        row = self.title_row(
-            "Dashboard",
-            "Double-click → fullscreen · scroll → zoom",
-        )
-
-        # self.search = QLineEdit()  # ✅ Search removed
-        # self.search.setPlaceholderText("🔍 Filter cameras…")  # ✅ Search removed
-        # self.search.setMaximumWidth(200)  # ✅ Search removed
-        # self.search.textChanged.connect(self.filter_cards)  # ✅ Search removed
-
-        # row.addWidget(self.search)  # ✅ Search removed
-
-        self.layout_cb = QComboBox()
-        self.layout_cb.addItems(["3 × 3", "2 × 3", "3 × 2", "2 × 2", "1 × 1"])
-        self.layout_cb.setCurrentText("3 × 3")
-        self.layout_cb.currentTextChanged.connect(self.change_layout)
-
-        row.addWidget(self.layout_cb)
-
-        self.grid = QGridLayout()
-        self.grid.setSpacing(10)
-
+        self.title_row("Dashboard", "Double-click camera to enlarge")
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        self.grid_content = QWidget()
+        self.grid_content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.grid = QGridLayout(self.grid_content)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(10)
+        self.grid.setVerticalSpacing(10)
+        self.grid.setAlignment(Qt.AlignTop)
+        self.grid.setColumnStretch(0, 1)
+        self.grid.setColumnStretch(1, 1)
+        self.scroll.setWidget(self.grid_content)
+        self.v.addWidget(self.scroll, 1)
         self.cards = []
+        self.reload_cameras()
 
-        for i, sim in enumerate(hub.sys.sims):
-            c = CameraCard(sim, hub)
-
-            self.cards.append(c)
-
-            self.grid.addWidget(c, i // 3, i % 3)
-
-        for i in range(3):
-            self.grid.setColumnStretch(i, 1)
-
-        for i in range(3):
-            self.grid.setRowStretch(i, 1)
-
-        self.v.addLayout(self.grid, 1)
-
-    def filter_cards(self):
-        # q = self.search.text().lower()  # ✅ Search removed
-
+    def reload_cameras(self):
         for card in self.cards:
-            s = card.sim
-
-            card.setVisible(q in f"{s.id} {s.name} {s.location}".lower())
-
-    def change_layout(self, txt):
-        cols = int(txt.split("×")[0].strip())
-
-        for i in reversed(range(self.grid.count())):
-            item = self.grid.itemAt(i)
-
-            if item.widget():
-                self.grid.removeWidget(item.widget())
-
-        visible = [c for c in self.cards if not c.isHidden()]
-
-        for i, card in enumerate(visible):
-            self.grid.addWidget(card, i // cols, i % cols)
-
-        rows = (len(visible) + cols - 1) // cols
-
-        for i in range(10):
-            self.grid.setColumnStretch(i, 1 if i < cols else 0)
-            self.grid.setRowStretch(i, 1 if i < rows else 0)
-
+            self.grid.removeWidget(card);card.deleteLater()
+        self.cards=[]
+        cameras=list(self.hub.sys.sims)
+        for index,sim in enumerate(cameras):
+            card=CameraCard(sim,self.hub);self.cards.append(card)
+            row,column=camera_grid_position(index);self.grid.addWidget(card,row,column)
+        rows=(len(cameras)+CAMERA_GRID_COLUMNS-1)//CAMERA_GRID_COLUMNS
+        for row in range(rows):
+            self.grid.setRowMinimumHeight(row,210);self.grid.setRowStretch(row,1)
+        self.grid_content.setMinimumHeight(max(0,rows*210+max(0,rows-1)*self.grid.verticalSpacing()))
+        if hasattr(self.hub,"cards"):self.hub.cards=self.cards
 
 # class AnalyticsPage(Page):
 #     def __init__(self, hub):
@@ -2295,13 +2302,11 @@ class EventsPage(Page):
         self.flt = QComboBox()
         self.flt.addItems([
             "All",
-            "Recognized",
-            "Unknown",
-            "Alerts",
-            "Offline",
-            "Snapshot",
-            "Intrusion",
-            "Overstay",
+            "Camera",
+            "Person",
+            "Identity",
+            "Enrollment",
+            "Conflict",
         ])
         self.flt.currentTextChanged.connect(self.rebuild)
 
@@ -2337,11 +2342,11 @@ class EventsPage(Page):
 
         self.tbl.setHorizontalHeaderLabels([
             "Time",
-            "Camera",
-            "Person",
             "Type",
-            "Confidence",
-            "📸",
+            "Camera",
+            "Person / Identity",
+            "Details",
+            "Status",
         ])
 
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -2370,13 +2375,11 @@ class EventsPage(Page):
 
         ok = (
             f == "All"
-            or (f == "Recognized" and e["type"] in ("recognized", "person_recognized"))
-            or (f == "Unknown" and e["type"] in ("unknown", "unknown_person", "unknown_detected"))
-            or (f == "Alerts" and e["level"] in ("warn", "err"))
-            or (f == "Offline" and e["type"] == "offline")
-            or (f == "Snapshot" and e["type"] == "snapshot")
-            or (f == "Intrusion" and e["type"] == "intrusion")
-            or (f == "Overstay" and e["type"] == "overstay")
+            or (f == "Camera" and e["type"].startswith("camera."))
+            or (f == "Person" and e["type"].startswith("person."))
+            or (f == "Identity" and e["type"].startswith("identity."))
+            or (f == "Enrollment" and e["type"].startswith("enrollment."))
+            or (f == "Conflict" and e["type"] == "identity.conflict")
         )
 
         if ok and q:
@@ -2394,9 +2397,16 @@ class EventsPage(Page):
     @staticmethod
     def _normalize_event(e):
         n = dict(e)
-        n.setdefault("cam", n.get("camera_id", ""))
-        n.setdefault("person", n.get("person_name", ""))
-        n.setdefault("conf", n.get("confidence", 0.0))
+        metadata = n.get("metadata") or n.get("details") or {}
+        n["type"] = str(n.get("event_type") or n.get("type") or "legacy")
+        n["time"] = n.get("timestamp") or n.get("time") or datetime.now()
+        n["cam"] = str(n.get("camera_id") or n.get("cam") or "")
+        n["person"] = str(n.get("person_name") or n.get("name") or n.get("person_id") or n.get("global_id") or n.get("person") or "")
+        n["conf"] = float(n.get("confidence") or metadata.get("confidence") or 0.0)
+        n["level"] = str(n.get("severity") or n.get("level") or "info")
+        n["ack"] = bool(n.get("acknowledged", n.get("ack", False)))
+        n["details_text"] = str(metadata.get("message") or n.get("message") or metadata or "")
+        if n.get("taxonomy_status")=="legacy":n["details_text"]="LEGACY | "+n["details_text"]
         return n
 
     @staticmethod
@@ -2426,9 +2436,15 @@ class EventsPage(Page):
     @staticmethod
     def _normalize_event(e):
         n = dict(e)
-        n.setdefault("cam", n.get("camera_id", ""))
-        n.setdefault("person", n.get("person_name", ""))
-        n.setdefault("conf", n.get("confidence", 0.0))
+        metadata = n.get("metadata") or n.get("details") or {}
+        n["type"] = str(n.get("event_type") or n.get("type") or "legacy")
+        n["time"] = n.get("timestamp") or n.get("time") or datetime.now()
+        n["cam"] = str(n.get("camera_id") or n.get("cam") or "")
+        n["person"] = str(n.get("person_name") or n.get("name") or n.get("person_id") or n.get("global_id") or n.get("person") or "")
+        n["conf"] = float(n.get("confidence") or metadata.get("confidence") or 0.0)
+        n["level"] = str(n.get("severity") or n.get("level") or "info")
+        n["ack"] = bool(n.get("acknowledged", n.get("ack", False)))
+        n["details_text"] = str(metadata.get("message") or n.get("message") or metadata or "")
         return n
 
     @staticmethod
@@ -2458,9 +2474,15 @@ class EventsPage(Page):
     @staticmethod
     def _normalize_event(e):
         n = dict(e)
-        n.setdefault("cam", n.get("camera_id", ""))
-        n.setdefault("person", n.get("person_name", ""))
-        n.setdefault("conf", n.get("confidence", 0.0))
+        metadata = n.get("metadata") or n.get("details") or {}
+        n["type"] = str(n.get("event_type") or n.get("type") or "legacy")
+        n["time"] = n.get("timestamp") or n.get("time") or datetime.now()
+        n["cam"] = str(n.get("camera_id") or n.get("cam") or "")
+        n["person"] = str(n.get("person_name") or n.get("name") or n.get("person_id") or n.get("global_id") or n.get("person") or "")
+        n["conf"] = float(n.get("confidence") or metadata.get("confidence") or 0.0)
+        n["level"] = str(n.get("severity") or n.get("level") or "info")
+        n["ack"] = bool(n.get("acknowledged", n.get("ack", False)))
+        n["details_text"] = str(metadata.get("message") or n.get("message") or metadata or "")
         return n
 
     @staticmethod
@@ -2513,41 +2535,16 @@ class EventsPage(Page):
         r = 0 if top else self.tbl.rowCount()
         self.tbl.insertRow(r)
         name, col = self.TYPES.get(e["type"], (e["type"], TH.DIM))
-        vals = [
-            self._event_time(e),
-            e["cam"],
-            e["person"],
-            name,
-            f'{e["conf"] * 100:.1f}%' if e["conf"] < 1 else "—",
-        ]
+        vals = [self._event_time(e), name, e["cam"], e["person"], e.get("details_text", ""), "Acknowledged" if e.get("ack") else "New"]
         for c, txt in enumerate(vals):
-            it = QTableWidgetItem(txt)
-            it.setTextAlignment(
-                Qt.AlignCenter
-                if c in (0, 1, 4)
-                else Qt.AlignVCenter | Qt.AlignLeft
-            )
-            if c == 3:
-                it.setForeground(QColor(col))
-            if c == 0:
-                it.setFont(QFont("Consolas", 9))
-            if e.get("ack"):
-                it.setForeground(QColor(TH.FAINT))
+            it = QTableWidgetItem(str(txt))
+            it.setTextAlignment(Qt.AlignCenter if c in (0, 2, 5) else Qt.AlignVCenter | Qt.AlignLeft)
+            if c == 1: it.setForeground(QColor(col))
+            if c == 0: it.setFont(QFont("Consolas", 9))
+            if e.get("ack"): it.setForeground(QColor(TH.FAINT))
             self.tbl.setItem(r, c, it)
-        b = QPushButton("📸")
-        b.setFixedSize(30, 24)
-        b.setObjectName("camTool")
-        cid = e["cam"]
-        b.clicked.connect(lambda _=False, i=cid: self._snap(i))
-        w = QWidget()
-        hl = QHBoxLayout(w)
-        hl.setContentsMargins(0, 2, 0, 2)
-        hl.addWidget(b)
-        hl.setAlignment(Qt.AlignCenter)
-        self.tbl.setCellWidget(r, 5, w)
         self.tbl.setRowHeight(r, 30)
-        if self.tbl.rowCount() > 300:
-            self.tbl.removeRow(self.tbl.rowCount() - 1)
+        if self.tbl.rowCount() > 300: self.tbl.removeRow(self.tbl.rowCount() - 1)
 
     def _snap(self, cid):
         s = self.hub.sys.sim_by_id(cid)
@@ -2574,12 +2571,12 @@ class EventsPage(Page):
         fn = f"exports/events_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         with open(fn, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["Time", "Camera", "Person", "Type", "Confidence", "Level"])
+            w.writerow(["Time", "Type", "Camera", "Person / Identity", "Details", "Status"])
             for e in getattr(self, '_events', []):
                 if self._match(e):
                     t = e.get("time")
                     tstr = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                    w.writerow([tstr, e["cam"], e["person"], e["type"], f'{e["conf"]:.3f}', e["level"]])
+                    w.writerow([tstr, e["type"], e["cam"], e["person"], e.get("details_text", ""), "Acknowledged" if e.get("ack") else "New"])
         self.hub.toast(f"📄 Exported {self.tbl.rowCount()} events → {fn}")
 
     def showEvent(self, event):
@@ -3130,11 +3127,10 @@ class EnrollmentPage(Page):
         self.hub = hub
         self.session_id=None
         self.hub.sys.websocket.message.connect(self._on_enrollment_event)
-        self.sim = hub.sys.enroll_sim
 
         self.title_row(
             "Person Enrollment",
-            "upload 1–10 clear face images · GPU embedding",
+            "select at least 10 clear face images · validated asynchronously",
         )
 
         body = QHBoxLayout()
@@ -3153,7 +3149,7 @@ class EnrollmentPage(Page):
         upload_title = QLabel("Upload face images")
         upload_title.setAlignment(Qt.AlignCenter)
         upload_title.setStyleSheet(f"color:{TH.TXT}; font-size:22px; font-weight:800; border:none;")
-        upload_hint = QLabel("Choose 1–10 clear photos. Front-facing and well-lit images give the best recognition.")
+        upload_hint = QLabel("Choose at least 10 clear photos. Invalid, blurry, small, or multi-face images will be rejected.")
         upload_hint.setWordWrap(True)
         upload_hint.setAlignment(Qt.AlignCenter)
         upload_hint.setStyleSheet(f"color:{TH.DIM}; font-size:12px; border:none;")
@@ -3260,7 +3256,7 @@ class EnrollmentPage(Page):
         kind=event.get("type")
         if kind=="enrollment.progress":
             captured=int(event.get("captured",0));required=int(event.get("required",10))
-            self.prog.setMaximum(required);self.prog.setValue(captured);self.prog_lbl.setText(f"Captured {captured} / {required}")
+            self.prog.setMaximum(required);self.prog.setValue(captured);self.prog_lbl.setText(f"Valid {captured} / {required}")
             self.face_status.setText(event.get("message") or f"Quality {float(event.get('quality',0)):.0%}")
         elif kind=="enrollment.completed":
             self.hub.toast("✅ Enrollment completed");self._reset()
@@ -3269,23 +3265,24 @@ class EnrollmentPage(Page):
             self.face_status.setText(f"⚠ {event.get('message',kind)}");self.btn_reg.setEnabled(True)
 
     def upload_images(self):
-        self.hub.toast("Enrollment capture is controlled by the ML camera workflow")
-        self.face_status.setText("Select a name and start camera enrollment")
-        self.btn_reg.setEnabled(True)
+        paths,_=QFileDialog.getOpenFileNames(self,"Select enrollment images","","Images (*.jpg *.jpeg *.png *.bmp *.webp)")
+        if not paths:return
+        self.captures=list(dict.fromkeys(paths))[:30];count=len(self.captures)
+        self.prog.setMaximum(max(10,count));self.prog.setValue(0);self.prog_lbl.setText(f"Selected {count} / 10 required")
+        self.face_status.setText(f"{count} images ready for validation");self.btn_reg.setEnabled(count>=10)
 
     # ==================== REGISTER ====================
     def register(self):
         name=self.name.text().strip()
         if not name:self.hub.toast("⚠ Please enter the person name");self.name.setFocus();return
-        dept=self.dept.currentText()
-        if dept=="Other":dept=self.dept_custom.text().strip() or "Other"
-        camera_id=getattr(self.hub.sys.enroll_sim,"id","CAM-01")
-        self.btn_reg.setEnabled(False);self.face_status.setText("Starting enrollment…")
+        dept=self.dept.currentText();dept=self.dept_custom.text().strip() or "Other" if dept=="Other" else dept
+        if len(self.captures)<10:self.hub.toast("⚠ Select at least 10 images");return
+        self.btn_reg.setEnabled(False);self.face_status.setText("Uploading images for validation…")
         def started(session):
             self.session_id=session["id"] if "id" in session else session["session_id"]
-            self.face_status.setText("Enrollment started — look at the camera")
+            self.face_status.setText("Validating face images…")
             self.hub.toast(f"Enrollment started for {name}")
-        self.hub.sys.async_api.submit(lambda:self.hub.sys.api.start_enrollment(name,camera_id,dept),started,lambda error:(self.btn_reg.setEnabled(True),self.face_status.setText(f"⚠ {error}")))
+        self.hub.sys.async_api.submit(lambda:self.hub.sys.api.start_enrollment(name,self.captures,dept),started,lambda error:(self.btn_reg.setEnabled(True),self.face_status.setText(f"⚠ {error}")))
 
     # ==================== RESET ====================
     def _reset(self):
@@ -3311,112 +3308,20 @@ class EnrollmentPage(Page):
             self.dept_custom.hide()
 
             
-class PasswordDialog(QDialog):
-    def __init__(self, pwd, parent=None):
-        super().__init__(parent)
-
-        self.pwd = pwd
-
-        self.setModal(True)
-        self.setFixedWidth(380)
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(26, 26, 26, 22)
-        v.setSpacing(10)
-
-        ic = QLabel("🔒")
-        ic.setStyleSheet("font-size:30px;")
-        ic.setAlignment(Qt.AlignCenter)
-
-        t = QLabel("Restricted Area")
-        t.setAlignment(Qt.AlignCenter)
-        t.setStyleSheet("font-size:15px; font-weight:800; color:white;")
-
-        s = QLabel("Administrator password required")
-        s.setAlignment(Qt.AlignCenter)
-        s.setStyleSheet(f"color:{TH.DIM}; font-size:10.5px;")
-
-        self.edit = QLineEdit()
-        self.edit.setEchoMode(QLineEdit.Password)
-        self.edit.setPlaceholderText("Password")
-        self.edit.returnPressed.connect(self.check)
-
-        self.err = QLabel("Incorrect password")
-        self.err.setAlignment(Qt.AlignCenter)
-        self.err.setStyleSheet(f"color:{TH.ERR}; font-size:10px;")
-        self.err.hide()
-
-        row = QHBoxLayout()
-
-        cancel = QPushButton("Cancel")
-        cancel.setObjectName("btnGhost")
-        cancel.clicked.connect(self.reject)
-
-        ok = QPushButton("Unlock")
-        ok.setObjectName("btnPrimary")
-        ok.clicked.connect(self.check)
-
-        row.addStretch(1)
-        row.addWidget(cancel)
-        row.addWidget(ok)
-        row.addStretch(1)
-
-        for w in (ic, t, s, self.edit, self.err):
-            v.addWidget(w)
-
-        v.addLayout(row)
-
-        self.edit.setFocus()
-
-    def check(self):
-        if self.edit.text() == self.pwd:
-            self.accept()
-        else:
-            self.err.show()
-
-            self.edit.clear()
-            self.edit.setFocus()
-
-
 class SettingsPage(Page):
     def __init__(self, hub):
         super().__init__()
         self.hub = hub
-        self.title_row("Settings", "administrator access granted")
+        self.title_row("Settings", "System preferences")
         self.tabs = QTabWidget()
         self.v.addWidget(self.tabs, 1)
         st = self.hub.sys.settings
 
         # ==== Cameras ====
         w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setSpacing(8)
-        for s in hub.sys.sims:
-            row = QHBoxLayout()
-            cb = QCheckBox(f"{s.id}  —  {s.name}")
-            cb.setChecked(s.online)
-            def mk(on=s, box=cb):
-                def f(state):
-                    requested=box.isChecked();box.setEnabled(False)
-                    def applied(_):
-                        on.enabled=requested
-                        if not requested:on.clear_frame()
-                        box.setEnabled(True)
-                    def failed(error):
-                        box.blockSignals(True);box.setChecked(on.online);box.blockSignals(False);box.setEnabled(True);hub.toast(f"Camera API: {error}")
-                    hub.sys.async_api.submit(lambda:hub.sys.api.update_camera(on.id,{"enabled":requested}),applied,failed)
-                return f
-            cb.stateChanged.connect(mk())
-            res = QComboBox()
-            res.addItems(["1920x1080", "2560x1440", "1280x720"])
-            fps = QSpinBox()
-            fps.setRange(5, 60)
-            fps.setValue(25)
-            row.addWidget(cb, 1)
-            row.addWidget(res)
-            row.addWidget(fps)
-            lay.addLayout(row)
-        lay.addStretch(1)
+        self.camera_layout = QVBoxLayout(w)
+        self.camera_layout.setSpacing(8)
+        self.rebuild_cameras()
         self.tabs.addTab(w, "🎥 Cameras")
 
         # ==== Database ====
@@ -3437,46 +3342,37 @@ class SettingsPage(Page):
         fm.addRow("", br)
         self.tabs.addTab(w, "🗄 Database")
 
-        # ==== Security ====
+        # ==== Preferences ====
         w = QWidget()
         fm = QFormLayout(w)
         fm.setSpacing(12)
-        self.pw1 = QLineEdit()
-        self.pw1.setEchoMode(QLineEdit.Password)
-        self.pw2 = QLineEdit()
-        self.pw2.setEchoMode(QLineEdit.Password)
-        ch = QPushButton("Change Password")
-        ch.setObjectName("btnPrimary")
-        ch.clicked.connect(self._change_pwd)
-        al = QSpinBox()
-        al.setRange(1, 120)
-        al.setValue(15)
-        al.valueChanged.connect(lambda value:hub.sys.async_api.submit(lambda:hub.sys.api.update_settings({"auto_lock_minutes":value}),None,lambda error:hub.toast(f"Settings API: {error}")))
-        https = QCheckBox("HTTPS / TLS only")
-        https.setChecked(True)
-        self.snd = QCheckBox("🔊 Sound alerts for critical events")
+        fm.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.snd = QCheckBox("Sound alerts for critical events")
         self.snd.setChecked(st.get("sound", True))
         self.snd.stateChanged.connect(lambda _state:hub.sys.async_api.submit(lambda:hub.sys.api.update_settings({"sound_enabled":self.snd.isChecked()}),lambda _:hub.sys.settings.__setitem__("sound",self.snd.isChecked()),lambda error:hub.toast(f"Settings API: {error}")))
-        fm.addRow("New password", self.pw1)
-        fm.addRow("Repeat password", self.pw2)
-        fm.addRow("", ch)
-        fm.addRow("Auto-lock (min)", al)
-        fm.addRow("", https)
-        fm.addRow("", self.snd)
-        self.tabs.addTab(w, "🔐 Security")
+        fm.addRow("Notifications", self.snd)
+        self.tabs.addTab(w, "Preferences")
 
-    def _change_pwd(self):
-        p1 = self.pw1.text().strip()
-        p2 = self.pw2.text().strip()
-        if not p1:
-            self.hub.toast("⚠ Parol bo'sh bo'lmasin")
-            return
-        if p1 != p2:
-            self.hub.toast("⚠ Parollar mos emas")
-            return
-        def saved(_):
-            self.hub.sys.settings["password"]=p1;self.hub.toast("✅ Password updated");self.pw1.clear();self.pw2.clear()
-        self.hub.sys.async_api.submit(lambda:self.hub.sys.api.update_settings({"login_password":p1}),saved,lambda error:self.hub.toast(f"Settings API: {error}"))
+    def rebuild_cameras(self):
+        while self.camera_layout.count():
+            item=self.camera_layout.takeAt(0)
+            if item.widget():item.widget().deleteLater()
+            if item.layout():
+                while item.layout().count():
+                    child=item.layout().takeAt(0)
+                    if child.widget():child.widget().deleteLater()
+        for camera in self.hub.sys.sims:
+            row=QHBoxLayout();checkbox=QCheckBox(f"{camera.id}  —  {camera.name}");checkbox.setChecked(camera.enabled)
+            def changed(_state,on=camera,box=checkbox):
+                requested=box.isChecked();box.setEnabled(False)
+                def applied(_):box.setEnabled(True);self.hub.sys.refresh_cameras()
+                def failed(error):
+                    box.blockSignals(True);box.setChecked(on.enabled);box.blockSignals(False);box.setEnabled(True);self.hub.toast(f"Camera API: {error}")
+                self.hub.sys.async_api.submit(lambda:self.hub.sys.api.update_camera(on.id,{"enabled":requested}),applied,failed)
+            checkbox.stateChanged.connect(changed)
+            resolution=QLabel(camera.res);fps=QLabel(f"{camera.fps:.0f} FPS")
+            row.addWidget(checkbox,1);row.addWidget(resolution);row.addWidget(fps);self.camera_layout.addLayout(row)
+        self.camera_layout.addStretch(1)
 
 
 SPLASH_STEPS = [
@@ -3514,7 +3410,7 @@ class SplashScreen(QDialog):
             "color:white; font-size:18px; font-weight:900; letter-spacing:2px;"
         )
 
-        s = QLabel("MUKAMMAL Edition v3.0")
+        s = QLabel("Operator Console")
         s.setAlignment(Qt.AlignCenter)
         s.setStyleSheet(f"color:{TH.DIM}; font-size:10px;")
 
@@ -3641,7 +3537,7 @@ class MainWindow(QMainWindow):
         # PM_AUTO_TIMER_FIX — OLIB TASHLANDI (showEvent + persons_online signal yetarli)
         super().__init__()
 
-        self.setWindowTitle("AI Surveillance System — MUKAMMAL Edition")
+        self.setWindowTitle("AI Surveillance System — Operator Console")
 
         self.resize(1680, 980)
         self.setMinimumSize(1180, 700)
@@ -3649,6 +3545,7 @@ class MainWindow(QMainWindow):
         self.sys = System()
 
         self.tick_n = 0
+        self._diagnostic_ticks = 0
         self.fs = None
 
         self._sb_anim = []
@@ -3666,6 +3563,7 @@ class MainWindow(QMainWindow):
         # self.analytics = AnalyticsPage(self)  # ✅ Analytics commented out
         self.events_pg = EventsPage(self)
         self.settings_pg = SettingsPage(self)
+        self.sys.cameras_changed.connect(self._cameras_changed)
 
         self.page_index = {}
 
@@ -3746,6 +3644,7 @@ class MainWindow(QMainWindow):
         self.right.refresh()
 
         QTimer.singleShot(3000, self.header.set_ai_ready)
+        self.sys.refresh_cameras()
 
         pages = [
             "dashboard",
@@ -3805,14 +3704,6 @@ class MainWindow(QMainWindow):
             self.tray.show()
 
     def navigate(self, page):
-        if page == "settings" and not self.sys.settings["unlocked"]:
-            dlg = PasswordDialog(self.sys.settings["password"], self)
-
-            if dlg.exec() != QDialog.Accepted:
-                return
-
-            self.sys.settings["unlocked"] = True
-
         if self.stack.currentIndex() == self.page_index[page]:
             self.sidebar.set_active(page)
 
@@ -3884,6 +3775,10 @@ class MainWindow(QMainWindow):
             if self.sys.settings.get("sound", True):
                 QApplication.beep()
 
+    def _cameras_changed(self):
+        self.live.reload_cameras();self.settings_pg.rebuild_cameras()
+        self.cards=self.live.cards;self.header.update_stats();self.right.refresh()
+
     def tick(self):
         self.tick_n += 1
 
@@ -3899,10 +3794,21 @@ class MainWindow(QMainWindow):
     def slow_tick(self):
         sy = self.sys
         def apply_metrics(metrics):
-            sy.gpu=float(metrics.get("gpu_utilization_percent") or metrics.get("gpu_percent") or 0)
-            sy.cpu=float(metrics.get("cpu_percent") or 0);sy.ram=float(metrics.get("memory_percent") or 0);self.header.update_stats()
+            sy.pipeline_metrics = dict(metrics or {})
+            system = dict(sy.pipeline_metrics.get("system") or {})
+            sy.system_metrics = system
+            sy.gpu = system.get("gpu_utilization_percent")
+            sy.cpu = system.get("cpu_percent")
+            sy.ram = system.get("ram_percent")
+            self.header.update_stats()
         sy.async_api.submit(sy.api.get_system_metrics,apply_metrics,lambda _error:None)
 
+        self._diagnostic_ticks += 1
+        if self._diagnostic_ticks % 5 == 0:
+            cameras=sy.pipeline_metrics.get("cameras",{});video=sy.pipeline_metrics.get("video",{})
+            for camera in sy.sims:
+                source=cameras.get(camera.id,{});transport=video.get(camera.id,{})
+                print(f"{camera.id} src={source.get('source_fps',0):.1f} handoff={transport.get('display_handoff_fps',0):.1f} transport={transport.get('transport_fps',0):.1f} recv={camera.receive_fps:.1f} render={camera.render_fps:.1f} latency={camera.transport_latency_ms:.0f}ms",flush=True)
         self.header.tick_clock()
 
         # self.analytics.push()  # ✅ Analytics commented out

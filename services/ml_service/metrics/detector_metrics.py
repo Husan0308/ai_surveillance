@@ -1,8 +1,9 @@
 """Correctly named detector timing and throughput metrics."""
 from __future__ import annotations
-from dataclasses import asdict, dataclass
+from dataclasses import asdict,dataclass,field
 import threading
 import time
+from .timing import TimingProfile
 
 @dataclass(frozen=True)
 class DetectorBatchMetrics:
@@ -16,6 +17,7 @@ class DetectorBatchMetrics:
     result_parse_ms: float
     detector_wall_ms: float
     total_detection_latency_ms: float
+    phases: dict[str,float]=field(default_factory=dict)
 
 class DetectorMetrics:
     def __init__(self):
@@ -23,10 +25,12 @@ class DetectorMetrics:
         self._batches = self.processed_frames_total = 0
         self.stale_drops_before_inference = self.duplicate_inference_prevented = 0
         self.last: DetectorBatchMetrics | None = None
+        self.profile=TimingProfile()
 
     def record(self, item):
         with self._lock:
             self.last = item; self._batches += 1; self.processed_frames_total += item.batch_size
+            self.profile.record(item.phases)
 
     def snapshot(self):
         with self._lock:
@@ -37,6 +41,7 @@ class DetectorMetrics:
                           stale_drops_before_inference=self.stale_drops_before_inference,
                           duplicate_inference_prevented=self.duplicate_inference_prevented)
             return result
+    def profile_snapshot(self):return self.profile.snapshot()
 
     def format_compact(self):
         item = self.snapshot()

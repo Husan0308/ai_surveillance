@@ -18,6 +18,8 @@ class GlobalTrack:
     bbox: tuple[float,float,float,float]; confidence: float
     identity_confidence: float; identity_status: IdentityStatus
     decision_reason: str
+    person_id: Optional[str] = None
+    display_name: Optional[str] = None
 
 @dataclass(frozen=True, slots=True)
 class GlobalTrackResult:

@@ -19,3 +19,6 @@ class ApiClientTests(unittest.TestCase):
         with patch("services.frontend.api_client.urlopen",side_effect=URLError("down")),self.assertRaises(ApiConnectionError):ApiClient().get_health()
     def test_malformed_person_list_is_not_accepted(self):
         with patch("services.frontend.api_client.urlopen",return_value=Response({"items":[]})),self.assertRaises(ApiValidationError):ApiClient().get_persons()
+    def test_camera_list_contract(self):
+        with patch("services.frontend.api_client.urlopen",return_value=Response([{"id":"CAM-X","enabled":True}])):self.assertEqual(ApiClient().get_cameras()[0]["id"],"CAM-X")
+        with patch("services.frontend.api_client.urlopen",return_value=Response([{}])),self.assertRaises(ApiValidationError):ApiClient().get_cameras()

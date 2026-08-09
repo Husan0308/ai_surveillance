@@ -20,7 +20,8 @@ app=FastAPI(title="AI Surveillance API",version="1.0.0",lifespan=lifespan);app.i
 @app.middleware("http")
 async def access_log(request:Request,call_next):
  started=time.perf_counter();response=await call_next(request);elapsed=(time.perf_counter()-started)*1000
- log.info("%s %s -> %d %.0fms",request.method,request.url.path,response.status_code,elapsed);return response
+ if not request.url.path.startswith("/api/v1/internal/ml/") or response.status_code>=400:log.info("%s %s -> %d %.0fms",request.method,request.url.path,response.status_code,elapsed)
+ return response
 def main():
- import uvicorn;uvicorn.run("services.api_service.app:app",host=settings.api_host,port=settings.api_port,reload=False)
+ import uvicorn;uvicorn.run("services.api_service.app:app",host=settings.api_host,port=settings.api_port,reload=False,access_log=False)
 if __name__=="__main__":main()

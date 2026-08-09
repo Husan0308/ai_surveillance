@@ -11,7 +11,7 @@ class IdentityMatcher:
         valid=[item for item in candidates if item[0].appearance_embedding is not None]
         if not valid:return []
         gallery=np.stack([item[0].appearance_embedding for item in valid]); similarities=gallery@query
-        relation_score={"same_camera":1.0,"same_room":1.0,"adjacent_room":.8,"possible_transition":.65}.get
+        relation_score={"same_camera":1.0,"same_room":1.0,"overlapping":1.0,"adjacent_room":.8,"possible_transition":.65}.get
         output=[]
         for index,(identity,relation,gap) in enumerate(valid):
             time_score=max(0.0,1.0-gap/300000); camera_score=relation_score(relation,0.0)

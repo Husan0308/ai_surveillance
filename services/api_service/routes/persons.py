@@ -2,7 +2,7 @@ from fastapi import APIRouter,HTTPException,Request,status
 from services.api_service.schemas import PersonCreate,PersonUpdate
 from services.api_service.services import PersonService
 router=APIRouter(prefix="/persons",tags=["persons"])
-def svc(r):return PersonService(r.app.state.database)
+def svc(r):return PersonService(r.app.state.database,r.app.state.ml_client)
 @router.get("")
 async def list_persons(request:Request):return await svc(request).list()
 @router.get("/{person_id}")

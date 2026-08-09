@@ -4,14 +4,17 @@ from .buffer import LatestFrameBuffer
 from .reader import CameraReader
 
 class CameraManager:
-    """Thread-safe owner enforcing one active reader per camera."""
-    def __init__(self, on_frame_available=None, capture_factory=None):
+    """Thread-safe owner enforcing one active inference reader per camera."""
+    @staticmethod
+    def _reader_config(config):
+        result=dict(config);result["source"]=result.get("ai_source") or result.get("source");result.pop("display_source",None);result.pop("display_codec",None);return result
+    def __init__(self, on_frame_available=None, capture_factory=None, on_display_frame=None):
         self._lock = threading.RLock()
         self._readers, self._buffers, self._configs = {}, {}, {}
-        self._on_available, self._factory = on_frame_available, capture_factory;self._running=False
+        self._on_available, self._factory, self._on_display_frame = on_frame_available, capture_factory, on_display_frame;self._running=False
 
     def configure(self, configs):
-        desired = {str(c["id"]): c for c in configs if c.get("online", c.get("enabled", False))}
+        desired = {str(c["id"]): self._reader_config(c) for c in configs if c.get("online", c.get("enabled", False))}
         with self._lock: remove = set(self._readers) - set(desired)
         for camera_id in remove: self.remove(camera_id)
         for camera_id, config in desired.items():
@@ -20,7 +23,7 @@ class CameraManager:
                 self.remove(camera_id);exists=False
             if not exists:
                 buffer = LatestFrameBuffer(self._on_available)
-                reader = CameraReader(config, buffer, self._factory)
+                reader = CameraReader(config, buffer, self._factory, self._on_display_frame)
                 with self._lock:
                     self._buffers[camera_id], self._readers[camera_id], self._configs[camera_id] = buffer, reader, dict(config)
                 if self._running:reader.start()

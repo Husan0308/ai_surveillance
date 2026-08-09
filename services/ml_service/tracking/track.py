@@ -19,6 +19,7 @@ class Track:
     hits: int = 1
     misses: int = 0
     appearance_embedding: np.ndarray | None = None
+    appearance_version: int = 0
     motion: BoxMotionModel = field(init=False, repr=False)
 
     def __post_init__(self): self.motion = BoxMotionModel(self.bbox)
@@ -39,13 +40,13 @@ class Track:
             if norm: emb /= norm
             if self.appearance_embedding is not None and self.appearance_embedding.shape == emb.shape:
                 emb = .8 * self.appearance_embedding + .2 * emb; emb /= max(np.linalg.norm(emb), 1e-12)
+            self.appearance_version += 1
             self.appearance_embedding = emb
         return recovered
 
     def miss(self):
         self.motion.miss(); self.bbox = tuple(float(v) for v in self.motion.bbox)
         self.age_frames += 1; self.misses += 1; self.state = TrackState.LOST
-
-    def output(self):
-        return TrackedPerson(self.track_id, self.state, self.bbox, self.confidence,
-                             self.age_frames, self.hits, self.misses, self.velocity)
+    def output(self, now=None):
+        now = self.last_seen_at if now is None else now; predicted = tuple(float(v) for v in self.motion.predict())
+        return TrackedPerson(self.track_id, self.state, self.bbox, self.confidence, self.age_frames, self.hits, self.misses, self.velocity, self.camera_id, self.local_id, self.created_at, self.last_seen_at, max(0.0, now-self.created_at), max(0.0, now-self.last_seen_at) if self.state == TrackState.LOST else 0.0, predicted, self.appearance_version, self.state == TrackState.CONFIRMED)

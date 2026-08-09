@@ -5,6 +5,7 @@ opencv-python>=4.8
 torch>=2.1
 torchvision>=0.16
 ultralytics>=8.2
+lap>=0.5.12
 torchreid>=0.2.5
 gdown>=6.1
 insightface>=0.7.3

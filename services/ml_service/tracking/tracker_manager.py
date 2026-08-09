@@ -11,6 +11,8 @@ log = get_logger(__name__)
 class TrackerManager:
     def __init__(self, config=None, appearance_extractor=None):
         config = config or {}; self.config = config.get("tracking", config.get("ai", {}).get("tracker", {}))
+        root=config or {}
+        self.config=dict(self.config);self.config.setdefault("effective_ai_fps",root.get("ai",{}).get("ai_fps",10))
         self.appearance_enabled = bool(self.config.get("appearance_enabled", False))
         self.appearance_interval = max(1, int(self.config.get("appearance_interval_frames", 3)))
         self.reconnect_grace_ms = float(self.config.get("reconnect_grace_period_ms", 5000))
@@ -76,5 +78,15 @@ class TrackerManager:
             for track in tracker.tracks:
                 if track.track_id==track_id:return track.appearance_embedding
         return None
+    def set_embedding(self,camera_id,track_id,embedding):
+        import numpy as np
+        tracker=self._tracker(camera_id);value=np.asarray(embedding,np.float32);value/=max(float(np.linalg.norm(value)),1e-12)
+        with tracker._lock:
+            for track in tracker.tracks:
+                if track.track_id==track_id:
+                    if track.appearance_embedding is not None and track.appearance_embedding.shape==value.shape:
+                        value=.8*track.appearance_embedding+.2*value;value/=max(float(np.linalg.norm(value)),1e-12)
+                    track.appearance_embedding=value;track.appearance_version+=1;return True
+        return False
     def close(self):
         with self._lock: self._trackers.clear(); self._disconnected.clear()

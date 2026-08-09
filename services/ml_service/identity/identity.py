@@ -14,6 +14,7 @@ class GlobalIdentity:
     track_history: list = field(default_factory=list)
     confidence: float = 0.0
     active_tracks: dict = field(default_factory=dict)
+    active_track_seen: dict = field(default_factory=dict)
 
     def add_embedding(self, embedding, quality, max_history):
         if embedding is None: return False

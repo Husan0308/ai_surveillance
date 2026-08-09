@@ -17,6 +17,15 @@ class TrackedPerson:
     hits: int
     misses: int
     velocity: tuple[float, float]
+    camera_id: str = ""
+    local_track_id: int = 0
+    first_seen: float = 0.0
+    last_seen: float = 0.0
+    age_seconds: float = 0.0
+    lost_duration: float = 0.0
+    predicted_bbox: tuple[float, float, float, float] | None = None
+    appearance_version: int = 0
+    confirmed: bool = False
 
 @dataclass(frozen=True, slots=True)
 class CameraTrackResult:

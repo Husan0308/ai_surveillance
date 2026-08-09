@@ -24,7 +24,7 @@ class EnrollmentStartCommand(Message):
     type:Literal["enrollment.start"]="enrollment.start"
     session_id:str=Field(default_factory=lambda:str(uuid4()))
     name:str=Field(min_length=1,max_length=255)
-    camera_id:str=Field(pattern=r"^[A-Za-z0-9_-]+$")
+    sample_paths:list[str]=Field(min_length=10,max_length=30)
     department:str|None=None
 
 class EnrollmentCancelCommand(Message):

@@ -33,7 +33,8 @@ ai:
   pose:
     conf: 0.20
     device: cpu
-    enabled: true
+    # Deferred in P1: bbox bottom-center remains the heatmap position source.
+    enabled: false
     imgsz: 320
     model: models/yolo26n-pose.pt
     batch_size: 6
@@ -74,7 +75,9 @@ ai:
   tracker:
     match_thresh: 0.35
     new_track_thresh: 0.28
-    track_buffer: 60   # keeps tracks stable during temporary occlusions
+    track_buffer: 15   # 1.5 seconds at the measured 10 AI updates/second
+    max_lost_time_ms: 1500
+    effective_ai_fps: 10
     track_high_thresh: 0.22
     # 0.05-0.22 detections only recover tracks; new_track_thresh stays 0.28.
     track_low_thresh: 0.05
@@ -82,7 +85,7 @@ ai:
     min_confirmed_hits: 3
     tentative_buffer: 12
     confirmation_mean_thresh: 0.18
-    type: bytetrack
+    type: custom_motion_iou
     visible_missing_frames: 5
     debug: true
     debug_interval_sec: 1.0
@@ -110,7 +113,7 @@ database:
   busy_timeout_ms: 5000
   sqlite_path: data/surveillance.db
   type: sqlite
-  wal: false
+  wal: true
 enrollment:
   countdown_seconds: 3
   duplicate_check: true
@@ -131,6 +134,7 @@ environment:
   threads: 2   # reduced CPU thread pool
 deepstream:
   enabled: true
+  decoder_backend: nvv4l2decoder
   fallback_to_opencv: false   # avoid CPU fallback
   max_decode_streams: 16
 events:
@@ -187,9 +191,9 @@ person_management:
   delete_embeddings_on_delete: true
 security:
   auto_lock_minutes: 15
-  login_password: admin
+  login_password: ""
   login_username: admin
-  settings_password: admin
+  settings_password: ""
 storage:
   auto_delete_old: true
   backups_dir: backups
@@ -201,18 +205,32 @@ storage:
   recordings_enabled: false
   retention_days: 14
   segment_minutes: 5
-  snapshots_dir: snapshots
-camera_rooms:
-  CAM-01: dev-room-1
-  CAM-04: dev-room-1
-  CAM-03: main-room-1
-  CAM-05: entrance-1
-  CAM-06: main-room-2
+  snapshots_dir: data/snapshots
+identity:
+  max_embeddings_per_identity: 20
+  max_activity_history: 256
+  max_runtime_identities: 2000
+  unknown_snapshots:
+    max_identities: 500
+    retention_days: 7
+    min_improvement: 0.10
+  # Physical camera relationships are intentionally empty until the site owner confirms them.
+  topology:
+    verified: false
+    default_min_travel_ms: 20000
+    cameras: {}
 
-# ===== GEMINI AI =====
 gemini:
   enabled: false
   model: gemini-2.5-flash
   api_key: ""
   min_face_score: 0.5
   max_calls_per_min: 30
+
+display:
+  fps_cap: 18
+  jpeg_quality: 85
+  visual_track_grace_ms: 400
+  metrics_refresh_ms: 1000
+  max_width: 1280
+  max_height: 720

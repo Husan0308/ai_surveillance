@@ -22,6 +22,7 @@ class GlobalIdentityTests(unittest.TestCase):
     def test_different_people_and_impossible_transition_do_not_merge(self):
         m=GlobalIdentityManager(CONFIG);a=m.update(obs("CAM-01","T1",[1,0])).tracks[0]
         b=m.update(obs("CAM-02","T2",[0,1])).tracks[0];c=m.update(obs("CAM-09","T3",[1,0])).tracks[0]
+        self.assertGreaterEqual(m.metrics.snapshot()["rejected_impossible_merges"],1)
         self.assertNotEqual(a.global_id,b.global_id);self.assertNotEqual(a.global_id,c.global_id)
 
     def test_ambiguous_candidates_do_not_force_merge(self):
@@ -31,6 +32,8 @@ class GlobalIdentityTests(unittest.TestCase):
         m._touch(second,seed,.9)
         first=m.store.get(a.global_id);first.appearance_embedding=np.array([1,.1],np.float32)
         first.appearance_embedding/=np.linalg.norm(first.appearance_embedding)
+        second.active_track_seen.clear()
+        m.topology.overlapping.add(frozenset(("CAM-02","CAM-06")))
         second.appearance_embedding=np.array([1,-.1],np.float32);second.appearance_embedding/=np.linalg.norm(second.appearance_embedding)
         result=m.update(obs("CAM-06","C",[1,0])).tracks[0]
         self.assertIsNone(result.global_id);self.assertEqual(result.identity_status,IdentityStatus.AMBIGUOUS)

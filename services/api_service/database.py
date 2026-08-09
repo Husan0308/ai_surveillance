@@ -22,9 +22,18 @@ class SQLiteDatabase:
             CREATE INDEX IF NOT EXISTS idx_api_resources_kind ON api_resources(resource,updated_at);
             CREATE TABLE IF NOT EXISTS enrollment_sessions(id TEXT PRIMARY KEY,person_id TEXT,status TEXT NOT NULL,data TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS heatmaps(camera_id TEXT NOT NULL,mode TEXT NOT NULL,timestamp TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(camera_id,mode));
-            CREATE TABLE IF NOT EXISTS api_face_embeddings(id INTEGER PRIMARY KEY AUTOINCREMENT,person_id TEXT NOT NULL,embedding BLOB NOT NULL,quality REAL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS api_face_embeddings(id INTEGER PRIMARY KEY AUTOINCREMENT,person_id TEXT NOT NULL,embedding BLOB NOT NULL,quality REAL,dimension INTEGER,model_version TEXT,source_metadata TEXT,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             """)
+            self._ensure_embedding_columns(db)
             self._import_existing(db)
+            self._seed_cameras(db)
+            self._migrate_camera_streams(db)
+    @staticmethod
+    def _ensure_embedding_columns(db):
+        columns={row[1] for row in db.execute("PRAGMA table_info(api_face_embeddings)")}
+        for name,definition in (("dimension","INTEGER"),("model_version","TEXT"),("source_metadata","TEXT"),("enabled","INTEGER NOT NULL DEFAULT 1")):
+            if name not in columns:db.execute(f"ALTER TABLE api_face_embeddings ADD COLUMN {name} {definition}")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_face_embeddings_person_enabled ON api_face_embeddings(person_id,enabled)")
     @staticmethod
     def _table(db,name):return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone() is not None
     @staticmethod
@@ -45,6 +54,30 @@ class SQLiteDatabase:
                 try:values[row["key"]]=json.loads(row["value"])
                 except (TypeError,ValueError):values[row["key"]]=row["value"]
             if values:self._put(db,"settings","application","Application",values)
+    def _seed_cameras(self,db):
+        if db.execute("SELECT COUNT(*) FROM api_resources WHERE resource='cameras'").fetchone()[0]:return
+        from shared.config import camera_config
+        for item in camera_config().get("cameras",[]):
+            data={k:v for k,v in item.items() if k not in ("id","username","password")}
+            data["rtsp_url"]=data.get("source");data["enabled"]=bool(data.get("online",data.get("enabled",False)))
+            self._put(db,"cameras",item["id"],data.get("name"),data)
+        log.info("Seeded empty camera database from config/cameras.yaml bootstrap defaults")
+    
+    @staticmethod
+    def _migrate_camera_streams(db):
+        """Persist explicit stream roles without replacing existing camera rows."""
+        from shared.config import camera_config
+        defaults={str(item["id"]):item for item in camera_config().get("cameras",[]) if item.get("id")}
+        for camera_id,raw in db.execute("SELECT id,data FROM api_resources WHERE resource='cameras'").fetchall():
+            data=json.loads(raw);had_ai=bool(data.get("ai_source"));legacy=data.get("rtsp_url") or data.get("source");base=defaults.get(str(camera_id),{})
+            ai_source=data.get("ai_source") or base.get("ai_source") or legacy
+            display_source=data.get("display_source") or base.get("display_source") or legacy
+            ai_codec=data.get("ai_codec") or base.get("ai_codec") or data.get("codec");display_codec=data.get("display_codec") or base.get("display_codec") or data.get("codec")
+            if data.get("ai_source")==ai_source and data.get("display_source")==display_source and data.get("ai_codec")==ai_codec and data.get("display_codec")==display_codec:continue
+            data["ai_source"]=ai_source;data["display_source"]=display_source;data["ai_codec"]=ai_codec;data["display_codec"]=display_codec
+            if not had_ai and base.get("ai_source"):data["codec"]=base.get("ai_codec") or base.get("codec",data.get("codec"))
+            db.execute("UPDATE api_resources SET data=?,updated_at=CURRENT_TIMESTAMP WHERE resource='cameras' AND id=?",(json.dumps(data,default=str),str(camera_id)))
+
     async def run(self,operation):
         if not self.available:raise RuntimeError("SQLite unavailable")
         def execute():

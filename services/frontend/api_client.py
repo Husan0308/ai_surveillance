@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+from shared.enrollment_paths import stage_files
 from urllib.error import HTTPError,URLError
 from urllib.parse import urlencode
 from urllib.request import Request,urlopen
@@ -40,13 +41,17 @@ class ApiClient:
     def create_person(self,data):return self.post("persons",data)
     def update_person(self,pid,data):return self.patch(f"persons/{pid}",data)
     def delete_person(self,pid):return self.delete(f"persons/{pid}")
-    def start_enrollment(self,name,camera_id,department=None):return self.post("enrollment/sessions",{"name":name,"camera_id":camera_id,"department":department})
+    def start_enrollment(self,name,sample_paths,department=None):
+        staged=stage_files(list(sample_paths));return self.post("enrollment/sessions",{"name":name,"sample_paths":staged,"department":department})
     def get_enrollment(self,sid):return self.get(f"enrollment/sessions/{sid}")
     def cancel_enrollment(self,sid):return self.post(f"enrollment/sessions/{sid}/cancel")
     def get_events(self,**filters):
         query=urlencode({k:v for k,v in filters.items() if v is not None});return self.get("events"+(f"?{query}" if query else ""))
     def acknowledge_event(self,eid):return self.post(f"events/{eid}/acknowledge")
-    def get_cameras(self):return self.get("cameras")
+    def get_cameras(self):
+        result=self.get("cameras")
+        if not isinstance(result,list) or any(not isinstance(item,dict) or not item.get("id") for item in result):raise ApiValidationError("Invalid cameras response")
+        return result
     def create_camera(self,data):return self.post("cameras",data)
     def update_camera(self,cid,data):return self.patch(f"cameras/{cid}",data)
     def delete_camera(self,cid):return self.delete(f"cameras/{cid}")

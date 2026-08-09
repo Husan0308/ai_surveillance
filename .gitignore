@@ -22,6 +22,7 @@ snapshots/
 venv/
 .venv/
 .env
+config/cameras.local.yaml
 .vscode/
 .idea/
 
@@ -34,3 +35,9 @@ backups/
 # Logs
 *.log
 logs/
+# Runtime-owned P4 data
+data/snapshots/
+data/enrollment_staging/
+data/backups/
+data/validation/
+data/detection_miss_debug/

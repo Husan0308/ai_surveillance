@@ -1,0 +1,6 @@
+# Fill this file only after an on-site physical inspection.
+verified: false
+rooms: {}
+overlaps: []
+adjacency: {}
+travel_time: {}

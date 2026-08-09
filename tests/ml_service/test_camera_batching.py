@@ -10,11 +10,14 @@ class CameraBatchingTests(unittest.TestCase):
         stamp = timestamp or time.time()
         return FramePacket(camera, frame_id, stamp, stamp, object(), 640, 360)
 
-    def test_latest_frame_replaces_old(self):
-        buffer = LatestFrameBuffer()
-        buffer.put(self.packet("CAM-01", 1)); buffer.put(self.packet("CAM-01", 2))
-        self.assertEqual(buffer.take().frame_id, 2)
-        self.assertEqual(buffer.dropped_old, 1); self.assertIsNone(buffer.take())
+    def test_five_frame_ring_selects_newest_and_discards_obsolete(self):
+        buffer = LatestFrameBuffer(capacity=5)
+        for frame_id in range(1, 7):
+            buffer.put(self.packet("CAM-01", frame_id))
+        self.assertEqual([packet.frame_id for packet in buffer.packets()], [2, 3, 4, 5, 6])
+        self.assertEqual(buffer.take().frame_id, 6)
+        self.assertEqual(buffer.dropped_old, 5)
+        self.assertIsNone(buffer.take())
 
     def test_partial_batch_does_not_wait_for_starved_camera(self):
         delivered, ready = [], threading.Event()

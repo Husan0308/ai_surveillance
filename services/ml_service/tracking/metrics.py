@@ -18,6 +18,14 @@ class CameraTrackingMetrics:
     recovered_tracks: int = 0
     removed_tracks: int = 0
     id_switch_suspected: int = 0
+    high_confidence_matches: int = 0
+    low_confidence_recovery_matches: int = 0
+    appearance_assisted_recoveries: int = 0
+    unmatched_detections: int = 0
+    average_track_age_seconds: float = 0.0
+    average_lost_duration_seconds: float = 0.0
+    local_track_fragments: int = 0
+    deleted_tracks: int = 0
 
 class TrackingMetrics:
     def __init__(self): self._lock = threading.Lock(); self.cameras = {}; self.total_tracking_ms = 0.0
@@ -31,6 +39,6 @@ class TrackingMetrics:
     def format_compact(self):
         data = self.snapshot(); lines = ["TRACKING"]
         for cid, m in data["cameras"].items():
-            lines.append(f"{cid} detections:{m['detections']} active:{m['tracks_active']} confirmed:{m['tracks_confirmed']} lost:{m['tracks_lost']} new:{m['new_tracks']} recovered:{m['recovered_tracks']}")
+            lines.append(f"{cid} det:{m['detections']} active:{m['tracks_active']} lost:{m['tracks_lost']} new:{m['new_tracks']} recovered:{m['recovered_tracks']} deleted:{m['deleted_tracks']} high:{m['high_confidence_matches']} low:{m['low_confidence_recovery_matches']} appearance:{m['appearance_assisted_recoveries']} unmatched:{m['unmatched_detections']} age:{m['average_track_age_seconds']:.1f}s lost_for:{m['average_lost_duration_seconds']:.1f}s")
         lines.append(f"tracking_total:{data['total_tracking_ms']:.2f}ms")
         return "\n".join(lines)

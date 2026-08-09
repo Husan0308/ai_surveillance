@@ -16,6 +16,15 @@ class IdentityStore:
         with self._lock: return tuple(self._identities.values())
     def get(self,global_id):
         with self._lock: return self._identities.get(global_id)
+    def prune_archived(self,max_identities=2000):
+        with self._lock:
+            excess=len(self._identities)-max(1,int(max_identities))
+            archived=sorted((item for item in self._identities.values() if str(getattr(item.status,"value",item.status))=="ARCHIVED"),key=lambda item:item.last_seen_at)
+            removed={item.global_id for item in archived[:max(0,excess)]}
+            for global_id in removed:self._identities.pop(global_id,None)
+            for key,value in list(self._bindings.items()):
+                if value in removed:self._bindings.pop(key,None)
+            return len(removed)
     def remove_camera_bindings(self,camera_id):
         with self._lock:
             for key in [key for key in self._bindings if key[0]==camera_id]: self._bindings.pop(key,None)

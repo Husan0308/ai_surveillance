@@ -9,10 +9,11 @@ class MetadataBuffer:
    bucket=self._items.setdefault(camera_id,OrderedDict());bucket[frame_id]=dict(message);bucket.move_to_end(frame_id)
    while len(bucket)>self.capacity:bucket.popitem(last=False)
  def match(self,camera_id,frame_id,timestamp=None):
-  with self._lock:item=self._items.get(str(camera_id),{}).pop(int(frame_id),None)
-  if item is None:return None
   reference=float(timestamp if timestamp is not None else time.time())
-  return item if abs(reference-float(item.get("timestamp",reference)))<=self.max_age else None
+  with self._lock:
+   bucket=self._items.get(str(camera_id),{});candidates=[item for fid,item in bucket.items() if fid<=int(frame_id)];item=candidates[-1] if candidates else None
+  if item is None:return None
+  age=reference-float(item.get("timestamp",reference));return item if 0<=age<=self.max_age else None
 class VideoRenderer:
  def __init__(self,metadata=None):self.metadata=metadata or MetadataBuffer()
  def render(self,frame,camera_id=None,frame_id=None,timestamp=None):

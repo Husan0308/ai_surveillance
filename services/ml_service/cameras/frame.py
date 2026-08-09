@@ -14,3 +14,4 @@ class FramePacket:
     frame: Any
     width: int
     height: int
+    scheduler_selected_timestamp: float = 0.0

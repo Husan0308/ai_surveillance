@@ -3,10 +3,14 @@ cameras:
     name: "Camera 1"
     location: "Channel 101"
     source: "rtsp://192.168.1.210:554/Streaming/Channels/101"
+    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/101"
+    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/101"
     codec: "h264"
+    ai_codec: "h264"
+    display_codec: "h264"
     latency_ms: 20
-    username: "apsidal"
-    password: "aps@2026"
+    username: "${SURVEILLANCE_RTSP_USERNAME}"
+    password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
     ai_enabled: true
     heatmap_enabled: true
@@ -24,10 +28,14 @@ cameras:
     name: "Camera 2"
     location: "Channel 201"
     source: "rtsp://192.168.1.210:554/Streaming/Channels/201"
+    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/201"
+    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/201"
     codec: "h264"
+    ai_codec: "h264"
+    display_codec: "h264"
     latency_ms: 20
-    username: "apsidal"
-    password: "aps@2026"
+    username: "${SURVEILLANCE_RTSP_USERNAME}"
+    password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
     ai_enabled: true
     heatmap_enabled: true
@@ -44,11 +52,15 @@ cameras:
   - id: "CAM-03"
     name: "Camera 3"
     location: "Channel 301"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/302"
-    codec: "h265"
+    source: "rtsp://192.168.1.210:554/Streaming/Channels/301"
+    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/301"
+    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/301"
+    codec: "h264"
+    ai_codec: "h264"
+    display_codec: "h264"
     latency_ms: 20
-    username: "apsidal"
-    password: "aps@2026"
+    username: "${SURVEILLANCE_RTSP_USERNAME}"
+    password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
     ai_enabled: true
     heatmap_enabled: true
@@ -66,10 +78,14 @@ cameras:
     name: "Camera 4"
     location: "Channel 401"
     source: "rtsp://192.168.1.210:554/Streaming/Channels/601"
+    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/601"
+    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/601"
     codec: "h265"
+    ai_codec: "h265"
+    display_codec: "h265"
     latency_ms: 50
-    username: "apsidal"
-    password: "aps@2026"
+    username: "${SURVEILLANCE_RTSP_USERNAME}"
+    password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
     ai_enabled: true
     heatmap_enabled: true
@@ -87,10 +103,14 @@ cameras:
     name: "Camera 5"
     location: "Channel 501"
     source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
+    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
+    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
     codec: "h265"
+    ai_codec: "h265"
+    display_codec: "h265"
     latency_ms: 20
-    username: "apsidal"
-    password: "aps@2026"
+    username: "${SURVEILLANCE_RTSP_USERNAME}"
+    password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
     ai_enabled: true
     heatmap_enabled: true
@@ -107,11 +127,15 @@ cameras:
   - id: "CAM-06"
     name: "Camera 6"
     location: "Channel 601"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/402"
+    source: "rtsp://192.168.1.210:554/Streaming/Channels/401"
+    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/402"
+    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/401"
     codec: "h265"
+    ai_codec: "h265"
+    display_codec: "h265"
     latency_ms: 50
-    username: "apsidal"
-    password: "aps@2026"
+    username: "${SURVEILLANCE_RTSP_USERNAME}"
+    password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
     ai_enabled: true
     heatmap_enabled: true
