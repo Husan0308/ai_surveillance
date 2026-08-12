@@ -33,7 +33,7 @@ def main():
   call('DELETE',f'cameras/{ID}');result['deleted']=wait(lambda:ID not in metrics().get('cameras',{}))
  finally:
   try:call('DELETE',f'cameras/{ID}')
-  except Exception:pass
+  except Exception as exc:print(f'release CRUD cleanup failed: {exc}',file=sys.stderr)
  with sqlite3.connect(settings.database_path) as db:result['temporary_rows']=db.execute("select count(*) from api_resources where resource='cameras' and id=?",(ID,)).fetchone()[0];result['canonical_rows']=db.execute("select count(*) from api_resources where resource='cameras'").fetchone()[0]
  print(json.dumps(result,sort_keys=True));return 0 if all(result[k] for k in ('reader_appeared','metadata_edited','disabled','restarted','deleted')) and result['temporary_rows']==0 and result['canonical_rows']==6 else 1
 if __name__=='__main__':raise SystemExit(main())

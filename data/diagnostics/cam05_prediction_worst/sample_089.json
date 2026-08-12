@@ -1,0 +1,80 @@
+{
+  "track_id": "CAM-05:TRACK-00036",
+  "horizon_ms": 3907.5625850236975,
+  "previous_bbox": [
+    390.48974609375,
+    184.12298583984375,
+    470.8390197753906,
+    312.6966552734375
+  ],
+  "legacy_bbox": [
+    443.044921875,
+    82.48411560058594,
+    507.40496826171875,
+    275.2960205078125
+  ],
+  "corrected_bbox": [
+    443.044921875,
+    82.48412322998047,
+    507.40496826171875,
+    275.2960205078125
+  ],
+  "actual_bbox": [
+    320.46014404296875,
+    13.190874099731445,
+    347.97784423828125,
+    53.602516174316406
+  ],
+  "predicted_velocity": [
+    29.238740921020508,
+    -34.12704849243164,
+    -2.7289998531341553,
+    32.4896354675293
+  ],
+  "previous_confidence": 0.6139035820960999,
+  "previous_real_observation_timestamp": 1786506793.7164583,
+  "previous_state_timestamp": 1786506793.7164583,
+  "new_observation_timestamp": 1786506797.624021,
+  "prediction_horizon_ms": 3907.5625850236975,
+  "frame_id": 23163,
+  "detection_confidence": 0.0652230978012085,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:23163:FULL:1",
+  "before": {
+    "center_error_px": 202.6104631055634,
+    "center_error_normalized": 6.262537445009699,
+    "iou": 0.0,
+    "bbox_width_error": 36.84234619140625,
+    "bbox_height_error": 152.4002628326416
+  },
+  "after": {
+    "center_error_px": 202.61046584487494,
+    "center_error_normalized": 6.262537499277219,
+    "iou": 0.0,
+    "bbox_width_error": 36.84234619140625,
+    "bbox_height_error": 152.40025520324707
+  },
+  "velocity_ratio": 1.0133259955660296,
+  "observed_velocity": [
+    -24.57111930847168,
+    -36.91952133178711
+  ],
+  "bbox_scale_delta": 3.7711968421936035,
+  "motion_direction_dot": 541.5257568359375,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "LOW_CONFIDENCE_DETECTION",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    304,
+    0
+  ],
+  "crop_shape": [
+    219,
+    291
+  ],
+  "rank_score": 6.262537499277219,
+  "saved_at": 1786506798.2258732
+}

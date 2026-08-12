@@ -1,0 +1,25 @@
+{
+  "camera_id": "CAM-06",
+  "ai_resolution": [
+    640,
+    360
+  ],
+  "decoder": "captured-real-frame",
+  "tensor_shape": [
+    3,
+    512,
+    896
+  ],
+  "tensor_dtype": "uint8",
+  "tensor_contiguous": true,
+  "custom_count": 2,
+  "custom_confidences": [
+    0.33648,
+    0.05207
+  ],
+  "official_count": 2,
+  "official_confidences": [
+    0.33648,
+    0.05207
+  ]
+}

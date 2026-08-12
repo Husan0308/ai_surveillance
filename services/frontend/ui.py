@@ -3,12 +3,15 @@
 #  Python + PySide6  |  ui.py — LOCKED
 # =====================================================================
 
-import sys
 import os
 import math
 import csv
 import time
+import logging
+from collections import deque
 from datetime import datetime
+
+import shiboken6
 
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
@@ -16,7 +19,11 @@ from PySide6.QtGui import *
 from services.frontend.api_client import ApiClient
 from services.frontend.async_api import AsyncApi
 from services.frontend.websocket_client import WebSocketClient
+from services.frontend.roi_editor import ROIEditorDialog
 from shared.settings import ServiceSettings
+
+
+log = logging.getLogger(__name__)
 
 
 # ============================ THEME ==================================
@@ -52,7 +59,59 @@ def aspect_fit_rect(container_width, container_height, frame_width, frame_height
 
 
 def map_bbox_to_video_rect(video_rect, frame_width, frame_height, bbox):
-    return QRectF(video_rect.x() + bbox.x() / frame_width * video_rect.width(),video_rect.y() + bbox.y() / frame_height * video_rect.height(),bbox.width() / frame_width * video_rect.width(),bbox.height() / frame_height * video_rect.height())
+    """Map a source-pixel bbox once into an aspect-fitted rendered image rectangle."""
+    if frame_width <= 0 or frame_height <= 0 or video_rect.isEmpty():return QRectF()
+    scale=min(video_rect.width()/frame_width,video_rect.height()/frame_height)
+    render_w,render_h=frame_width*scale,frame_height*scale
+    image_rect=QRectF(video_rect.x()+(video_rect.width()-render_w)/2,video_rect.y()+(video_rect.height()-render_h)/2,render_w,render_h)
+    x1=clamp(float(bbox.left()),0.0,float(frame_width));y1=clamp(float(bbox.top()),0.0,float(frame_height))
+    x2=clamp(float(bbox.right()),x1,float(frame_width));y2=clamp(float(bbox.bottom()),y1,float(frame_height))
+    mapped=QRectF(image_rect.left()+x1*scale,image_rect.top()+y1*scale,(x2-x1)*scale,(y2-y1)*scale)
+    return mapped.intersected(image_rect)
+
+def clamped_label_rect(box,image_rect,label_width,label_height,gap=2.0):
+    width=min(float(label_width),image_rect.width());height=min(float(label_height),image_rect.height())
+    x=clamp(box.left(),image_rect.left(),image_rect.right()-width)
+    y=box.top()-height-gap if box.top()-height-gap>=image_rect.top() else box.top()
+    y=clamp(y,image_rect.top(),image_rect.bottom()-height)
+    return QRectF(x,y,width,height)
+
+def compact_unknown_label(value,track_id=None):
+    import re
+    raw=str(value or track_id or "")
+    suffix=raw.rsplit(":",1)[-1];match=re.search(r"(\d+)$",suffix)
+    if match:return f"UNK {match.group(1)[-5:]}"
+    suffix=suffix.replace("UNKNOWN-","").replace("Unknown-","").replace("UNK-","")
+    return f"UNK {suffix[-8:]}".strip()
+
+def active_global_counts(camera_states):
+    people={}
+    for camera in camera_states:
+        if not camera.online:continue
+        for track in camera.tracks:
+            key=track.global_id or f"{camera.id}:{track.track_id}"
+            previous=people.get(key)
+            if previous is None or track.known:people[key]=bool(track.known)
+    known=sum(people.values());return known,len(people)-known
+
+def unique_overlay_payloads(items):
+    """One visual per local track; real detection wins over prediction."""
+    output={}
+    for raw in items:
+        item=dict(raw);local=item.get("local_track_id") or item.get("global_id");key=(local,int(item.get("track_generation") or 1))
+        if key is None:continue
+        previous=output.get(str(key))
+        if previous is None or not (previous.get("observation_type","detected")!="predicted" and item.get("observation_type","detected")=="predicted"):output[str(key)]=item
+    return tuple(output.values())
+
+def suspicious_overlay_pairs(tracks,threshold=.70):
+    pairs=[]
+    for index,left in enumerate(tracks):
+        a=left._bbox;aa=max(0,a[2]-a[0])*max(0,a[3]-a[1])
+        for right in tracks[index+1:]:
+            b=right._bbox;inter=max(0,min(a[2],b[2])-max(a[0],b[0]))*max(0,min(a[3],b[3])-max(a[1],b[1]));union=aa+max(0,b[2]-b[0])*max(0,b[3]-b[1])-inter;iou=inter/union if union else 0.0
+            if iou>=threshold:pairs.append((left.track_id,right.track_id,iou))
+    return tuple(pairs)
 
 def heat_color(v):
     stops = [
@@ -84,12 +143,15 @@ def clamp(v, a, b):
 # ========================= REALTIME CAMERA STATE =====================
 class RealtimeTrack:
     def __init__(self,payload,previous=None,metadata_timestamp=0.0):
-        self.track_id=payload.get("local_track_id");self.global_id=payload.get("global_id");self.person_id=payload.get("person_id");self.name=payload.get("display_name") or self.global_id or self.track_id or "Unknown";self.conf=float(payload.get("confidence") or 0.0);self.known=bool(self.person_id or payload.get("display_name"));raw=tuple(float(v) for v in payload.get("bbox",(0,0,0,0)));self.metadata_timestamp=float(metadata_timestamp or time.time());self.velocity=(0.0,)*4
-        if previous is not None:
-            alpha=.65;old=previous._bbox;self._bbox=tuple(old[i]*(1-alpha)+raw[i]*alpha for i in range(4));dt=max(.02,self.metadata_timestamp-previous.metadata_timestamp);self.velocity=tuple((raw[i]-old[i])/dt for i in range(4))
-        else:self._bbox=raw
+        self.track_id=payload.get("local_track_id");self.track_generation=int(payload.get("track_generation") or 1);self.visual_key=(str(self.track_id),self.track_generation);self.global_id=payload.get("global_id");self.person_id=payload.get("person_id");self.name=payload.get("display_name") or self.global_id or self.track_id or "Unknown";self.conf=float(payload.get("confidence") or 0.0);self.known=bool(self.person_id);raw=tuple(float(v) for v in payload.get("bbox",(0,0,0,0)));self.metadata_timestamp=float(metadata_timestamp or time.time());self.observation_type=str(payload.get("observation_type") or "detected");self.tracker_state=str(payload.get("tracker_state") or "DETECTED");self.last_detection_timestamp=float(payload.get("last_detection_timestamp") or self.metadata_timestamp);self.prediction_age_ms=float(payload.get("prediction_age_ms") or 0.0);self.identity_version=int(payload.get("identity_version") or 0);self.detection_source=str(payload.get("detection_source") or self.observation_type.upper());self.detection_id=payload.get("detection_id");self.velocity=tuple(float(v) for v in payload.get("velocity",(0.0,0.0,0.0,0.0)));self.state_timestamp=float(payload.get("state_timestamp") or self.metadata_timestamp);self.geometry_monotonic=float(payload.get("geometry_monotonic") or 0.0);self.visual_expires_at=float(payload.get("visual_expires_at") or 0.0);self.visual_visible=bool(payload.get("visual_visible",True));self.boundary_exit=bool(payload.get("boundary_exit",False));self._bbox=raw;self.last_visual_age_before_ms=0.0;self.last_visual_time_error_ms=0.0;self.last_projection_dt_ms=0.0;self.negative_projection=False
+    def visible_at(self,display_timestamp):
+        return self.visual_visible and (not self.visual_expires_at or display_timestamp is None or float(display_timestamp)<=self.visual_expires_at)
     def bbox(self,width,height,display_timestamp=None):
-        ahead=min(.20,max(0.0,float(display_timestamp or self.metadata_timestamp)-self.metadata_timestamp));values=tuple(self._bbox[i]+self.velocity[i]*ahead for i in range(4));x1,y1,x2,y2=values;x1=max(0,min(width,x1));x2=max(x1,min(width,x2));y1=max(0,min(height,y1));y2=max(y1,min(height,y2));return QRectF(x1,y1,x2-x1,y2-y1)
+        x1,y1,x2,y2=self._bbox;target=float(display_timestamp or self.state_timestamp);raw_dt=target-self.state_timestamp;self.last_visual_age_before_ms=max(0.0,raw_dt)*1000.0;self.last_projection_dt_ms=raw_dt*1000.0;self.negative_projection=raw_dt<0;dt=max(-.5,raw_dt)
+        if self.visual_expires_at:dt=min(dt,max(0.0,self.visual_expires_at-self.state_timestamp))
+        vx,vy,vw,vh=(self.velocity+(0.0,0.0,0.0,0.0))[:4];cx=(x1+x2)*.5+vx*dt;cy=(y1+y2)*.5+vy*dt;w=max(1.0,(x2-x1)+vw*dt);h=max(1.0,(y2-y1)+vh*dt);x1,y1,x2,y2=cx-w*.5,cy-h*.5,cx+w*.5,cy+h*.5
+        self.last_visual_time_error_ms=abs(raw_dt-dt)*1000.0 if self.visible_at(target) else abs(target-self.state_timestamp)*1000.0
+        x1=max(0,min(width,x1));x2=max(x1,min(width,x2));y1=max(0,min(height,y1));y2=max(y1,min(height,y2));return QRectF(x1,y1,x2-x1,y2-y1)
 
 class CameraState(QObject):
     def __init__(self, cid, name, location, enabled=True, max_people=0):
@@ -102,34 +164,44 @@ class CameraState(QObject):
         self.frame = None
         self.frame_id = None
         self.frame_timestamp = None
+        self.frontend_width,self.frontend_height=0,0
         self.tracks = []
-        self.metadata_frame_id=-1;self.metadata_timestamp=0.0;self.visual_grace_seconds=.4
-        self.receive_fps=0.0;self.render_fps=0.0;self.transport_latency_ms=0.0;self.dropped_display_frames=0;self._last_rendered_frame_id=None;self._render_started=time.monotonic();self._render_frames=0
+        self._expired_track_versions={};self._latest_generation_by_local={}
+        self.camera_local_metadata_drops_total=0;self.stale_metadata_dropped_total=0;self.stale_resurrection_blocked_total=0;self.generation_mismatch_dropped_total=0
+        self.negative_projection_dt_total=0;self.projection_dt_ms=deque(maxlen=2000)
+        self.visual_age_before_ms=deque(maxlen=2000);self.visual_time_error_ms=deque(maxlen=2000);self.bbox_render_frames=0
+        self.metadata_frame_id=-1;self.metadata_timestamp=0.0;self.metadata_frame_width=0;self.metadata_frame_height=0;self.identity_version=0;self.canonicalize_global_id=lambda value:value;self.independent_display_frame_domain=False
+        self.receive_fps=0.0;self.render_fps=0.0;self.transport_latency_ms=0.0;self.jpeg_decode_ms=0.0;self.qimage_prepare_ms=0.0;self.gui_schedule_wait_ms=0.0;self.pending_gui_updates=0;self.decoded_frames=0;self.prepared_frames=0;self.replaced_before_render=0;self.qt_render_ms=0.0;self.dropped_display_frames=0;self._last_rendered_frame_id=None;self._render_started=time.monotonic();self._render_frames=0;self._render_ms_total=0.0
         self.surfaces = []
         self.heat = [[0.0] * GW for _ in range(GH)]
         self.hist = [[0.0] * GW for _ in range(GH)]
+
+    def update_surfaces(self):
+        live=[surface for surface in self.surfaces if shiboken6.isValid(surface)]
+        self.surfaces=live
+        for surface in live:surface.update()
 
     def apply_config(self,data):
         self.name=data.get("name") or self.id;self.location=data.get("location") or ""
         self.enabled=bool(data.get("enabled",data.get("online",False)))
         self.res=str(data.get("resolution") or "—");self.fps=float(data.get("fps") or 0)
-        self.heat_on=bool(data.get("heatmap_enabled",False));self.recording=bool(data.get("recording_enabled",False))
+        self.heat_on=bool(data.get("heatmap_enabled",False));self.recording=bool(data.get("recording_enabled",False));self.recovery_rois=[dict(item) for item in data.get("recovery_rois",())]
 
     @property
     def people(self):
-        if not self.metadata_timestamp:
-            return []
-        return self.tracks if time.time() - self.metadata_timestamp <= self.visual_grace_seconds else []
+        # The backend owns lifecycle; the frontend may only enforce the
+        # backend-authorized visual expiry against the exact displayed frame.
+        return [track for track in self.tracks if track.visible_at(self.frame_timestamp)]
 
-    def note_render(self):
-        if self.frame_id is None or self.frame_id == self._last_rendered_frame_id:return
-        self._last_rendered_frame_id = self.frame_id
-        self._render_frames += 1
+    def note_render(self,paint_ms=0.0):
+        if self.frame_id is None:return
+        self._render_frames += 1;self._render_ms_total+=max(0.0,float(paint_ms))
         now = time.monotonic()
         elapsed = now - self._render_started
         if elapsed >= 1.0:
             self.render_fps = self._render_frames / elapsed
-            self._render_frames = 0
+            self.qt_render_ms=self._render_ms_total/max(1,self._render_frames)
+            self._render_frames = 0;self._render_ms_total=0.0
             self._render_started = now
 
     @property
@@ -138,8 +210,47 @@ class CameraState(QObject):
 
     def set_metadata(self,message):
         frame_id=int(message.get("frame_id",-1))
-        if frame_id<self.metadata_frame_id or self.frame_id is not None and frame_id>int(self.frame_id):return False
-        stamp=float(message.get("timestamp") or time.time());previous={track.track_id:track for track in self.tracks};self.tracks=[RealtimeTrack(item,previous.get(item.get("local_track_id")),stamp) for item in message.get("tracks",())];self.metadata_frame_id=frame_id;self.metadata_timestamp=stamp;return True
+        version=int(message.get("metadata_version",-1))
+        if not hasattr(self, 'metadata_version'): self.metadata_version = -1
+        
+        # Use metadata_version for strict causal ordering if available, else fallback to frame_id
+        if version > -1:
+            if version <= self.metadata_version:
+                self.camera_local_metadata_drops_total+=1;self.stale_metadata_dropped_total+=1;return False
+            self.metadata_version = version
+        else:
+            if frame_id<self.metadata_frame_id:
+                self.camera_local_metadata_drops_total+=1;self.stale_metadata_dropped_total+=1;return False
+        
+        if not self.independent_display_frame_domain and self.frame_id is not None and frame_id>int(self.frame_id):return False
+        stamp=float(message.get("capture_timestamp") or message.get("timestamp") or time.time());identity_version=int(message.get("identity_version") or 0);previous={track.visual_key:track for track in self.tracks};deduped={};protected_locals=set()
+        for raw in unique_overlay_payloads(message.get("tracks",())):
+            item=dict(raw);canonical=self.canonicalize_global_id(item.get("global_id"));item["global_id"]=canonical;item["identity_version"]=max(identity_version,int(item.get("identity_version") or 0))
+            if not item.get("person_id"):item["display_name"]=canonical
+            local=item.get("local_track_id") or canonical
+            if local is None:continue
+            local=str(local);generation=int(item.get("track_generation") or 1);latest=self._latest_generation_by_local.get(local,0)
+            if generation<latest:
+                self.generation_mismatch_dropped_total+=1;protected_locals.add(local);continue
+            if generation>latest:self._latest_generation_by_local[local]=generation
+            key=(local,generation)
+            deduped[key]=item
+        incoming=set(deduped);previous_ids=set(previous)
+        for visual_key in previous_ids-incoming:
+            if visual_key[0] not in protected_locals:self._expired_track_versions[visual_key]=max(frame_id,self._expired_track_versions.get(visual_key,-1))
+        accepted={}
+        for visual_key,item in deduped.items():
+            self._expired_track_versions.pop(visual_key,None)
+            accepted[visual_key]=item
+        updated=[RealtimeTrack(item,previous.get(visual_key),stamp) for visual_key,item in accepted.items()]
+        updated_keys={track.visual_key for track in updated}
+        self.tracks=updated+[track for key,track in previous.items() if key[0] in protected_locals and key not in updated_keys]
+        overlaps=suspicious_overlay_pairs(self.tracks)
+        if overlaps:
+            by_id={track.track_id:track for track in self.tracks}
+            lineage=[{"left":a,"right":b,"iou":round(iou,3),"left_type":by_id[a].observation_type,"right_type":by_id[b].observation_type,"left_source":by_id[a].detection_source,"right_source":by_id[b].detection_source,"left_detection":by_id[a].detection_id,"right_detection":by_id[b].detection_id,"left_global":by_id[a].global_id,"right_global":by_id[b].global_id} for a,b,iou in overlaps]
+            log.warning("Suspicious distinct-track overlay overlap camera=%s frame=%s lineage=%s",self.id,frame_id,lineage)
+        self.metadata_frame_width=max(0,int(message.get("frame_width") or 0));self.metadata_frame_height=max(0,int(message.get("frame_height") or 0));self.metadata_frame_id=max(self.metadata_frame_id, frame_id);self.metadata_timestamp=stamp;self.identity_version=max(self.identity_version,identity_version);return True
 
     def clear_frame(self):
         self.online = False
@@ -147,6 +258,7 @@ class CameraState(QObject):
         self.frame_id = None
         self.frame_timestamp = None
         self.tracks = []
+        self.metadata_frame_id=-1;self.metadata_timestamp=0.0;self.metadata_frame_width=0;self.metadata_frame_height=0;self.identity_version=0
 
     def heat_image(self):
         import numpy as np
@@ -206,17 +318,53 @@ class System(QObject):
         self.video_base_url=ServiceSettings.from_env().ml_url.rstrip("/")
         self.visitors = {}
         self.usage = {}
+        self.identity_aliases = {}
+        self.identity_version = 0
+        self.identity_runtime_epoch = None
 
         self.events = []
 
         self.gpu, self.cpu, self.ram = None, None, None
         self.system_metrics, self.pipeline_metrics = {}, {}
         self._closing = False
+        self._event_loop_interval_s = 0.05
+        self._event_loop_expected = time.monotonic() + self._event_loop_interval_s
+        self._event_loop_lag_ms = deque(maxlen=1200)
+        self._event_loop_timer = QTimer(self)
+        self._event_loop_timer.setInterval(round(self._event_loop_interval_s * 1000))
+        self._event_loop_timer.timeout.connect(self._sample_event_loop)
+        self._event_loop_timer.start()
 
         self.people = []
 
+    def _sample_event_loop(self):
+        now = time.monotonic()
+        self._event_loop_lag_ms.append(max(0.0, (now - self._event_loop_expected) * 1000.0))
+        self._event_loop_expected = now + self._event_loop_interval_s
+
+    def frontend_runtime_metrics(self):
+        samples = sorted(self._event_loop_lag_ms)
+        def percentile(fraction):
+            return samples[min(len(samples) - 1, int((len(samples) - 1) * fraction))] if samples else 0.0
+        return {
+            "event_loop_lag_ms": {
+                "samples": len(samples), "p50": percentile(0.50),
+                "p95": percentile(0.95), "max": samples[-1] if samples else 0.0,
+            },
+            "frontend_cross_camera_mutations_total":0,
+            "cameras": {
+                camera_id: {**client.runtime_metrics(),**self._camera_visual_metrics(camera_id)}
+                for camera_id, client in sorted(self.video_clients.items())
+            },
+        }
+
+    def _camera_visual_metrics(self,camera_id):
+        camera=self.sim_by_id(camera_id);ages=sorted(camera.visual_age_before_ms) if camera else [];errors=sorted(camera.visual_time_error_ms) if camera else [];projection=sorted(camera.projection_dt_ms) if camera else []
+        def pct(values,fraction):return values[min(len(values)-1,int((len(values)-1)*fraction))] if values else 0.0
+        return {"render_fps":camera.render_fps if camera else 0.0,"bbox_render_frames":camera.bbox_render_frames if camera else 0,"visual_age_before_ms":{"p50":pct(ages,.5),"p95":pct(ages,.95),"max":ages[-1] if ages else 0.0},"visual_time_error_ms":{"p50":pct(errors,.5),"p95":pct(errors,.95),"max":errors[-1] if errors else 0.0},"projection_dt_ms":{"p50":pct(projection,.5),"p95":pct(projection,.95),"max":projection[-1] if projection else 0.0},"negative_projection_dt_total":camera.negative_projection_dt_total if camera else 0,"camera_local_metadata_drops_total":camera.camera_local_metadata_drops_total if camera else 0,"stale_metadata_dropped_total":camera.stale_metadata_dropped_total if camera else 0,"stale_resurrection_blocked_total":camera.stale_resurrection_blocked_total if camera else 0,"generation_mismatch_dropped_total":camera.generation_mismatch_dropped_total if camera else 0}
+
     def refresh_cameras(self):
-        self.async_api.submit(self.api.get_cameras,self._apply_cameras,lambda error:print(f"Camera API: {error}",flush=True))
+        self.async_api.submit(self.api.get_cameras,self._apply_cameras,lambda error:log.warning("Camera API unavailable: %s",error))
 
     def _apply_cameras(self,rows):
         existing={camera.id:camera for camera in self.sims};ordered=[];wanted=set()
@@ -224,7 +372,7 @@ class System(QObject):
         for data in sorted(rows,key=lambda item:str(item.get("id", ""))):
             camera_id=str(data["id"]);wanted.add(camera_id)
             camera=existing.get(camera_id) or CameraState(camera_id,data.get("name") or camera_id,data.get("location") or "",False)
-            camera.apply_config(data);ordered.append(camera);self.usage.setdefault(camera_id,0)
+            camera.apply_config(data);camera.canonicalize_global_id=self.canonicalize_global_id;ordered.append(camera);self.usage.setdefault(camera_id,0)
             client=self.video_clients.get(camera_id)
             if camera.enabled and client is None:
                 client=MJPEGClient(camera_id,f"{self.video_base_url}/video/{camera_id}",self)
@@ -238,13 +386,44 @@ class System(QObject):
         self.sims=ordered;self.cameras_changed.emit()
 
 
+    def canonicalize_global_id(self,global_id):
+        if global_id is None:return None
+        current=str(global_id);seen=set()
+        while current in self.identity_aliases and current not in seen:
+            seen.add(current);current=self.identity_aliases[current]
+        for alias in seen:self.identity_aliases[alias]=current
+        return current
+
+    def _accept_identity_epoch(self,message):
+        epoch=message.get("identity_runtime_epoch")
+        if not epoch:return
+        if self.identity_runtime_epoch is not None and epoch!=self.identity_runtime_epoch:
+            self.identity_aliases.clear();self.identity_version=0;self.metadata_buffer.clear()
+            for camera in self.sims:camera.identity_version=0
+        self.identity_runtime_epoch=epoch
+
     def _on_remote_message(self,message):
         kind=message.get("type","")
+        if kind in ("identity.merged","frame.metadata"):self._accept_identity_epoch(message)
+        if kind=="identity.merged":
+            version=int(message.get("identity_version") or 0)
+            if version<self.identity_version:return
+            old_id=str(message.get("old_global_id"));canonical=self.canonicalize_global_id(message.get("global_id"));self.identity_aliases[old_id]=canonical;self.identity_version=max(self.identity_version,version)
+            for camera in self.sims:
+                for track in camera.tracks:
+                    resolved=self.canonicalize_global_id(track.global_id)
+                    if resolved!=track.global_id:track.global_id=resolved;track.identity_version=self.identity_version
+                    if not track.person_id:track.name=resolved
+                # Identity text is presented with the next paced camera frame;
+                # never trigger a six-card overlay-only repaint burst.
+            return
         if kind=="frame.metadata":
             self.metadata_buffer.put(message)
-            camera=self.sim_by_id(message.get("camera_id"))
-            if camera and camera.set_metadata(message):
-                for surface in camera.surfaces:surface.update()
+            # Geometry and video must be presented atomically. Applying every
+            # prediction message here caused a second, metadata-only repaint in
+            # between paced video frames, doubling GUI paint load and making
+            # motion look like burst/freeze/overlay tearing. _on_video_frame
+            # selects the best camera-local metadata for that exact frame time.
         elif kind=="person.identified":
             self.new_event.emit(message)
         elif kind.startswith("camera."):
@@ -265,19 +444,19 @@ class System(QObject):
     def _on_video_frame(self,camera_id,frame_id,timestamp,image):
         for camera in self.sims:
             if camera.id==camera_id:
-                camera.frame=image;camera.online=True;camera.frame_id=frame_id;camera.frame_timestamp=timestamp
-                metadata=self.metadata_buffer.match(camera_id,frame_id,timestamp)
+                camera.frame=image;camera.online=True;camera.frame_id=frame_id;camera.frame_timestamp=timestamp;camera.frontend_width=image.width();camera.frontend_height=image.height()
+                metadata=self.metadata_buffer.match(camera_id,frame_id,timestamp,camera.independent_display_frame_domain)
                 if metadata:camera.set_metadata(metadata)
                 client=self.video_clients.get(camera_id)
-                if client:camera.receive_fps=client.receive_fps;camera.transport_latency_ms=client.transport_latency_ms;camera.dropped_display_frames=client.dropped_display_frames
-                for surface in camera.surfaces:surface.update()
+                if client:camera.receive_fps=client.receive_fps;camera.transport_latency_ms=client.transport_latency_ms;camera.jpeg_decode_ms=client.decode_ms;camera.qimage_prepare_ms=client.prepare_ms;camera.gui_schedule_wait_ms=client.gui_schedule_wait_ms;camera.pending_gui_updates=client.pending_gui_updates;camera.decoded_frames=client.decoded_frames;camera.prepared_frames=client.prepared_frames;camera.replaced_before_render=client.replaced_before_render;camera.dropped_display_frames=client.dropped_display_frames
+                camera.update_surfaces()
                 break
 
     def _on_video_status(self,camera_id,online):
         for camera in self.sims:
             if camera.id==camera_id:
-                if not online:camera.clear_frame()
-                for surface in camera.surfaces:surface.update()
+                if not online and (camera.online or camera.frame is not None):
+                    camera.clear_frame();camera.update_surfaces()
                 break
 
     @staticmethod
@@ -321,7 +500,7 @@ class System(QObject):
 
     def shutdown(self):
         if self._closing:return
-        self._closing=True;self.websocket.close()
+        self._closing=True;self._event_loop_timer.stop();self.websocket.close()
         for client in self.video_clients.values():client.stop()
         self.video_clients.clear()
         self.async_api.shutdown()
@@ -379,11 +558,21 @@ class PulsingDot(QWidget):
 
         self.t = QTimer(self)
         self.t.setInterval(80)
-        self.t.timeout.connect(self.update)
+        self.t.timeout.connect(self._tick)
         self.t.start()
 
+    @Slot()
+    def _tick(self):
+        self.update()
+
+    def stop(self):
+        self.t.stop()
+
     def set_color(self, c):
-        self.base = QColor(c)
+        value = QColor(c)
+        if value == self.base:
+            return
+        self.base = value
         self.update()
 
     def paintEvent(self, e):
@@ -434,9 +623,14 @@ class VideoSurface(QWidget):
 
         sim.surfaces.append(self)
 
-        self.destroyed.connect(
-            lambda _=None, s=sim, w=self: s.surfaces.remove(w) if w in s.surfaces else None
-        )
+        self.destroyed.connect(self._detach_surface)
+
+    @Slot()
+    def _detach_surface(self, *_args):
+        if self in self.sim.surfaces:self.sim.surfaces.remove(self)
+
+    def dispose(self):
+        if self in self.sim.surfaces:self.sim.surfaces.remove(self)
 
     def wheelEvent(self, e):
         if not self.zoomable:
@@ -484,7 +678,7 @@ class VideoSurface(QWidget):
         return aspect_fit_rect(self.width(), self.height(), fw, fh)
 
     def paintEvent(self, e):
-        p = QPainter(self)
+        paint_started=time.perf_counter();p = QPainter(self)
 
         p.setRenderHint(QPainter.SmoothPixmapTransform)
 
@@ -535,7 +729,8 @@ class VideoSurface(QWidget):
                 p.setOpacity(1.0)
 
             if s.ai_on:
-                self._draw_ai(p, vr, f.width(), f.height())
+                source_w=s.metadata_frame_width or f.width();source_h=s.metadata_frame_height or f.height()
+                self._draw_ai(p, vr, source_w, source_h)
 
         p.restore()
 
@@ -549,8 +744,8 @@ class VideoSurface(QWidget):
                 f"🔍 {self.zoom:.1f}×  (scroll · drag · dbl-click reset)",
             )
 
-        self.sim.note_render()
         p.end()
+        self.sim.note_render((time.perf_counter()-paint_started)*1000)
 
     def _map(self, vr, fw, fh, bb):
         return map_bbox_to_video_rect(vr, fw, fh, bb)
@@ -558,17 +753,17 @@ class VideoSurface(QWidget):
     def _draw_ai(self, p, vr, fw, fh):
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
+        p.setClipRect(vr,Qt.IntersectClip)
 
         font = QFont("Segoe UI", 8.5, QFont.Bold)
         p.setFont(font)
 
-        # zy = vr.y() + self.sim.zone_y * vr.height()
 
-        # p.setPen(QPen(QColor(255, 80, 60, 140), 1.5, Qt.DashLine))
-        # p.drawLine(QPointF(vr.left(), zy), QPointF(vr.right(), zy))
 
         for ps in self.sim.people:
-            r = self._map(vr, fw, fh, ps.bbox(fw, fh, self.sim.frame_timestamp))
+            r=self._map(vr,fw,fh,ps.bbox(fw,fh,self.sim.frame_timestamp));self.sim.projection_dt_ms.append(ps.last_projection_dt_ms)
+            if ps.negative_projection:self.sim.negative_projection_dt_total+=1
+            self.sim.visual_age_before_ms.append(ps.last_visual_age_before_ms);self.sim.visual_time_error_ms.append(ps.last_visual_time_error_ms);self.sim.bbox_render_frames+=1
 
             col = QColor(TH.OK) if ps.known else QColor("#f59e42")
 
@@ -599,22 +794,22 @@ class VideoSurface(QWidget):
                     raw_id = raw_id[4:]
                 elif raw_id.lower().startswith("unknown-"):
                     raw_id = raw_id[8:]
-                display_name = f"UNK: {raw_id}"
-            lbl = f"{display_name} · {int(ps.conf * 100)}%"
+                display_name = compact_unknown_label(raw_id,ps.track_id)
+            lbl = display_name
 
             fm = QFontMetrics(font)
 
             tw = fm.horizontalAdvance(lbl) + 10
             lh = fm.height() + 6
 
-            ly = r.top() - lh - 2 if r.top() - lh - 2 > vr.top() + 2 else r.top() + 2
+            label_rect=clamped_label_rect(r,vr,tw,lh)
 
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(col.red(), col.green(), col.blue(), 215))
-            p.drawRoundedRect(QRectF(r.left(), ly, tw, lh), 4, 4)
+            p.drawRoundedRect(label_rect,4,4)
 
             p.setPen(QColor("#0c1116"))
-            p.drawText(QRectF(r.left() + 5, ly, tw, lh), Qt.AlignVCenter, lbl)
+            p.drawText(label_rect.adjusted(5,0,-5,0),Qt.AlignVCenter,lbl)
 
         p.restore()
 
@@ -802,11 +997,6 @@ class Header(QFrame):
         h.addSpacing(8)
         h.addStretch(1)
 
-        # self.search = QLineEdit()  # ✅ Search removed
-        # self.search.setPlaceholderText("🔍  Search events, people, cameras…   ( / )")  # ✅ Search removed
-        # self.search.setMaximumWidth(340)  # ✅ Search removed
-        # self.search.setMinimumWidth(160)  # ✅ Search removed
-        # self.search.returnPressed.connect(lambda: mw.navigate("events"))  # ✅ Search removed
 
         # h.addWidget(self.search)  # ✅ Search removed
         h.addStretch(1)
@@ -1124,8 +1314,9 @@ class RightPanel(QFrame):
     def refresh(self):
         sims = [s for s in self.sys.sims if s.online]
 
-        self.known_card[1].setText(str(sum(s.known_count for s in sims)))
-        self.unk_card[1].setText(str(sum(s.unknown_count for s in sims)))
+        known,unknown=active_global_counts(sims)
+        self.known_card[1].setText(str(known))
+        self.unk_card[1].setText(str(unknown))
 
         for (bar, val), v in [
             ((self.b_gpu[1], self.b_gpu[2]), self.sys.gpu),
@@ -1155,14 +1346,14 @@ class RightPanel(QFrame):
         self.metric_detail.setText("\n".join((gpu_text,ram_text,ai_text)))
 
     def add_event(self, e):
+        e=dict(e);e.setdefault("cam",e.get("camera_id") or "SYSTEM");e.setdefault("person",e.get("person_name") or e.get("name") or e.get("global_id") or e.get("event_type") or e.get("type") or "Event")
         # Normalize timestamp - handle both datetime objects and ISO string timestamps
         ts = e.get("time")
         if isinstance(ts, str):
             try:
-                from datetime import datetime
                 ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 e["time"] = ts
-            except Exception:
+            except ValueError:
                 ts = None
         if ts is None or not hasattr(ts, "strftime"):
             ts = datetime.now()
@@ -1295,7 +1486,6 @@ class QuickInfo(QFrame):
 
         self.vals["camera"].setText(f"{s.id} — {s.name}")
 
-        # self.vals["status"].setText("🟢 Online" if on else "🔴 Offline")  # ✅ Status label removed
         self.vals["status"].setStyleSheet(
             f"color:{TH.OK if on else TH.ERR}; font-size:9.5px; font-weight:700;"
         )
@@ -1325,6 +1515,8 @@ class CameraCard(QFrame):
         self.setObjectName("camCard")
 
         self.sim, self.hub = sim, hub
+        self._disposed=False
+        self._last_offline=None
 
         self.setMinimumSize(300, 200)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1356,14 +1548,11 @@ class CameraCard(QFrame):
 
         self.dot = PulsingDot(TH.OK)
 
-        # self.lbl_status = QLabel("Online")  # ✅ Status label removed
-        # self.lbl_status.setStyleSheet(f"color:{TH.OK}; font-size:10px; font-weight:700;")  # ✅ Status label removed
 
         self.top.lay.addWidget(self.lbl_id)
         self.top.lay.addWidget(self.lbl_loc)
         self.top.lay.addStretch(1)
         self.top.lay.addWidget(self.dot)
-        # self.top.lay.addWidget(self.lbl_status)  # ✅ Status label removed
 
         self.bot = GradientBar(30, top=False)
         self.bot.setParent(self)
@@ -1387,9 +1576,7 @@ class CameraCard(QFrame):
 
         self.rec_t = QTimer(self)
         self.rec_t.setInterval(600)
-        self.rec_t.timeout.connect(
-            lambda: self.lbl_rec.setVisible(not self.lbl_rec.isVisible())
-        )
+        self.rec_t.timeout.connect(self._toggle_recording)
         self.rec_t.start()
 
         self.tb = QFrame(self)
@@ -1426,7 +1613,7 @@ class CameraCard(QFrame):
         self.btn_snap.clicked.connect(lambda: hub.snapshot(sim))
         self.btn_full.clicked.connect(lambda: hub.open_fullscreen(sim))
         self.btn_more.clicked.connect(self._menu)
-        self.hub.sys.heatmap_updated.connect(lambda camera_id:self.refresh() if camera_id==self.sim.id and self.sim.heat_on else None)
+        self.hub.sys.heatmap_updated.connect(self._on_heatmap_updated)
 
         self.qi = QuickInfo(sim)
         self.qi.setParent(self)
@@ -1435,6 +1622,26 @@ class CameraCard(QFrame):
         self.surface.doubleClicked.connect(lambda: hub.open_fullscreen(sim))
 
         self.refresh()
+
+    @Slot()
+    def _toggle_recording(self):
+        self.lbl_rec.setVisible(not self.lbl_rec.isVisible())
+
+    @Slot(str)
+    def _on_heatmap_updated(self,camera_id):
+        if not self._disposed and camera_id==self.sim.id and self.sim.heat_on:self.refresh()
+
+    def dispose(self):
+        if self._disposed:return
+        self._disposed=True;self.rec_t.stop();self.dot.stop();self.surface.dispose()
+        try:self.hub.sys.heatmap_updated.disconnect(self._on_heatmap_updated)
+        except (RuntimeError,TypeError):pass
+
+    def deleteLater(self):
+        self.dispose();super().deleteLater()
+
+    def closeEvent(self,event):
+        self.dispose();super().closeEvent(event)
 
     def _set_ai(self, c):
         self.sim.ai_on = c
@@ -1446,7 +1653,7 @@ class CameraCard(QFrame):
         self.refresh()
 
     def _load_heatmap(self):
-        self.hub.sys.async_api.submit(lambda:self.hub.sys.api.get_heatmap(self.sim.id,"live"),lambda snapshot:(self.sim.apply_heatmap(snapshot),self.refresh()),lambda error:self.hub.toast(f"Heatmap API: {error}"))
+        self.hub.sys.async_api.submit(lambda:self.hub.sys.api.get_heatmap(self.sim.id,"live"),lambda snapshot:(self.sim.apply_heatmap(snapshot),self.refresh()),lambda error:self.hub.toast(f"Heatmap API: {error}"),owner=self)
 
     def _menu(self):
         m = QMenu(self)
@@ -1504,43 +1711,26 @@ class CameraCard(QFrame):
     def refresh(self):
         s = self.sim
         on = s.online
-
-        # self.lbl_status.setText("Online" if on else "Offline")  # ✅ Status label removed
-        # self.lbl_status.setStyleSheet(  # ✅ Status label removed
-            # f"color:{TH.OK if on else TH.ERR}; font-size:10px; font-weight:700;"  # ✅ Status label removed
-        # )  # ✅ Status label removed
-
         self.dot.set_color(TH.OK if on else TH.ERR)
-
-        self.lbl_fps.setText(f"{s.receive_fps:.1f} FPS" if on else "-- FPS")
-
-        self.lbl_ppl.setText(f"👥 {len(s.people)}" if on else "👥 —")
-
-        self.lbl_ai.setText("🤖 AI ON" if s.ai_on else "🤖 AI OFF")
-        self.lbl_ai.setStyleSheet(
-            f"color:{TH.OK if s.ai_on else TH.FAINT}; font-size:9.5px; font-weight:700;"
-        )
-
+        def text_if_changed(label,value):
+            if label.text()!=value:label.setText(value)
+        def style_if_changed(widget,value):
+            if widget.styleSheet()!=value:widget.setStyleSheet(value)
+        text_if_changed(self.lbl_fps,f"{s.receive_fps:.1f} FPS" if on else "-- FPS")
+        text_if_changed(self.lbl_ppl,f"👥 {len(s.people)}" if on else "👥 —")
+        text_if_changed(self.lbl_ai,"🤖 AI ON" if s.ai_on else "🤖 AI OFF")
+        style_if_changed(self.lbl_ai,f"color:{TH.OK if s.ai_on else TH.FAINT}; font-size:9.5px; font-weight:700;")
         q = s.conn_quality
-
         bars = "▂▄▆█"
-
-        self.lbl_conn.setText(bars[:q] + "░" * (4 - q) if on else "░░░░")
-
-        self.lbl_conn.setStyleSheet(
-            f"color:{TH.OK if q >= 3 else (TH.WARN if q >= 2 else TH.ERR)}; font-size:9px;"
-        )
-
-        self.setProperty("offline", not on)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
+        text_if_changed(self.lbl_conn,bars[:q] + "░" * (4 - q) if on else "░░░░")
+        style_if_changed(self.lbl_conn,f"color:{TH.OK if q >= 3 else (TH.WARN if q >= 2 else TH.ERR)}; font-size:9px;")
+        offline=not on
+        if offline!=self._last_offline:
+            self._last_offline=offline;self.setProperty("offline",offline);self.style().unpolish(self);self.style().polish(self)
         for b, v in ((self.btn_ai, s.ai_on), (self.btn_heat, s.heat_on)):
-            b.blockSignals(True)
-            b.setChecked(v)
-            b.blockSignals(False)
-
-        self.qi.refresh()
+            if b.isChecked()!=v:
+                b.blockSignals(True);b.setChecked(v);b.blockSignals(False)
+        if self.qi.isVisible():self.qi.refresh()
 
 
 # =========================== FULLSCREEN ==============================
@@ -1552,6 +1742,7 @@ class FullscreenCam(QDialog):
         self.setStyleSheet("background:#000;")
 
         self.sim, self.hub = sim, hub
+        self._disposed = False
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -1633,7 +1824,7 @@ class FullscreenCam(QDialog):
 
     def _set_heat(self,enabled):
         self.sim.heat_on=enabled
-        if enabled:self.hub.sys.async_api.submit(lambda:self.hub.sys.api.get_heatmap(self.sim.id,"live"),lambda snapshot:(self.sim.apply_heatmap(snapshot),self.refresh()),lambda error:self.hub.toast(f"Heatmap API: {error}"))
+        if enabled:self.hub.sys.async_api.submit(lambda:self.hub.sys.api.get_heatmap(self.sim.id,"live"),lambda snapshot:(self.sim.apply_heatmap(snapshot),self.refresh()),lambda error:self.hub.toast(f"Heatmap API: {error}"),owner=self)
 
     def refresh(self):
         s = self.sim
@@ -1648,11 +1839,10 @@ class FullscreenCam(QDialog):
             b.setChecked(val)
             b.blockSignals(False)
 
-    def accept(self):
-        self.surface.zoom = 1.0
-        self.surface.offset = QPointF(0, 0)
-
-        super().accept()
+    def done(self,result):
+        if not self._disposed:
+            self._disposed=True;self.surface.zoom=1.0;self.surface.offset=QPointF(0,0);self.surface.dispose()
+        super().done(result)
 
     def keyPressEvent(self, e):
         if e.key() in (Qt.Key_Escape, Qt.Key_Back):
@@ -1678,63 +1868,6 @@ class ChartCard(QFrame):
         v.addWidget(t)
 
         self.body = v
-
-
-class LineChart(QWidget):
-    def __init__(self):
-        super().__init__()
-
-        self.series = []
-
-        self.setMinimumHeight(120)
-
-    def set_series(self, series):
-        self.series = series
-        self.update()
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-
-        w, h = self.width(), self.height()
-
-        p.setPen(QPen(QColor(TH.BORDER), 1))
-
-        for i in range(1, 4):
-            p.drawLine(0, h * i // 4, w, h * i // 4)
-
-        for data, color, name in self.series:
-            if len(data) < 2:
-                continue
-
-            mx = max(1, max(data))
-
-            pts = [
-                QPointF(i / (len(data) - 1) * w, h - 4 - (v / mx) * (h - 10))
-                for i, v in enumerate(data)
-            ]
-
-            path = QPainterPath()
-            path.moveTo(pts[0])
-
-            for q in pts[1:]:
-                path.lineTo(q)
-
-            p.setPen(QPen(QColor(color), 2))
-            p.setBrush(Qt.NoBrush)
-            p.drawPath(path)
-
-            fill = QPainterPath(path)
-            fill.lineTo(w, h)
-            fill.lineTo(0, h)
-            fill.closeSubpath()
-
-            c = QColor(color)
-            c.setAlpha(40)
-
-            p.fillPath(fill, QBrush(c))
-
-        p.end()
 
 
 class BarChart(QWidget):
@@ -1807,101 +1940,6 @@ class BarChart(QWidget):
         p.end()
 
 
-class Donut(QWidget):
-    def __init__(self):
-        super().__init__()
-
-        self.known, self.unknown = 1, 0
-
-        self.setMinimumHeight(120)
-
-    def set_values(self, k, u):
-        self.known, self.unknown = k, u
-        self.update()
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-
-        w, h = self.width(), self.height()
-
-        s = min(w * 0.55, h - 30)
-
-        x, y = (w - s) / 2, 6
-
-        total = max(1, self.known + self.unknown)
-
-        a0 = 90 * 16
-        a1 = int(self.known / total * 360 * 16)
-
-        p.setPen(Qt.NoPen)
-
-        p.setBrush(QColor(TH.OK))
-        p.drawPie(QRectF(x, y, s, s), a0, a1)
-
-        p.setBrush(QColor("#f59e42"))
-        p.drawPie(QRectF(x, y, s, s), a0 + a1, 360 * 16 - a1)
-
-        p.setBrush(QColor(TH.CARD))
-        p.drawEllipse(QRectF(x + s * 0.22, y + s * 0.22, s * 0.56, s * 0.56))
-
-        p.setPen(QColor(TH.TXT))
-        p.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        p.drawText(QRectF(x, y, s, s), Qt.AlignCenter, str(self.known + self.unknown))
-
-        p.setFont(QFont("Segoe UI", 8))
-
-        p.setPen(QColor(TH.OK))
-        p.drawText(10, y + s + 14, f"● Known {self.known}")
-
-        p.setPen(QColor("#f59e42"))
-        p.drawText(w // 2, y + s + 14, f"● Unknown {self.unknown}")
-
-        p.end()
-
-
-class HeatSummary(QWidget):
-    def __init__(self, sims):
-        super().__init__()
-
-        self.sims = sims
-
-        self.setMinimumHeight(120)
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-
-        w, h = self.width(), self.height()
-
-        cols, rows = 4, 2
-
-        tw, th = (w - 3 * (cols - 1)) // cols, (h - 3 * (rows - 1) - 14) // rows
-
-        p.setFont(QFont("Segoe UI", 7))
-
-        for i, s in enumerate(self.sims[:8]):
-            cx, cy = (i % cols) * (tw + 3), (i // cols) * (th + 3 + 11)
-
-            p.fillRect(cx, cy, tw, th, QColor("#0a0d11"))
-
-            if s.online:
-                pm = QPixmap.fromImage(s.heat_image()).scaled(
-                    tw,
-                    th,
-                    Qt.IgnoreAspectRatio,
-                    Qt.SmoothTransformation,
-                )
-
-                p.drawPixmap(cx, cy, pm)
-
-            p.setPen(QColor(TH.DIM))
-            p.drawText(cx + 3, cy + th + 9, s.id)
-
-        p.end()
-
-
-# ============================== PAGES ================================
 class Page(QWidget):
     def __init__(self):
         super().__init__()
@@ -1933,89 +1971,6 @@ class Page(QWidget):
         return row
 
 
-class DashboardPage(Page):
-    def __init__(self, hub):
-        super().__init__()
-
-        self.hub = hub
-
-        strip = QHBoxLayout()
-
-        t = QLabel("LIVE WALL")
-        t.setStyleSheet(
-            "font-size:11px; font-weight:800; color:white; letter-spacing:1px;"
-        )
-
-        self.info = QLabel()
-        self.info.setStyleSheet(f"color:{TH.DIM}; font-size:10px;")
-
-        strip.addWidget(t)
-        strip.addWidget(self.info)
-        strip.addStretch(1)
-
-        ws = QPushButton("📸 Wall Snapshot")
-        ws.setObjectName("btnGhost")
-        ws.setFixedHeight(26)
-        ws.setCursor(Qt.PointingHandCursor)
-        ws.clicked.connect(self.wall_snapshot)
-
-        strip.addWidget(ws)
-
-        self.v.addLayout(strip)
-
-        g = QGridLayout()
-        g.setSpacing(10)
-
-        self.cards = []
-
-        for i, sim in enumerate(hub.sys.sims[:6]):
-            c = CameraCard(sim, hub)
-
-            self.cards.append(c)
-
-            g.addWidget(c, i // 2, i % 2)
-
-        for i in range(2):
-            g.setColumnStretch(i, 1)
-
-        for i in range(3):
-            g.setRowStretch(i, 1)
-
-        self.v.addLayout(g, 1)
-
-    def refresh(self):
-        sy = self.hub.sys
-
-        self.info.setText(
-            f"  {sy.cams_online}/{len(sy.sims)} cameras online · "
-            f"{datetime.now().strftime('%d %b %Y')}"
-        )
-
-    def wall_snapshot(self):
-        os.makedirs("snapshots", exist_ok=True)
-
-        cols, rows = 2, 3
-
-        tw, th = FRAME_W, FRAME_H
-
-        grid = QPixmap(cols * tw, rows * th)
-        grid.fill(QColor("#000"))
-
-        p = QPainter(grid)
-
-        for i, sim in enumerate(self.hub.sys.sims[:6]):
-            if sim.frame:
-                p.drawImage(i % cols * tw, i // cols * th, sim.frame)
-
-        p.end()
-
-        fn = f"snapshots/wall_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-
-        grid.save(fn)
-
-        self.hub.toast(f"📸 Wall snapshot saved — {fn}")
-
-
 class LivePage(Page):
     def __init__(self, hub):
         super().__init__()
@@ -2042,7 +1997,7 @@ class LivePage(Page):
 
     def reload_cameras(self):
         for card in self.cards:
-            self.grid.removeWidget(card);card.deleteLater()
+            self.grid.removeWidget(card);card.dispose();card.deleteLater()
         self.cards=[]
         cameras=list(self.hub.sys.sims)
         for index,sim in enumerate(cameras):
@@ -2053,104 +2008,6 @@ class LivePage(Page):
             self.grid.setRowMinimumHeight(row,210);self.grid.setRowStretch(row,1)
         self.grid_content.setMinimumHeight(max(0,rows*210+max(0,rows-1)*self.grid.verticalSpacing()))
         if hasattr(self.hub,"cards"):self.hub.cards=self.cards
-
-# class AnalyticsPage(Page):
-#     def __init__(self, hub):
-#         super().__init__()
-#         self.hub = hub
-#         self.title_row("Analytics", "● real-time")
-#         g = QGridLayout(); g.setSpacing(10)
-# 
-#         self.occ = LineChart()
-#         c1 = ChartCard("OCCUPANCY (people, all cameras)"); c1.body.addWidget(self.occ)
-# 
-#         self.gpu_fps = LineChart()
-#         c2 = ChartCard("GPU %  /  FPS"); c2.body.addWidget(self.gpu_fps)
-# 
-#         self.donut = Donut()
-#         c3 = ChartCard("KNOWN vs UNKNOWN"); c3.body.addWidget(self.donut)
-# 
-#         self.visitors = BarChart()
-#         c4 = ChartCard("VISITORS PER CAMERA"); c4.body.addWidget(self.visitors)
-# 
-#         self.peak = BarChart()
-#         c5 = ChartCard("PEAK HOURS · aniq vaqt")
-#         peak_scroll = QScrollArea()
-#         peak_scroll.setWidgetResizable(True)
-#         peak_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-#         peak_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-#         peak_scroll.setMinimumHeight(200)
-#         peak_container = QWidget(); peak_container.setMinimumWidth(1400)
-#         peak_layout = QHBoxLayout(peak_container); peak_layout.setContentsMargins(4, 4, 4, 4)
-#         peak_layout.addWidget(self.peak)
-#         peak_scroll.setWidget(peak_container); c5.body.addWidget(peak_scroll)
-# 
-#         self.heatsum = HeatSummary(hub.sys.sims)
-#         c7 = ChartCard("HEATMAP SUMMARY"); c7.body.addWidget(self.heatsum)
-# 
-#         g.addWidget(c1, 0, 0, 1, 2)
-#         g.addWidget(c3, 0, 2)
-#         g.addWidget(c2, 0, 3)
-#         g.addWidget(c4, 1, 0)
-#         g.addWidget(c5, 1, 1, 1, 2)
-#         g.addWidget(c7, 1, 3)
-#         for i in range(4): g.setColumnStretch(i, 1)
-#         g.setRowStretch(0, 1); g.setRowStretch(1, 1)
-#         self.v.addLayout(g, 1)
-# 
-#         self.occ_d, self.gpu_d, self.fps_d = [], [], []
-#         self.push()
-# 
-#     def push(self):
-#         sy = self.hub.sys
-#         sims = [s for s in sy.sims if s.online]
-# 
-#         occ = sum(len(s.people) for s in sims)
-#         self.occ_d.append(occ)
-#         if len(self.occ_d) > 90: self.occ_d.pop(0)
-#         self.occ.set_series([(self.occ_d, TH.ACCENT, "occ")])
-# 
-#         self.gpu_d.append(sy.gpu)
-#         self.fps_d.append(sum(s.fps for s in sims) / max(1, len(sims)))
-#         if len(self.gpu_d) > 90: self.gpu_d.pop(0); self.fps_d.pop(0)
-#         self.gpu_fps.set_series([(self.gpu_d, TH.WARN, "gpu"), (self.fps_d, TH.OK, "fps")])
-# 
-#         self.donut.set_values(sum(s.known_count for s in sims), sum(s.unknown_count for s in sims))
-# 
-#         self.visitors.set_data(
-#             [sy.visitors.get(s.id, 0) for s in sy.sims[:6]],
-#             [s.id[-2:] for s in sy.sims[:6]],
-#             formatter=lambda v: str(int(v)), max_value=10,
-#         )
-#         self.visitors._show_minutes = True
-# 
-#         peak_minutes, peak_people = [0]*24, [0]*24
-#         peak_labels = [f"{i:02d}:00" if i % 3 == 0 else "" for i in range(24)]
-#         try:
-#             today_str = datetime.now().strftime("%Y-%m-%d")
-#             analytics rows are supplied by the system metrics API
-#                 h = int(row.get("hour", 0))
-#                 occ_sum = int(row.get("occupancy_sum", 0) or 0)
-#                 samples = max(1, int(row.get("int_samples", 0) or 1))
-#                 maxp = int(row.get("max_occupancy", 0) or 0)
-#                 minutes = max(0, min(60, round(occ_sum / samples * 5)))
-#                 if 0 <= h < 24:
-#                     peak_minutes[h] = minutes
-#                     peak_people[h] = maxp if maxp > 0 else round(occ_sum / samples)
-#                     if minutes > 0 or maxp > 0:
-#                         peak_labels[h] = f"{h:02d}:00→{h:02d}:{max(minutes,1):02d}"
-#         except Exception as e:
-#             print(f"[Analytics] ⚠ peak hours error: {e}", flush=True)
-#         self.peak.set_data(
-#             peak_minutes, peak_labels, QColor("#3b82f6"),
-#             formatter=lambda v: f'{int(v)}min' if v > 0 else '',
-#             max_value=60, top_values=peak_people,
-#         )
-#         self.peak._show_minutes = True
-#         self.heatsum.update()
-# 
-# 
-# 
 
 class EventDetailDialog(QDialog):
     TYPES = {
@@ -2287,17 +2144,12 @@ class EventsPage(Page):
 
     def __init__(self, hub):
 
-        # PM_AUTO_TIMER_FIX — OLIB TASHLANDI (showEvent + persons_online signal yetarli)
         super().__init__()
 
         self.hub = hub
 
         row = self.title_row("Events", f"{len(hub.sys.events)} records | 📅 Bugun")
 
-        # self.search = QLineEdit()  # ✅ Search removed
-        # self.search.setPlaceholderText("🔍 Search…")  # ✅ Search removed
-        # self.search.setMaximumWidth(200)  # ✅ Search removed
-        # self.search.textChanged.connect(self.rebuild)  # ✅ Search removed
 
         self.flt = QComboBox()
         self.flt.addItems([
@@ -2335,7 +2187,6 @@ class EventsPage(Page):
         row.addWidget(self.date_picker)
         row.addWidget(today_btn)
         row.addWidget(self.flt)
-        # row.addWidget(self.search)  # ✅ Search removed
         row.addWidget(exp)
 
         self.tbl = QTableWidget(0, 6)
@@ -2369,9 +2220,7 @@ class EventsPage(Page):
         self.rebuild()
 
     def _match(self, e):
-        q = ""  # ✅ Search removed
         f = self.flt.currentText()
-        # q = self.search.text().lower()  # ✅ Search removed
 
         ok = (
             f == "All"
@@ -2381,9 +2230,6 @@ class EventsPage(Page):
             or (f == "Enrollment" and e["type"].startswith("enrollment."))
             or (f == "Conflict" and e["type"] == "identity.conflict")
         )
-
-        if ok and q:
-            ok = q in f'{e["cam"]} {e["person"]} {e["type"]}'.lower()
 
         return ok
 
@@ -2426,86 +2272,10 @@ class EventsPage(Page):
         s = str(t)
         return s[11:19] if len(s) >= 19 else s
 
-    def _load_events_for_date(self,date_str):
-        def loaded(items):
-            self._events=[self._normalize_event(item) for item in items];self.rebuild()
-        self.hub.sys.async_api.submit(
-            lambda:self.hub.sys.api.get_events(from_ts=f"{date_str}T00:00:00Z",to_ts=f"{date_str}T23:59:59Z"),
-            loaded,lambda error:self.hub.toast(f"Events API: {error}"))
-
-    @staticmethod
-    def _normalize_event(e):
-        n = dict(e)
-        metadata = n.get("metadata") or n.get("details") or {}
-        n["type"] = str(n.get("event_type") or n.get("type") or "legacy")
-        n["time"] = n.get("timestamp") or n.get("time") or datetime.now()
-        n["cam"] = str(n.get("camera_id") or n.get("cam") or "")
-        n["person"] = str(n.get("person_name") or n.get("name") or n.get("person_id") or n.get("global_id") or n.get("person") or "")
-        n["conf"] = float(n.get("confidence") or metadata.get("confidence") or 0.0)
-        n["level"] = str(n.get("severity") or n.get("level") or "info")
-        n["ack"] = bool(n.get("acknowledged", n.get("ack", False)))
-        n["details_text"] = str(metadata.get("message") or n.get("message") or metadata or "")
-        return n
-
-    @staticmethod
-    def _event_date(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%Y-%m-%d")
-        if isinstance(t, str):
-            return t[:10]
-        return ""
-
-    @staticmethod
-    def _event_time(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%H:%M:%S")
-        s = str(t)
-        return s[11:19] if len(s) >= 19 else s
-
-    def _load_events_for_date(self,date_str):
-        def loaded(items):
-            self._events=[self._normalize_event(item) for item in items];self.rebuild()
-        self.hub.sys.async_api.submit(
-            lambda:self.hub.sys.api.get_events(from_ts=f"{date_str}T00:00:00Z",to_ts=f"{date_str}T23:59:59Z"),
-            loaded,lambda error:self.hub.toast(f"Events API: {error}"))
-
-    @staticmethod
-    def _normalize_event(e):
-        n = dict(e)
-        metadata = n.get("metadata") or n.get("details") or {}
-        n["type"] = str(n.get("event_type") or n.get("type") or "legacy")
-        n["time"] = n.get("timestamp") or n.get("time") or datetime.now()
-        n["cam"] = str(n.get("camera_id") or n.get("cam") or "")
-        n["person"] = str(n.get("person_name") or n.get("name") or n.get("person_id") or n.get("global_id") or n.get("person") or "")
-        n["conf"] = float(n.get("confidence") or metadata.get("confidence") or 0.0)
-        n["level"] = str(n.get("severity") or n.get("level") or "info")
-        n["ack"] = bool(n.get("acknowledged", n.get("ack", False)))
-        n["details_text"] = str(metadata.get("message") or n.get("message") or metadata or "")
-        return n
-
-    @staticmethod
-    def _event_date(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%Y-%m-%d")
-        if isinstance(t, str):
-            return t[:10]
-        return ""
-
-    @staticmethod
-    def _event_time(e):
-        t = e.get("time")
-        if hasattr(t, "strftime"):
-            return t.strftime("%H:%M:%S")
-        s = str(t)
-        return s[11:19] if len(s) >= 19 else s
-
     def _on_date_changed(self, qdate):
         """Date picker o'zgarganda events ni qayta yuklash"""
         date_str = qdate.toString("yyyy-MM-dd")
-        print(f"[Events] 📅 Date changed: {date_str}", flush=True)
+        log.debug("Event date changed: %s",date_str)
         self._load_events_for_date(date_str)
         self.rebuild()
 
@@ -2579,58 +2349,9 @@ class EventsPage(Page):
                     w.writerow([tstr, e["type"], e["cam"], e["person"], e.get("details_text", ""), "Acknowledged" if e.get("ack") else "New"])
         self.hub.toast(f"📄 Exported {self.tbl.rowCount()} events → {fn}")
 
-    def showEvent(self, event):
-        try:
-            super().showEvent(event)
-        except Exception:
-            pass
-
-        # PM_AUTO_SYNC_FIX
-        try:
-            if hasattr(self, "sync_db"):
-                self.sync_db()
-        except Exception as e:
-            print(f"[PM] sync_db error: {e}", flush=True)
-
-        try:
-            if hasattr(self, "load_persons"):
-                self.load_persons()
-        except Exception as e:
-            print(f"[PM] load_persons error: {e}", flush=True)
-
-        try:
-            if hasattr(self, "rebuild"):
-                self.rebuild()
-        except Exception as e:
-            print(f"[PM] rebuild error: {e}", flush=True)
-
-        try:
-            if hasattr(self, "refresh"):
-                self.refresh()
-        except Exception:
-            pass
-
-        print("[PM] ✅ Auto DB sync on enter", flush=True)
-
-    def _pm_auto_refresh(self):
-        # PM_AUTO_REFRESH_FIX
-        try:
-            if not self.isVisible():
-                return
-
-            if hasattr(self, "load_persons"):
-                self.load_persons()
-
-            if hasattr(self, "rebuild"):
-                self.rebuild()
-
-        except Exception:
-            pass
-
 class PersonManagementPage(Page):
     def __init__(self, hub):
 
-        # PM_AUTO_TIMER_FIX — OLIB TASHLANDI (showEvent + persons_online signal yetarli)
         super().__init__()
 
         self.hub = hub
@@ -2641,15 +2362,8 @@ class PersonManagementPage(Page):
         )
 
         # # Refresh tugmasi
-        # refresh_btn = QPushButton("🔄 Refresh")
-        # refresh_btn.setObjectName("btnGhost")
-        # refresh_btn.setFixedHeight(28)
-        # refresh_btn.setCursor(Qt.PointingHandCursor)
-        # refresh_btn.clicked.connect(self.force_refresh)
         
-        # row.addWidget(refresh_btn)
 
-        # ✅ DB SYNC tugmasi - eng ishonchli usul
         sync_btn = QPushButton("🔄 DB Sync")
         sync_btn.setObjectName("btnPrimary")
         sync_btn.setFixedHeight(28)
@@ -2658,23 +2372,13 @@ class PersonManagementPage(Page):
         
         row.addWidget(sync_btn)
         
-        # Timer OLIB TASHLANDI — faqat DB Sync yoki signal orqali yangilanish
-        # self._refresh_timer = QTimer(self)
-        # self._refresh_timer.setInterval(3000)
-        # self._refresh_timer.timeout.connect(self.force_refresh)
-        # self._refresh_timer.start()
 
-        # self.search = QLineEdit()  # ✅ Search removed
-        # self.search.setPlaceholderText("🔍 Search people…")  # ✅ Search removed
-        # self.search.setMaximumWidth(220)  # ✅ Search removed
-        # self.search.textChanged.connect(self.rebuild)  # ✅ Search removed
 
         enr = QPushButton("＋ Enroll New")
         enr.setObjectName("btnPrimary")
         enr.setCursor(Qt.PointingHandCursor)
         enr.clicked.connect(lambda: hub.navigate("enroll"))
 
-        # row.addWidget(self.search)  # ✅ Search removed
         row.addWidget(enr)
 
         self.tbl = QTableWidget(0, 6)
@@ -2702,7 +2406,6 @@ class PersonManagementPage(Page):
 
         self.v.addWidget(self.tbl, 1)
 
-        # Online/offline tracking
         self._online_persons = {}  # person_id -> {camera_id, track_id, name}
         
         self.hub.sys.websocket.message.connect(self._on_realtime_message)
@@ -2753,10 +2456,8 @@ class PersonManagementPage(Page):
             )
             
             if is_online:
-                # status_item.setText("🟢 Online")  # ✅ Status label removed
                 status_item.setForeground(QColor("#2ecc71"))
             else:
-                pass  # block emptied
                 status_item.setForeground(QColor("#95a5a6"))
 
     def showEvent(self, e):
@@ -2768,66 +2469,32 @@ class PersonManagementPage(Page):
             self._last_db_sync = _n
             try:
                 self.db_sync()
-                print("[PM] ✅ Auto DB sync on enter", flush=True)
+                log.debug("Person records synchronized on page entry")
             except Exception as _se:
-                print(f"[PM] showEvent sync xato: {_se}", flush=True)
+                log.warning("Person synchronization failed: %s",_se)
 
     def rebuild(self):
         """Jadvalni to'liq qayta qurish — yuz + jonli status"""
         try:
             from datetime import datetime
-            print(f"[PM] rebuild START", flush=True)
 
             self.tbl.clearContents()
             self.tbl.setRowCount(0)
 
             people = list(self.hub.sys.people)
-            print(f"[PM] rebuild: {len(people)} people to display", flush=True)
 
-            q = ""  # ✅ Search removed (disabled)
             visible_count = 0
 
-            # Backup image cache
-            face_img_cache = {}
-
             for rec in people:
-                if q:
-                    # search_text = f"{rec.name} {rec.dept} {rec.emp_id}".lower()  # EMP REMOVED
-                    if q not in search_text:
-                        continue
-
                 r = self.tbl.rowCount()
                 self.tbl.insertRow(r)
 
                 # ===== PHOTO =====
                 ph = QTableWidgetItem()
                 avatar_pm = None
-                rec_id = getattr(rec, 'db_id', None)
-                rec_name = getattr(rec, 'name', '?')
-
                 # 1) PersonRecordUI dan avatar
                 if hasattr(rec, 'avatar') and rec.avatar is not None and not rec.avatar.isNull():
                     avatar_pm = rec.avatar
-
-                # 2) face_img_cache dan (face_embeddings.image)
-                if avatar_pm is None and rec_id is not None:
-                    img_bytes = face_img_cache.get(rec_id)
-                    if img_bytes:
-                        pm = QPixmap()
-                        if pm.loadFromData(img_bytes):
-                            avatar_pm = pm
-
-                # 3) Name orqali cache dan qidirish (fallback)
-                if avatar_pm is None:
-                    for pid, img in face_img_cache.items():
-                        # Barcha mavjud ID larni tekshirish
-                        try:
-                            pm = QPixmap()
-                            if pm.loadFromData(img):
-                                avatar_pm = pm
-                                break  # birinchi topilgan rasm
-                        except Exception:
-                            continue
 
                 if avatar_pm is not None:
                     scaled = avatar_pm.scaled(38, 38, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
@@ -2889,7 +2556,6 @@ class PersonManagementPage(Page):
             if hasattr(self, 'lbl_count'):
                 self.lbl_count.setText(f"{visible_count} registered")
 
-            print(f"[PM] rebuild DONE: {visible_count} rows displayed", flush=True)
 
             # Auto-refresh timer
             if not hasattr(self, '_presence_timer'):
@@ -2900,28 +2566,7 @@ class PersonManagementPage(Page):
                 self._presence_timer.start()
 
         except Exception as e:
-            print(f"[PM] rebuild ERROR: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-
-    def _presence_label(self, rec):
-        """last_seen asosida jonli status matni va rangi"""
-        from datetime import datetime
-        if not rec.last_seen:
-            return ("", TH.FAINT)  # ✅ No offline label
-        try:
-            secs = (datetime.now() - rec.last_seen).total_seconds()
-        except Exception:
-            return ("⚫ Unknown", TH.FAINT)
-
-        if secs < 60:
-            return ("🟢 Online", TH.OK)
-        elif secs < 300:
-            return (f"🟡 {int(secs // 60)}m ago", TH.WARN)
-        elif secs < 86400:
-            return (f"⚫ {int(secs // 3600)}h ago", TH.FAINT)
-        else:
-            return (f"⚫ {int(secs // 86400)}d ago", TH.FAINT)
+            log.exception("Person table rebuild failed")
 
     def _auto_refresh_presence(self):
         """Har 20s da faqat Status ustunini yangilash (tez, to'liq rebuild emas)"""
@@ -2943,8 +2588,8 @@ class PersonManagementPage(Page):
                 st = QTableWidgetItem(status_text)
                 st.setForeground(QColor(status_color))
                 self.tbl.setItem(r, 3, st)
-        except Exception:
-            pass
+        except (RuntimeError,TypeError,AttributeError):
+            log.exception("Person presence refresh failed")
 
     def add_record(self, rec):
         self.hub.sys.people.append(rec)
@@ -2975,7 +2620,7 @@ class PersonManagementPage(Page):
         if rec is not None:
             ProfileDialog(rec,api=self.hub.sys.api,async_api=self.hub.sys.async_api).exec()
         else:
-            print(f"[PM] _profile: no rec found at row={r} col={c}", flush=True)
+            log.warning("No person record at row=%s column=%s",r,c)
 
     def force_refresh(self):
         def loaded(rows):
@@ -2987,21 +2632,6 @@ class PersonManagementPage(Page):
 
     def db_sync(self):
         self.force_refresh()
-
-    def _pm_auto_refresh(self):
-        # PM_AUTO_REFRESH_FIX
-        try:
-            if not self.isVisible():
-                return
-
-            if hasattr(self, "load_persons"):
-                self.load_persons()
-
-            if hasattr(self, "rebuild"):
-                self.rebuild()
-
-        except Exception:
-            pass
 
 class ProfileDialog(QDialog):
     def __init__(self,rec,api,async_api):
@@ -3029,11 +2659,10 @@ class ProfileDialog(QDialog):
         st_text, st_color = "—", TH.FAINT  # default
         if rec.last_seen:
             try: secs = (datetime.now() - rec.last_seen).total_seconds()
-            except Exception: secs = 999999
+            except (TypeError,AttributeError):secs=999999
             if secs < 60: st_text, st_color = "🟢 Online", TH.OK
             elif secs < 300: st_text, st_color = f"🟡 {int(secs // 60)}m ago", TH.WARN
             else: st_text, st_color = "—", TH.FAINT
-        # else: st_text, st_color = "⚫ Never seen", TH.FAINT  # ✅ Offline removed
         st = QLabel(st_text)
         st.setStyleSheet(f"color:{st_color}; font-size:11px; font-weight:700;")
         info.addWidget(nm); info.addWidget(st); info.addStretch(1)
@@ -3061,9 +2690,7 @@ class ProfileDialog(QDialog):
         visit_scroll.setStyleSheet("QScrollArea{border:none; background:transparent;}")
         visit_content = QWidget()
         vv = QVBoxLayout(visit_content); vv.setContentsMargins(0,0,0,0); vv.setSpacing(4)
-        visits_loaded = False
-        if not visits_loaded:
-            l = QLabel("No visit records yet"); l.setStyleSheet(f"color:{TH.FAINT}; font-size:10.5px; font-style:italic;"); vv.addWidget(l)
+        l = QLabel("No visit records yet");l.setStyleSheet(f"color:{TH.FAINT}; font-size:10.5px; font-style:italic;");vv.addWidget(l)
         vv.addStretch(1)
         visit_scroll.setWidget(visit_content)
         vc.body.addWidget(visit_scroll)
@@ -3113,11 +2740,11 @@ class ProfileDialog(QDialog):
         if not ok1 or not new_name.strip():return
         new_dept,ok2=QInputDialog.getText(self,"Edit Department","Department:",text=getattr(self.rec,"dept",""))
         if not ok2:return
-        self.async_api.submit(lambda:self.api.update_person(self.rec.db_id,{"name":new_name.strip(),"department":new_dept.strip()}),lambda _:(setattr(self.rec,"name",new_name.strip()),setattr(self.rec,"dept",new_dept.strip()),self.accept()),lambda error:QMessageBox.warning(self,"API",error))
+        self.async_api.submit(lambda:self.api.update_person(self.rec.db_id,{"name":new_name.strip(),"department":new_dept.strip()}),lambda _:(setattr(self.rec,"name",new_name.strip()),setattr(self.rec,"dept",new_dept.strip()),self.accept()),lambda error:QMessageBox.warning(self,"API",error),owner=self)
 
     def _delete_person(self):
         if QMessageBox.question(self,"Delete Person",f"Are you sure you want to delete {self.rec.name!r}?",QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes:return
-        self.async_api.submit(lambda:self.api.delete_person(self.rec.db_id),lambda _:self.accept(),lambda error:QMessageBox.warning(self,"API",error))
+        self.async_api.submit(lambda:self.api.delete_person(self.rec.db_id),lambda _:self.accept(),lambda error:QMessageBox.warning(self,"API",error),owner=self)
 
 
 class EnrollmentPage(Page):
@@ -3199,13 +2826,10 @@ class EnrollmentPage(Page):
         self.dept_custom.hide()
         self.dept.currentTextChanged.connect(self._on_dept_changed)
 
-        # self.emp = QLineEdit()  # EMP REMOVED
-        # self.emp.setPlaceholderText("Employee ID (auto if empty)")  # EMP REMOVED
 
         f.addWidget(self.name)
         f.addWidget(self.dept)
         f.addWidget(self.dept_custom)
-        # f.addWidget(self.emp)  # EMP REMOVED
 
         self.prog = QProgressBar()
         self.prog.setRange(0, 10)
@@ -3298,7 +2922,6 @@ class EnrollmentPage(Page):
         self.emb.setStyleSheet(f"color:{TH.FAINT}; font-size:9.5px; font-family:Consolas,monospace;")
         self.btn_reg.setEnabled(False)
         self.name.clear()
-        # self.emp.clear()  # EMP REMOVED
         self.face_status.setText("🟢 Ready for next enrollment")
 
     def _on_dept_changed(self, text):
@@ -3368,10 +2991,10 @@ class SettingsPage(Page):
                 def applied(_):box.setEnabled(True);self.hub.sys.refresh_cameras()
                 def failed(error):
                     box.blockSignals(True);box.setChecked(on.enabled);box.blockSignals(False);box.setEnabled(True);self.hub.toast(f"Camera API: {error}")
-                self.hub.sys.async_api.submit(lambda:self.hub.sys.api.update_camera(on.id,{"enabled":requested}),applied,failed)
+                self.hub.sys.async_api.submit(lambda:self.hub.sys.api.update_camera(on.id,{"enabled":requested}),applied,failed,owner=box)
             checkbox.stateChanged.connect(changed)
-            resolution=QLabel(camera.res);fps=QLabel(f"{camera.fps:.0f} FPS")
-            row.addWidget(checkbox,1);row.addWidget(resolution);row.addWidget(fps);self.camera_layout.addLayout(row)
+            resolution=QLabel(camera.res);fps=QLabel(f"{camera.fps:.0f} FPS");edit=QPushButton("Detection Recovery ROI");edit.setObjectName("btnGhost");edit.clicked.connect(lambda _checked=False,on=camera:ROIEditorDialog(self.hub,on,self).exec())
+            row.addWidget(checkbox,1);row.addWidget(resolution);row.addWidget(fps);row.addWidget(edit);self.camera_layout.addLayout(row)
         self.camera_layout.addStretch(1)
 
 
@@ -3455,86 +3078,10 @@ class SplashScreen(QDialog):
         self.lbl.setText(txt)
 
 
-class LoginScreen(QDialog):
-    def __init__(self):
-        super().__init__(None, Qt.FramelessWindowHint | Qt.Dialog)
-
-        self.setFixedSize(400, 420)
-        self.setModal(True)
-
-        scr = QApplication.primaryScreen().availableGeometry()
-
-        self.move(scr.center() - self.rect().center())
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(40, 36, 40, 30)
-        v.setSpacing(12)
-
-        logo = QLabel("◉")
-        logo.setAlignment(Qt.AlignCenter)
-        logo.setStyleSheet(f"color:{TH.ACCENT}; font-size:40px; font-weight:900;")
-
-        t = QLabel("AI Surveillance System")
-        t.setAlignment(Qt.AlignCenter)
-        t.setStyleSheet("color:white; font-size:16px; font-weight:800;")
-
-        s = QLabel("Operator Login")
-        s.setAlignment(Qt.AlignCenter)
-        s.setStyleSheet(f"color:{TH.DIM}; font-size:10.5px;")
-
-        self.user = QLineEdit()
-        self.user.setText("admin")
-        self.user.setPlaceholderText("Username")
-
-        self.pwd = QLineEdit()
-        self.pwd.setEchoMode(QLineEdit.Password)
-        self.pwd.setText("admin")
-        self.pwd.setPlaceholderText("Password")
-        self.pwd.returnPressed.connect(self.check)
-
-        self.err = QLabel("Invalid credentials")
-        self.err.setAlignment(Qt.AlignCenter)
-        self.err.setStyleSheet(f"color:{TH.ERR}; font-size:10px;")
-        self.err.hide()
-
-        btn = QPushButton("🔓  Login")
-        btn.setObjectName("btnPrimary")
-        btn.setFixedHeight(40)
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.clicked.connect(self.check)
-
-        hint = QLabel("Default: admin / admin")
-        hint.setAlignment(Qt.AlignCenter)
-        hint.setStyleSheet(f"color:{TH.FAINT}; font-size:9px;")
-
-        for w in (logo, t, s):
-            v.addWidget(w)
-
-        v.addSpacing(8)
-
-        v.addWidget(self.user)
-        v.addWidget(self.pwd)
-        v.addWidget(self.err)
-        v.addWidget(btn)
-        v.addWidget(hint)
-
-        v.addStretch(1)
-
-    def check(self):
-        if self.user.text().strip() == "admin" and self.pwd.text() == "admin":
-            self.accept()
-        else:
-            self.err.show()
-
-            self.pwd.clear()
-            self.pwd.setFocus()
-
-
 # =========================== MAIN WINDOW =============================
 class MainWindow(QMainWindow):
     def __init__(self):
 
-        # PM_AUTO_TIMER_FIX — OLIB TASHLANDI (showEvent + persons_online signal yetarli)
         super().__init__()
 
         self.setWindowTitle("AI Surveillance System — Operator Console")
@@ -3545,7 +3092,6 @@ class MainWindow(QMainWindow):
         self.sys = System()
 
         self.tick_n = 0
-        self._diagnostic_ticks = 0
         self.fs = None
 
         self._sb_anim = []
@@ -3556,11 +3102,9 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
 
-        # self.dash = DashboardPage(self)  # Dashboard olib tashlandi
         self.live = LivePage(self)
         self.pm = PersonManagementPage(self)
         self.enroll = EnrollmentPage(self)
-        # self.analytics = AnalyticsPage(self)  # ✅ Analytics commented out
         self.events_pg = EventsPage(self)
         self.settings_pg = SettingsPage(self)
         self.sys.cameras_changed.connect(self._cameras_changed)
@@ -3568,17 +3112,15 @@ class MainWindow(QMainWindow):
         self.page_index = {}
 
         for key, w in [
-            # ("dashboard", self.dash),  # Dashboard olib tashlandi
             ("live", self.live),
             ("people", self.pm),
             ("enroll", self.enroll),
-            # ("analytics", self.analytics),  # ✅ Analytics removed
             ("events", self.events_pg),
             ("settings", self.settings_pg),
         ]:
             self.page_index[key] = self.stack.addWidget(w)
 
-        self.cards = self.live.cards  # Dashboard olib tashlandi
+        self.cards = self.live.cards
 
         self.right = RightPanel(self.sys)
 
@@ -3627,13 +3169,13 @@ class MainWindow(QMainWindow):
         self.sidebar.changed.connect(self.navigate)
         self.sys.new_event.connect(self.on_event)
 
-        tf = QTimer(self)
-        tf.timeout.connect(self.tick)
-        tf.start(40)
+        self.fast_timer = QTimer(self)
+        self.fast_timer.timeout.connect(self.tick)
+        self.fast_timer.start(40)
 
-        ts = QTimer(self)
-        ts.timeout.connect(self.slow_tick)
-        ts.start(1000)
+        self.slow_timer = QTimer(self)
+        self.slow_timer.timeout.connect(self.slow_tick)
+        self.slow_timer.start(1000)
 
         for e in reversed(self.sys.events):
             self.right.add_event(e)
@@ -3643,23 +3185,12 @@ class MainWindow(QMainWindow):
 
         self.right.refresh()
 
-        QTimer.singleShot(3000, self.header.set_ai_ready)
+        self.ai_ready_timer=QTimer(self);self.ai_ready_timer.setSingleShot(True);self.ai_ready_timer.timeout.connect(self.header.set_ai_ready);self.ai_ready_timer.start(3000)
         self.sys.refresh_cameras()
 
-        pages = [
-            "dashboard",
-            "live",
-            "people",
-            "enroll",
-            # "analytics",  # ✅ Analytics nav removed
-            "events",
-            "settings",
-        ]
-
-        for i, key in enumerate("123456"):  # ✅ 6 pages (analytics removed)
-            QShortcut(QKeySequence(key), self, lambda k=pages[i]: self.navigate(k))
-
-        QShortcut(QKeySequence("/"), self, self._focus_search)
+        pages = ("live","people","enroll","events","settings")
+        for key,page in zip("12345",pages):
+            QShortcut(QKeySequence(key),self,lambda target=page:self.navigate(target))
 
         QShortcut(QKeySequence("Ctrl+E"), self, lambda: self.navigate("events"))
 
@@ -3730,9 +3261,6 @@ class MainWindow(QMainWindow):
 
         self.sidebar.set_active(page)
 
-        if page == "dashboard":
-            pass  # Dashboard removed
-
         a = QPropertyAnimation(self.fade_eff, b"opacity")
         a.setDuration(110)
         a.setStartValue(1)
@@ -3741,10 +3269,6 @@ class MainWindow(QMainWindow):
         a.start()
 
         self._nav_anim = a
-
-    def _focus_search(self):
-        if not isinstance(self.focusWidget(), QLineEdit):
-            self.header.search.setFocus()
 
     def toggle_sidebar(self):
         collapsed = not self.sidebar.collapsed
@@ -3803,25 +3327,19 @@ class MainWindow(QMainWindow):
             self.header.update_stats()
         sy.async_api.submit(sy.api.get_system_metrics,apply_metrics,lambda _error:None)
 
-        self._diagnostic_ticks += 1
-        if self._diagnostic_ticks % 5 == 0:
-            cameras=sy.pipeline_metrics.get("cameras",{});video=sy.pipeline_metrics.get("video",{})
-            for camera in sy.sims:
-                source=cameras.get(camera.id,{});transport=video.get(camera.id,{})
-                print(f"{camera.id} src={source.get('source_fps',0):.1f} handoff={transport.get('display_handoff_fps',0):.1f} transport={transport.get('transport_fps',0):.1f} recv={camera.receive_fps:.1f} render={camera.render_fps:.1f} latency={camera.transport_latency_ms:.0f}ms",flush=True)
         self.header.tick_clock()
 
-        # self.analytics.push()  # ✅ Analytics commented out
 
-    def open_fullscreen(self, sim):
-        dlg = FullscreenCam(sim, self)
-
-        self.fs = dlg
-
-        dlg.showFullScreen()
-        dlg.exec()
-
-        self.fs = None
+    def open_fullscreen(self,sim):
+        client=self.sys.video_clients.get(sim.id);sim.independent_display_frame_domain=True
+        if client:client.set_display_mode(True)
+        dlg=FullscreenCam(sim,self);self.fs=dlg
+        try:
+            dlg.showFullScreen();dlg.exec()
+        finally:
+            sim.independent_display_frame_domain=False
+            if client:client.set_display_mode(False)
+            self.fs=None
 
     def snapshot(self, sim):
         if not sim.online or sim.frame is None:
@@ -3866,19 +3384,18 @@ class MainWindow(QMainWindow):
         eff = QGraphicsOpacityEffect(t)
         t.setGraphicsEffect(eff)
 
-        anim = QPropertyAnimation(eff, b"opacity")
+        anim = QPropertyAnimation(eff, b"opacity", t)
         anim.setDuration(500)
         anim.setStartValue(1.0)
         anim.setEndValue(0.0)
 
-        anim2 = QPropertyAnimation(t, b"pos")
+        anim2 = QPropertyAnimation(t, b"pos", t)
         anim2.setDuration(500)
         anim2.setStartValue(t.pos())
         anim2.setEndValue(t.pos() + QPoint(0, 14))
 
-        QTimer.singleShot(2100, anim.start)
-        QTimer.singleShot(2100, anim2.start)
-        QTimer.singleShot(2700, t.deleteLater)
+        start_timer=QTimer(t);start_timer.setSingleShot(True);start_timer.timeout.connect(anim.start);start_timer.timeout.connect(anim2.start);start_timer.start(2100)
+        cleanup_timer=QTimer(t);cleanup_timer.setSingleShot(True);cleanup_timer.timeout.connect(t.deleteLater);cleanup_timer.start(2700)
 
     def _tray_exit(self):
         self._force_close = True
@@ -3899,6 +3416,9 @@ class MainWindow(QMainWindow):
             e.ignore()
 
         else:
+            self.fast_timer.stop();self.slow_timer.stop();self.ai_ready_timer.stop()
+            for card in tuple(self.cards):card.dispose()
+            if self.fs:self.fs.close()
             self.sys.shutdown()
             e.accept()
 
@@ -4066,88 +3586,3 @@ QSplitter::handle { background: #2b3542; }
 QToolTip { background: #202a35; color: #e9eef5; border: 1px solid #2b3542;
     border-radius: 5px; padding: 5px 8px; }
 """
-
-
-# =============================== RUN =================================
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-
-    app.setStyle("Fusion")
-
-    pal = QPalette()
-
-    pal.setColor(QPalette.Window, QColor(TH.PANEL))
-    pal.setColor(QPalette.WindowText, QColor(TH.TXT))
-    pal.setColor(QPalette.Base, QColor(TH.CARD))
-    pal.setColor(QPalette.Text, QColor(TH.TXT))
-    pal.setColor(QPalette.Button, QColor(TH.CARD2))
-    pal.setColor(QPalette.ButtonText, QColor(TH.TXT))
-    pal.setColor(QPalette.Highlight, QColor(TH.ACCENT))
-    pal.setColor(QPalette.HighlightedText, QColor("white"))
-
-    app.setPalette(pal)
-
-    app.setStyleSheet(STYLE)
-
-    splash = SplashScreen()
-
-    if splash.exec() != QDialog.Accepted:
-        sys.exit(0)
-
-    login = LoginScreen()
-
-    if login.exec() != QDialog.Accepted:
-        sys.exit(0)
-
-    win = MainWindow()
-    win.show()
-
-    sys.exit(app.exec())
-
-    def showEvent(self, event):
-        try:
-            super().showEvent(event)
-        except Exception:
-            pass
-
-        # PM_AUTO_SYNC_FIX
-        try:
-            if hasattr(self, "sync_db"):
-                self.sync_db()
-        except Exception as e:
-            print(f"[PM] sync_db error: {e}", flush=True)
-
-        try:
-            if hasattr(self, "load_persons"):
-                self.load_persons()
-        except Exception as e:
-            print(f"[PM] load_persons error: {e}", flush=True)
-
-        try:
-            if hasattr(self, "rebuild"):
-                self.rebuild()
-        except Exception as e:
-            print(f"[PM] rebuild error: {e}", flush=True)
-
-        try:
-            if hasattr(self, "refresh"):
-                self.refresh()
-        except Exception:
-            pass
-
-        print("[PM] ✅ Auto DB sync on enter", flush=True)
-
-    def _pm_auto_refresh(self):
-        # PM_AUTO_REFRESH_FIX
-        try:
-            if not self.isVisible():
-                return
-
-            if hasattr(self, "load_persons"):
-                self.load_persons()
-
-            if hasattr(self, "rebuild"):
-                self.rebuild()
-
-        except Exception:
-            pass

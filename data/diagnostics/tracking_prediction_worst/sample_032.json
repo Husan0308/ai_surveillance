@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-01:TRACK-00007",
+  "horizon_ms": 752.6427549892105,
+  "previous_bbox": [
+    1719.6295166015625,
+    554.7498779296875,
+    1985.166259765625,
+    1121.024169921875
+  ],
+  "legacy_bbox": [
+    1719.3385009765625,
+    558.8643798828125,
+    2002.8328857421875,
+    1112.4002685546875
+  ],
+  "corrected_bbox": [
+    1718.314697265625,
+    558.6193237304688,
+    2001.4384765625,
+    1113.49560546875
+  ],
+  "actual_bbox": [
+    1684.7393798828125,
+    570.453369140625,
+    1908.6470947265625,
+    1134.505859375
+  ],
+  "predicted_velocity": [
+    -4.575403213500977,
+    3.232149600982666,
+    29.641857147216797,
+    -1.233733057975769
+  ],
+  "previous_confidence": 0.9346417784690857,
+  "previous_real_observation_timestamp": 1786519641.2110207,
+  "previous_state_timestamp": 1786519641.2110207,
+  "new_observation_timestamp": 1786519641.9636643,
+  "prediction_horizon_ms": 752.6427549892105,
+  "frame_id": 1100,
+  "detection_confidence": 0.9278153777122498,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-01:1100:FULL:0",
+  "before": {
+    "center_error_px": 66.55989466950166,
+    "center_error_normalized": 0.2891316903236678,
+    "iou": 0.5680017192274055,
+    "bbox_width_error": 59.586669921875,
+    "bbox_height_error": 10.5166015625
+  },
+  "after": {
+    "center_error_px": 65.2826367976733,
+    "center_error_normalized": 0.28368276217368527,
+    "iou": 0.5740997396144695,
+    "bbox_width_error": 59.216064453125,
+    "bbox_height_error": 9.17620849609375
+  },
+  "velocity_ratio": 0.07321809815461505,
+  "observed_velocity": [
+    -74.01215362548828,
+    19.38846778869629
+  ],
+  "bbox_scale_delta": 0.2661215662956238,
+  "motion_direction_dot": 401.3018798828125,
+  "classifications": [
+    "DETECTION_BOX_JITTER",
+    "MOTION_UNDERSHOOT"
+  ],
+  "camera_id": "CAM-01",
+  "crop_origin": [
+    1668,
+    542
+  ],
+  "crop_shape": [
+    350,
+    608
+  ],
+  "rank_score": 0.28368276217368527,
+  "saved_at": 1786519642.6512678
+}

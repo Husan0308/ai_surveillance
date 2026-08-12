@@ -4,6 +4,7 @@ import numpy as np
 from services.ml_service.cameras.buffer import LatestFrameBuffer
 from services.ml_service.cameras.frame import FramePacket
 from services.ml_service.detection.person_detector import PersonDetector,filter_end2end_predictions
+from services.ml_service.detection.schemas import Detection
 from services.ml_service.pipeline.batch import BatchOutput
 from services.ml_service.pipeline.scheduler import BatchScheduler
 
@@ -29,6 +30,26 @@ class PersonDetectorTests(unittest.TestCase):
         np.testing.assert_array_equal(output[0],raw[0,:1]);np.testing.assert_array_equal(output[1],raw[1,:2])
         output=filter_end2end_predictions(raw,.05,[0],1)
         np.testing.assert_array_equal(output[0],raw[0,:1]);np.testing.assert_array_equal(output[1],raw[1,:1])
+
+    def test_end2end_class_filter_runs_before_max_det(self):
+        raw=np.array([[[1,2,3,4,.95,56],[2,3,4,5,.90,63],[3,4,5,6,.80,0],
+                       [4,5,6,7,.70,0]]],np.float32)
+        output=filter_end2end_predictions(raw,.05,[0],2)
+        np.testing.assert_array_equal(output[0],raw[0,2:4])
+    def test_end2end_exact_duplicate_nms_preserves_overlapping_people(self):
+        raw=np.array([[[10,10,50,90,.9,0],[10.1,10.1,50.1,90.1,.7,0],[25,10,65,90,.8,0],[60,10,100,90,.75,0]]],np.float32)
+        output=filter_end2end_predictions(raw,.05,[0],50)[0]
+        self.assertEqual(len(output),3);self.assertAlmostEqual(float(output[0,4]),.9,places=5)
+        self.assertTrue(any(abs(float(row[0])-25)<.1 for row in output))
+
+    def test_contained_same_person_is_suppressed_but_two_track_support_survives(self):
+        detector=PersonDetector(CONFIG,FakeBackend());tight=Detection((10,10,50,90),.9);full=Detection((5,5,55,105),.6)
+        self.assertEqual(len(detector._suppress_contained_person_duplicates("CAM-01",[tight,full])),1);self.assertEqual(detector.runtime_snapshot()["software_person_duplicates_suppressed"],1)
+        detector._active_track_hints={"CAM-01":((10,10,50,90),(5,5,55,105))}
+        self.assertEqual(len(detector._suppress_contained_person_duplicates("CAM-01",[tight,full])),2)
+        weak=Detection((5,5,55,105),.2);self.assertEqual(len(detector._suppress_contained_person_duplicates("CAM-01",[tight,weak])),1)
+        shoulder=Detection((28,10,68,90),.8);self.assertEqual(len(detector._suppress_contained_person_duplicates("CAM-02",[tight,shoulder])),2)
+
     def test_dynamic_batches_and_identity(self):
         for size in range(1, 7):
             with self.subTest(size=size):
@@ -38,6 +59,13 @@ class PersonDetectorTests(unittest.TestCase):
                 self.assertEqual(backend.batch_sizes, [size]); self.assertEqual(len(result.results), size)
                 self.assertEqual([(r.camera_id, r.frame_id) for r in result.results],
                                  [(f"CAM-{i:02d}", i) for i in range(1, size + 1)])
+
+    def test_detector_batch_record_correlates_scheduler_tensor_and_output(self):
+        backend=FakeBackend();detector=PersonDetector(CONFIG,backend);batch=BatchOutput(77,time.time(),tuple(packet(cid,index) for index,cid in enumerate(("CAM-01","CAM-03","CAM-06"),1)))
+        detector.process_batch(batch);metric=detector.metrics.snapshot()
+        self.assertEqual(metric["batch_id"],77);self.assertEqual(tuple(metric["camera_ids"]),("CAM-01","CAM-03","CAM-06"))
+        self.assertEqual((metric["scheduler_batch_size"],metric["tensor_batch_size"],metric["model_output_batch_size"]),(3,3,3))
+        self.assertLessEqual(detector.runtime_snapshot()["max_detector_batches_pending"],1)
 
     def test_original_coordinate_conversion_and_clipping(self):
         backend = FakeBackend(np.array([[-10, 20, 110, 80, .8, 0]], np.float32))
@@ -61,6 +89,10 @@ class PersonDetectorTests(unittest.TestCase):
         self.assertEqual(metrics["stale_drops_before_inference"], 1)
         self.assertEqual(metrics["duplicate_inference_prevented"], 1)
         self.assertEqual(backend.calls, 1)
+
+    def test_synchronous_detector_runtime_has_at_most_one_pending_batch(self):
+        detector=PersonDetector(CONFIG,FakeBackend());detector.process_batch(BatchOutput(1,time.time(),(packet("CAM-01",1),)))
+        runtime=detector.runtime_snapshot();self.assertEqual(runtime["detector_batches_started"],1);self.assertEqual(runtime["detector_batches_completed"],1);self.assertEqual(runtime["detector_batches_pending"],0);self.assertLessEqual(runtime["max_detector_batches_pending"],1)
 
     def test_starved_camera_does_not_block_detection(self):
         detected, backend = [], FakeBackend()

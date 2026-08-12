@@ -12,6 +12,9 @@ models/
 
 # Snapshots and Media
 snapshots/
+!services/ml_service/snapshots/
+!services/ml_service/snapshots/__init__.py
+!services/ml_service/snapshots/manager.py
 *.png
 *.jpg
 *.jpeg

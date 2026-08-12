@@ -15,3 +15,6 @@ class FramePacket:
     width: int
     height: int
     scheduler_selected_timestamp: float = 0.0
+    # System-boot monotonic seconds captured with ``capture_timestamp``. Motion
+    # models use this field; wall-clock seconds remain the transport/API time.
+    capture_monotonic: float = 0.0

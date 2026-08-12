@@ -22,3 +22,6 @@ class ApiClientTests(unittest.TestCase):
     def test_camera_list_contract(self):
         with patch("services.frontend.api_client.urlopen",return_value=Response([{"id":"CAM-X","enabled":True}])):self.assertEqual(ApiClient().get_cameras()[0]["id"],"CAM-X")
         with patch("services.frontend.api_client.urlopen",return_value=Response([{}])),self.assertRaises(ApiValidationError):ApiClient().get_cameras()
+    def test_ui_metrics_poll_uses_compact_summary(self):
+        with patch("services.frontend.api_client.urlopen",return_value=Response({})) as call:
+            ApiClient().get_system_metrics();self.assertTrue(call.call_args.args[0].full_url.endswith("/system/metrics/summary"))

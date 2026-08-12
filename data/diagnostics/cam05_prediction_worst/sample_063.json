@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00100",
+  "horizon_ms": 1674.662791978335,
+  "previous_bbox": [
+    111.38909912109375,
+    70.63526916503906,
+    159.14236450195312,
+    173.32777404785156
+  ],
+  "legacy_bbox": [
+    26.699317932128906,
+    32.005401611328125,
+    67.9423599243164,
+    122.08184814453125
+  ],
+  "corrected_bbox": [
+    26.699317932128906,
+    32.005401611328125,
+    67.9423599243164,
+    122.08184814453125
+  ],
+  "actual_bbox": [
+    92.8203125,
+    64.75712585449219,
+    142.25704956054688,
+    174.95941162109375
+  ],
+  "predicted_velocity": [
+    -50.91868591308594,
+    -19.40338706970215,
+    -3.305938959121704,
+    -8.857633590698242
+  ],
+  "previous_confidence": 0.5697911381721497,
+  "previous_real_observation_timestamp": 1786508384.8714068,
+  "previous_state_timestamp": 1786508384.8714068,
+  "new_observation_timestamp": 1786508386.5460696,
+  "prediction_horizon_ms": 1674.662791978335,
+  "frame_id": 54630,
+  "detection_confidence": 0.8194512724876404,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:54630:FULL:2",
+  "before": {
+    "center_error_px": 82.2413465254276,
+    "center_error_normalized": 1.4725336084966043,
+    "iou": 0.0,
+    "bbox_width_error": 8.193695068359375,
+    "bbox_height_error": 20.125839233398438
+  },
+  "after": {
+    "center_error_px": 82.2413465254276,
+    "center_error_normalized": 1.4725336084966043,
+    "iou": 0.0,
+    "bbox_width_error": 8.193695068359375,
+    "bbox_height_error": 20.125839233398438
+  },
+  "velocity_ratio": 5.111141028378536,
+  "observed_velocity": [
+    -10.585444450378418,
+    -1.2678688764572144
+  ],
+  "bbox_scale_delta": 0.18262633681297302,
+  "motion_direction_dot": 563.597900390625,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "MOTION_OVERSHOOT",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    10,
+    16
+  ],
+  "crop_shape": [
+    148,
+    174
+  ],
+  "rank_score": 1.4725336084966043,
+  "saved_at": 1786508387.105624
+}

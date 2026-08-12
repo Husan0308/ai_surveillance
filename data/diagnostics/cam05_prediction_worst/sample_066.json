@@ -1,0 +1,80 @@
+{
+  "track_id": "CAM-05:TRACK-00168",
+  "horizon_ms": 1554.0631169860717,
+  "previous_bbox": [
+    183.6541748046875,
+    52.87037658691406,
+    231.68374633789062,
+    145.75961303710938
+  ],
+  "legacy_bbox": [
+    144.78846740722656,
+    54.65538787841797,
+    192.00852966308594,
+    161.873291015625
+  ],
+  "corrected_bbox": [
+    144.78846740722656,
+    54.655391693115234,
+    192.00852966308594,
+    161.873291015625
+  ],
+  "actual_bbox": [
+    66.08314514160156,
+    173.93063354492188,
+    135.60543823242188,
+    323.22296142578125
+  ],
+  "predicted_velocity": [
+    -32.49435043334961,
+    5.448580741882324,
+    2.5360047817230225,
+    1.861010193824768
+  ],
+  "previous_confidence": 0.525416374206543,
+  "previous_real_observation_timestamp": 1786511452.9229753,
+  "previous_state_timestamp": 1786511452.9229753,
+  "new_observation_timestamp": 1786511454.477038,
+  "prediction_horizon_ms": 1554.0631169860717,
+  "frame_id": 115290,
+  "detection_confidence": 0.914326548576355,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:115290:FULL:0",
+  "before": {
+    "center_error_px": 155.7278290596772,
+    "center_error_normalized": 1.3518516163662087,
+    "iou": 0.0,
+    "bbox_width_error": 22.302230834960938,
+    "bbox_height_error": 42.074424743652344
+  },
+  "after": {
+    "center_error_px": 155.72782734113545,
+    "center_error_normalized": 1.3518516074839726,
+    "iou": 0.0,
+    "bbox_width_error": 22.302230834960938,
+    "bbox_height_error": 42.07442855834961
+  },
+  "velocity_ratio": 0.2789607890507516,
+  "observed_velocity": [
+    -68.73895263671875,
+    96.04617309570312
+  ],
+  "bbox_scale_delta": 0.3207924962043762,
+  "motion_direction_dot": 2756.94287109375,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "MOTION_UNDERSHOOT",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    50,
+    38
+  ],
+  "crop_shape": [
+    158,
+    301
+  ],
+  "rank_score": 1.3518516074839726,
+  "saved_at": 1786511454.7108018
+}

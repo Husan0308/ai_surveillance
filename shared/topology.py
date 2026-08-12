@@ -55,7 +55,13 @@ def compile_topology(raw,camera_ids):
         if float(seconds)<0:raise TopologyValidationError(f"negative travel time: {route}")
         travel[f"{start}:{end}"]=float(seconds)*1000
     if verified and set(membership)!=known:raise TopologyValidationError("verified topology must assign every camera to one room")
-    return {"verified":verified,"camera_rooms":membership,"overlapping_camera_pairs":overlaps,"relationships":relationships,"min_travel_time_ms":travel,"default_min_travel_ms":20000}
+    camera_relationships={}
+    ordered=sorted(known)
+    for index,a in enumerate(ordered):
+        for b in ordered[index+1:]:
+            relation="same_room" if membership.get(a) is not None and membership.get(a)==membership.get(b) else "different_room"
+            camera_relationships[f"{a}:{b}"]=relation;camera_relationships[f"{b}:{a}"]=relation
+    return {"verified":verified,"camera_rooms":membership,"room_cameras":room_cameras,"overlapping_camera_pairs":overlaps,"camera_relationships":camera_relationships,"relationships":relationships,"min_travel_time_ms":travel,"default_min_travel_ms":20000}
 
 def validate_topology(camera_ids,records):
     """Compatibility validator for the P3 per-camera representation."""

@@ -4,6 +4,7 @@ from services.ml_service.face.schemas import IdentityResolutionResult,FaceDecisi
 class IdentityResolver:
     def __init__(self,identity_store,evidence_required=3,strong_quality=.8):self.store=identity_store;self.required=evidence_required;self.strong_quality=strong_quality;self.evidence=defaultdict(list);self.bindings={};self.conflicts=[]
     def resolve(self,global_id,match,quality):
+        global_id=self.store.canonicalize(global_id) if hasattr(self.store,"canonicalize") else global_id
         existing=self.bindings.get(global_id)
         if match.person_id is None:return IdentityResolutionResult(global_id,existing[0] if existing else None,existing[1] if existing else None,match.similarity,quality,existing[2] if existing else 0,match.decision)
         if existing and existing[0]!=match.person_id:

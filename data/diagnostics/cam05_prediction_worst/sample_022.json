@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00011",
+  "horizon_ms": 744.117861991981,
+  "previous_bbox": [
+    252.06494140625,
+    24.113147735595703,
+    292.372314453125,
+    129.11865234375
+  ],
+  "legacy_bbox": [
+    244.1605987548828,
+    27.649147033691406,
+    287.88726806640625,
+    132.34457397460938
+  ],
+  "corrected_bbox": [
+    245.33692932128906,
+    27.216785430908203,
+    288.4776611328125,
+    132.28268432617188
+  ],
+  "actual_bbox": [
+    277.603271484375,
+    19.382694244384766,
+    304.5821533203125,
+    85.01066589355469
+  ],
+  "predicted_velocity": [
+    1.1809377670288086,
+    3.0254931449890137,
+    -2.188004732131958,
+    5.154365539550781
+  ],
+  "previous_confidence": 0.16494758427143097,
+  "previous_real_observation_timestamp": 1786506255.0844927,
+  "previous_state_timestamp": 1786506255.0844927,
+  "new_observation_timestamp": 1786506255.8286107,
+  "prediction_horizon_ms": 744.117861991981,
+  "frame_id": 12393,
+  "detection_confidence": 0.40218526124954224,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:12393:FULL:1",
+  "before": {
+    "center_error_px": 37.43385783436249,
+    "center_error_normalized": 1.0212012303409375,
+    "iou": 0.10243825891993527,
+    "bbox_width_error": 16.747787475585938,
+    "bbox_height_error": 39.06745529174805
+  },
+  "after": {
+    "center_error_px": 36.662040768104305,
+    "center_error_normalized": 0.9898984575618228,
+    "iou": 0.11074971652128715,
+    "bbox_width_error": 16.161849975585938,
+    "bbox_height_error": 39.43792724609375
+  },
+  "velocity_ratio": 0.07830548790139412,
+  "observed_velocity": [
+    25.364376068115234,
+    -32.81633377075195
+  ],
+  "bbox_scale_delta": 0.62077397108078,
+  "motion_direction_dot": -69.33184051513672,
+  "classifications": [
+    "SCALE_CHANGE",
+    "DIRECTION_CHANGE",
+    "MOTION_UNDERSHOOT"
+  ],
+  "crop_origin": [
+    228,
+    3
+  ],
+  "crop_shape": [
+    92,
+    145
+  ],
+  "rank_score": 0.9898984575618228,
+  "saved_at": 1786506256.6488872
+}

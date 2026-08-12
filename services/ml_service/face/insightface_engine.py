@@ -1,6 +1,8 @@
 """Canonical shared InsightFace detection/embedding implementation."""
 import threading
 import numpy as np
+from contextlib import nullcontext
+from services.ml_service.pipeline.gpu_coordinator import gpu_coordinator
 
 class InsightFaceEngine:
     def __init__(self, config):
@@ -11,7 +13,7 @@ class InsightFaceEngine:
         from insightface.app import FaceAnalysis
         import onnxruntime
         cuda=self.device.startswith("cuda") and "CUDAExecutionProvider" in onnxruntime.get_available_providers()
-        providers=["CUDAExecutionProvider","CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
+        self.uses_cuda=cuda;providers=["CUDAExecutionProvider","CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
         self.app=FaceAnalysis(name=self.model_name,allowed_modules=["detection","recognition"],providers=providers)
         self.app.prepare(ctx_id=0 if cuda else -1,det_size=self.det_size);self.available=True
 
@@ -24,7 +26,8 @@ class InsightFaceEngine:
     def detect(self,bgr,need_embedding=True):
         if not self.available or bgr is None:return []
         image=np.ascontiguousarray(bgr,dtype=np.uint8)
-        with self.lock:faces=self.app.get(image)
+        gate=gpu_coordinator.secondary("FACE") if self.uses_cuda else nullcontext()
+        with gate,self.lock:faces=self.app.get(image)
         output=[]
         for face in faces:
             raw_embedding=getattr(face,"normed_embedding",None)

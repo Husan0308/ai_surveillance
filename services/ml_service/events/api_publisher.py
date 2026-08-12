@@ -8,7 +8,7 @@ from collections import Counter
 log=get_logger(__name__)
 class APIEventPublisher:
  def __init__(self,base_url,capacity=128,timeout=.75):self.base_url=base_url.rstrip("/");self.event_url=self.base_url+"/api/v1/internal/ml/events";self.realtime_url=self.base_url+"/api/v1/internal/ml/realtime";self.timeout=timeout;self.queue=queue.Queue(capacity);self.stop_event=threading.Event();self.thread=None;self.dropped=0;self.available=False;self.started=time.monotonic();self.counts=Counter();self.persistent_counts=Counter();self._metrics_lock=threading.Lock()
- def start(self):self.thread=threading.Thread(target=self._run,name="ml-api-publisher",daemon=True);self.thread.start()
+ def start(self):self.thread=threading.Thread(target=self._run,name="ml-api-publisher",daemon=False);self.thread.start()
  def publish(self,payload):
   item=dict(payload);kind=event_type(item);persistent=is_persistent(item)
   with self._metrics_lock:self.counts[kind]+=1;self.persistent_counts[kind]+=int(persistent)
@@ -33,4 +33,6 @@ class APIEventPublisher:
   with self._metrics_lock:return {"requests_total":sum(self.counts.values()),"requests_per_sec":sum(self.counts.values())/elapsed,"persistent_requests_total":sum(self.persistent_counts.values()),"persistent_requests_per_sec":sum(self.persistent_counts.values())/elapsed,"types":dict(self.counts),"persistent_types":dict(self.persistent_counts),"dropped":self.dropped}
  def close(self):
   self.stop_event.set()
-  if self.thread:self.thread.join(2)
+  if self.thread:
+   self.thread.join(2)
+   if self.thread.is_alive():log.error("API event publisher did not stop")

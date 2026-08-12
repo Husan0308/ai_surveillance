@@ -15,6 +15,8 @@ async def event(payload:dict,request:Request):
   if kind=="enrollment.completed":await repo.complete(data)
   else:await repo.upsert(data["session_id"],data)
  elif kind=="heatmap.updated":await ResourceRepository(request.app.state.database,"heatmaps").upsert(f"{data['camera_id']}:{data['mode'].upper()}",data)
+ elif kind=="identity.merged" and data.get("identity_runtime_epoch"):
+  alias_key=f"{data['identity_runtime_epoch']}:{data.get('old_global_id')}";await ResourceRepository(request.app.state.database,"identity_aliases").upsert(alias_key,data)
  elif is_persistent(data) or (kind=="event.created" and is_persistent(data)):
   await ResourceRepository(request.app.state.database,"events").create({**data,"event_type":data.get("event_type",kind)})
   if kind in ("camera.online","camera.offline"):request.app.state.ml_status=data

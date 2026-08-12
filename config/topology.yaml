@@ -1,6 +1,13 @@
-# Fill this file only after an on-site physical inspection.
-verified: false
-rooms: {}
+# Human-confirmed physical room membership. Same-room permits ReID candidates;
+# it never implies an automatic identity merge.
+verified: true
+rooms:
+  ROOM-1:
+    cameras: [CAM-01, CAM-04]
+  ROOM-2:
+    cameras: [CAM-02, CAM-05]
+  ROOM-3:
+    cameras: [CAM-03, CAM-06]
 overlaps: []
 adjacency: {}
 travel_time: {}

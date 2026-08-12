@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 from urllib.parse import quote, urlsplit, urlunsplit
+import re
 import threading
+import time
+from collections import deque
 
 SUPPORTED_CODECS = {"h264": ("rtph264depay", "h264parse"), "h265": ("rtph265depay", "h265parse"), "hevc": ("rtph265depay", "h265parse")}
 _GST_INIT_LOCK=threading.Lock()
 _GST=None
+
+def jitter_nanoseconds_to_ms(value):
+    """Convert GStreamer's rtpjitterbuffer avg-jitter nanoseconds to ms."""
+    if value is None:return None
+    try:return float(value)/1_000_000.0
+    except (TypeError,ValueError):return None
 
 def _gstreamer():
     global _GST
@@ -31,6 +40,16 @@ def authenticated_source(config: dict) -> str | int:
 def _gst_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
+def redacted_pipeline(value: str) -> str:
+    """Keep runtime properties observable without exposing RTSP credentials."""
+    return re.sub(r'(?i)(location="?rtsps?://)[^@"\s]+@',r'\1***:***@',str(value))
+
+def owned_bgr_from_mapped(data,width,height,pixel_format):
+    import numpy as np
+    channels=4 if str(pixel_format)=="BGRx" else 3
+    mapped=np.frombuffer(data,dtype=np.uint8).reshape((int(height),int(width),channels))
+    return mapped[...,:3].copy()
+
 def nvidia_rtsp_pipeline(config: dict) -> str:
     codec = str(config.get("codec", "")).lower()
     if codec not in SUPPORTED_CODECS: raise ValueError(f"camera {config.get('id')} requires codec=h264 or codec=h265")
@@ -39,14 +58,26 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
     depay, parser = SUPPORTED_CODECS[codec]; latency = max(0, int(config.get("latency_ms", 50)))
     decoder_backend=str(config.get("decoder_backend","nvv4l2decoder")).lower()
     if decoder_backend=="nvcodec":
-        decoder="nvh264dec max-display-delay=0" if codec=="h264" else "nvh265dec max-display-delay=0"
-        conversion="video/x-raw,format=NV12 ! videoconvert"
-    elif decoder_backend=="nvv4l2decoder":decoder="nvv4l2decoder low-latency-mode=true";conversion="nvvideoconvert ! video/x-raw,format=BGRx ! videoconvert"
+        decoder="nvh264dec name=decoder max-display-delay=0" if codec=="h264" else "nvh265dec name=decoder max-display-delay=0"
+        conversion="video/x-raw,format=NV12 ! videoconvert name=converter ! video/x-raw,format=BGR"
+    elif decoder_backend=="nvv4l2decoder":
+        decoder="nvv4l2decoder name=decoder low-latency-mode=true num-extra-surfaces=2"
+        # Map BGRx once and strip the padding channel while making the required
+        # owned NumPy copy.  A full-resolution videoconvert BGR buffer is avoided.
+        conversion="nvvideoconvert name=converter ! video/x-raw,format=BGRx"
     else:raise ValueError(f"unsupported NVIDIA decoder backend: {decoder_backend}")
     encoding="H264" if codec=="h264" else "H265"
-    return (f"rtspsrc location={_gst_quote(source)} protocols=tcp latency={latency} drop-on-latency=true ! "
+    transport=str(config.get("rtsp_transport","tcp")).strip().lower()
+    if transport not in {"tcp","udp","auto"}:
+        raise ValueError(f"unsupported RTSP transport: {transport}")
+    source_options=[f"location={_gst_quote(source)}",f"latency={latency}",
+        f"drop-on-latency={'true' if bool(config.get('drop_on_latency',True)) else 'false'}"]
+    if transport!="auto":source_options.append(f"protocols={transport}")
+    udp_buffer_size=int(config.get("udp_buffer_size",0) or 0)
+    if transport in {"udp","auto"} and udp_buffer_size>0:source_options.append(f"udp-buffer-size={udp_buffer_size}")
+    return (f"rtspsrc name=source {' '.join(source_options)} ! "
             f"application/x-rtp,media=video,encoding-name={encoding} ! "
-            f"{depay} ! {parser} ! {decoder} ! {conversion} ! video/x-raw,format=BGR ! "
+            f"{depay} name=depay ! {parser} name=parser ! {decoder} ! {conversion} ! "
             "appsink name=sink drop=true max-buffers=1 sync=false")
 
 class GStreamerCapture:
@@ -57,24 +88,68 @@ class GStreamerCapture:
         self.pipeline = nvidia_rtsp_pipeline(config)
         self._pipeline=Gst.parse_launch(self.pipeline);self._sink=self._pipeline.get_by_name("sink")
         if self._sink is None:self._sink=self._pipeline.get_by_name("appsink0")
+        stages=("rtp_receive","jitterbuffer_input","jitterbuffer_output","depay_output","parser_input","parser_output","decoder_input","decoder_output","conversion_output","appsink")
+        self._stage_last={};self._stage_intervals={name:deque(maxlen=2000) for name in stages};self._map_copy_ms=deque(maxlen=2000);self._jitterbuffers=[]
+        def probe(name):
+            def callback(_pad,_info):
+                now=time.monotonic();previous=self._stage_last.get(name);self._stage_last[name]=now
+                if previous is not None:self._stage_intervals[name].append(max(0.0,(now-previous)*1000.0))
+                return Gst.PadProbeReturn.OK
+            return callback
+        self._probe=probe
+        def attach_jitterbuffer(element):
+            factory=element.get_factory() if element is not None else None
+            if factory is None or factory.get_name()!="rtpjitterbuffer" or element in self._jitterbuffers:return
+            self._jitterbuffers.append(element)
+            for pad_name,stage in (("sink","jitterbuffer_input"),("src","jitterbuffer_output")):
+                pad=element.get_static_pad(pad_name)
+                if pad is not None:pad.add_probe(Gst.PadProbeType.BUFFER,probe(stage))
+        self._attach_jitterbuffer=attach_jitterbuffer
+        self._pipeline.connect("deep-element-added",lambda *_args:attach_jitterbuffer(_args[-1]))
+        depay=self._pipeline.get_by_name("depay");parser=self._pipeline.get_by_name("parser");decoder=self._pipeline.get_by_name("decoder");converter=self._pipeline.get_by_name("converter")
+        elements=((depay,"sink","rtp_receive"),(depay,"src","depay_output"),(parser,"sink","parser_input"),(parser,"src","parser_output"),(decoder,"sink","decoder_input"),(decoder,"src","decoder_output"),(converter,"src","conversion_output"),(self._sink,"sink","appsink"))
+        for element,pad_name,stage in elements:
+            if element is not None:
+                pad=element.get_static_pad(pad_name)
+                if pad is not None:pad.add_probe(Gst.PadProbeType.BUFFER,probe(stage))
         result=self._pipeline.set_state(Gst.State.PLAYING)
         # Live sources transition asynchronously. Waiting here would serialize camera startup.
         self._opened=result!=Gst.StateChangeReturn.FAILURE
     def isOpened(self): return self._opened
     def read(self):
-        import numpy as np
         if not self._opened or self._sink is None:return False,None
         sample=self._sink.emit("try-pull-sample",self.Gst.SECOND)
         if sample is None:
             message=self._pipeline.get_bus().pop_filtered(self.Gst.MessageType.ERROR|self.Gst.MessageType.EOS)
             if message is not None:self._opened=False
             return False,None
-        caps=sample.get_caps().get_structure(0);width=caps.get_value("width");height=caps.get_value("height")
+        caps=sample.get_caps().get_structure(0);width=caps.get_value("width");height=caps.get_value("height");pixel_format=str(caps.get_value("format"))
         buffer=sample.get_buffer();ok,mapped=buffer.map(self.Gst.MapFlags.READ)
         if not ok:return False,None
-        try:frame=np.frombuffer(mapped.data,dtype=np.uint8).reshape((height,width,3)).copy()
+        copied=time.perf_counter()
+        try:
+            frame=owned_bgr_from_mapped(mapped.data,width,height,pixel_format)
         finally:buffer.unmap(mapped)
+        self._map_copy_ms.append((time.perf_counter()-copied)*1000)
         return True,frame
+    def stage_metrics(self):
+        def stats(values):
+            ordered=sorted(values)
+            def pct(p):return ordered[min(len(ordered)-1,int((len(ordered)-1)*p))] if ordered else 0.0
+            return {"count":len(ordered),"p50":pct(.50),"p95":pct(.95),"max":ordered[-1] if ordered else 0.0}
+        jitter={"available":False,"lost":None,"late":None,"duplicates":None,"average_jitter_ms":None}
+        for element in self._jitterbuffers:
+            try:
+                structure=element.get_property("stats")
+                def field(*names):
+                    for name in names:
+                        if structure.has_field(name):return structure.get_value(name)
+                average_jitter=field("avg-jitter","average-jitter")
+                jitter={"available":True,"lost":field("num-lost","lost"),"late":field("num-late","late"),
+                        "duplicates":field("num-duplicates","duplicates"),"average_jitter_ms":jitter_nanoseconds_to_ms(average_jitter)}
+                break
+            except Exception:continue
+        return {**{f"{name}_interval_ms":stats(values) for name,values in self._stage_intervals.items()},"rtp_jitterbuffer":jitter,"map_copy_ms":stats(self._map_copy_ms),"pipeline":redacted_pipeline(self.pipeline)}
     def interrupt(self):
         # CameraReader will leave try-pull-sample within one second and perform
         # the state transition from the owning reader thread.

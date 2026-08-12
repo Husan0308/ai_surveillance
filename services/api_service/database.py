@@ -72,6 +72,10 @@ class SQLiteDatabase:
             data=json.loads(raw);had_ai=bool(data.get("ai_source"));legacy=data.get("rtsp_url") or data.get("source");base=defaults.get(str(camera_id),{})
             ai_source=data.get("ai_source") or base.get("ai_source") or legacy
             display_source=data.get("display_source") or base.get("display_source") or legacy
+            # One-time verified display-role migration. It is intentionally narrow:
+            # never replace a customized display URL, and never change the AI source.
+            if str(camera_id)=="CAM-05" and display_source==ai_source and base.get("display_source") and base.get("display_source")!=ai_source:
+                display_source=base["display_source"]
             ai_codec=data.get("ai_codec") or base.get("ai_codec") or data.get("codec");display_codec=data.get("display_codec") or base.get("display_codec") or data.get("codec")
             if data.get("ai_source")==ai_source and data.get("display_source")==display_source and data.get("ai_codec")==ai_codec and data.get("display_codec")==display_codec:continue
             data["ai_source"]=ai_source;data["display_source"]=display_source;data["ai_codec"]=ai_codec;data["display_codec"]=display_codec

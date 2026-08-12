@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication,QDialog
 
 from services.frontend import ui
 from shared.logging import configure_logging,get_logger
+from shared.settings import ServiceSettings
 
 
 def _palette():
@@ -25,7 +26,7 @@ def _palette():
 
 
 def main():
-    configure_logging(service="frontend");log=get_logger(__name__)
+    settings=ServiceSettings.from_env();configure_logging(settings.log_level,"frontend");log=get_logger(__name__)
     app=QApplication(sys.argv);app.setStyle("Fusion");app.setPalette(_palette());app.setStyleSheet(ui.STYLE)
     signal.signal(signal.SIGINT,lambda *_:app.quit())
     signal.signal(signal.SIGTERM,lambda *_:app.quit())

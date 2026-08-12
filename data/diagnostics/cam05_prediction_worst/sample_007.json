@@ -1,0 +1,81 @@
+{
+  "track_id": "CAM-05:TRACK-00111",
+  "horizon_ms": 3858.8481250044424,
+  "previous_bbox": [
+    476.8758544921875,
+    101.34880828857422,
+    546.38623046875,
+    209.17703247070312
+  ],
+  "legacy_bbox": [
+    636.7551879882812,
+    150.39065551757812,
+    732.6642456054688,
+    256.7451171875
+  ],
+  "corrected_bbox": [
+    636.7551879882812,
+    150.39065551757812,
+    732.6642456054688,
+    256.7451171875
+  ],
+  "actual_bbox": [
+    281.8167419433594,
+    31.696537017822266,
+    312.6024169921875,
+    73.36788177490234
+  ],
+  "predicted_velocity": [
+    46.878177642822266,
+    8.095151901245117,
+    6.486201763153076,
+    -7.067158222198486
+  ],
+  "previous_confidence": 0.9256281852722168,
+  "previous_real_observation_timestamp": 1786508655.9162588,
+  "previous_state_timestamp": 1786508655.9162588,
+  "new_observation_timestamp": 1786508659.7751074,
+  "prediction_horizon_ms": 3858.8481250044424,
+  "frame_id": 60030,
+  "detection_confidence": 0.11008436977863312,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:60030:FULL:1",
+  "before": {
+    "center_error_px": 415.8943761866505,
+    "center_error_normalized": 13.098469117002681,
+    "iou": 0.0,
+    "bbox_width_error": 65.12338256835938,
+    "bbox_height_error": 64.6831169128418
+  },
+  "after": {
+    "center_error_px": 415.8943761866505,
+    "center_error_normalized": 13.098469117002681,
+    "iou": 0.0,
+    "bbox_width_error": 65.12338256835938,
+    "bbox_height_error": 64.6831169128418
+  },
+  "velocity_ratio": 0.7720918460563008,
+  "observed_velocity": [
+    -55.56618118286133,
+    -26.62211799621582
+  ],
+  "bbox_scale_delta": 2.1153793334960938,
+  "motion_direction_dot": -2820.351318359375,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "DIRECTION_CHANGE",
+    "LOW_CONFIDENCE_DETECTION",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    265,
+    15
+  ],
+  "crop_shape": [
+    375,
+    257
+  ],
+  "rank_score": 13.098469117002681,
+  "saved_at": 1786508660.4222403
+}

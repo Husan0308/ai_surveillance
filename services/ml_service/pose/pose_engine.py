@@ -1,4 +1,5 @@
 import threading
+from contextlib import nullcontext
 import numpy as np
 import torch
 
@@ -6,6 +7,7 @@ from shared.logging import get_logger
 
 log = get_logger("ai.pose")
 from services.ml_service.pipeline.gpu_utils import resolve_torch_device
+from services.ml_service.pipeline.gpu_coordinator import gpu_coordinator
 
 
 class PoseEngine:
@@ -71,7 +73,8 @@ class PoseEngine:
         with self.lock:
             try:
                 use_cuda = getattr(self.device, "type", str(self.device)) == "cuda"
-                with torch.inference_mode():
+                gate=gpu_coordinator.secondary("POSE") if use_cuda else nullcontext()
+                with gate,torch.inference_mode():
                     with torch.amp.autocast('cuda', enabled=use_cuda):
                         results = self.model(
                             valid_inputs,
@@ -151,5 +154,5 @@ class PoseEngine:
             arr = np.array(points, dtype=np.float32)
             return float(arr[:, 0].mean()), float(arr[:, 1].mean())
 
-        except Exception:
+        except (IndexError,TypeError,ValueError):
             return None

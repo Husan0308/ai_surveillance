@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00009",
+  "horizon_ms": 1908.9791379810777,
+  "previous_bbox": [
+    281.7975769042969,
+    31.39667510986328,
+    318.7438049316406,
+    91.58866882324219
+  ],
+  "legacy_bbox": [
+    282.0823974609375,
+    31.709218978881836,
+    319.29803466796875,
+    91.20166778564453
+  ],
+  "corrected_bbox": [
+    282.0823974609375,
+    31.70922088623047,
+    319.29803466796875,
+    91.20166778564453
+  ],
+  "actual_bbox": [
+    282.3634948730469,
+    34.50522232055664,
+    307.818359375,
+    72.6769790649414
+  ],
+  "predicted_velocity": [
+    0.379793643951416,
+    -0.0025303163565695286,
+    0.20274314284324646,
+    -0.25876641273498535
+  ],
+  "previous_confidence": 0.5929147601127625,
+  "previous_real_observation_timestamp": 1786519829.1619766,
+  "previous_state_timestamp": 1786519829.1619766,
+  "new_observation_timestamp": 1786519831.0709555,
+  "prediction_horizon_ms": 1908.9791379810777,
+  "frame_id": 5019,
+  "detection_confidence": 0.4240725636482239,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:5019:FULL:1",
+  "before": {
+    "center_error_px": 9.654010699006555,
+    "center_error_normalized": 0.30138491585440547,
+    "iou": 0.438859629566444,
+    "bbox_width_error": 11.760772705078125,
+    "bbox_height_error": 21.32069206237793
+  },
+  "after": {
+    "center_error_px": 9.654011475888,
+    "center_error_normalized": 0.3013849329331807,
+    "iou": 0.43885964363643704,
+    "bbox_width_error": 11.760772705078125,
+    "bbox_height_error": 21.320690155029297
+  },
+  "velocity_ratio": 1.0,
+  "observed_velocity": [
+    0.08264006674289703,
+    -0.004475664347410202
+  ],
+  "bbox_scale_delta": 0.5585461854934692,
+  "motion_direction_dot": 0.031397495418787,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "DETECTION_BOX_JITTER"
+  ],
+  "camera_id": "CAM-05",
+  "crop_origin": [
+    266,
+    15
+  ],
+  "crop_shape": [
+    69,
+    92
+  ],
+  "rank_score": 0.3013849329331807,
+  "saved_at": 1786519831.9239597
+}

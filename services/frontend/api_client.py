@@ -60,4 +60,4 @@ class ApiClient:
     def get_heatmap(self,camera_id,mode="live"):return self.get(f"heatmaps/{camera_id}/{mode}")
     def get_health(self):return self.get("health")
     def get_system_status(self):return self.get("system/status")
-    def get_system_metrics(self):return self.get("system/metrics")
+    def get_system_metrics(self):return self.get("system/metrics/summary")

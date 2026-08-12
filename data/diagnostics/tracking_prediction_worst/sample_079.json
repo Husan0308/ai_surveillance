@@ -1,0 +1,81 @@
+{
+  "track_id": "CAM-01:TRACK-00006",
+  "horizon_ms": 3848.047106002923,
+  "previous_bbox": [
+    1861.013671875,
+    431.24517822265625,
+    2005.5985107421875,
+    874.2711791992188
+  ],
+  "legacy_bbox": [
+    1904.03515625,
+    365.158447265625,
+    2048.32958984375,
+    870.908203125
+  ],
+  "corrected_bbox": [
+    1904.03515625,
+    365.158447265625,
+    2048.32958984375,
+    870.908203125
+  ],
+  "actual_bbox": [
+    2065.424072265625,
+    449.8519287109375,
+    2210.818115234375,
+    716.8508911132812
+  ],
+  "predicted_velocity": [
+    108.23591613769531,
+    -0.8596539497375488,
+    0.7111977338790894,
+    -31.610877990722656
+  ],
+  "previous_confidence": 0.6875605583190918,
+  "previous_real_observation_timestamp": 1786519663.6103218,
+  "previous_state_timestamp": 1786519663.6103218,
+  "new_observation_timestamp": 1786519667.4583685,
+  "prediction_horizon_ms": 3848.047106002923,
+  "frame_id": 1565,
+  "detection_confidence": 0.7673094868659973,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-01:1565:FULL:1",
+  "before": {
+    "center_error_px": 165.61094320930607,
+    "center_error_normalized": 1.1213408913534229,
+    "iou": 0.0,
+    "bbox_width_error": 1.099609375,
+    "bbox_height_error": 238.75079345703125
+  },
+  "after": {
+    "center_error_px": 165.61094320930607,
+    "center_error_normalized": 1.1213408913534229,
+    "iou": 0.0,
+    "bbox_width_error": 1.099609375,
+    "bbox_height_error": 238.75079345703125
+  },
+  "velocity_ratio": 1.9260087378833208,
+  "observed_velocity": [
+    53.225685119628906,
+    -18.03687286376953
+  ],
+  "bbox_scale_delta": 0.8942012190818787,
+  "motion_direction_dot": 5776.43603515625,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "MOTION_OVERSHOOT",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "camera_id": "CAM-01",
+  "crop_origin": [
+    1888,
+    349
+  ],
+  "crop_shape": [
+    338,
+    537
+  ],
+  "rank_score": 1.1213408913534229,
+  "saved_at": 1786519669.0256915
+}

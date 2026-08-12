@@ -1,6 +1,6 @@
 import time
 from .face_extractor import FaceExtractor
-from .schemas import FaceEmbeddingResult,FaceDecision
+from .schemas import FaceDecision
 
 class FaceManager:
     def __init__(self,detector,quality,matcher,resolver,attempt_interval_ms=3000,max_attempts=3,retry_low_quality_ms=1500):

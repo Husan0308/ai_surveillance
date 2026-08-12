@@ -1,5 +1,6 @@
 from typing import Any,Literal
-from pydantic import BaseModel,Field
+from pydantic import BaseModel,Field,field_validator
+from shared.schemas.roi import RecoveryROI,unique_rois
 
 Codec=Literal["h264","h265","hevc"]
 class PersonCreate(BaseModel):
@@ -14,11 +15,15 @@ class CameraCreate(BaseModel):
     codec:Codec;ai_codec:Codec|None=None;display_codec:Codec|None=None
     enabled:bool=True;room_id:str|None=None;heatmap_enabled:bool=True
     latency_ms:int=Field(default=50,ge=0,le=5000);decoder_backend:Literal["nvv4l2decoder","nvcodec"]="nvv4l2decoder"
+    recovery_rois:list[RecoveryROI]=Field(default_factory=list)
+    _unique_recovery_rois=field_validator("recovery_rois")(unique_rois)
 class CameraUpdate(BaseModel):
     name:str|None=None;source:str|None=None;ai_source:str|None=None;display_source:str|None=None
     codec:Codec|None=None;ai_codec:Codec|None=None;display_codec:Codec|None=None
     enabled:bool|None=None;room_id:str|None=None;heatmap_enabled:bool|None=None
     latency_ms:int|None=Field(None,ge=0,le=5000);decoder_backend:Literal["nvv4l2decoder","nvcodec"]|None=None
+    recovery_rois:list[RecoveryROI]|None=None
+    _unique_recovery_rois=field_validator("recovery_rois")(unique_rois)
 class EnrollmentCreate(BaseModel):
     name:str=Field(min_length=1);sample_paths:list[str]=Field(min_length=10,max_length=30);department:str|None=None
 class SettingsPatch(BaseModel):

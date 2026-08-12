@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00007",
+  "horizon_ms": 2772.765016008634,
+  "previous_bbox": [
+    339.29150390625,
+    47.86188888549805,
+    380.1497802734375,
+    115.26166534423828
+  ],
+  "legacy_bbox": [
+    339.1139221191406,
+    47.899776458740234,
+    380.9729919433594,
+    115.22526550292969
+  ],
+  "corrected_bbox": [
+    339.1139221191406,
+    47.8997802734375,
+    380.9729919433594,
+    115.22526550292969
+  ],
+  "actual_bbox": [
+    339.5115051269531,
+    48.36341094970703,
+    365.918212890625,
+    93.24419403076172
+  ],
+  "predicted_velocity": [
+    0.11502240598201752,
+    -0.0035699307918548584,
+    0.39541274309158325,
+    -0.04347103089094162
+  ],
+  "previous_confidence": 0.24141673743724823,
+  "previous_real_observation_timestamp": 1786519737.6736295,
+  "previous_state_timestamp": 1786519737.6736295,
+  "new_observation_timestamp": 1786519740.4463933,
+  "prediction_horizon_ms": 2772.765016008634,
+  "frame_id": 3229,
+  "detection_confidence": 0.46167585253715515,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:3229:FULL:1",
+  "before": {
+    "center_error_px": 13.017617774954422,
+    "center_error_normalized": 0.36672375501251725,
+    "iou": 0.42053833895833154,
+    "bbox_width_error": 15.452362060546875,
+    "bbox_height_error": 22.444705963134766
+  },
+  "after": {
+    "center_error_px": 13.017619351327912,
+    "center_error_normalized": 0.36672378279242207,
+    "iou": 0.42053836278625417,
+    "bbox_width_error": 15.452362060546875,
+    "bbox_height_error": 22.4447021484375
+  },
+  "velocity_ratio": 1.0,
+  "observed_velocity": [
+    0.10884803533554077,
+    -0.016208775341510773
+  ],
+  "bbox_scale_delta": 0.5851680636405945,
+  "motion_direction_dot": 0.012577827088534832,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "DETECTION_BOX_JITTER"
+  ],
+  "camera_id": "CAM-05",
+  "crop_origin": [
+    323,
+    31
+  ],
+  "crop_shape": [
+    73,
+    100
+  ],
+  "rank_score": 0.36672378279242207,
+  "saved_at": 1786519741.7063313
+}

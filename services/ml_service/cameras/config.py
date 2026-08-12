@@ -1,5 +1,6 @@
 import json
 from urllib.request import urlopen
+from urllib.error import URLError
 from shared.config import camera_config
 from shared.logging import get_logger
 from shared.settings import ServiceSettings
@@ -17,6 +18,16 @@ def _normalize(item,defaults):
         if not merged.get(key) and base.get(key):merged[key]=base[key]
     return merged
 
+def _validate(cameras):
+    ids=[str(item.get("id") or "").strip() for item in cameras]
+    if any(not camera_id for camera_id in ids):raise ValueError("camera id is required")
+    if len(ids)!=len(set(ids)):raise ValueError("camera ids must be unique")
+    for item in cameras:
+        if item.get("online") and not item.get("source"):raise ValueError(f"{item['id']} enabled without an AI source")
+        codec=str(item.get("codec") or "h264").lower()
+        if codec not in ("h264","h265"):raise ValueError(f"{item['id']} has unsupported AI codec: {codec}")
+    return cameras
+
 def fetch_camera_configs(api_url=None,fetcher=None) -> list[dict]:
     """Fetch canonical API/SQLite cameras, raising while that authority is unavailable."""
     bootstrap=camera_config();defaults={str(c["id"]):c for c in bootstrap.get("cameras",[])}
@@ -24,15 +35,16 @@ def fetch_camera_configs(api_url=None,fetcher=None) -> list[dict]:
     if fetcher is None:
         with urlopen(endpoint,timeout=2) as response:items=json.load(response)
     else:items=fetcher(endpoint)
-    cameras=[_normalize(item,defaults) for item in items]
+    cameras=_validate([_normalize(item,defaults) for item in items])
     log.info("Camera authority: API/SQLite (%d records)",len(cameras))
     return [c for c in cameras if c.get("online",False)]
 
 def load_camera_configs(path=None,api_url=None,fetcher=None) -> list[dict]:
     """Load API/SQLite runtime cameras; YAML is bootstrap and local-secret fallback only."""
     if path is not None:raise ValueError("Camera configuration must use config/cameras.yaml")
-    try:return fetch_camera_configs(api_url,fetcher)
-    except Exception as exc:
+    if fetcher is not None:return fetch_camera_configs(api_url,fetcher)
+    try:return fetch_camera_configs(api_url)
+    except (URLError,TimeoutError,ConnectionError,OSError) as exc:
         bootstrap=camera_config();defaults={str(c["id"]):c for c in bootstrap.get("cameras",[])}
         log.warning("Camera API unavailable; using YAML bootstrap for this startup: %s",exc)
-        return [_normalize(item,defaults) for item in bootstrap.get("cameras",[]) if item.get("online",item.get("enabled",False))]
+        return _validate([_normalize(item,defaults) for item in bootstrap.get("cameras",[]) if item.get("online",item.get("enabled",False))])

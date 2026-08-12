@@ -1,6 +1,5 @@
 """Isolated maintained Ultralytics ByteTrack adapter for P2 evaluation."""
 from types import SimpleNamespace
-import time
 import numpy as np
 from .schemas import CameraTrackResult,TrackedPerson,TrackState
 
@@ -40,9 +39,26 @@ class OfficialByteTrackAdapter:
 
 def nvdcf_capability():
     from pathlib import Path
+    gpu_name="unknown";compute_capability=None
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name=torch.cuda.get_device_name(0)
+            major,minor=torch.cuda.get_device_capability(0);compute_capability=f"{major}.{minor}"
+    except Exception:
+        pass
     root=Path("/opt/nvidia/deepstream/deepstream-7.1")
     library=root/"lib/libnvds_nvmultiobjecttracker.so"
     config=root/"samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml"
+    # DeepStream 7.1 ships TensorRT 10.6. Its builder rejects Pascal SM 6.1,
+    # so nvinfer cannot provide the real detector metadata NvDCF needs here.
+    primary_supported=compute_capability is None or tuple(int(x) for x in compute_capability.split("."))>=(7,5)
+    reason=("NvDCF consumes NvDsBatchMeta on GstBuffers; a comparable adapter requires "
+        "a native DeepStream primary detector and metadata bridge.")
+    if not primary_supported:
+        reason=f"DeepStream 7.1 TensorRT 10.6 does not support {gpu_name} SM {compute_capability}; nvinfer cannot supply live YOLO metadata."
     return {"runtime_available":library.exists(),"config_available":config.exists(),
+        "gpu_name":gpu_name,"compute_capability":compute_capability,
+        "primary_inference_supported":primary_supported,
         "comparable_external_detection_adapter":False,
-        "reason":"NvDCF consumes NvDsBatchMeta on GstBuffers; the current Python detector emits structured CPU metadata, so a fair adapter requires a future DeepStream metadata-injection harness."}
+        "reason":reason}

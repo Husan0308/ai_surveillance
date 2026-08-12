@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-02:TRACK-00001",
+  "horizon_ms": 1777.8896219970193,
+  "previous_bbox": [
+    1803.0767822265625,
+    1309.14453125,
+    2190.706787109375,
+    1619.685546875
+  ],
+  "legacy_bbox": [
+    1807.5594482421875,
+    1211.5594482421875,
+    2268.99755859375,
+    1595.2093505859375
+  ],
+  "corrected_bbox": [
+    1807.5595703125,
+    1211.5594482421875,
+    2268.99755859375,
+    1595.2093505859375
+  ],
+  "actual_bbox": [
+    1647.8399658203125,
+    1312.0283508300781,
+    2189.6145629882812,
+    1776.8997192382812
+  ],
+  "predicted_velocity": [
+    31.68213653564453,
+    -38.65069580078125,
+    26.133960723876953,
+    16.28246307373047
+  ],
+  "previous_confidence": 0.1259007602930069,
+  "previous_real_observation_timestamp": 1786519669.7009544,
+  "previous_state_timestamp": 1786519669.7009544,
+  "new_observation_timestamp": 1786519671.4788442,
+  "prediction_horizon_ms": 1777.8896219970193,
+  "frame_id": 1788,
+  "detection_confidence": 0.7491832375526428,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-02:1788:FULL:1",
+  "before": {
+    "center_error_px": 184.92150317475017,
+    "center_error_normalized": 0.3752255533316288,
+    "iou": 0.3373629230638986,
+    "bbox_width_error": 80.33648681640625,
+    "bbox_height_error": 81.22146606445312
+  },
+  "after": {
+    "center_error_px": 184.9215426338153,
+    "center_error_normalized": 0.3752256195844738,
+    "iou": 0.3373628281748516,
+    "bbox_width_error": 80.33660888671875,
+    "bbox_height_error": 81.22146606445312
+  },
+  "velocity_ratio": 1.851913326302252,
+  "observed_velocity": [
+    26.796058654785156,
+    3.1988909244537354
+  ],
+  "bbox_scale_delta": 0.17471809685230255,
+  "motion_direction_dot": 725.3170166015625,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "MOTION_OVERSHOOT"
+  ],
+  "camera_id": "CAM-02",
+  "crop_origin": [
+    1631,
+    1195
+  ],
+  "crop_shape": [
+    653,
+    597
+  ],
+  "rank_score": 0.3752256195844738,
+  "saved_at": 1786519672.278128
+}

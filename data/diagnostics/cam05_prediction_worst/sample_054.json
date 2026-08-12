@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00163",
+  "horizon_ms": 1653.9932070008945,
+  "previous_bbox": [
+    291.8867492675781,
+    32.39943313598633,
+    355.84844970703125,
+    111.40158081054688
+  ],
+  "legacy_bbox": [
+    338.6178283691406,
+    11.224454879760742,
+    399.3599548339844,
+    68.98489379882812
+  ],
+  "corrected_bbox": [
+    338.6178283691406,
+    11.224456787109375,
+    399.3599548339844,
+    68.98489379882812
+  ],
+  "actual_bbox": [
+    302.9952697753906,
+    22.922409057617188,
+    341.7364807128906,
+    119.63053894042969
+  ],
+  "predicted_velocity": [
+    17.134735107421875,
+    -10.715120315551758,
+    -1.0622332096099854,
+    -10.728110313415527
+  ],
+  "previous_confidence": 0.8820950388908386,
+  "previous_real_observation_timestamp": 1786511382.266071,
+  "previous_state_timestamp": 1786511382.266071,
+  "new_observation_timestamp": 1786511383.9200642,
+  "prediction_horizon_ms": 1653.9932070008945,
+  "frame_id": 113886,
+  "detection_confidence": 0.8713235259056091,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:113886:FULL:0",
+  "before": {
+    "center_error_px": 56.08374763058108,
+    "center_error_normalized": 1.2458658900222208,
+    "iou": 0.020200282476328997,
+    "bbox_width_error": 22.00091552734375,
+    "bbox_height_error": 38.94769096374512
+  },
+  "after": {
+    "center_error_px": 56.0837471005212,
+    "center_error_normalized": 1.2458658874709023,
+    "iou": 0.02020028280542351,
+    "bbox_width_error": 22.00091552734375,
+    "bbox_height_error": 38.94769287109375
+  },
+  "velocity_ratio": 1.0,
+  "observed_velocity": [
+    -0.05898546800017357,
+    -0.4623127579689026
+  ],
+  "bbox_scale_delta": 0.5678943395614624,
+  "motion_direction_dot": 3.9430365562438965,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    286,
+    0
+  ],
+  "crop_shape": [
+    129,
+    135
+  ],
+  "rank_score": 1.2458658874709023,
+  "saved_at": 1786511384.275549
+}

@@ -1,0 +1,80 @@
+{
+  "track_id": "CAM-05:TRACK-00004",
+  "horizon_ms": 2367.446768010268,
+  "previous_bbox": [
+    282.318603515625,
+    29.532455444335938,
+    322.9674072265625,
+    91.53517150878906
+  ],
+  "legacy_bbox": [
+    282.3753356933594,
+    28.92943572998047,
+    324.1694641113281,
+    94.55729675292969
+  ],
+  "corrected_bbox": [
+    282.3753356933594,
+    28.92943572998047,
+    324.1694641113281,
+    94.55729675292969
+  ],
+  "actual_bbox": [
+    282.5396423339844,
+    30.494293212890625,
+    312.11126708984375,
+    72.82915496826172
+  ],
+  "predicted_velocity": [
+    0.9861782789230347,
+    0.2639268636703491,
+    1.5209513902664185,
+    1.3300940990447998
+  ],
+  "previous_confidence": 0.40920141339302063,
+  "previous_real_observation_timestamp": 1786519722.947089,
+  "previous_state_timestamp": 1786519722.947089,
+  "new_observation_timestamp": 1786519725.3145354,
+  "prediction_horizon_ms": 2367.446768010268,
+  "frame_id": 2932,
+  "detection_confidence": 0.209151953458786,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:2932:FULL:0",
+  "before": {
+    "center_error_px": 11.704941928790294,
+    "center_error_normalized": 0.31169426989123167,
+    "iou": 0.4564254054548008,
+    "bbox_width_error": 12.222503662109375,
+    "bbox_height_error": 23.292999267578125
+  },
+  "after": {
+    "center_error_px": 11.704941928790294,
+    "center_error_normalized": 0.31169426989123167,
+    "iou": 0.4564254054548008,
+    "bbox_width_error": 12.222503662109375,
+    "bbox_height_error": 23.292999267578125
+  },
+  "velocity_ratio": 0.7721515962832706,
+  "observed_velocity": [
+    1.1972986459732056,
+    -0.5608049631118774
+  ],
+  "bbox_scale_delta": 0.5502084493637085,
+  "motion_direction_dot": 1.032738447189331,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "DETECTION_BOX_JITTER",
+    "LOW_CONFIDENCE_DETECTION"
+  ],
+  "camera_id": "CAM-05",
+  "crop_origin": [
+    266,
+    12
+  ],
+  "crop_shape": [
+    74,
+    98
+  ],
+  "rank_score": 0.31169426989123167,
+  "saved_at": 1786519727.1878843
+}

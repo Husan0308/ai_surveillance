@@ -1,5 +1,6 @@
 import threading
 import weakref
+import shiboken6
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 
@@ -21,7 +22,7 @@ class RequestTask(QRunnable):
         self._parent_ref = weakref.ref(parent)
         self.signals.setParent(parent)
 
-    def cancel(self):
+    def cancel(self, *_args):
         self.cancelled.set()
 
     def run(self):
@@ -33,6 +34,7 @@ class RequestTask(QRunnable):
             error = str(exc)
 
         if self.cancelled.is_set():
+            self.signals.finished.emit(self)
             return
 
         # Check if parent still exists
@@ -54,16 +56,25 @@ class AsyncApi(QObject):
         self._tasks = set()
         self._closing = False
 
-    def submit(self, call, on_success=None, on_error=None):
+    def submit(self, call, on_success=None, on_error=None, owner=None):
         if self._closing:
             return None
         task = RequestTask(call)
         task.set_parent(self)
         self._tasks.add(task)
+        owner_ref=weakref.ref(owner) if owner is not None else None
+        def alive():
+            target=owner_ref() if owner_ref is not None else self
+            return target is not None and shiboken6.isValid(target)
+        if owner is not None:owner.destroyed.connect(task.cancel)
         if on_success:
-            task.signals.success.connect(on_success)
+            def guarded_success(value):
+                if alive():on_success(value)
+            task.signals.success.connect(guarded_success)
         if on_error:
-            task.signals.error.connect(on_error)
+            def guarded_error(error):
+                if alive():on_error(error)
+            task.signals.error.connect(guarded_error)
         task.signals.finished.connect(self._finished)
         self.pool.start(task)
         return task
@@ -80,7 +91,7 @@ class AsyncApi(QObject):
             task.cancel()
             try:
                 task.signals.finished.disconnect(self._finished)
-            except Exception:
+            except (RuntimeError,TypeError):
                 pass
         # Clear pool and wait
         self.pool.clear()

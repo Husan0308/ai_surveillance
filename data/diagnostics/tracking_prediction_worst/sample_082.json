@@ -1,0 +1,81 @@
+{
+  "track_id": "CAM-01:TRACK-00011",
+  "horizon_ms": 2764.6520670095924,
+  "previous_bbox": [
+    728.314453125,
+    802.7933959960938,
+    978.7636108398438,
+    1175.70947265625
+  ],
+  "legacy_bbox": [
+    640.129638671875,
+    770.3927001953125,
+    999.1639404296875,
+    1346.7039794921875
+  ],
+  "corrected_bbox": [
+    640.129638671875,
+    770.3927001953125,
+    999.1639404296875,
+    1346.7039794921875
+  ],
+  "actual_bbox": [
+    726.0026245117188,
+    809.745361328125,
+    902.09521484375,
+    1060.9127197265625
+  ],
+  "predicted_velocity": [
+    -22.97299575805664,
+    46.97106170654297,
+    73.60159301757812,
+    137.86602783203125
+  ],
+  "previous_confidence": 0.5173727869987488,
+  "previous_real_observation_timestamp": 1786519810.2708206,
+  "previous_state_timestamp": 1786519810.2708206,
+  "new_observation_timestamp": 1786519813.0354724,
+  "prediction_horizon_ms": 2764.6520670095924,
+  "frame_id": 4121,
+  "detection_confidence": 0.6269518136978149,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-01:4121:FULL:3",
+  "before": {
+    "center_error_px": 123.34638977749482,
+    "center_error_normalized": 0.4916153117531944,
+    "iou": 0.21375250743189014,
+    "bbox_width_error": 182.94171142578125,
+    "bbox_height_error": 325.1439208984375
+  },
+  "after": {
+    "center_error_px": 123.34638977749482,
+    "center_error_normalized": 0.4916153117531944,
+    "iou": 0.21375250743189014,
+    "bbox_width_error": 182.94171142578125,
+    "bbox_height_error": 325.1439208984375
+  },
+  "velocity_ratio": 2.1628686144113964,
+  "observed_velocity": [
+    -14.283935546875,
+    -19.504236221313477
+  ],
+  "bbox_scale_delta": 1.294530987739563,
+  "motion_direction_dot": -587.9898681640625,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "DIRECTION_CHANGE",
+    "MOTION_OVERSHOOT"
+  ],
+  "camera_id": "CAM-01",
+  "crop_origin": [
+    624,
+    754
+  ],
+  "crop_shape": [
+    391,
+    608
+  ],
+  "rank_score": 0.4916153117531944,
+  "saved_at": 1786519814.7769253
+}

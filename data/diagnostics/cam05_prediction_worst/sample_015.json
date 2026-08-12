@@ -1,0 +1,81 @@
+{
+  "track_id": "CAM-05:TRACK-00056",
+  "horizon_ms": 2641.2088409997523,
+  "previous_bbox": [
+    319.2062072753906,
+    22.11927032470703,
+    350.0286865234375,
+    103.94490051269531
+  ],
+  "legacy_bbox": [
+    319.7815856933594,
+    24.774856567382812,
+    350.3346862792969,
+    114.29544067382812
+  ],
+  "corrected_bbox": [
+    319.7815856933594,
+    24.774856567382812,
+    350.3346862792969,
+    114.29544067382812
+  ],
+  "actual_bbox": [
+    289.17425537109375,
+    16.1317081451416,
+    318.0601806640625,
+    77.2358627319336
+  ],
+  "predicted_velocity": [
+    -2.5379955768585205,
+    1.1076810359954834,
+    -1.6186670064926147,
+    5.629201412200928
+  ],
+  "previous_confidence": 0.43036895990371704,
+  "previous_real_observation_timestamp": 1786507107.1806471,
+  "previous_state_timestamp": 1786507107.1806471,
+  "new_observation_timestamp": 1786507109.8218558,
+  "prediction_horizon_ms": 2641.2088409997523,
+  "frame_id": 29356,
+  "detection_confidence": 0.09550788998603821,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:29356:FULL:2",
+  "before": {
+    "center_error_px": 38.86793179468691,
+    "center_error_normalized": 1.1509050296071572,
+    "iou": 0.0,
+    "bbox_width_error": 1.66717529296875,
+    "bbox_height_error": 28.41642951965332
+  },
+  "after": {
+    "center_error_px": 38.86793179468691,
+    "center_error_normalized": 1.1509050296071572,
+    "iou": 0.0,
+    "bbox_width_error": 1.66717529296875,
+    "bbox_height_error": 28.41642951965332
+  },
+  "velocity_ratio": 0.40728937514942676,
+  "observed_velocity": [
+    -3.583129644393921,
+    -5.778266429901123
+  ],
+  "bbox_scale_delta": 0.46504899859428406,
+  "motion_direction_dot": 2.6934914588928223,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "MOTION_UNDERSHOOT",
+    "LOW_CONFIDENCE_DETECTION",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    273,
+    0
+  ],
+  "crop_shape": [
+    93,
+    130
+  ],
+  "rank_score": 1.1509050296071572,
+  "saved_at": 1786507110.2621953
+}

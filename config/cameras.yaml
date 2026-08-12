@@ -83,7 +83,8 @@ cameras:
     codec: "h265"
     ai_codec: "h265"
     display_codec: "h265"
-    latency_ms: 50
+    latency_ms: 80
+    drop_on_latency: true
     username: "${SURVEILLANCE_RTSP_USERNAME}"
     password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
@@ -104,11 +105,12 @@ cameras:
     location: "Channel 501"
     source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
     ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
-    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
+    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/501"
     codec: "h265"
     ai_codec: "h265"
     display_codec: "h265"
-    latency_ms: 20
+    latency_ms: 80
+    drop_on_latency: true
     username: "${SURVEILLANCE_RTSP_USERNAME}"
     password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
@@ -133,7 +135,8 @@ cameras:
     codec: "h265"
     ai_codec: "h265"
     display_codec: "h265"
-    latency_ms: 50
+    latency_ms: 80
+    drop_on_latency: true
     username: "${SURVEILLANCE_RTSP_USERNAME}"
     password: "${SURVEILLANCE_RTSP_PASSWORD}"
     online: true
@@ -148,22 +151,3 @@ cameras:
     connection_timeout: 5
     latency_warn_ms: 200
     packet_loss_warn_percent: 2.0
-  
-  # - id: "CAM-EN"
-  #   name: "Enrollment Station"
-  #   location: "HQ — Security Office"
-  #   source: "0"
-  #   username: ""
-  #   password: ""
-  #   online: true
-  #   ai_enabled: false
-  #   heatmap_enabled: false
-  #   recording_enabled: false
-  #   zone_enabled: false
-  #   overstay_enabled: false
-  #   resolution: "1280x720"
-  #   fps: 30
-  #   reconnect_interval: 10
-  #   connection_timeout: 5
-  #   latency_warn_ms: 200
-  #   packet_loss_warn_percent: 2.0

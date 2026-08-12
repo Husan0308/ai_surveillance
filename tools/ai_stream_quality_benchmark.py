@@ -24,7 +24,7 @@ def summary(result,packet):
  ds=result.results[0].detections;conf=[d.confidence for d in ds];small=[d for d in ds if (d.bbox_xyxy[3]-d.bbox_xyxy[1])/packet.height<.15]
  return {'count':len(ds),'mean_confidence':float(np.mean(conf)) if conf else 0.0,'small_person_count':len(small),'resolution':f'{packet.width}x{packet.height}','detections':[{'confidence':round(d.confidence,4),'bbox':[round(v,1) for v in d.bbox_xyxy]} for d in ds]}
 def main():
- p=argparse.ArgumentParser();p.add_argument('--samples',type=int,default=3);a=p.parse_args();detector=PersonDetector(project_config(),max_frame_age_ms=10000,max_batch_size=2);output=[];frame_id=0
+ p=argparse.ArgumentParser();p.add_argument('--samples',type=int,default=3);p.add_argument('--output',type=Path);a=p.parse_args();detector=PersonDetector(project_config(),max_frame_age_ms=10000,max_batch_size=2);output=[];frame_id=0
  try:
   for item in records():
    if item.get('ai_source')==item.get('display_source'):
@@ -40,5 +40,9 @@ def main():
    finally:
     for capture in captures.values():capture.release()
  finally:detector.close()
- print(json.dumps(output,indent=2))
+ payload=json.dumps(output,indent=2)
+ if a.output:
+  a.output.parent.mkdir(parents=True,exist_ok=True);temporary=a.output.with_suffix(a.output.suffix+'.tmp')
+  temporary.write_text(payload+'\n',encoding='utf-8');temporary.replace(a.output)
+ print(payload)
 if __name__=='__main__':main()

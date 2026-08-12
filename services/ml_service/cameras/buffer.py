@@ -1,4 +1,4 @@
-"""Thread-safe bounded latest-frame ring buffer."""
+"""Thread-safe single-slot latest-frame buffer."""
 from __future__ import annotations
 from collections import deque
 import threading
@@ -6,9 +6,10 @@ from typing import Callable,Optional
 from .frame import FramePacket
 
 class LatestFrameBuffer:
-    """Keep a short history, but selection atomically returns only the newest packet."""
-    def __init__(self,on_available:Optional[Callable[[],None]]=None,capacity:int=5)->None:
-        self.maxsize=max(1,int(capacity));self._condition=threading.Condition(threading.Lock());self._packets=deque(maxlen=self.maxsize);self._closed=False;self._on_available=on_available;self.dropped_old=0
+    """Replace an unconsumed frame atomically; a backlog is impossible."""
+    def __init__(self,on_available:Optional[Callable[[],None]]=None,capacity:int=1)->None:
+        if int(capacity)!=1:raise ValueError("LatestFrameBuffer capacity is fixed at 1")
+        self.maxsize=1;self._condition=threading.Condition(threading.Lock());self._packets=deque(maxlen=1);self._closed=False;self._on_available=on_available;self.dropped_old=0
     def put(self,packet:FramePacket)->None:
         with self._condition:
             if self._closed:return

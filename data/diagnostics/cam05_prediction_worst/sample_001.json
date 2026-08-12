@@ -1,0 +1,80 @@
+{
+  "track_id": "CAM-05:TRACK-00101",
+  "horizon_ms": 1774.2069329833612,
+  "previous_bbox": [
+    297.8838806152344,
+    15.596710205078125,
+    334.80224609375,
+    103.4172134399414
+  ],
+  "legacy_bbox": [
+    330.7439880371094,
+    -12.010549545288086,
+    352.9720153808594,
+    61.987220764160156
+  ],
+  "corrected_bbox": [
+    330.7439880371094,
+    -12.010551452636719,
+    352.9720153808594,
+    61.987220764160156
+  ],
+  "actual_bbox": [
+    291.29156494140625,
+    12.713188171386719,
+    321.9170227050781,
+    103.26640319824219
+  ],
+  "predicted_velocity": [
+    8.787805557250977,
+    -15.564573287963867,
+    -5.882598876953125,
+    -7.216320991516113
+  ],
+  "previous_confidence": 0.8612579703330994,
+  "previous_real_observation_timestamp": 1786508396.4962122,
+  "previous_state_timestamp": 1786508396.4962122,
+  "new_observation_timestamp": 1786508398.270419,
+  "prediction_horizon_ms": 1774.2069329833612,
+  "frame_id": 54861,
+  "detection_confidence": 0.8839043974876404,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:54861:FULL:0",
+  "before": {
+    "center_error_px": 48.28996051768977,
+    "center_error_normalized": 1.2074376153357045,
+    "iou": 0.0,
+    "bbox_width_error": 8.397430419921875,
+    "bbox_height_error": 16.555444717407227
+  },
+  "after": {
+    "center_error_px": 48.28996116943279,
+    "center_error_normalized": 1.2074376185144868,
+    "iou": 0.0,
+    "bbox_width_error": 8.397430419921875,
+    "bbox_height_error": 16.555442810058594
+  },
+  "velocity_ratio": 3.1779354832583655,
+  "observed_velocity": [
+    5.559034824371338,
+    -0.8551235795021057
+  ],
+  "bbox_scale_delta": 0.27419769763946533,
+  "motion_direction_dot": 62.161354064941406,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "MOTION_OVERSHOOT",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    275,
+    0
+  ],
+  "crop_shape": [
+    93,
+    119
+  ],
+  "rank_score": 1.2074376185144868,
+  "saved_at": 1786508398.9912775
+}

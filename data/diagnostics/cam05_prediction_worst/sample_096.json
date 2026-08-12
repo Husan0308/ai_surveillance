@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00205",
+  "horizon_ms": 2002.609108982142,
+  "previous_bbox": [
+    340.8118896484375,
+    53.61455535888672,
+    372.7700500488281,
+    100.470947265625
+  ],
+  "legacy_bbox": [
+    380.0541076660156,
+    67.78562927246094,
+    411.4066467285156,
+    118.15507507324219
+  ],
+  "corrected_bbox": [
+    380.0541076660156,
+    67.78562927246094,
+    411.4066467285156,
+    118.15507507324219
+  ],
+  "actual_bbox": [
+    341.9031982421875,
+    53.58721160888672,
+    377.53338623046875,
+    99.56920623779297
+  ],
+  "predicted_velocity": [
+    36.5919303894043,
+    14.827371597290039,
+    -0.5349195003509521,
+    2.9106781482696533
+  ],
+  "previous_confidence": 0.05746091157197952,
+  "previous_real_observation_timestamp": 1786512867.6506681,
+  "previous_state_timestamp": 1786512867.6506681,
+  "new_observation_timestamp": 1786512869.6532772,
+  "prediction_horizon_ms": 2002.609108982142,
+  "frame_id": 143370,
+  "detection_confidence": 0.1847904920578003,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:143370:FULL:3",
+  "before": {
+    "center_error_px": 39.56731761879106,
+    "center_error_normalized": 1.0717448634632114,
+    "iou": 0.0,
+    "bbox_width_error": 4.27764892578125,
+    "bbox_height_error": 4.387451171875
+  },
+  "after": {
+    "center_error_px": 39.56731761879106,
+    "center_error_normalized": 1.0717448634632114,
+    "iou": 0.0,
+    "bbox_width_error": 4.27764892578125,
+    "bbox_height_error": 4.387451171875
+  },
+  "velocity_ratio": 26.67599386545415,
+  "observed_velocity": [
+    1.4617619514465332,
+    -0.23197048902511597
+  ],
+  "bbox_scale_delta": 0.1200568750500679,
+  "motion_direction_dot": 50.04917907714844,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "LOW_CONFIDENCE_DETECTION",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    325,
+    37
+  ],
+  "crop_shape": [
+    102,
+    97
+  ],
+  "rank_score": 1.0717448634632114,
+  "saved_at": 1786512869.9191825
+}

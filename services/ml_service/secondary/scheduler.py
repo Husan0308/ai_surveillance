@@ -13,7 +13,7 @@ class SecondaryAIScheduler:
         self.max_age = float(max_task_age_ms) / 1000; self.batch_size = max(1, int(reid_batch_size)); self.batch_wait = max(0, float(reid_batch_wait_ms)) / 1000
         self.queues = {kind: queue.Queue(max(1, int(queue_size))) for kind in SecondaryTaskType}
         self._stop = threading.Event(); self._threads = []
-        self._lock = threading.Lock(); self._metrics = defaultdict(lambda: {"submitted":0,"completed":0,"dropped":0,"stale":0,"queue_depth":0,"batch_size":0,"processing_ms":0.0,"cache_hits":0})
+        self._lock = threading.Lock(); self._metrics = defaultdict(lambda: {"submitted":0,"completed":0,"dropped":0,"stale":0,"queue_depth":0,"batch_size":0,"processing_ms":0.0,"cache_hits":0,"active":False,"active_started_at":None})
 
     def start(self):
         if self._threads: return
@@ -21,6 +21,9 @@ class SecondaryAIScheduler:
         for kind in self.processors:
             thread = threading.Thread(target=self._run, args=(kind,), name=f"secondary-{kind.value.lower()}", daemon=False)
             self._threads.append(thread); thread.start()
+
+    def can_accept(self, kind: SecondaryTaskType):
+        return not self.queues[kind].full()
 
     def submit(self, task: SecondaryTask):
         q = self.queues[task.task_type]
@@ -32,8 +35,8 @@ class SecondaryAIScheduler:
             metric=self._metrics[task.task_type];metric["submitted"]+=1;metric["queue_depth"]=q.qsize()
         return True
 
-    def cache_hit(self, kind=SecondaryTaskType.REID):
-        with self._lock:self._metrics[kind]["cache_hits"]+=1
+    def cache_hit(self, kind=SecondaryTaskType.REID, count=1):
+        with self._lock:self._metrics[kind]["cache_hits"]+=max(0,int(count))
 
     def _run(self, kind):
         q=self.queues[kind];processor=self.processors[kind]
@@ -56,17 +59,18 @@ class SecondaryAIScheduler:
                 else:fresh.append(task)
             if fresh:
                 started=time.perf_counter()
+                with self._lock:self._metrics[kind]["active"]=True;self._metrics[kind]["active_started_at"]=time.time()
                 try:
                     outputs=processor(fresh) if kind == SecondaryTaskType.REID else [processor(task) for task in fresh]
                     if outputs is None:outputs=[None]*len(fresh)
                     for task,result in zip(fresh,outputs):
-                        if result is not None and self.result_callback:self.result_callback(task,result)
+                        if self.result_callback and (kind == SecondaryTaskType.REID or result is not None):self.result_callback(task,result)
                 except Exception as exc:
                     log.exception("%s secondary worker failed: %s",kind.value,exc)
                 finally:
                     elapsed=(time.perf_counter()-started)*1000
                     with self._lock:
-                        metric=self._metrics[kind];metric["completed"]+=len(fresh);metric["batch_size"]=len(fresh);metric["processing_ms"]=elapsed;metric["queue_depth"]=q.qsize()
+                        metric=self._metrics[kind];metric["completed"]+=len(fresh);metric["batch_size"]=len(fresh);metric["processing_ms"]=elapsed;metric["queue_depth"]=q.qsize();metric["active"]=False;metric["active_started_at"]=None
                     for _ in fresh:q.task_done()
 
     def snapshot(self):

@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-01:TRACK-00006",
+  "horizon_ms": 1956.2526470108423,
+  "previous_bbox": [
+    2024.9703369140625,
+    453.30755615234375,
+    2203.051025390625,
+    864.804931640625
+  ],
+  "legacy_bbox": [
+    2022.0072021484375,
+    454.0797424316406,
+    2202.201171875,
+    872.2635498046875
+  ],
+  "corrected_bbox": [
+    2022.00732421875,
+    454.0797119140625,
+    2202.201171875,
+    872.2635498046875
+  ],
+  "actual_bbox": [
+    2070.554443359375,
+    447.48504638671875,
+    2204.50439453125,
+    736.3646240234375
+  ],
+  "predicted_velocity": [
+    -1.8853415250778198,
+    3.3567636013031006,
+    -1.1517658233642578,
+    3.900890827178955
+  ],
+  "previous_confidence": 0.9010776877403259,
+  "previous_real_observation_timestamp": 1786519733.443823,
+  "previous_state_timestamp": 1786519733.443823,
+  "new_observation_timestamp": 1786519735.4000754,
+  "prediction_horizon_ms": 1956.2526470108423,
+  "frame_id": 2762,
+  "detection_confidence": 0.8308365941047668,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-01:2762:FULL:1",
+  "before": {
+    "center_error_px": 75.64754116401971,
+    "center_error_normalized": 0.31121614475215625,
+    "iou": 0.48332658334273276,
+    "bbox_width_error": 46.2440185546875,
+    "bbox_height_error": 129.30422973632812
+  },
+  "after": {
+    "center_error_px": 75.64750627892428,
+    "center_error_normalized": 0.31121582498736133,
+    "iou": 0.4833269471753466,
+    "bbox_width_error": 46.243896484375,
+    "bbox_height_error": 129.30426025390625
+  },
+  "velocity_ratio": 1.0063398530412455,
+  "observed_velocity": [
+    -1.9654686450958252,
+    3.282245635986328
+  ],
+  "bbox_scale_delta": 0.44760599732398987,
+  "motion_direction_dot": 14.723302841186523,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE"
+  ],
+  "camera_id": "CAM-01",
+  "crop_origin": [
+    2006,
+    431
+  ],
+  "crop_shape": [
+    214,
+    457
+  ],
+  "rank_score": 0.31121582498736133,
+  "saved_at": 1786519737.1666691
+}

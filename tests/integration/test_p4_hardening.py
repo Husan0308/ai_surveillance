@@ -47,7 +47,7 @@ class RealtimePolicyTests(unittest.TestCase):
   self.assertFalse(realtime[0]);self.assertEqual(realtime[1]["type"],"frame.metadata");self.assertTrue(business[0])
  def test_display_handoff_samples_twenty_fps_near_eighteen_without_ai(self):
   runtime=MLRuntimeState();frame=np.zeros((4,4,3),np.uint8);times=[i*.05 for i in range(20)]
-  with patch("services.ml_service.control.time.monotonic",side_effect=times):
+  with patch("services.ml_service.control.DISPLAY_FPS",18.0),patch("services.ml_service.control.time.monotonic",side_effect=times):
    for frame_id in range(20):runtime.frame(FramePacket("A",frame_id,frame_id*.05,frame_id*.05,frame,4,4))
   self.assertGreaterEqual(runtime.video_stats["A"]["display_frames"],17);self.assertLessEqual(runtime.video_stats["A"]["display_frames"],19);self.assertEqual(runtime.frames["A"][0],19)
 

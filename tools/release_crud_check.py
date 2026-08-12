@@ -54,8 +54,8 @@ def main():
   with sqlite3.connect(settings.database_path) as db:row_count=db.execute("select count(*) from api_resources where resource='cameras' and id=?",(ID,)).fetchone()[0];camera_count=db.execute("select count(*) from api_resources where resource='cameras'").fetchone()[0]
   result={'ml_ready':True,'reader_appeared':appeared,'thread_appeared':thread_appeared,'metadata_edited':edited,'disabled':disabled,'thread_stopped':thread_stopped,'restarted':restarted,'deleted':deleted,'thread_deleted':thread_deleted,'temporary_rows':row_count,'canonical_rows':camera_count};print(json.dumps(result,sort_keys=True));return 0 if all(v for k,v in result.items() if k not in ('temporary_rows','canonical_rows')) and row_count==0 and camera_count==6 else 1
  finally:
-  try:request('DELETE',f'cameras/{ID}',required=False)
-  except Exception:pass
+  cleanup=request('DELETE',f'cameras/{ID}',required=False)
+  if cleanup is None:print('release check cleanup: temporary camera already absent or API unavailable',file=sys.stderr)
   for process in (worker,api):
    if process and process.poll() is None:process.terminate()
   for process in (worker,api):

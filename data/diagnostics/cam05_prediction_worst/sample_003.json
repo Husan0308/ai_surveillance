@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00056",
+  "horizon_ms": 2425.7377890171483,
+  "previous_bbox": [
+    283.7367858886719,
+    17.60986328125,
+    313.6390075683594,
+    75.98374938964844
+  ],
+  "legacy_bbox": [
+    270.3782653808594,
+    14.55898666381836,
+    298.1764221191406,
+    64.47044372558594
+  ],
+  "corrected_bbox": [
+    270.3782653808594,
+    14.558988571166992,
+    298.1764221191406,
+    64.47044372558594
+  ],
+  "actual_bbox": [
+    299.3825378417969,
+    15.297752380371094,
+    325.5918884277344,
+    57.594688415527344
+  ],
+  "predicted_velocity": [
+    -6.118673801422119,
+    -0.87698894739151,
+    -0.10639886558055878,
+    -3.453266143798828
+  ],
+  "previous_confidence": 0.059031423181295395,
+  "previous_real_observation_timestamp": 1786507110.6163895,
+  "previous_state_timestamp": 1786507110.6163895,
+  "new_observation_timestamp": 1786507113.0421274,
+  "prediction_horizon_ms": 2425.7377890171483,
+  "frame_id": 29420,
+  "detection_confidence": 0.08691111207008362,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:29420:FULL:1",
+  "before": {
+    "center_error_px": 28.376264571349708,
+    "center_error_normalized": 1.0787705512152632,
+    "iou": 0.0,
+    "bbox_width_error": 1.58880615234375,
+    "bbox_height_error": 7.614521026611328
+  },
+  "after": {
+    "center_error_px": 28.376264674476218,
+    "center_error_normalized": 1.0787705527315405,
+    "iou": 0.0,
+    "bbox_width_error": 1.58880615234375,
+    "bbox_height_error": 7.614519119262695
+  },
+  "velocity_ratio": 0.8209029099069062,
+  "observed_velocity": [
+    -6.204043388366699,
+    -4.266984462738037
+  ],
+  "bbox_scale_delta": 0.1800253540277481,
+  "motion_direction_dot": 41.70261764526367,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "LOW_CONFIDENCE_DETECTION",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    254,
+    0
+  ],
+  "crop_shape": [
+    87,
+    80
+  ],
+  "rank_score": 1.0787705527315405,
+  "saved_at": 1786507113.6944494
+}

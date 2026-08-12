@@ -16,13 +16,13 @@ class Scenario:
 def _box(x,y=10,w=20,h=60):return (x,y,x+w,y+h)
 def scenarios():
     a=[((_box(10+i),),) for i in range(30)]+[((),)]*5+[((_box(70+i),),) for i in range(10)]
-    b=[((_box(10+i),),) for i in range(20)]+[((),)]*15+[((_box(45+i),),) for i in range(10)]
+    b=[((_box(10+i),),) for i in range(20)]+[((),)]*75+[((_box(90+i),),) for i in range(10)]
     crossing=[];similar=[];turn=[]
     for i in range(30):
         crossing.append(((_box(5+3*i),_box(105-3*i)),))
         similar.append(((_box(5+3*i),_box(105-3*i)),))
         turn.append(((_box(20+i),),))
-    return (Scenario("A_short_5",tuple(a)),Scenario("B_long_15",tuple(b)),
+    return (Scenario("A_short_5",tuple(a)),Scenario("B_long_75",tuple(b)),
             Scenario("C_crossing",tuple(crossing)),Scenario("D_similar_overlap",tuple(similar)),
             Scenario("E_turnaround",tuple(turn)))
 
@@ -33,7 +33,7 @@ def _result(frame,boxes):
 def evaluate(factory,scenario):
     tracker=factory();truth_ids={};switches=false_merges=fragments=0;started=time.perf_counter()
     for frame,item in enumerate(scenario.frames,1):
-        boxes=item[0];out=tracker.update(_result(frame,boxes))
+        boxes=item[0];result=_result(frame,boxes);out=tracker.update(result,now_monotonic=result.receive_timestamp) if isinstance(tracker,CameraTracker) else tracker.update(result)
         visible=[t for t in out.tracks if t.state.value!="LOST"]
         assigned=set()
         for truth,box in enumerate(boxes):

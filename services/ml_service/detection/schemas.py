@@ -8,6 +8,8 @@ class Detection:
     confidence: float
     class_id: int = 0
     class_name: str = "person"
+    detection_source: str = "FULL_FRAME"
+    detection_id: str | None = None
 
 @dataclass(frozen=True, slots=True)
 class CameraDetectionResult:
@@ -16,6 +18,9 @@ class CameraDetectionResult:
     capture_timestamp: float
     receive_timestamp: float
     detections: tuple[Detection, ...]
+    capture_monotonic: float = 0.0
+    source_width: int = 0
+    source_height: int = 0
 
 @dataclass(frozen=True, slots=True)
 class DetectionBatchResult:

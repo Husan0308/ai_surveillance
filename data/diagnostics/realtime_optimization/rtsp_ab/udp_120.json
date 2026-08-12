@@ -1,0 +1,136 @@
+{
+  "decoder": "nvv4l2decoder",
+  "duration": 15.0,
+  "extra_surfaces": 0,
+  "memtype": null,
+  "output": "bgrx-appsink",
+  "transport": "udp",
+  "latency_ms": 120,
+  "udp_buffer_size": 0,
+  "results": [
+    {
+      "camera_id": "CAM-03",
+      "codec": "h264",
+      "frames": 289,
+      "first_frame_ms": 611.0,
+      "success": true,
+      "first_error": null,
+      "first_warning": null,
+      "transport": "udp",
+      "latency_ms": 120,
+      "udp_buffer_size": 0,
+      "stage_frames": {
+        "decode": 289,
+        "nvconvert": 289,
+        "cpuconvert": 0,
+        "appsink": 289
+      },
+      "stage_fps": {
+        "decode": 18.95,
+        "nvconvert": 18.95,
+        "cpuconvert": 0.0,
+        "appsink": 18.95
+      },
+      "stage_interval_ms": {
+        "decode": {
+          "count": 288,
+          "p50": 49.971,
+          "p95": 89.807,
+          "max": 328.623,
+          "gaps_over_150": 3,
+          "gaps_over_200": 3,
+          "gaps_over_300": 3
+        },
+        "nvconvert": {
+          "count": 288,
+          "p50": 49.107,
+          "p95": 90.187,
+          "max": 333.094,
+          "gaps_over_150": 3,
+          "gaps_over_200": 3,
+          "gaps_over_300": 3
+        },
+        "cpuconvert": {
+          "count": 0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "max": 0.0,
+          "gaps_over_150": 0,
+          "gaps_over_200": 0,
+          "gaps_over_300": 0
+        },
+        "appsink": {
+          "count": 288,
+          "p50": 49.08,
+          "p95": 90.176,
+          "max": 333.106,
+          "gaps_over_150": 3,
+          "gaps_over_200": 3,
+          "gaps_over_300": 3
+        }
+      }
+    },
+    {
+      "camera_id": "CAM-06",
+      "codec": "h265",
+      "frames": 300,
+      "first_frame_ms": 341.6,
+      "success": true,
+      "first_error": null,
+      "first_warning": null,
+      "transport": "udp",
+      "latency_ms": 120,
+      "udp_buffer_size": 0,
+      "stage_frames": {
+        "decode": 300,
+        "nvconvert": 300,
+        "cpuconvert": 0,
+        "appsink": 300
+      },
+      "stage_fps": {
+        "decode": 19.67,
+        "nvconvert": 19.67,
+        "cpuconvert": 0.0,
+        "appsink": 19.67
+      },
+      "stage_interval_ms": {
+        "decode": {
+          "count": 299,
+          "p50": 49.882,
+          "p95": 100.084,
+          "max": 146.227,
+          "gaps_over_150": 0,
+          "gaps_over_200": 0,
+          "gaps_over_300": 0
+        },
+        "nvconvert": {
+          "count": 299,
+          "p50": 49.811,
+          "p95": 100.439,
+          "max": 146.141,
+          "gaps_over_150": 0,
+          "gaps_over_200": 0,
+          "gaps_over_300": 0
+        },
+        "cpuconvert": {
+          "count": 0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "max": 0.0,
+          "gaps_over_150": 0,
+          "gaps_over_200": 0,
+          "gaps_over_300": 0
+        },
+        "appsink": {
+          "count": 299,
+          "p50": 49.799,
+          "p95": 100.474,
+          "max": 146.123,
+          "gaps_over_150": 0,
+          "gaps_over_200": 0,
+          "gaps_over_300": 0
+        }
+      }
+    }
+  ]
+}

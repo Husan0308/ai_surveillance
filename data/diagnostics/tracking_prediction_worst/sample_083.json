@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00009",
+  "horizon_ms": 2265.0385390152223,
+  "previous_bbox": [
+    281.45330810546875,
+    31.52161407470703,
+    319.44091796875,
+    91.7850341796875
+  ],
+  "legacy_bbox": [
+    280.8595275878906,
+    31.2165470123291,
+    320.5599670410156,
+    93.99127960205078
+  ],
+  "corrected_bbox": [
+    280.8595275878906,
+    31.21654510498047,
+    320.5599670410156,
+    93.99127960205078
+  ],
+  "actual_bbox": [
+    282.1746520996094,
+    31.85248565673828,
+    309.05584716796875,
+    73.03068542480469
+  ],
+  "predicted_velocity": [
+    -0.030015600845217705,
+    0.1597994863986969,
+    0.366533100605011,
+    0.3277207016944885
+  ],
+  "previous_confidence": 0.5856765508651733,
+  "previous_real_observation_timestamp": 1786519841.5158637,
+  "previous_state_timestamp": 1786519841.5158637,
+  "new_observation_timestamp": 1786519843.7809014,
+  "prediction_horizon_ms": 2265.0385390152223,
+  "frame_id": 5271,
+  "detection_confidence": 0.3158124089241028,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:5271:FULL:2",
+  "before": {
+    "center_error_px": 11.367797159098638,
+    "center_error_normalized": 0.31116278829076804,
+    "iou": 0.44415621463503935,
+    "bbox_width_error": 12.819244384765625,
+    "bbox_height_error": 21.596532821655273
+  },
+  "after": {
+    "center_error_px": 11.367796306554318,
+    "center_error_normalized": 0.31116276992238573,
+    "iou": 0.44415620113978915,
+    "bbox_width_error": 12.819244384765625,
+    "bbox_height_error": 21.596534729003906
+  },
+  "velocity_ratio": 1.0,
+  "observed_velocity": [
+    -0.0812157616019249,
+    0.02464151941239834
+  ],
+  "bbox_scale_delta": 0.5244652628898621,
+  "motion_direction_dot": 0.006375442259013653,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "DETECTION_BOX_JITTER"
+  ],
+  "camera_id": "CAM-05",
+  "crop_origin": [
+    264,
+    15
+  ],
+  "crop_shape": [
+    72,
+    94
+  ],
+  "rank_score": 0.31116276992238573,
+  "saved_at": 1786519844.1409774
+}

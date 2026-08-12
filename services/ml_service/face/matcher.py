@@ -1,4 +1,4 @@
-import time,numpy as np
+import numpy as np
 from .schemas import FaceMatch,FaceDecision
 
 class KnownPersonMatcher:

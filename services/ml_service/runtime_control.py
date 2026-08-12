@@ -1,5 +1,8 @@
 """Independent bounded command consumer; it never depends on camera batches."""
 import threading
+from shared.logging import get_logger
+
+log=get_logger(__name__)
 
 class RuntimeCommandLoop:
     def __init__(self, poll, handler, interval_seconds=.1):
@@ -9,7 +12,9 @@ class RuntimeCommandLoop:
         self._stop.clear();self._thread=threading.Thread(target=self._run,name="ml-command-loop",daemon=False);self._thread.start()
     def _run(self):
         while not self._stop.is_set():
-            for command in self.poll():self.handler(command)
+            for command in self.poll():
+                try:self.handler(command)
+                except Exception:log.exception("ML command failed: %s",command.get("type") if isinstance(command,dict) else type(command).__name__)
             self._stop.wait(self.interval)
     def stop(self):self._stop.set()
     def join(self,timeout=None):

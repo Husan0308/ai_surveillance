@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00004",
+  "horizon_ms": 3335.761269001523,
+  "previous_bbox": [
+    339.8774719238281,
+    50.133544921875,
+    377.7030029296875,
+    116.487548828125
+  ],
+  "legacy_bbox": [
+    362.391357421875,
+    60.147335052490234,
+    399.855712890625,
+    132.86036682128906
+  ],
+  "corrected_bbox": [
+    362.391357421875,
+    60.1473388671875,
+    399.855712890625,
+    132.86036682128906
+  ],
+  "actual_bbox": [
+    339.761962890625,
+    50.22283935546875,
+    378.1639099121094,
+    114.94300842285156
+  ],
+  "predicted_velocity": [
+    1.458806037902832,
+    3.46003794670105,
+    -0.5549173951148987,
+    1.3609817028045654
+  ],
+  "previous_confidence": 0.35349491238594055,
+  "previous_real_observation_timestamp": 1786519796.1103048,
+  "previous_state_timestamp": 1786519796.1103048,
+  "new_observation_timestamp": 1786519799.4460654,
+  "prediction_horizon_ms": 3335.761269001523,
+  "frame_id": 4391,
+  "detection_confidence": 0.24359112977981567,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:4391:FULL:2",
+  "before": {
+    "center_error_px": 26.1702951271689,
+    "center_error_normalized": 0.6158529655699578,
+    "iou": 0.19889895804844682,
+    "bbox_width_error": 0.937591552734375,
+    "bbox_height_error": 7.992862701416016
+  },
+  "after": {
+    "center_error_px": 26.17029614175671,
+    "center_error_normalized": 0.6158529758629572,
+    "iou": 0.19889894798941865,
+    "bbox_width_error": 0.937591552734375,
+    "bbox_height_error": 7.99285888671875
+  },
+  "velocity_ratio": 1.0,
+  "observed_velocity": [
+    -0.2848542630672455,
+    0.3919086158275604
+  ],
+  "bbox_scale_delta": 0.12349873036146164,
+  "motion_direction_dot": 0.9404715299606323,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "LOW_CONFIDENCE_DETECTION"
+  ],
+  "camera_id": "CAM-05",
+  "crop_origin": [
+    323,
+    34
+  ],
+  "crop_shape": [
+    92,
+    114
+  ],
+  "rank_score": 0.6158529758629572,
+  "saved_at": 1786519800.619399
+}

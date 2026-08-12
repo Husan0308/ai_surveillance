@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-04:TRACK-00001",
+  "horizon_ms": 1125.5316020105965,
+  "previous_bbox": [
+    805.0759887695312,
+    151.73912048339844,
+    1031.115234375,
+    860.3956298828125
+  ],
+  "legacy_bbox": [
+    823.4857788085938,
+    159.79550170898438,
+    1064.7037353515625,
+    886.4803466796875
+  ],
+  "corrected_bbox": [
+    823.4857177734375,
+    159.7955322265625,
+    1064.7037353515625,
+    886.4803466796875
+  ],
+  "actual_bbox": [
+    650.3519439697266,
+    267.32452392578125,
+    958.1614685058594,
+    900.1548767089844
+  ],
+  "predicted_velocity": [
+    -13.618218421936035,
+    6.7673468589782715,
+    -25.508798599243164,
+    24.567529678344727
+  ],
+  "previous_confidence": 0.9318850040435791,
+  "previous_real_observation_timestamp": 1786519645.6447668,
+  "previous_state_timestamp": 1786519645.6447668,
+  "new_observation_timestamp": 1786519646.7702985,
+  "prediction_horizon_ms": 1125.5316020105965,
+  "frame_id": 1339,
+  "detection_confidence": 0.912366509437561,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-04:1339:FULL:0",
+  "before": {
+    "center_error_px": 152.40490718030514,
+    "center_error_normalized": 0.4642839625468101,
+    "iou": 0.29084957674318873,
+    "bbox_width_error": 66.59156799316406,
+    "bbox_height_error": 93.8544921875
+  },
+  "after": {
+    "center_error_px": 152.40487311166223,
+    "center_error_normalized": 0.46428386056099513,
+    "iou": 0.2908497093664128,
+    "bbox_width_error": 66.59150695800781,
+    "bbox_height_error": 93.85446166992188
+  },
+  "velocity_ratio": 0.12419741357872416,
+  "observed_velocity": [
+    -101.14237213134766,
+    69.00943756103516
+  ],
+  "bbox_scale_delta": 0.2163403034210205,
+  "motion_direction_dot": 1844.3896484375,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "MOTION_UNDERSHOOT"
+  ],
+  "camera_id": "CAM-04",
+  "crop_origin": [
+    634,
+    143
+  ],
+  "crop_shape": [
+    446,
+    773
+  ],
+  "rank_score": 0.46428386056099513,
+  "saved_at": 1786519647.1071303
+}

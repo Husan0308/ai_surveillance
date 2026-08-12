@@ -6,6 +6,8 @@ class BatchOutput:
     batch_id: int
     created_timestamp: float
     frames: tuple[FramePacket, ...]
+    build_started_monotonic: float = 0.0
+    build_completed_monotonic: float = 0.0
 
     @property
     def camera_ids(self): return tuple(packet.camera_id for packet in self.frames)

@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-05:TRACK-00109",
+  "horizon_ms": 2829.8871419974603,
+  "previous_bbox": [
+    99.55888366699219,
+    76.96141052246094,
+    149.424560546875,
+    184.11471557617188
+  ],
+  "legacy_bbox": [
+    102.38224792480469,
+    83.07981872558594,
+    152.5045623779297,
+    190.14439392089844
+  ],
+  "corrected_bbox": [
+    102.38224792480469,
+    83.07981872558594,
+    152.5045623779297,
+    190.14439392089844
+  ],
+  "actual_bbox": [
+    231.78810119628906,
+    63.60314178466797,
+    281.5436706542969,
+    179.386962890625
+  ],
+  "predicted_velocity": [
+    0.5926988124847412,
+    1.5021485090255737,
+    0.14039665460586548,
+    0.06279897689819336
+  ],
+  "previous_confidence": 0.8333412408828735,
+  "previous_real_observation_timestamp": 1786508460.0161853,
+  "previous_state_timestamp": 1786508460.0161853,
+  "new_observation_timestamp": 1786508462.8460724,
+  "prediction_horizon_ms": 2829.8871419974603,
+  "frame_id": 56141,
+  "detection_confidence": 0.7594035267829895,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-05:56141:FULL:1",
+  "before": {
+    "center_error_px": 130.1037080892433,
+    "center_error_normalized": 2.600425781663238,
+    "iou": 0.0,
+    "bbox_width_error": 0.3667449951171875,
+    "bbox_height_error": 8.719245910644531
+  },
+  "after": {
+    "center_error_px": 130.1037080892433,
+    "center_error_normalized": 2.600425781663238,
+    "iou": 0.0,
+    "bbox_width_error": 0.3667449951171875,
+    "bbox_height_error": 8.719245910644531
+  },
+  "velocity_ratio": 0.03449378099165978,
+  "observed_velocity": [
+    46.706512451171875,
+    -3.195533514022827
+  ],
+  "bbox_scale_delta": 0.0753062516450882,
+  "motion_direction_dot": 22.882728576660156,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "MOTION_UNDERSHOOT",
+    "ASSOCIATION_SUSPECT"
+  ],
+  "crop_origin": [
+    86,
+    47
+  ],
+  "crop_shape": [
+    211,
+    159
+  ],
+  "rank_score": 2.600425781663238,
+  "saved_at": 1786508463.5954823
+}

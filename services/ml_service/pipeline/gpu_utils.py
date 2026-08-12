@@ -1,9 +1,11 @@
 import os
-import sys
 import site
 import ctypes
 import cv2
 import torch
+from shared.logging import get_logger
+
+log=get_logger(__name__)
 
 _GPU_SETUP_DONE = False
 _TORCH_CUDA_USABLE = None
@@ -21,7 +23,7 @@ def torch_cuda_usable():
         _TORCH_CUDA_USABLE = True
         return _TORCH_CUDA_USABLE
     except Exception as exc:
-        print(f"[GPU Setup] CUDA check failed: {exc}; AI uses CPU.", flush=True)
+        log.warning("CUDA check failed: %s; AI uses CPU",exc)
         _TORCH_CUDA_USABLE = False
         return _TORCH_CUDA_USABLE
 
@@ -51,8 +53,8 @@ def setup_gpu_environment():
         cv2.setNumThreads(2)
         torch.set_num_threads(2)
         torch.backends.cudnn.benchmark = True
-    except Exception:
-        pass
+    except (RuntimeError,AttributeError) as exc:
+        log.warning("GPU runtime tuning unavailable: %s",exc)
 
     # Targeted preloading for ONNX Runtime & PyTorch
     try:
@@ -75,9 +77,9 @@ def setup_gpu_environment():
                 if os.path.exists(p):
                     try:
                         ctypes.CDLL(p, mode=ctypes.RTLD_GLOBAL)
-                    except Exception:
-                        pass
+                    except OSError as exc:
+                        log.debug("CUDA preload skipped %s: %s",p,exc)
 
-        print("[GPU Setup] ✅ Targeted CUDA & cuDNN libraries successfully initialized for GPU.", flush=True)
+        log.info("Targeted CUDA and cuDNN libraries initialized")
     except Exception as e:
-        print(f"[GPU Setup] ⚠ Setup notice: {e}", flush=True)
+        log.warning("GPU setup notice: %s",e)

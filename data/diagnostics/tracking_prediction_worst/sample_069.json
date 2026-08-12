@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-01:TRACK-00009",
+  "horizon_ms": 1616.0322450159583,
+  "previous_bbox": [
+    2015.9248046875,
+    646.800537109375,
+    2170.046142578125,
+    887.5980224609375
+  ],
+  "legacy_bbox": [
+    2084.662841796875,
+    643.744384765625,
+    2237.998291015625,
+    884.408935546875
+  ],
+  "corrected_bbox": [
+    2084.662841796875,
+    643.744384765625,
+    2237.998291015625,
+    884.408935546875
+  ],
+  "actual_bbox": [
+    2014.9537353515625,
+    643.2628173828125,
+    2178.98681640625,
+    892.0643310546875
+  ],
+  "predicted_velocity": [
+    49.37425231933594,
+    -2.255819320678711,
+    -0.5678671002388,
+    -0.09605567157268524
+  ],
+  "previous_confidence": 0.801136314868927,
+  "previous_real_observation_timestamp": 1786519676.6013045,
+  "previous_state_timestamp": 1786519676.6013045,
+  "new_observation_timestamp": 1786519678.217337,
+  "prediction_horizon_ms": 1616.0322450159583,
+  "frame_id": 1755,
+  "detection_confidence": 0.8589653372764587,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-01:1755:FULL:2",
+  "before": {
+    "center_error_px": 64.46016560059284,
+    "center_error_normalized": 0.3926264236419308,
+    "iou": 0.4126328181595925,
+    "bbox_width_error": 10.6976318359375,
+    "bbox_height_error": 8.136962890625
+  },
+  "after": {
+    "center_error_px": 64.46016560059284,
+    "center_error_normalized": 0.3926264236419308,
+    "iou": 0.4126328181595925,
+    "bbox_width_error": 10.6976318359375,
+    "bbox_height_error": 8.136962890625
+  },
+  "velocity_ratio": 19.909569088356367,
+  "observed_velocity": [
+    2.4658315181732178,
+    0.28730517625808716
+  ],
+  "bbox_scale_delta": 0.0652163103222847,
+  "motion_direction_dot": 121.10047912597656,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "MOTION_OVERSHOOT"
+  ],
+  "camera_id": "CAM-01",
+  "crop_origin": [
+    1998,
+    627
+  ],
+  "crop_shape": [
+    255,
+    281
+  ],
+  "rank_score": 0.3926264236419308,
+  "saved_at": 1786519679.188328
+}

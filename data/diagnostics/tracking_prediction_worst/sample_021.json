@@ -1,0 +1,79 @@
+{
+  "track_id": "CAM-04:TRACK-00013",
+  "horizon_ms": 2626.2176180025563,
+  "previous_bbox": [
+    2071.5732421875,
+    359.776611328125,
+    2349.405029296875,
+    662.6715087890625
+  ],
+  "legacy_bbox": [
+    2095.91015625,
+    501.2445983886719,
+    2366.51611328125,
+    706.2030029296875
+  ],
+  "corrected_bbox": [
+    2095.91015625,
+    501.24462890625,
+    2366.51611328125,
+    706.2030029296875
+  ],
+  "actual_bbox": [
+    2087.31201171875,
+    361.9062042236328,
+    2396.717071533203,
+    642.8526306152344
+  ],
+  "predicted_velocity": [
+    0.5208835601806641,
+    35.84764099121094,
+    -5.115208148956299,
+    -37.37396240234375
+  ],
+  "previous_confidence": 0.5492841601371765,
+  "previous_real_observation_timestamp": 1786519812.1753833,
+  "previous_state_timestamp": 1786519812.1753833,
+  "new_observation_timestamp": 1786519814.801601,
+  "prediction_horizon_ms": 2626.2176180025563,
+  "frame_id": 4441,
+  "detection_confidence": 0.8398656249046326,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-04:4441:FULL:2",
+  "before": {
+    "center_error_px": 101.91837128019354,
+    "center_error_normalized": 0.3624102768396407,
+    "iou": 0.3682161923798988,
+    "bbox_width_error": 38.799102783203125,
+    "bbox_height_error": 75.98802185058594
+  },
+  "after": {
+    "center_error_px": 101.91838645304755,
+    "center_error_normalized": 0.3624103308991656,
+    "iou": 0.3682161130265864,
+    "bbox_width_error": 38.799102783203125,
+    "bbox_height_error": 75.98805236816406
+  },
+  "velocity_ratio": 1.0792845389079886,
+  "observed_velocity": [
+    12.004197120666504,
+    30.972881317138672
+  ],
+  "bbox_scale_delta": 0.2704716920852661,
+  "motion_direction_dot": 1116.5574951171875,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "DETECTION_BOX_JITTER"
+  ],
+  "camera_id": "CAM-04",
+  "crop_origin": [
+    2071,
+    345
+  ],
+  "crop_shape": [
+    341,
+    377
+  ],
+  "rank_score": 0.3624103308991656,
+  "saved_at": 1786519815.6355412
+}

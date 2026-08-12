@@ -1,7 +1,7 @@
 # AI Surveillance configuration (optimized)
 ai:
   detector:
-    model: models/yolo26n.pt
+    model: models/yolo26m.pt
     # Low-confidence boxes can recover an existing track, but cannot create
     # a new ID until tracker.new_track_thresh is reached.
     conf: 0.05
@@ -13,23 +13,19 @@ ai:
     low_conf_size_threshold: 0.22
     low_conf_min_width: 12
     low_conf_min_height: 36
-    device: auto
-    # Offline miss-evidence benchmark: 61.7% recovery at 384x640 versus
-    # 82.5% at 448x800. 544x960 was slower and recovered fewer samples.
-    imgsz: [448, 800]
+    device: cuda:0
+    # GTX 1050 Ti benchmark: YOLO26m recovered 112/120 confirmed-person misses
+    # at both requested sizes; 384x640 was substantially faster than 448x800.
+    imgsz: [384, 640]
+    half: false
+  roi_recovery:
+    discovery_interval_ms: 2000
+    urgent_interval_ms: 1000
+    max_task_age_ms: 500
   ai_fps: 10
-  batch_size: 6
+  batch_size: 3
   batch_interval_ms: 40
-  batch_queue_size: 5
-  # Launch-time freshness ceiling; normal operation should stay well below it.
-  max_frame_age_ms: 120
-  batch_debug: true
-  batch_debug_interval_sec: 1.0
-  detection_interval_frames: 1
-  face_interval_frames: 6
-  face_min_quality: 60
-  face_recognition_timeout_sec: 7
-  max_people_per_camera: 12
+  max_frame_age_ms: 200
   pose:
     conf: 0.20
     device: cpu
@@ -43,9 +39,6 @@ ai:
   secondary:
     enabled: true
     queue_size: 36
-    pose_batch_size: 6
-    pose_batch_wait_ms: 5.0
-  pose_interval_frames: 5   # reduced to lower GPU load while keeping pose
   reid:
     # Associate an already detected person across cameras. This does not
     # fabricate boxes: every camera still requires a local YOLO detection.
@@ -75,8 +68,18 @@ ai:
   tracker:
     match_thresh: 0.35
     new_track_thresh: 0.28
+    # Conservative NEW-track admission only; existing confirmed people are never size-gated.
+    new_track_min_width: 12
+    new_track_min_height: 36
+    new_track_min_area: 432
+    new_track_min_aspect_ratio: 0.08
+    new_track_max_aspect_ratio: 3.5
     track_buffer: 15   # 1.5 seconds at the measured 10 AI updates/second
-    max_lost_time_ms: 1500
+    max_lost_time_ms: 1800
+    # Expiry requires actual camera observations, never scheduler omission alone.
+    min_expiry_misses: 3
+    # Visual-only propagation; never counts as detector or identity evidence.
+    prediction_horizon_ms: 1800
     effective_ai_fps: 10
     track_high_thresh: 0.22
     # 0.05-0.22 detections only recover tracks; new_track_thresh stays 0.28.
@@ -86,76 +89,21 @@ ai:
     tentative_buffer: 12
     confirmation_mean_thresh: 0.18
     type: custom_motion_iou
-    visible_missing_frames: 5
-    debug: true
-    debug_interval_sec: 1.0
-    miss_debug:
-      enabled: true
-      dir: data/detection_miss_debug
-      miss_milestones: [2, 5]
-      per_track_limit: 3
-      per_camera_limit: 30
-      global_limit: 120
-      context_scale: 2.0
-      jpeg_quality: 85
-alerts:
-  sound_enabled: true
-  sound_events:
-    - intrusion
-    - camera_offline
-    - overstay
-app:
-  name: AI Surveillance System
-  ui_locked: true
-  version: "3.0"
-cameras_config: config/cameras.yaml
-database:
-  busy_timeout_ms: 5000
-  sqlite_path: data/surveillance.db
-  type: sqlite
-  wal: true
+    visible_missing_frames: 18
 enrollment:
-  countdown_seconds: 3
-  duplicate_check: true
   duplicate_threshold: 0.752
-  flash_animation: true
-  hot_reload_recognition: true
   images_count: 10
-  min_face_quality: 45
-  min_face_size_px: 20
-  reject_bad_angle: false
-  reject_blur: true
-  reject_dark: true
-  shutter_sound: true
-  source: 0
-environment:
-  device: cuda
-  gpu_id: 0
-  threads: 2   # reduced CPU thread pool
 deepstream:
   enabled: true
   decoder_backend: nvv4l2decoder
   fallback_to_opencv: false   # avoid CPU fallback
   max_decode_streams: 16
-events:
-  retention_days: 30
-  types:
-    - person_detected
-    - person_recognized
-    - unknown_detected
-    - camera_offline
-    - camera_online
-    - enrollment_completed
-    - snapshot
-    - error
-    - intrusion
-    - overstay
-  ui_limit: 300
 face:
   det_size:
     - 320
     - 320
-  enabled: true
+  # Code retained; disabled to reserve runtime for YOLO26m and OSNet.
+  enabled: false
   device: cpu
   refresh_seconds: 60
   weak_retry_seconds: 3
@@ -163,10 +111,9 @@ face:
   model: buffalo_l
   threshold: 0.4
 heatmap:
-  enabled: true
+  # Code retained; disabled to reserve runtime for YOLO26m and OSNet.
+  enabled: false
   accumulation_mode: POINT
-  blur: true
-  collect_when_off: true
   grid_width: 160
   grid_height: 90
   kernel_radius: 4
@@ -175,38 +122,22 @@ heatmap:
   live_decay_enabled: true
   live_decay_half_life_seconds: 30
   max_tracked_keys: 4096
-  opacity: 0.6
 logging:
   backup_count: 5
   dir: logs
   level: INFO
   max_mb: 10
 performance:
-  camera_thread_per_camera: true
-  db_queue_size: 10000
-  frame_queue_size: 2
-  ui_refresh_fps: 25
-person_management:
-  allow_unknown_to_employee: true
-  delete_embeddings_on_delete: true
-security:
-  auto_lock_minutes: 15
-  login_password: ""
-  login_username: admin
-  settings_password: ""
-storage:
-  auto_delete_old: true
-  backups_dir: backups
-  exports_dir: exports
-  max_disk_gb: 500
-  models_dir: models
-  recording_format: mp4
-  recordings_dir: recordings
-  recordings_enabled: false
-  retention_days: 14
-  segment_minutes: 5
-  snapshots_dir: data/snapshots
+  # Bound native pools so OpenCV/JPEG and CPU ReID do not each consume every core.
+  opencv_threads: 2
+  torch_threads: 4
+  torch_interop_threads: 1
 identity:
+  # Two prompt, genuinely independent OSNet extractions are required before merge.
+  min_independent_evidence_ms: 500
+  initial_evidence_interval_seconds: 0.75
+  # Low-quality crops remain eligible, but retry slowly so they cannot starve YOLO.
+  low_quality_retry_seconds: 3.0
   max_embeddings_per_identity: 20
   max_activity_history: 256
   max_runtime_identities: 2000
@@ -214,23 +145,16 @@ identity:
     max_identities: 500
     retention_days: 7
     min_improvement: 0.10
-  # Physical camera relationships are intentionally empty until the site owner confirms them.
-  topology:
-    verified: false
-    default_min_travel_ms: 20000
-    cameras: {}
-
-gemini:
-  enabled: false
-  model: gemini-2.5-flash
-  api_key: ""
-  min_face_score: 0.5
-  max_calls_per_min: 30
-
 display:
-  fps_cap: 18
+  fps_cap: 12
+  presentation_fps: 12
+  prediction_fps: 15
   jpeg_quality: 85
-  visual_track_grace_ms: 400
-  metrics_refresh_ms: 1000
-  max_width: 1280
-  max_height: 720
+  # Two-column cards do not consume 720p pixels. The real six-camera pacing
+  # trace showed JPEG/decode/paint contention, so grid transport is capped at
+  # 960x540. On-demand fullscreen is capped at 1280x720 so enlarging a camera
+  # remains visibly sharper without encoding oversized frames.
+  max_width: 960
+  max_height: 540
+  fullscreen_max_width: 1280
+  fullscreen_max_height: 720

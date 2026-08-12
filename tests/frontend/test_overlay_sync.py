@@ -8,3 +8,6 @@ class OverlaySyncTests(unittest.TestCase):
  def test_stale_metadata_rejected(self):
   buffer=MetadataBuffer(max_age_ms=10);buffer.put({"camera_id":"CAM-01","frame_id":1,"timestamp":time.time()-1,"tracks":[]})
   self.assertIsNone(buffer.match("CAM-01",1))
+ def test_independent_fullscreen_frame_domain_matches_by_capture_time(self):
+  buffer=MetadataBuffer(max_age_ms=500);buffer.put({"camera_id":"CAM-06","frame_id":900,"timestamp":10.0,"tracks":[{"global_id":"UNK 3"}]})
+  self.assertIsNone(buffer.match("CAM-06",3,10.05));matched=buffer.match("CAM-06",3,10.05,independent_frame_domain=True);self.assertEqual(matched["frame_id"],900)

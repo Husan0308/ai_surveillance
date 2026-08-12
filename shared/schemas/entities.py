@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel,ConfigDict, Field
 
 from shared.enums import CameraStatus, EventSeverity, EventType
+from shared.schemas.roi import RecoveryROI
 
 
 def now_utc() -> datetime:
@@ -27,6 +28,7 @@ class Camera(ContractModel):
     status: CameraStatus = CameraStatus.OFFLINE
     ai_enabled: bool = True
     heatmap_enabled: bool = False
+    recovery_rois: List[RecoveryROI] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 

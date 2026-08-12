@@ -1,0 +1,80 @@
+{
+  "track_id": "CAM-01:TRACK-00009",
+  "horizon_ms": 4197.170712024672,
+  "previous_bbox": [
+    1930.544921875,
+    712.49560546875,
+    2041.6824951171875,
+    884.5492553710938
+  ],
+  "legacy_bbox": [
+    1934.03515625,
+    715.8046875,
+    2034.256591796875,
+    869.5228271484375
+  ],
+  "corrected_bbox": [
+    1934.03515625,
+    715.8046875,
+    2034.256591796875,
+    869.5228271484375
+  ],
+  "actual_bbox": [
+    1998.5130615234375,
+    683.3574829101562,
+    2173.5888671875,
+    896.6427612304688
+  ],
+  "predicted_velocity": [
+    0.01912059634923935,
+    -0.34626781940460205,
+    -0.6847447156906128,
+    -0.12093734741210938
+  ],
+  "previous_confidence": 0.645805835723877,
+  "previous_real_observation_timestamp": 1786519733.443823,
+  "previous_state_timestamp": 1786519733.443823,
+  "new_observation_timestamp": 1786519737.6409936,
+  "prediction_horizon_ms": 4197.170712024672,
+  "frame_id": 2802,
+  "detection_confidence": 0.818852961063385,
+  "detection_source": "FULL_FRAME",
+  "detection_id": "CAM-01:2802:FULL:2",
+  "before": {
+    "center_error_px": 101.93989596004747,
+    "center_error_normalized": 0.5821966276650093,
+    "iou": 0.11627802054654603,
+    "bbox_width_error": 74.8543701171875,
+    "bbox_height_error": 59.567138671875
+  },
+  "after": {
+    "center_error_px": 101.93989596004747,
+    "center_error_normalized": 0.5821966276650093,
+    "iou": 0.11627802054654603,
+    "bbox_width_error": 74.8543701171875,
+    "bbox_height_error": 59.567138671875
+  },
+  "velocity_ratio": 0.14657569336425208,
+  "observed_velocity": [
+    1.2144758701324463,
+    -2.030496120452881
+  ],
+  "bbox_scale_delta": 0.42755404114723206,
+  "motion_direction_dot": 0.7263169288635254,
+  "classifications": [
+    "LONG_OBSERVATION_GAP",
+    "SCALE_CHANGE",
+    "MOTION_UNDERSHOOT"
+  ],
+  "camera_id": "CAM-01",
+  "crop_origin": [
+    1918,
+    667
+  ],
+  "crop_shape": [
+    271,
+    245
+  ],
+  "rank_score": 0.5821966276650093,
+  "saved_at": 1786519739.478937
+}

@@ -1,9 +1,10 @@
-from datetime import datetime,timezone
 from fastapi import HTTPException
+import logging
 from shared.schemas.messages import (CameraConfigChangedCommand,EnrollmentCancelCommand,
  EnrollmentStartCommand,MLSettingsChangedCommand)
 from services.api_service.repositories import *
 from shared.event_taxonomy import classify,event_type
+log=logging.getLogger(__name__)
 
 class PersonService:
     def __init__(self,db,ml=None):self.repo=PersonRepository(db);self.ml=ml
@@ -55,11 +56,12 @@ class CameraService:
         except Exception:await self.repo.delete(item["id"]);raise
         return self._public(item)
     async def update(self,cid,data):
-        old=await self.repo.get(cid);item=await self.repo.update(cid,data)
+        item=await self.repo.update(cid,data)
         try:await self.ml.command(CameraConfigChangedCommand(action="updated",camera_id=cid,config=item))
-        except Exception:
-            if old:await self.repo.update(cid,old)
-            raise
+        except Exception as exc:
+            # SQLite is authoritative. A stopped ML service must not make an
+            # operator calibration disappear; ML reconciles rows on startup.
+            log.warning("Camera %s persisted; live ML notification deferred: %s",cid,exc)
         return self._public(item)
     async def delete(self,cid):await self.ml.command(CameraConfigChangedCommand(action="deleted",camera_id=cid));await self.repo.delete(cid)
 

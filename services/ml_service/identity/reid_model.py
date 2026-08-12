@@ -3,12 +3,14 @@ import threading
 import time
 import cv2
 import numpy as np
+from contextlib import nullcontext
+from services.ml_service.pipeline.gpu_coordinator import gpu_coordinator
 
 class OSNetReIDModel:
     def __init__(self,config):
         import torch,torchreid
         cfg=config.get("ai",{}).get("reid",{});self.torch=torch;requested=str(cfg.get("device","cpu"))
-        self.device=torch.device("cuda:0" if requested=="auto" and torch.cuda.is_available() else requested)
+        self.device=torch.device("cuda:0" if requested=="auto" and torch.cuda.is_available() else requested);self.uses_cuda=self.device.type=="cuda"
         name=str(cfg.get("model","osnet_x0_25"));checkpoint=str(cfg.get("checkpoint","models/osnet_x0_25_market1501.pt"))
         self.model=torchreid.models.build_model(name=name,num_classes=751,loss="softmax",pretrained=False)
         state=torch.load(checkpoint,map_location="cpu");state=state.get("state_dict",state);state={k.replace("module.",""):v for k,v in state.items()}
@@ -23,7 +25,8 @@ class OSNetReIDModel:
             rgb=cv2.cvtColor(cv2.resize(crop,(128,256)),cv2.COLOR_BGR2RGB);valid.append(rgb);indices.append(index)
         if not valid:return output,{"gpu_ms":0}
         array=np.asarray(valid,np.float32)/255;array=np.ascontiguousarray(((array-self.mean)/self.std).transpose(0,3,1,2))
-        with self.lock,self.torch.inference_mode():
+        gate=gpu_coordinator.secondary("REID") if self.uses_cuda else nullcontext()
+        with gate,self.lock,self.torch.inference_mode():
             # torchreid OSNet returns embeddings directly while in eval mode.
             tensor=self.torch.from_numpy(array).to(self.device);features=self.model(tensor)
             if isinstance(features,(tuple,list)):features=features[0]

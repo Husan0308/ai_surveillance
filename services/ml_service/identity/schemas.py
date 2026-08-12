@@ -11,6 +11,12 @@ class IdentityTrackObservation:
     camera_id: str; frame_id: int; local_track_id: str
     bbox: tuple[float,float,float,float]; confidence: float
     timestamp: float; appearance_embedding: object = None; quality_score: float = 1.0
+    embedding_frame_id: int | None = None
+    embedding_timestamp: float | None = None
+    source_width: int = 0
+    source_height: int = 0
+    detection_source: str = "PREDICTED"
+    detection_id: str | None = None
 
 @dataclass(frozen=True, slots=True)
 class GlobalTrack:
@@ -20,7 +26,22 @@ class GlobalTrack:
     decision_reason: str
     person_id: Optional[str] = None
     display_name: Optional[str] = None
+    observation_type: str = "detected"
+    last_detection_timestamp: float = 0.0
+    prediction_age_ms: float = 0.0
+    tracker_state: str = "DETECTED"
+    identity_version: int = 0
+    detection_source: str = "PREDICTED"
+    detection_id: str | None = None
+    velocity: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    state_timestamp: float = 0.0
+    visual_expires_at: float = 0.0
+    track_generation: int = 1
+    geometry_monotonic: float = 0.0
+    visual_visible: bool = True
+    boundary_exit: bool = False
 
 @dataclass(frozen=True, slots=True)
 class GlobalTrackResult:
     camera_id: str; frame_id: int; tracks: tuple[GlobalTrack,...]
+    identity_version: int = 0

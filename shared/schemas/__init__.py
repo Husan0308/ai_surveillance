@@ -1,3 +1,4 @@
+from .roi import RecoveryROI
 """Versioned inter-service data contracts."""
 from .entities import (
     Camera,
