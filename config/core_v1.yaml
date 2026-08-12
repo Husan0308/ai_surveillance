@@ -6,7 +6,7 @@ core_v1:
 
   # Camera/display baseline. Keep presentation light and latest-only.
   display_fps: 12
-  jpeg_quality: 78
+  jpeg_quality: 76
   max_display_width: 800
   max_display_height: 450
   startup_grace_sec: 8.0
@@ -17,22 +17,36 @@ core_v1:
   decoder_extra_surfaces: 2
   decoder_low_latency_mode: false
   drop_on_latency: false
+  # Lower than the earlier conservative baseline now that the stream is proven
+  # stable. This reduces RTSP jitter-buffer contribution without reintroducing
+  # aggressive decoder low-latency flags.
+  rtsp_latency_ms: 40
+  rtsp_transport: "tcp"
 
-  # Stage 2: detector only. No tracking/ReID/identity/prediction/ROI/heatmap.
+  # Stage 2: YOLO person detector only. The actual ML model runs on CUDA.
   detector:
     enabled: true
     model: "models/yolo26m.pt"
     device: "cuda:0"
     imgsz: [384, 640]
     quantize: 32
-    conf: 0.18
+    # Lower raw confidence recovers small/partly occluded people. Visual tracker
+    # confirmation below prevents most one-frame low-confidence false positives
+    # from appearing in the UI.
+    conf: 0.08
     iou: 0.45
-    max_det: 30
+    max_det: 40
     batch_size: 3
     poll_interval_ms: 5
     start_delay_sec: 2.0
-    # Final near-duplicate guard after Ultralytics NMS. High enough to keep two
-    # nearby people, low enough to remove two boxes on the same person.
-    duplicate_iou: 0.70
-    # Raw detector-only stage: never keep a stale bbox around for long.
     overlay_max_age_ms: 250
+
+  # Visual-only per-camera stabilization. No identity/ReID evidence is produced.
+  visual_tracker:
+    hold_ms: 850
+    prediction_ms: 350
+    match_iou: 0.20
+    duplicate_iou: 0.55
+    duplicate_containment: 0.88
+    smoothing: 0.68
+    low_conf_confirm: 0.16
