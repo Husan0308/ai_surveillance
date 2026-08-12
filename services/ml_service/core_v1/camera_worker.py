@@ -21,20 +21,13 @@ class CameraMetrics:
     last_error: str=""
 
 class CameraWorker:
-    """Exactly one capture thread and one single-slot frame store per camera.
-
-    Core-v1 deliberately tolerates RTSP/NVDEC startup. GStreamerCapture.read()
-    waits up to one second for a sample; treating a single timeout as fatal made
-    all six cameras tear down before RTSP SETUP/PLAY and the first keyframe had
-    time to complete. After the first frame we also tolerate a short bounded run
-    of empty pulls before reconnecting.
-    """
+    """Exactly one capture thread and one single-slot frame store per camera."""
     def __init__(self,config:dict,store:LatestFrameStore,core_config:dict|None=None):
         self.config=dict(config);self.core_config=dict(core_config or {});self.camera_id=str(config["id"]);self.store=store
         self._stop=threading.Event();self._thread=None;self._lock=threading.Lock();self._capture=None
         self._metrics=CameraMetrics();self._fps_started=time.monotonic();self._fps_frames=0
-        self.startup_grace_sec=max(2.0,float(self.core_config.get("startup_grace_sec",8.0)))
-        self.max_read_timeouts=max(1,int(self.core_config.get("max_read_timeouts",3)))
+        self.startup_grace_sec=max(2.0,float(self.core_config.get("startup_grace_sec",15.0)))
+        self.max_read_timeouts=max(1,int(self.core_config.get("max_read_timeouts",5)))
         self.reconnect_delay_sec=max(.25,float(self.core_config.get("reconnect_delay_sec",2.0)))
     def start(self):
         if self._thread and self._thread.is_alive():return
@@ -54,9 +47,17 @@ class CameraWorker:
             result["replaced_frames"]=self.store.replaced
             return result
     def _open(self):
-        cfg={**self.config,"source":self.config.get("display_source") or self.config.get("source"),"codec":self.config.get("display_codec") or self.config.get("codec")}
-        # Keep the camera-specific RTSP latency/codec, but do not let old
-        # reconnect_interval values control this fresh core.
+        cfg={
+            **self.config,
+            "source":self.config.get("display_source") or self.config.get("source"),
+            "codec":self.config.get("display_codec") or self.config.get("codec"),
+            "latency_ms":int(self.core_config.get("rtsp_latency_ms",self.config.get("latency_ms",100))),
+            "drop_on_latency":bool(self.core_config.get("drop_on_latency",False)),
+            "decoder_extra_surfaces":int(self.core_config.get("decoder_extra_surfaces",2)),
+            "decoder_low_latency_mode":bool(self.core_config.get("decoder_low_latency_mode",False)),
+            "capture_timeout_ms":int(self.core_config.get("capture_timeout_ms",1000)),
+            "rtsp_transport":str(self.core_config.get("rtsp_transport",self.config.get("rtsp_transport","tcp"))),
+        }
         return GStreamerCapture(cfg)
     def _run(self):
         while not self._stop.is_set():
@@ -73,18 +74,12 @@ class CameraWorker:
                         if self._stop.is_set():break
                         with self._lock:
                             self._metrics.read_failures+=1;self._metrics.consecutive_timeouts+=1
-                        # A real bus error closes GStreamerCapture immediately.
                         if not cap.isOpened():
-                            raise RuntimeError("GStreamer pipeline error before sample")
+                            detail=cap.last_error() if hasattr(cap,"last_error") else ""
+                            raise RuntimeError(f"GStreamer pipeline error before sample: {detail}")
                         timeouts+=1
-                        # Initial RTSP DESCRIBE/SETUP/PLAY + decoder negotiation +
-                        # first IDR can legitimately take multiple seconds.
-                        if not had_frame and time.monotonic()-opened_at < self.startup_grace_sec:
-                            continue
-                        # Once live, absorb brief packet/keyframe gaps instead of
-                        # destroying a healthy pipeline after one empty pull.
-                        if had_frame and timeouts < self.max_read_timeouts:
-                            continue
+                        if not had_frame and time.monotonic()-opened_at < self.startup_grace_sec:continue
+                        if had_frame and timeouts < self.max_read_timeouts:continue
                         reason="startup grace expired without first frame" if not had_frame else f"{timeouts} consecutive read timeouts"
                         raise RuntimeError(reason)
                     had_frame=True;timeouts=0
