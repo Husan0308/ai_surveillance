@@ -31,7 +31,7 @@ class FrameMetadataTests(unittest.TestCase):
         messages=frame_metadata_messages((packet,),(GlobalTrackResult("CAM-01",9,(first,)),GlobalTrackResult("CAM-01",9,(newest,))))
         self.assertEqual(len(messages[0]["tracks"]),1);self.assertEqual(messages[0]["tracks"][0]["bbox"],[1,1,20,20])
 
-    def test_only_confirmed_lost_track_gets_bounded_visual_persistence(self):
+    def test_confirmed_lost_track_gets_bounded_visual_persistence_and_tentative_is_real_only(self):
         cache={};identity=GlobalTrack("CAM-01:TRACK-00001","UNK-1",(10,10,30,50),.8,.7,IdentityStatus.ACTIVE,"test")
         live=(GlobalTrackResult("CAM-01",1,(identity,)),)
         confirmed=SimpleNamespace(camera_id="CAM-01",tracks=(SimpleNamespace(track_id=identity.local_track_id,state=TrackState.CONFIRMED,misses=0,bbox=identity.bbox,predicted_bbox=identity.bbox),))
@@ -40,8 +40,11 @@ class FrameMetadataTests(unittest.TestCase):
         visual=merge_visual_identity_results(SimpleNamespace(results=(lost,)),(),cache,3)
         self.assertEqual(len(visual),1);self.assertEqual(visual[0].tracks[0].bbox,(12,10,32,50))
         self.assertEqual(visual[0].tracks[0].observation_type,"predicted")
-        tentative=SimpleNamespace(camera_id="CAM-02",frame_id=2,tracks=(SimpleNamespace(track_id="T2",state=TrackState.TENTATIVE,misses=1,bbox=(0,0,10,20),predicted_bbox=(0,0,10,20)),))
-        self.assertEqual(merge_visual_identity_results(SimpleNamespace(results=(tentative,)),(),{},3),())
+        tentative=SimpleNamespace(camera_id="CAM-02",frame_id=2,tracks=(SimpleNamespace(track_id="T2",local_track_id="T2",state=TrackState.TENTATIVE,misses=0,bbox=(0,0,10,20),predicted_bbox=(0,0,10,20),confidence=.31,last_detection_timestamp=10.0,detection_source="FULL_FRAME",detection_id="D2",velocity=(0.0,0.0),state_timestamp=10.0,visual_expires_at=0.0,track_generation=1,geometry_monotonic=10.0,visual_visible=True,boundary_exit=False),))
+        tentative_visual=merge_visual_identity_results(SimpleNamespace(results=(tentative,)),(),{},3)
+        self.assertEqual(len(tentative_visual),1);self.assertEqual(tentative_visual[0].tracks[0].tracker_state,"TENTATIVE");self.assertIsNone(tentative_visual[0].tracks[0].global_id)
+        missed_tentative=SimpleNamespace(camera_id="CAM-02",frame_id=3,tracks=(SimpleNamespace(track_id="T2",local_track_id="T2",state=TrackState.TENTATIVE,misses=1,bbox=(0,0,10,20),predicted_bbox=(1,0,11,20),confidence=.31),))
+        self.assertEqual(merge_visual_identity_results(SimpleNamespace(results=(missed_tentative,)),(),{},3),())
 
     def test_metadata_propagates_display_prediction_state_and_expiry(self):
         packet=FramePacket("CAM-01",5,10.5,10.5,None,640,360)
