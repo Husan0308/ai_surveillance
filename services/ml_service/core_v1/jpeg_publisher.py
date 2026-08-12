@@ -4,21 +4,19 @@ import cv2
 from .visual_tracker import VisualTracker
 
 class LatestJpegPublisher:
-    """Publish one newest JPEG per camera with no presentation backlog.
-
-    Detection results are visually stabilized by a tiny per-camera tracker. It
-    is deliberately visual-only: no ReID, no global identity, and no detector
-    evidence is fabricated. Short sparse-YOLO gaps are bridged for display only.
-    """
+    """Publish one newest JPEG per camera with no presentation backlog."""
     def __init__(self,camera_id,store,fps=12,quality=82,max_width=960,max_height=540,detections=None,overlay_max_age_ms=350,tracker_config=None):
         self.camera_id=camera_id;self.store=store;self.interval=1/max(1.0,float(fps));self.quality=int(quality);self.max_width=int(max_width);self.max_height=int(max_height)
         self.detections=detections;self.overlay_max_age_ms=max(0.0,float(overlay_max_age_ms))
         cfg=dict(tracker_config or {})
+        camera_zones=dict(cfg.get('camera_exclusion_zones') or {})
         self.visual_tracker=VisualTracker(
-            hold_ms=cfg.get('hold_ms',800),prediction_ms=cfg.get('prediction_ms',350),
-            match_iou=cfg.get('match_iou',0.20),duplicate_iou=cfg.get('duplicate_iou',0.55),
-            duplicate_containment=cfg.get('duplicate_containment',0.88),smoothing=cfg.get('smoothing',0.68),
-            low_conf_confirm=cfg.get('low_conf_confirm',0.16),
+            hold_ms=cfg.get('hold_ms',800),memory_ms=cfg.get('memory_ms',6000),prediction_ms=cfg.get('prediction_ms',350),
+            match_iou=cfg.get('match_iou',0.20),reacquire_distance=cfg.get('reacquire_distance',1.05),
+            duplicate_iou=cfg.get('duplicate_iou',0.50),duplicate_containment=cfg.get('duplicate_containment',0.82),
+            duplicate_center_distance=cfg.get('duplicate_center_distance',0.40),smoothing=cfg.get('smoothing',0.68),
+            low_conf_confirm=cfg.get('low_conf_confirm',0.16),start_conf=cfg.get('start_conf',0.18),
+            exclusion_zones=camera_zones.get(camera_id,[]),exclusion_max_box_height=cfg.get('exclusion_max_box_height',0.34),
         )
         self._stop=threading.Event();self._thread=None;self._lock=threading.Lock();self._condition=threading.Condition(self._lock)
         self._jpeg=None;self._version=0;self._published_monotonic=0.0;self._source_frame_id=0
@@ -46,9 +44,7 @@ class LatestJpegPublisher:
         if self.detections is not None:
             result=self.detections.get(self.camera_id)
             if result is not None:
-                # Only new real YOLO results update the visual tracker. The
-                # tracker itself may bridge a short gap after that observation.
-                self.visual_tracker.update(result,now)
+                self.visual_tracker.update(result,now,source_width,source_height)
         boxes=self.visual_tracker.visible(now)
         if not boxes:return image
         h,w=image.shape[:2];sx=w/max(1.0,float(source_width));sy=h/max(1.0,float(source_height))
