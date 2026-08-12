@@ -27,8 +27,16 @@ class _Track:
     vy2: float = 0.0
 
 
+def _width(box: VisualBox) -> float:
+    return max(0.0, box.x2 - box.x1)
+
+
+def _height(box: VisualBox) -> float:
+    return max(0.0, box.y2 - box.y1)
+
+
 def _area(box: VisualBox) -> float:
-    return max(0.0, box.x2 - box.x1) * max(0.0, box.y2 - box.y1)
+    return _width(box) * _height(box)
 
 
 def _intersection(a: VisualBox, b: VisualBox) -> float:
@@ -55,6 +63,38 @@ def _center_distance(a: VisualBox,b: VisualBox) -> float:
     return math.hypot(acx-bcx,acy-bcy)/scale
 
 
+def _horizontal_overlap_ratio(a:VisualBox,b:VisualBox) -> float:
+    overlap=max(0.0,min(a.x2,b.x2)-max(a.x1,b.x1))
+    smaller=max(1.0,min(_width(a),_width(b)))
+    return overlap/smaller
+
+
+def _vertical_overlap_ratio(a:VisualBox,b:VisualBox) -> float:
+    overlap=max(0.0,min(a.y2,b.y2)-max(a.y1,b.y1))
+    smaller=max(1.0,min(_height(a),_height(b)))
+    return overlap/smaller
+
+
+def _vertical_gap_ratio(a:VisualBox,b:VisualBox) -> float:
+    if a.y2 < b.y1:
+        gap=b.y1-a.y2
+    elif b.y2 < a.y1:
+        gap=a.y1-b.y2
+    else:
+        gap=0.0
+    return gap/max(1.0,max(_height(a),_height(b)))
+
+
+def _x_center_ratio(a:VisualBox,b:VisualBox) -> float:
+    acx=(a.x1+a.x2)*0.5;bcx=(b.x1+b.x2)*0.5
+    return abs(acx-bcx)/max(1.0,max(_width(a),_width(b)))
+
+
+def _area_ratio(a:VisualBox,b:VisualBox) -> float:
+    aa=_area(a);bb=_area(b)
+    return min(aa,bb)/max(1.0,max(aa,bb))
+
+
 class VisualTracker:
     """Visual-only per-camera continuity layer.
 
@@ -62,16 +102,23 @@ class VisualTracker:
     bridged visually, dormant tracks remain briefly for reacquisition, and no
     predicted/dormant state is used as identity evidence.
 
-    Camera-specific exclusion zones are intentionally applied only to small
-    boxes whose *center* lies inside a known static screen/fixture region. This
-    removes persistent TV-screen people without creating a broad ROI that could
-    hide a real full-height person walking below the screen.
+    The optional fragment-duplicate rule is intended for cameras that also use a
+    high-resolution ROI second pass. In that situation one real seated/occluded
+    person can appear once as a large full-frame body box and again as a smaller
+    upper-body ROI box. The rule collapses only strongly x-aligned, differently
+    sized fragments; it is not enabled globally.
     """
 
     def __init__(self, *, hold_ms=1600, memory_ms=6000, prediction_ms=450,
                  match_iou=0.16, reacquire_distance=1.05,
                  duplicate_iou=0.50, duplicate_containment=0.82,
                  duplicate_center_distance=0.40,
+                 fragment_duplicate=False,
+                 fragment_horizontal_overlap=0.70,
+                 fragment_x_center=0.30,
+                 fragment_max_area_ratio=0.70,
+                 fragment_min_vertical_overlap=0.12,
+                 fragment_max_vertical_gap=0.10,
                  smoothing=0.72, low_conf_confirm=0.16, start_conf=0.18,
                  exclusion_zones=None, exclusion_max_box_height=0.34):
         self.hold_sec=max(0.05,float(hold_ms)/1000.0)
@@ -82,6 +129,12 @@ class VisualTracker:
         self.duplicate_iou=float(duplicate_iou)
         self.duplicate_containment=float(duplicate_containment)
         self.duplicate_center_distance=max(0.0,float(duplicate_center_distance))
+        self.fragment_duplicate=bool(fragment_duplicate)
+        self.fragment_horizontal_overlap=float(fragment_horizontal_overlap)
+        self.fragment_x_center=float(fragment_x_center)
+        self.fragment_max_area_ratio=float(fragment_max_area_ratio)
+        self.fragment_min_vertical_overlap=float(fragment_min_vertical_overlap)
+        self.fragment_max_vertical_gap=float(fragment_max_vertical_gap)
         self.smoothing=min(0.95,max(0.05,float(smoothing)))
         self.low_conf_confirm=float(low_conf_confirm)
         self.start_conf=float(start_conf)
@@ -100,13 +153,28 @@ class VisualTracker:
         if box_h>self.exclusion_max_box_height:return False
         return any(x1<=cx<=x2 and y1<=cy<=y2 for x1,y1,x2,y2 in self.exclusion_zones)
 
+    def _fragment_duplicate_match(self, box:VisualBox, other:VisualBox) -> bool:
+        if not self.fragment_duplicate:return False
+        # Different sized boxes that are strongly aligned on the x-axis and
+        # overlap/touch vertically are very likely full-frame + ROI fragments of
+        # the same person. Similar-sized boxes are left alone so two real people
+        # standing close together are not collapsed.
+        if _area_ratio(box,other)>self.fragment_max_area_ratio:return False
+        if _horizontal_overlap_ratio(box,other)<self.fragment_horizontal_overlap:return False
+        if _x_center_ratio(box,other)>self.fragment_x_center:return False
+        return (
+            _vertical_overlap_ratio(box,other)>=self.fragment_min_vertical_overlap or
+            _vertical_gap_ratio(box,other)<=self.fragment_max_vertical_gap
+        )
+
     def _is_duplicate(self, box:VisualBox, other:VisualBox) -> bool:
         iou=_iou(box,other)
         containment=_containment(box,other)
         center_distance=_center_distance(box,other)
-        return iou>=self.duplicate_iou or (
-            containment>=self.duplicate_containment and
-            center_distance<=self.duplicate_center_distance
+        return (
+            iou>=self.duplicate_iou or
+            (containment>=self.duplicate_containment and center_distance<=self.duplicate_center_distance) or
+            self._fragment_duplicate_match(box,other)
         )
 
     def _dedupe(self, boxes, source_width=None, source_height=None) -> list[VisualBox]:
@@ -165,6 +233,7 @@ class VisualTracker:
                     pairs.append((score,tid,di))
         pairs.sort(reverse=True)
 
+        matched_tracks=set()
         for _score,tid,di in pairs:
             if tid not in unmatched_tracks or di not in unmatched_dets:continue
             track=self._tracks[tid];det=detections[di]
@@ -182,7 +251,16 @@ class VisualTracker:
                 max(det.confidence,track.box.confidence*0.82),
             )
             track.raw_box=det;track.last_seen=now;track.last_update=now;track.hits+=1
+            matched_tracks.add(tid)
             unmatched_tracks.remove(tid);unmatched_dets.remove(di)
+
+        # Do not create a second track from an unmatched ROI/body fragment when
+        # it geometrically belongs to a track that was already refreshed in this
+        # same detector observation.
+        for di in list(unmatched_dets):
+            det=detections[di]
+            if any(self._is_duplicate(det,self._tracks[tid].box) for tid in matched_tracks):
+                unmatched_dets.remove(di)
 
         for di in unmatched_dets:
             det=detections[di]
@@ -200,10 +278,9 @@ class VisualTracker:
             predicted.confidence=max(0.01,track.box.confidence*(1.0-0.30*min(1.0,age/self.hold_sec)))
             candidates.append(predicted)
 
-        # A duplicate can survive at track level even after raw detector boxes
-        # were deduped (e.g. two tracks were created on adjacent detector cycles).
-        # Final visual suppression prevents two rectangles being drawn on one
-        # person while preserving genuinely separated people.
+        # Final presentation guard: even if two tracks were born on different
+        # detector cycles, only one rectangle is drawn when they match the same
+        # duplicate geometry rule.
         candidates.sort(key=lambda b:b.confidence,reverse=True)
         visible=[]
         for box in candidates:
