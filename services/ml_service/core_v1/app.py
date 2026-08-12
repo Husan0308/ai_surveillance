@@ -19,14 +19,9 @@ def _expand(value):
 def _load_yaml(path):
     with open(path,'r',encoding='utf-8') as f:return _expand(yaml.safe_load(f) or {})
 
-# IMPORTANT: use the same canonical camera configuration layer as the normal
-# services. It expands ${ENV} placeholders and, crucially, overlays the local
-# untracked config/cameras.local.yaml file. The first core-v1 version read
-# cameras.yaml directly, so local RTSP credentials/source overrides were lost
-# and every rtspsrc connection returned no samples.
 camera_cfg=camera_config().get('cameras',[])
 core_cfg=_load_yaml(ROOT/'config/core_v1.yaml').get('core_v1',{})
-manager=CameraManager(camera_cfg)
+manager=CameraManager(camera_cfg,core_cfg)
 publishers={cid:LatestJpegPublisher(cid,store,core_cfg.get('display_fps',12),core_cfg.get('jpeg_quality',82),core_cfg.get('max_display_width',960),core_cfg.get('max_display_height',540)) for cid,store in manager.stores.items()}
 app=FastAPI(title='AI Surveillance ML Core v1',version='1.0')
 
