@@ -58,18 +58,22 @@ def _center_distance(a: VisualBox,b: VisualBox) -> float:
 class VisualTracker:
     """Visual-only per-camera continuity layer.
 
-    A real detector observation creates/refreshes a track. A short detector miss
-    does not make the box blink off immediately. After the visible hold expires
-    the track becomes dormant (not drawn) but remains in memory, so a person who
-    walks fully behind a chair/desk can be associated and shown immediately when
-    visible again. No dormant/predicted box is ever identity/ReID evidence.
+    Real detector observations create/refresh tracks. Short detector misses are
+    bridged visually, dormant tracks remain briefly for reacquisition, and no
+    predicted/dormant state is used as identity evidence.
+
+    Camera-specific exclusion zones are intentionally applied only to small
+    boxes whose *center* lies inside a known static screen/fixture region. This
+    removes persistent TV-screen people without creating a broad ROI that could
+    hide a real full-height person walking below the screen.
     """
 
     def __init__(self, *, hold_ms=1600, memory_ms=6000, prediction_ms=450,
                  match_iou=0.16, reacquire_distance=1.05,
-                 duplicate_iou=0.55, duplicate_containment=0.88,
-                 smoothing=0.72, low_conf_confirm=0.16,
-                 start_conf=0.18):
+                 duplicate_iou=0.50, duplicate_containment=0.82,
+                 duplicate_center_distance=0.40,
+                 smoothing=0.72, low_conf_confirm=0.16, start_conf=0.18,
+                 exclusion_zones=None, exclusion_max_box_height=0.34):
         self.hold_sec=max(0.05,float(hold_ms)/1000.0)
         self.memory_sec=max(self.hold_sec,float(memory_ms)/1000.0)
         self.prediction_sec=max(0.0,float(prediction_ms)/1000.0)
@@ -77,22 +81,47 @@ class VisualTracker:
         self.reacquire_distance=max(0.1,float(reacquire_distance))
         self.duplicate_iou=float(duplicate_iou)
         self.duplicate_containment=float(duplicate_containment)
+        self.duplicate_center_distance=max(0.0,float(duplicate_center_distance))
         self.smoothing=min(0.95,max(0.05,float(smoothing)))
         self.low_conf_confirm=float(low_conf_confirm)
         self.start_conf=float(start_conf)
+        self.exclusion_zones=[tuple(float(v) for v in zone[:4]) for zone in (exclusion_zones or []) if len(zone)>=4]
+        self.exclusion_max_box_height=max(0.0,float(exclusion_max_box_height))
         self._tracks:dict[int,_Track]={}
         self._next_id=1
         self._last_result_frame_id=-1
         self._weak_candidates:list[tuple[VisualBox,float,int]]=[]
 
-    def _dedupe(self, boxes) -> list[VisualBox]:
+    def _excluded(self, box:VisualBox, source_width:float|None, source_height:float|None) -> bool:
+        if not self.exclusion_zones or not source_width or not source_height:return False
+        width=max(1.0,float(source_width));height=max(1.0,float(source_height))
+        cx=((box.x1+box.x2)*0.5)/width;cy=((box.y1+box.y2)*0.5)/height
+        box_h=max(0.0,box.y2-box.y1)/height
+        if box_h>self.exclusion_max_box_height:return False
+        return any(x1<=cx<=x2 and y1<=cy<=y2 for x1,y1,x2,y2 in self.exclusion_zones)
+
+    def _dedupe(self, boxes, source_width=None, source_height=None) -> list[VisualBox]:
         candidates=[VisualBox(float(b.x1),float(b.y1),float(b.x2),float(b.y2),float(b.confidence)) for b in boxes]
+        candidates=[b for b in candidates if not self._excluded(b,source_width,source_height)]
         candidates.sort(key=lambda b:b.confidence,reverse=True)
         kept=[]
         for box in candidates:
-            if any(_iou(box,other)>=self.duplicate_iou or _containment(box,other)>=self.duplicate_containment for other in kept):
-                continue
-            kept.append(box)
+            duplicate=False
+            for other in kept:
+                iou=_iou(box,other)
+                containment=_containment(box,other)
+                center_distance=_center_distance(box,other)
+                # Standard overlap catches two nearly identical boxes. The
+                # containment+center rule catches the common YOLO26 case where
+                # one duplicate is nested/shifted inside the other and therefore
+                # has only moderate IoU. Nearby distinct people normally have
+                # separated centers and survive this second rule.
+                if iou>=self.duplicate_iou or (
+                    containment>=self.duplicate_containment and
+                    center_distance<=self.duplicate_center_distance
+                ):
+                    duplicate=True;break
+            if not duplicate:kept.append(box)
         return kept
 
     def _predicted_box(self, track:_Track, now:float) -> VisualBox:
@@ -104,7 +133,6 @@ class VisualTracker:
         )
 
     def _confirm_weak_new_track(self, det:VisualBox, now:float) -> bool:
-        """Allow repeated weak people to start without accepting one-frame noise."""
         fresh=[];matched=None
         for box,ts,hits in self._weak_candidates:
             if now-ts<=1.5:
@@ -119,12 +147,11 @@ class VisualTracker:
         if hits>=2:return True
         self._weak_candidates.append((det,now,hits));return False
 
-    def update(self, result, now:float) -> None:
+    def update(self, result, now:float, source_width=None, source_height=None) -> None:
         if result is None or int(result.frame_id)==self._last_result_frame_id:return
         self._last_result_frame_id=int(result.frame_id)
-        detections=self._dedupe(result.boxes)
+        detections=self._dedupe(result.boxes,source_width,source_height)
 
-        # Keep dormant tracks for reacquisition, but never forever.
         for tid in list(self._tracks):
             if now-self._tracks[tid].last_seen>self.memory_sec:
                 del self._tracks[tid]
@@ -139,8 +166,6 @@ class VisualTracker:
             for di,det in enumerate(detections):
                 iou=_iou(reference,det);dist=_center_distance(reference,det)
                 if iou>=self.match_iou or dist<=max_distance:
-                    # Prefer overlap, then spatial proximity; dormant tracks get a
-                    # slight penalty so a currently visible track wins first.
                     score=iou+(max(0.0,max_distance-dist)*0.30)-(0.08 if dormant else 0.0)
                     pairs.append((score,tid,di))
         pairs.sort(reverse=True)
@@ -166,10 +191,6 @@ class VisualTracker:
 
         for di in unmatched_dets:
             det=detections[di]
-            # Strong observations start immediately. Weak observations need to
-            # repeat spatially before becoming a visible track. This lets detector
-            # conf stay low for far people without making random chair-like noise
-            # blink into existence from one frame.
             if det.confidence<self.start_conf and not self._confirm_weak_new_track(det,now):
                 continue
             tid=self._next_id;self._next_id+=1
