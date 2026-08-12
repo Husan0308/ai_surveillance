@@ -1,0 +1,6 @@
+-r base.txt
+fastapi>=0.110
+uvicorn[standard]>=0.27
+numpy>=1.24
+opencv-python>=4.8
+PyGObject>=3.46
