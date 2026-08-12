@@ -3,4 +3,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 numpy>=1.24
 opencv-python>=4.8
-PyGObject>=3.46
+# GStreamer Python bindings come from Ubuntu packages (python3-gi / gir1.2-gstreamer-1.0), not pip.
