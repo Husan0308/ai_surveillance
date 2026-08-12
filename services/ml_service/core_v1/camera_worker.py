@@ -1,8 +1,10 @@
 from __future__ import annotations
-import threading,time
+import logging,threading,time
 from dataclasses import dataclass,asdict
 from .latest_frame import Frame,LatestFrameStore
 from services.ml_service.cameras.gstreamer import GStreamerCapture
+
+log=logging.getLogger(__name__)
 
 @dataclass
 class CameraMetrics:
@@ -14,6 +16,7 @@ class CameraMetrics:
     reconnects: int=0
     read_failures: int=0
     last_frame_age_ms: float=0.0
+    last_error: str=""
 
 class CameraWorker:
     """Exactly one capture thread and one single-slot frame store per camera."""
@@ -48,12 +51,12 @@ class CameraWorker:
             try:
                 cap=self._open();self._capture=cap
                 if not cap.isOpened():raise RuntimeError("GStreamer pipeline did not open")
-                with self._lock:self._metrics.online=True
+                with self._lock:self._metrics.online=True;self._metrics.last_error=""
                 while not self._stop.is_set():
                     ok,image=cap.read()
                     if not ok or image is None:
                         with self._lock:self._metrics.read_failures+=1
-                        raise RuntimeError("camera read failed")
+                        raise RuntimeError("camera read returned no sample")
                     now=time.time();mono=time.monotonic();h,w=image.shape[:2]
                     with self._lock:
                         self._metrics.frame_id+=1;frame_id=self._metrics.frame_id;self._metrics.width=w;self._metrics.height=h
@@ -62,9 +65,14 @@ class CameraWorker:
                             self._metrics.source_fps=self._fps_frames/elapsed;self._fps_frames=0;self._fps_started=mono
                         self._last_frame_mono=mono
                     self.store.put(Frame(self.camera_id,frame_id,now,mono,image,w,h))
-            except Exception:
+            except Exception as exc:
                 with self._lock:
-                    self._metrics.online=False;self._metrics.reconnects+=1
+                    self._metrics.online=False;self._metrics.reconnects+=1;self._metrics.last_error=f"{type(exc).__name__}: {exc}"
+                stage={}
+                if cap is not None:
+                    try:stage=cap.stage_metrics()
+                    except Exception:pass
+                log.warning("CORE_V1_CAMERA_RECONNECT camera=%s error=%s stage=%s",self.camera_id,exc,stage)
                 if not self._stop.is_set():self._stop.wait(delay)
             finally:
                 if cap is not None:
