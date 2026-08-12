@@ -30,16 +30,32 @@ core_v1:
     imgsz: [448, 704]
     quantize: 32
     conf: 0.06
-    # Ultralytics documents that lower IoU removes more overlapping detections.
-    # YOLO26 end-to-end mode does not use traditional IoU NMS the same way, so
-    # our visual layer below remains the final duplicate guard.
     iou: 0.50
     max_det: 50
     batch_size: 3
     poll_interval_ms: 5
     start_delay_sec: 2.0
     duplicate_iou: 0.70
+    fusion_containment: 0.90
+    fusion_center_distance: 0.30
     overlay_max_age_ms: 300
+
+    # Selective high-resolution second pass for the difficult entrance camera.
+    # Full-frame inference still runs, so people outside this box remain eligible.
+    # The ROI is only an additional zoomed inference around the desk/chair area.
+    roi_second_pass:
+      enabled: true
+      imgsz: [512, 640]
+      conf: 0.045
+      iou: 0.50
+      max_det: 20
+      # Run at most every other detector observation to protect GTX 1050 Ti headroom.
+      every_n: 2
+      # If the full frame already found two people in the ROI, skip the extra pass.
+      trigger_max_full_roi_persons: 1
+      cameras:
+        CAM-05:
+          box: [0.27, 0.00, 0.72, 0.54]
 
   visual_tracker:
     hold_ms: 1600
@@ -47,21 +63,15 @@ core_v1:
     memory_ms: 6000
     match_iou: 0.16
     reacquire_distance: 1.05
-
-    # Stronger duplicate suppression than before. This runs both on fresh YOLO
-    # results and again on currently visible tracks, so two tracks created on
-    # adjacent detector cycles cannot keep drawing two boxes around one person.
     duplicate_iou: 0.50
     duplicate_containment: 0.82
     duplicate_center_distance: 0.40
-
     smoothing: 0.72
     start_conf: 0.18
     low_conf_confirm: 0.12
 
-    # Ignore only small detections whose center is inside a known static screen.
-    # This is deliberately narrow instead of a broad room ROI, so real people
-    # walking underneath/near the TV are still eligible for detection.
+    # This is NOT a detection ROI. It is a tiny UI/visual exclusion only for the
+    # known TV screen false-positive. The detector still sees the whole frame.
     exclusion_max_box_height: 0.22
     camera_exclusion_zones:
       CAM-06:
