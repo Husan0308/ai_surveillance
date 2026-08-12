@@ -4,11 +4,11 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Camera/display baseline (already validated smooth on six cameras).
+  # Camera/display baseline. Keep presentation light and latest-only.
   display_fps: 12
-  jpeg_quality: 82
-  max_display_width: 960
-  max_display_height: 540
+  jpeg_quality: 78
+  max_display_width: 800
+  max_display_height: 450
   startup_grace_sec: 8.0
   startup_stagger_sec: 0.20
   capture_timeout_ms: 1000
@@ -25,12 +25,14 @@ core_v1:
     device: "cuda:0"
     imgsz: [384, 640]
     quantize: 32
-    conf: 0.15
+    conf: 0.18
     iou: 0.45
-    max_det: 40
+    max_det: 30
     batch_size: 3
     poll_interval_ms: 5
     start_delay_sec: 2.0
-    # Draw only a recent real detector result. This is intentionally not a
-    # tracker/prediction bridge; it lets us evaluate raw YOLO cadence first.
-    overlay_max_age_ms: 350
+    # Final near-duplicate guard after Ultralytics NMS. High enough to keep two
+    # nearby people, low enough to remove two boxes on the same person.
+    duplicate_iou: 0.70
+    # Raw detector-only stage: never keep a stale bbox around for long.
+    overlay_max_age_ms: 250
