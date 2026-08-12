@@ -40,18 +40,13 @@ core_v1:
     fusion_center_distance: 0.30
     overlay_max_age_ms: 300
 
-    # Selective high-resolution second pass for the difficult entrance camera.
-    # Full-frame inference still runs, so people outside this box remain eligible.
-    # The ROI is only an additional zoomed inference around the desk/chair area.
     roi_second_pass:
       enabled: true
       imgsz: [512, 640]
       conf: 0.045
       iou: 0.50
       max_det: 20
-      # Run at most every other detector observation to protect GTX 1050 Ti headroom.
       every_n: 2
-      # If the full frame already found two people in the ROI, skip the extra pass.
       trigger_max_full_roi_persons: 1
       cameras:
         CAM-05:
@@ -66,12 +61,22 @@ core_v1:
     duplicate_iou: 0.50
     duplicate_containment: 0.82
     duplicate_center_distance: 0.40
+
+    # CAM-05 has a high-resolution ROI second pass. A seated/occluded person can
+    # therefore be returned once as a large body box and again as a tighter
+    # upper-body fragment. Enable the stricter fragment rule only on that camera
+    # so nearby real people in the other views are unaffected.
+    fragment_duplicate_cameras: ["CAM-05"]
+    fragment_horizontal_overlap: 0.70
+    fragment_x_center: 0.30
+    fragment_max_area_ratio: 0.70
+    fragment_min_vertical_overlap: 0.12
+    fragment_max_vertical_gap: 0.10
+
     smoothing: 0.72
     start_conf: 0.18
     low_conf_confirm: 0.12
 
-    # This is NOT a detection ROI. It is a tiny UI/visual exclusion only for the
-    # known TV screen false-positive. The detector still sees the whole frame.
     exclusion_max_box_height: 0.22
     camera_exclusion_zones:
       CAM-06:
