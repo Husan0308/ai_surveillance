@@ -30,6 +30,7 @@ class LatestJpegPublisher:
             low_conf_confirm=camera_low_conf.get(camera_id,cfg.get('low_conf_confirm',0.12)),
             start_conf=camera_start_conf.get(camera_id,cfg.get('start_conf',0.34)),
             new_track_min_conf=cfg.get('new_track_min_conf',0.24),
+            strong_confirm_hits=cfg.get('strong_confirm_hits',2),
             weak_confirm_hits=cfg.get('weak_confirm_hits',3),
             new_track_zones=camera_birth_zones.get(camera_id,[]),
             exclusion_zones=camera_zones.get(camera_id,[]),
@@ -38,6 +39,7 @@ class LatestJpegPublisher:
         )
         self._stop=threading.Event();self._thread=None;self._lock=threading.Lock();self._condition=threading.Condition(self._lock)
         self._jpeg=None;self._version=0;self._published_monotonic=0.0;self._source_frame_id=0
+        self._last_source_capture_mono=0.0;self._started_mono=time.monotonic();self._last_encode_ms=0.0;self._last_publish_source_age_ms=None
         self.encoded=0;self.skipped_same_frame=0;self.stale_detection_rejects=0
     def start(self):
         self._thread=threading.Thread(target=self._run,name=f"core-v1-jpeg-{self.camera_id}",daemon=False);self._thread.start()
@@ -50,6 +52,20 @@ class LatestJpegPublisher:
         with self._lock:return self._jpeg,self._version
     def snapshot(self):
         with self._lock:return self._jpeg,self._version,self._published_monotonic,self._source_frame_id
+    def metrics(self):
+        now=time.monotonic()
+        with self._lock:
+            elapsed=max(0.001,now-self._started_mono)
+            return {
+                'encoded':self.encoded,
+                'publish_rate':self.encoded/elapsed,
+                'skipped_same_frame':self.skipped_same_frame,
+                'stale_detection_rejects':self.stale_detection_rejects,
+                'last_encode_ms':self._last_encode_ms,
+                'last_publish_source_age_ms':self._last_publish_source_age_ms,
+                'last_published_age_ms':((now-self._published_monotonic)*1000.0) if self._published_monotonic else None,
+                'source_frame_id':self._source_frame_id,
+            }
     def wait_newer(self,last_version:int,timeout:float=0.25):
         deadline=time.monotonic()+max(0.0,float(timeout))
         with self._condition:
@@ -67,10 +83,6 @@ class LatestJpegPublisher:
                 if max_age_sec is None or source_age<=max_age_sec:
                     self.visual_tracker.update(result,now,source_width,source_height)
                 else:
-                    # Critical realtime rule: a late detector result must never
-                    # refresh last_seen and resurrect an old rectangle on top of
-                    # a newer camera frame. Internal state from earlier fresh
-                    # observations may still expire/reacquire normally.
                     self.stale_detection_rejects+=1
         boxes=self.visual_tracker.visible(now,target_time=display_frame_time,max_observation_age_sec=max_age_sec)
         if not boxes:return image
@@ -88,20 +100,20 @@ class LatestJpegPublisher:
             now=time.monotonic()
             if now<next_at:
                 self._stop.wait(next_at-now);continue
-            # Late ticks are skipped instead of replayed: presentation is always
-            # anchored to the newest source frame.
             next_at=now+self.interval
             frame,_=self.store.get()
             if frame is None:continue
             if frame.frame_id==last_frame_id:self.skipped_same_frame+=1;continue
+            encode_started=time.perf_counter()
             image=frame.image;source_h,source_w=image.shape[:2];scale=min(1.0,self.max_width/max(1,source_w),self.max_height/max(1,source_h))
             if scale<1.0:image=cv2.resize(image,(max(1,round(source_w*scale)),max(1,round(source_h*scale))),interpolation=cv2.INTER_AREA)
             else:image=image.copy()
             image=self._draw_detection(image,source_w,source_h,now,frame.captured_monotonic)
             ok,encoded=cv2.imencode('.jpg',image,[cv2.IMWRITE_JPEG_QUALITY,self.quality])
             if not ok:continue
-            published=time.monotonic();payload=encoded.tobytes()
+            published=time.monotonic();payload=encoded.tobytes();encode_ms=(time.perf_counter()-encode_started)*1000.0
             with self._condition:
-                self._jpeg=payload;self._version+=1;self._published_monotonic=published;self._source_frame_id=frame.frame_id
+                self._jpeg=payload;self._version+=1;self._published_monotonic=published;self._source_frame_id=frame.frame_id;self._last_source_capture_mono=float(frame.captured_monotonic)
+                self._last_encode_ms=encode_ms;self._last_publish_source_age_ms=max(0.0,(published-float(frame.captured_monotonic))*1000.0)
                 self._condition.notify_all()
             last_frame_id=frame.frame_id;self.encoded+=1
