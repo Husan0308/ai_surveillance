@@ -26,7 +26,6 @@ class BatchScheduler:
         self._batch_id = self._stale_drops = 0
         self._window_at = time.monotonic()
         self._window_batches = self._window_processed = self._window_stale = 0
-        # Recovery burst: track consecutive burst cycles per camera so we cap at 2.
         self._burst_cycles = {}
 
     def notify_frame_available(self):
@@ -44,7 +43,7 @@ class BatchScheduler:
     def unregister_camera(self, camera_id):
         with self._condition:
             self._buffers.pop(camera_id, None); self._states.pop(camera_id, None)
-            self._last_dropped.pop(camera_id, None); self._risks.pop(camera_id,None);self._condition.notify()
+            self._last_dropped.pop(camera_id, None); self._risks.pop(camera_id,None);self._burst_cycles.pop(camera_id,None);self._condition.notify()
 
     def update_camera_risks(self,risks):
         """Atomically publish tracker risk; scheduler remains the only selector."""
@@ -92,15 +91,18 @@ class BatchScheduler:
             lost=max(0.0,float(risk.get("lost_tracks",0.0)));active=max(0.0,float(risk.get("active_person_count",0.0)));uncertainty=max(0.0,float(risk.get("motion_uncertainty",0.0)))
             ambiguity=max(0.0,float(risk.get("association_ambiguity",0.0)))
             priority=2.0*since_ms/self.fairness_deadline_ms+observation_age/self.fairness_deadline_ms+.8*active+.7*lost+.6*ambiguity+.15*min(4.0,uncertainty)
-            
             is_lost=lost>0;old_enough=float(risk.get("observation_age_ms",0.0))>=_burst_threshold_ms
             if is_lost and old_enough:
                 if self._burst_cycles.get(camera_id,0)<_max_burst_cycles:priority+=1000.0
             else:self._burst_cycles[camera_id]=0
-            
             state["priority"]=priority;priorities[camera_id]=(priority,-rank)
             urgent=urgent or observation_age>=self.fairness_deadline_ms*.75 or lost>0 or ambiguity>0
-        target=min(limit,len(ready));target=min(target,self.min_batch_size) if urgent else target
+        # Recovery is priority, never extra capacity. Risk-aware mode keeps the
+        # configured hard batch size; adaptive mode may use the smaller baseline
+        # only while the scene is calm. Urgency expands adaptive mode back up to
+        # the configured limit rather than shrinking a busy batch.
+        target=min(limit,len(ready))
+        if self.mode=="adaptive" and not urgent:target=min(target,self.min_batch_size)
         selected=sorted(ready,key=lambda camera_id:priorities[camera_id],reverse=True)[:target]
         selected_set=set(selected)
         for camera_id in ready:
@@ -141,15 +143,16 @@ class BatchScheduler:
 
     def take_if_newer(self, camera_id, current_frame_id):
         """Re-fetch immediately before GPU launch if a newer frame arrived during queue wait."""
-        buffer = self._buffers.get(camera_id)
-        if not buffer: return None
-        packet = buffer.peek()
-        if packet and packet.frame_id > current_frame_id:
+        with self._condition:
+            buffer = self._buffers.get(camera_id)
+            if not buffer:return None
+            packet = buffer.peek()
+            if packet is None or packet.frame_id <= current_frame_id:return None
             packet = buffer.take()
-            if packet:
-                self._states[camera_id]["used_frame_id"] = packet.frame_id
-                return packet
-        return None
+            if packet is not None:
+                state=self._states.get(camera_id)
+                if state is not None:state["used_frame_id"] = packet.frame_id
+            return packet
 
     def snapshot_metrics(self, reader_metrics=None):
         now, reader_metrics = time.monotonic(), reader_metrics or {}
