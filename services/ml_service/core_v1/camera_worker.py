@@ -18,6 +18,7 @@ class CameraMetrics:
     consecutive_timeouts: int=0
     startup_waiting: bool=False
     last_frame_age_ms: float=0.0
+    pipeline_lag_ms: float|None=None
     last_error: str=""
 
 class CameraWorker:
@@ -57,6 +58,8 @@ class CameraWorker:
             "decoder_low_latency_mode":bool(self.core_config.get("decoder_low_latency_mode",False)),
             "capture_timeout_ms":int(self.core_config.get("capture_timeout_ms",1000)),
             "rtsp_transport":str(self.core_config.get("rtsp_transport",self.config.get("rtsp_transport","tcp"))),
+            "rtsp_buffer_mode":str(self.core_config.get("rtsp_buffer_mode",self.config.get("rtsp_buffer_mode","auto"))),
+            "tcp_timestamp":bool(self.core_config.get("tcp_timestamp",True)),
         }
         return GStreamerCapture(cfg)
     def _run(self):
@@ -84,8 +87,9 @@ class CameraWorker:
                         raise RuntimeError(reason)
                     had_frame=True;timeouts=0
                     now=time.time();mono=time.monotonic();h,w=image.shape[:2]
+                    pipeline_lag=cap.current_pipeline_lag_ms() if hasattr(cap,"current_pipeline_lag_ms") else None
                     with self._lock:
-                        self._metrics.online=True;self._metrics.startup_waiting=False;self._metrics.consecutive_timeouts=0;self._metrics.last_error=""
+                        self._metrics.online=True;self._metrics.startup_waiting=False;self._metrics.consecutive_timeouts=0;self._metrics.last_error="";self._metrics.pipeline_lag_ms=pipeline_lag
                         self._metrics.frame_id+=1;frame_id=self._metrics.frame_id;self._metrics.width=w;self._metrics.height=h
                         self._fps_frames+=1;elapsed=mono-self._fps_started
                         if elapsed>=1.0:
