@@ -10,12 +10,13 @@ class LatestJpegPublisher:
         self.detections=detections;self.overlay_max_age_ms=max(0.0,float(overlay_max_age_ms))
         cfg=dict(tracker_config or {})
         camera_zones=dict(cfg.get('camera_exclusion_zones') or {})
+        camera_birth_zones=dict(cfg.get('camera_new_track_zones') or {})
         fragment_cameras=set(str(cid) for cid in (cfg.get('fragment_duplicate_cameras') or []))
         camera_start_conf=dict(cfg.get('camera_start_conf') or {})
         camera_low_conf=dict(cfg.get('camera_low_conf_confirm') or {})
         self.visual_tracker=VisualTracker(
-            hold_ms=cfg.get('hold_ms',800),memory_ms=cfg.get('memory_ms',6000),prediction_ms=cfg.get('prediction_ms',350),
-            match_iou=cfg.get('match_iou',0.20),reacquire_distance=cfg.get('reacquire_distance',1.05),
+            hold_ms=cfg.get('hold_ms',700),memory_ms=cfg.get('memory_ms',6000),prediction_ms=cfg.get('prediction_ms',450),
+            match_iou=cfg.get('match_iou',0.16),reacquire_distance=cfg.get('reacquire_distance',1.05),
             duplicate_iou=cfg.get('duplicate_iou',0.50),duplicate_containment=cfg.get('duplicate_containment',0.82),
             duplicate_center_distance=cfg.get('duplicate_center_distance',0.40),
             fragment_duplicate=(camera_id in fragment_cameras),
@@ -24,11 +25,16 @@ class LatestJpegPublisher:
             fragment_max_area_ratio=cfg.get('fragment_max_area_ratio',0.70),
             fragment_min_vertical_overlap=cfg.get('fragment_min_vertical_overlap',0.12),
             fragment_max_vertical_gap=cfg.get('fragment_max_vertical_gap',0.10),
-            smoothing=cfg.get('smoothing',0.88),velocity_smoothing=cfg.get('velocity_smoothing',0.58),
-            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes',1.35),
-            low_conf_confirm=camera_low_conf.get(camera_id,cfg.get('low_conf_confirm',0.16)),
-            start_conf=camera_start_conf.get(camera_id,cfg.get('start_conf',0.18)),
-            exclusion_zones=camera_zones.get(camera_id,[]),exclusion_max_box_height=cfg.get('exclusion_max_box_height',0.34),
+            smoothing=cfg.get('smoothing',0.96),velocity_smoothing=cfg.get('velocity_smoothing',0.70),
+            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes',1.20),
+            low_conf_confirm=camera_low_conf.get(camera_id,cfg.get('low_conf_confirm',0.12)),
+            start_conf=camera_start_conf.get(camera_id,cfg.get('start_conf',0.34)),
+            new_track_min_conf=cfg.get('new_track_min_conf',0.24),
+            weak_confirm_hits=cfg.get('weak_confirm_hits',3),
+            new_track_zones=camera_birth_zones.get(camera_id,[]),
+            exclusion_zones=camera_zones.get(camera_id,[]),
+            exclusion_max_box_height=cfg.get('exclusion_max_box_height',0.24),
+            exclusion_overlap_threshold=cfg.get('exclusion_overlap_threshold',0.35),
         )
         self._stop=threading.Event();self._thread=None;self._lock=threading.Lock();self._condition=threading.Condition(self._lock)
         self._jpeg=None;self._version=0;self._published_monotonic=0.0;self._source_frame_id=0
@@ -57,7 +63,8 @@ class LatestJpegPublisher:
             result=self.detections.get(self.camera_id)
             if result is not None:
                 self.visual_tracker.update(result,now,source_width,source_height)
-        boxes=self.visual_tracker.visible(now,target_time=display_frame_time)
+        max_age_sec=(self.overlay_max_age_ms/1000.0) if self.overlay_max_age_ms>0 else None
+        boxes=self.visual_tracker.visible(now,target_time=display_frame_time,max_observation_age_sec=max_age_sec)
         if not boxes:return image
         h,w=image.shape[:2];sx=w/max(1.0,float(source_width));sy=h/max(1.0,float(source_height))
         for box in boxes:
