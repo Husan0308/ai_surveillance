@@ -3,10 +3,21 @@ core_v1:
   ml_port: 8001
   api_host: "0.0.0.0"
   api_port: 8000
+
   display_fps: 12
   jpeg_quality: 82
   max_display_width: 960
   max_display_height: 540
+
+  rtsp_transport: "tcp"
+  rtsp_latency_ms: 100
+  drop_on_latency: false
+
   decoder_extra_surfaces: 2
-  capture_timeout_ms: 700
+  decoder_low_latency_mode: false
+
+  capture_timeout_ms: 1000
+  startup_grace_sec: 15
+  startup_stagger_sec: 0.5
+  max_read_timeouts: 5
   reconnect_delay_sec: 2.0
