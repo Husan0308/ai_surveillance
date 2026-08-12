@@ -30,7 +30,7 @@ class DetectionResult:
 
 
 class LatestDetectionStore:
-    """One detector result per camera. Never queues historical visual state."""
+    """One detector result per camera. Historical results are never queued."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -51,15 +51,25 @@ class LatestDetectionStore:
             return dict(self._results)
 
 
-def _detector_process_main(input_queue, output_queue, config: dict, model_path: str):
-    """CUDA/Ultralytics owner process.
+def _predict_kwargs(config: dict):
+    raw_imgsz = config.get("imgsz", [384, 640])
+    imgsz = tuple(int(v) for v in raw_imgsz) if isinstance(raw_imgsz, (list, tuple)) else int(raw_imgsz)
+    return {
+        "imgsz": imgsz,
+        "conf": float(config.get("conf", 0.15)),
+        "iou": float(config.get("iou", 0.45)),
+        "classes": [0],
+        "max_det": max(1, int(config.get("max_det", 40))),
+        "device": str(config.get("device", "cuda:0")),
+        # Ultralytics replaced the legacy half flag with quantize. 32 means
+        # explicit FP32, which is the validated mode for the GTX 1050 Ti core.
+        "quantize": config.get("quantize", 32),
+        "verbose": False,
+    }
 
-    This function is intentionally module-level so multiprocessing ``spawn`` can
-    import it without importing the FastAPI app. GStreamer/NVDEC remains in the
-    ML service process; PyTorch CUDA lives in this child process. A native CUDA,
-    PyTorch or Ultralytics abort therefore cannot take the six camera streams
-    down with it.
-    """
+
+def _detector_process_main(input_queue, output_queue, config: dict, model_path: str):
+    """Own all PyTorch/CUDA state in a spawned process."""
     import faulthandler
     faulthandler.enable(all_threads=True)
 
@@ -74,31 +84,16 @@ def _detector_process_main(input_queue, output_queue, config: dict, model_path: 
         except Exception:
             pass
 
-        device = str(config.get("device", "cuda:0"))
+        kwargs = _predict_kwargs(config)
+        device = str(kwargs["device"])
         if device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but torch.cuda.is_available() is false")
 
-        raw_imgsz = config.get("imgsz", [384, 640])
-        imgsz = tuple(int(v) for v in raw_imgsz) if isinstance(raw_imgsz, (list, tuple)) else int(raw_imgsz)
-        conf = float(config.get("conf", 0.15))
-        iou = float(config.get("iou", 0.45))
-        max_det = max(1, int(config.get("max_det", 40)))
-        half = bool(config.get("half", False))
-
+        imgsz = kwargs["imgsz"]
         model = YOLO(model_path)
         warm_h, warm_w = (int(imgsz[0]), int(imgsz[1])) if isinstance(imgsz, tuple) else (int(imgsz), int(imgsz))
         warm = np.zeros((warm_h, warm_w, 3), dtype=np.uint8)
-        model.predict(
-            source=[warm],
-            imgsz=imgsz,
-            conf=conf,
-            iou=iou,
-            classes=[0],
-            max_det=max_det,
-            device=device,
-            half=half,
-            verbose=False,
-        )
+        model.predict(source=[warm], **kwargs)
         output_queue.put(("ready", {"device": device, "model": model_path}))
     except BaseException as exc:
         try:
@@ -121,21 +116,9 @@ def _detector_process_main(input_queue, output_queue, config: dict, model_path: 
         images = [entry[6] for entry in entries]
         started = time.perf_counter()
         try:
-            predictions = model.predict(
-                source=images,
-                imgsz=imgsz,
-                conf=conf,
-                iou=iou,
-                classes=[0],
-                max_det=max_det,
-                device=device,
-                half=half,
-                verbose=False,
-            )
-            if device.startswith("cuda"):
-                # Make batch timing meaningful and surface asynchronous CUDA
-                # errors inside the isolated detector process.
-                torch.cuda.synchronize()
+            predictions = model.predict(source=images, **kwargs)
+            # Reading result tensors onto CPU below is the synchronization point.
+            # Do not add an extra torch.cuda.synchronize() before it.
         except BaseException as exc:
             try:
                 output_queue.put(("batch_error", {"batch_id": batch_id, "error": f"{type(exc).__name__}: {exc}"}))
@@ -143,7 +126,6 @@ def _detector_process_main(input_queue, output_queue, config: dict, model_path: 
                 pass
             continue
 
-        wall_ms = (time.perf_counter() - started) * 1000.0
         produced = time.monotonic()
         result_entries = []
         total_boxes = 0
@@ -168,6 +150,7 @@ def _detector_process_main(input_queue, output_queue, config: dict, model_path: 
             total_boxes += len(boxes)
             result_entries.append((cid, frame_id, captured_mono, produced, boxes))
 
+        wall_ms = (time.perf_counter() - started) * 1000.0
         try:
             output_queue.put(("result", {
                 "batch_id": batch_id,
@@ -181,11 +164,14 @@ def _detector_process_main(input_queue, output_queue, config: dict, model_path: 
 
 
 class YoloDetectorWorker:
-    """Latest-only detector bridge with CUDA isolated in a spawned process.
+    """Latest-only detector bridge.
 
-    The parent ML service only performs a small CPU resize and IPC copy. It never
-    imports/initializes PyTorch CUDA for realtime inference. This preserves the
-    already-validated camera/display baseline even if the detector child aborts.
+    There is exactly one in-flight detector batch. The previous implementation
+    resized and repickled three fresh frames every ~20 ms while CUDA was still
+    busy, then replaced the pending queue entry. That could burn a full CPU core
+    and compete directly with six JPEG publishers, creating display latency.
+    This version waits for the current inference result, then re-fetches and
+    submits the newest camera snapshots exactly once.
     """
 
     def __init__(self, frame_stores, config: dict, project_root: Path):
@@ -194,7 +180,7 @@ class YoloDetectorWorker:
         self.project_root = Path(project_root)
         self.camera_ids = sorted(self.frame_stores)
         self.batch_size = max(1, min(len(self.camera_ids) or 1, int(self.config.get("batch_size", 3))))
-        self.batch_interval = max(0.0, float(self.config.get("batch_interval_ms", 20.0)) / 1000.0)
+        self.poll_interval = max(0.002, float(self.config.get("poll_interval_ms", 5.0)) / 1000.0)
         raw_imgsz = self.config.get("imgsz", [384, 640])
         if isinstance(raw_imgsz, (list, tuple)):
             self.input_h, self.input_w = int(raw_imgsz[0]), int(raw_imgsz[1])
@@ -215,6 +201,7 @@ class YoloDetectorWorker:
         self._last_versions = {cid: 0 for cid in self.camera_ids}
         self._cursor = 0
         self._batch_id = 0
+        self._inflight_batch_id: int | None = None
         self._lock = threading.Lock()
         self._started_mono = time.monotonic()
         self._ready = False
@@ -222,8 +209,8 @@ class YoloDetectorWorker:
         self._batches = 0
         self._inputs = 0
         self._detections = 0
-        self._dropped_batches = 0
         self._last_batch_ms = 0.0
+        self._last_prepare_ms = 0.0
         self._last_error = ""
         self._per_camera_inputs = {cid: 0 for cid in self.camera_ids}
         self._per_camera_last_frame_id = {cid: 0 for cid in self.camera_ids}
@@ -238,10 +225,9 @@ class YoloDetectorWorker:
 
     def stop(self):
         self._stop.set()
-        q = self._input_queue
-        if q is not None:
+        if self._input_queue is not None:
             try:
-                q.put_nowait(None)
+                self._input_queue.put_nowait(None)
             except Exception:
                 pass
 
@@ -290,11 +276,10 @@ class YoloDetectorWorker:
 
     def _prepare_payload(self, selected):
         import cv2
+        started = time.perf_counter()
         entries = []
         for cid, frame, version in selected:
-            # Resize only frames that are actually being submitted to YOLO. The
-            # camera capture and 12 FPS display paths keep their original frames.
-            small = cv2.resize(frame.image, (self.input_w, self.input_h), interpolation=cv2.INTER_AREA)
+            small = cv2.resize(frame.image, (self.input_w, self.input_h), interpolation=cv2.INTER_LINEAR)
             entries.append((
                 cid,
                 int(frame.frame_id),
@@ -304,34 +289,28 @@ class YoloDetectorWorker:
                 (self.input_h, self.input_w),
                 small,
             ))
+        with self._lock:
+            self._last_prepare_ms = (time.perf_counter() - started) * 1000.0
         return entries
 
-    def _submit_latest(self):
+    def _submit_if_idle(self):
+        if self._inflight_batch_id is not None:
+            return
         selected = self._select_latest_batch()
         if not selected:
             return
         entries = self._prepare_payload(selected)
         self._batch_id += 1
-        payload = (self._batch_id, entries)
-
-        # Strict latest-only IPC. If the CUDA process has not consumed the last
-        # batch, discard it and replace it with the newest camera snapshots.
+        batch_id = self._batch_id
         try:
-            self._input_queue.put_nowait(payload)
+            self._input_queue.put_nowait((batch_id, entries))
         except queue.Full:
-            try:
-                self._input_queue.get_nowait()
-                with self._lock:
-                    self._dropped_batches += 1
-            except Exception:
-                pass
-            try:
-                self._input_queue.put_nowait(payload)
-            except queue.Full:
-                return
-
+            # This should not happen while _inflight_batch_id is None. Do not do
+            # extra resize/copy work trying to fight a stale IPC queue.
+            return
         for cid, _frame, version in selected:
             self._last_versions[cid] = version
+        self._inflight_batch_id = batch_id
         with self._lock:
             self._submitted += len(entries)
 
@@ -355,6 +334,8 @@ class YoloDetectorWorker:
 
             if kind in {"startup_error", "batch_error"}:
                 error = payload if isinstance(payload, str) else payload.get("error", str(payload))
+                if isinstance(payload, dict) and payload.get("batch_id") == self._inflight_batch_id:
+                    self._inflight_batch_id = None
                 with self._lock:
                     self._last_error = error
                 log.error("CORE_V1_YOLO_%s %s", kind.upper(), error)
@@ -363,6 +344,8 @@ class YoloDetectorWorker:
             if kind != "result":
                 continue
 
+            if payload.get("batch_id") == self._inflight_batch_id:
+                self._inflight_batch_id = None
             for cid, frame_id, captured_mono, produced_mono, raw_boxes in payload["entries"]:
                 boxes = tuple(PersonBox(*map(float, box)) for box in raw_boxes)
                 self.results.put(DetectionResult(
@@ -407,8 +390,8 @@ class YoloDetectorWorker:
                 log.error("CORE_V1_YOLO_PROCESS_EXITED exitcode=%s camera_core_continues=true", exitcode)
                 break
             if self._ready:
-                self._submit_latest()
-            self._stop.wait(self.batch_interval if self.batch_interval else 0.01)
+                self._submit_if_idle()
+            self._stop.wait(self.poll_interval)
 
         self._drain_outputs()
 
@@ -434,14 +417,16 @@ class YoloDetectorWorker:
                 "start_method": "spawn",
                 "model": str(self.model_path),
                 "device": str(self.config.get("device", "cuda:0")),
+                "quantize": self.config.get("quantize", 32),
                 "batch_size": self.batch_size,
+                "inflight_batch_id": self._inflight_batch_id,
                 "submitted_camera_inputs": self._submitted,
-                "dropped_pending_batches": self._dropped_batches,
                 "batches": self._batches,
                 "batch_rate": self._batches / elapsed,
                 "camera_inputs": self._inputs,
                 "camera_input_rate": self._inputs / elapsed,
                 "detections": self._detections,
+                "last_prepare_ms": self._last_prepare_ms,
                 "last_batch_ms": self._last_batch_ms,
                 "last_error": self._last_error,
                 "cameras": cameras,
