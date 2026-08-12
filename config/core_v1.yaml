@@ -5,9 +5,7 @@ core_v1:
   api_port: 8000
 
   # Presentation is separate from inference. Most cameras deliver about 19-21
-  # decoded FPS, so a 12 FPS JPEG cap caused visible walking judder even while
-  # capture/detector health looked good. Publish up to 18 FPS, but keep the
-  # presentation image smaller/lighter so CPU work stays bounded.
+  # decoded FPS. Publish up to 18 FPS, with a small JPEG to keep CPU bounded.
   display_fps: 18
   jpeg_quality: 72
   max_display_width: 720
@@ -19,22 +17,38 @@ core_v1:
   max_read_timeouts: 3
   reconnect_delay_sec: 1.0
 
-  # Do NOT reconnect a healthy live RTSP stream only because clock/PTS-derived
-  # pipeline_lag_ms is high. RTSP jitterbuffer PTS is useful telemetry but is not
-  # a safe standalone backlog detector. The actual decoded path is already
-  # bounded (postdecode queue=1 + appsink max-buffers=1 + LatestFrameStore=1).
-  # Real stalls are still recovered by capture timeouts / bus errors.
+  # Capture backend: prefer DeepStream nvurisrcbin/NVDEC when the plugin exists,
+  # otherwise automatically fall back to the previous GStreamer/NVDEC path.
+  # DeepStream is used for ingest/decode only; YOLO stays PyTorch CUDA.
+  capture_backend: "auto"
+
+  # Do not reconnect only from clock/PTS lag. Real stalls are recovered by
+  # source errors/timeouts and DeepStream's RTSP reconnect support.
   max_pipeline_lag_ms: 0
   max_pipeline_lag_samples: 8
 
-  rtsp_transport: "tcp"
-  rtsp_latency_ms: 50
+  # A tiny 50 ms jitterbuffer was too aggressive for six office RTSP feeds and
+  # can manifest as stop/go playback when packet arrival is bursty. Give the
+  # source a bounded 150 ms window and DROP late packets instead of allowing the
+  # jitterbuffer to grow. "auto" lets RTP try the normal UDP path with TCP
+  # fallback instead of forcing TCP head-of-line blocking on every camera.
+  rtsp_transport: "auto"
+  rtsp_latency_ms: 150
   rtsp_buffer_mode: "auto"
-  drop_on_latency: false
-  tcp_timestamp: true
-  decoder_extra_surfaces: 2
+  drop_on_latency: true
+  tcp_timestamp: false
+  udp_buffer_size: 1048576
+
+  # Extra NVDEC surfaces reduce decoder starvation under six concurrent streams.
+  # low-latency-mode stays false because it is only safe for streams without
+  # B-frames; the camera GOP structure is not guaranteed yet.
+  decoder_extra_surfaces: 4
   decoder_low_latency_mode: false
   postdecode_queue_buffers: 1
+
+  # nvurisrcbin handles source-level RTSP stalls independently per camera.
+  deepstream_reconnect_interval_sec: 2
+  deepstream_reconnect_attempts: -1
 
   detector:
     enabled: true
