@@ -4,7 +4,8 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
-  display_fps: 12
+  # 15 FPS presentation is still latest-frame-only. No display backlog is built.
+  display_fps: 15
   jpeg_quality: 76
   max_display_width: 800
   max_display_height: 450
@@ -38,10 +39,14 @@ core_v1:
     duplicate_iou: 0.58
     fusion_containment: 0.84
     fusion_center_distance: 0.40
-    overlay_max_age_ms: 300
 
-    # Camera-specific high-resolution verification/recovery. Full-frame YOLO
-    # always remains active outside these boxes.
+    # A box may be predicted toward the current display frame only while the
+    # detector observation is still recent. Internal track memory is separate.
+    overlay_max_age_ms: 650
+
+    # Keep the useful entrance high-resolution verifier. CAM-06's previous
+    # rotated sofa ROI was removed because it amplified sofa/TV false positives
+    # and added avoidable GPU work/jitter.
     roi_second_pass:
       enabled: true
       imgsz: [512, 640]
@@ -51,9 +56,6 @@ core_v1:
       every_n: 2
       trigger_max_full_roi_persons: 1
       cameras:
-        # entrance-1 desk/chair region: use high-res as source of truth there.
-        # This removes persistent chair/fixture false positives while retaining
-        # true people in the same area.
         CAM-05:
           mode: "verify"
           every_n: 1
@@ -62,20 +64,10 @@ core_v1:
           rotations: [0]
           box: [0.27, 0.00, 0.72, 0.54]
 
-        # main-room-2 sofa region: horizontal/lying people are difficult for the
-        # normal full-frame view. Run the same crop at 0/90/270 degrees and map
-        # detections back to the original frame. High-res result is authoritative
-        # inside the region so furniture false positives are discarded.
-        CAM-06:
-          mode: "verify"
-          every_n: 1
-          always_run: true
-          accept_conf: 0.075
-          rotations: [0, 90, 270]
-          box: [0.39, 0.08, 0.74, 0.52]
-
   visual_tracker:
-    hold_ms: 1600
+    # Visible prediction is intentionally short. Lost-person memory is longer,
+    # so occlusion recovery does not require drawing an old ghost rectangle.
+    hold_ms: 700
     prediction_ms: 450
     memory_ms: 6000
     match_iou: 0.16
@@ -91,24 +83,37 @@ core_v1:
     fragment_min_vertical_overlap: 0.08
     fragment_max_vertical_gap: 0.14
 
-    # Favor newest measurement and predict to the current display-frame time so
-    # boxes follow a walking person instead of trailing behind detector latency.
-    smoothing: 0.90
-    velocity_smoothing: 0.62
-    max_prediction_shift_boxes: 1.35
-    start_conf: 0.18
+    # Responsive to the newest detector observation while still limiting noisy
+    # velocity extrapolation.
+    smoothing: 0.96
+    velocity_smoothing: 0.70
+    max_prediction_shift_boxes: 1.20
+
+    # ByteTrack-style birth policy: low-score detections are allowed to refresh
+    # an existing track, but they cannot freely create a new person track.
+    start_conf: 0.34
+    new_track_min_conf: 0.24
+    weak_confirm_hits: 3
     low_conf_confirm: 0.12
 
-    # Entrance chair clutter must repeat strongly before becoming a visible track.
     camera_start_conf:
-      CAM-05: 0.26
+      CAM-05: 0.28
+      CAM-06: 0.40
+
     camera_low_conf_confirm:
       CAM-05: 0.18
 
-    # Hard restriction is ONLY the physical wall TV itself, not the sofa below.
-    # This prevents people displayed on the TV from becoming CCTV people while a
-    # real person lying/sitting on the sofa remains eligible for CAM-06 ROI recovery.
-    exclusion_max_box_height: 0.20
+    # Static sofa/clutter in main-room-2 needs a stronger score to CREATE a new
+    # track. Existing real tracks can still be refreshed by lower-score boxes.
+    camera_new_track_zones:
+      CAM-06:
+        - [0.48, 0.16, 0.72, 0.41, 0.50]
+
+    # Hard restriction only for the physical wall TV. Suppression uses either
+    # bbox-center inclusion or sufficient bbox/zone overlap, while the max-height
+    # guard keeps a real full-height person near the TV eligible for tracking.
+    exclusion_max_box_height: 0.24
+    exclusion_overlap_threshold: 0.35
     camera_exclusion_zones:
       CAM-06:
-        - [0.51, 0.00, 0.68, 0.15]
+        - [0.58, 0.00, 0.73, 0.18]
