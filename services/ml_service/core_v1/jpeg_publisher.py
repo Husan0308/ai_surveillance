@@ -10,12 +10,19 @@ class LatestJpegPublisher:
         self.detections=detections;self.overlay_max_age_ms=max(0.0,float(overlay_max_age_ms))
         cfg=dict(tracker_config or {})
         camera_zones=dict(cfg.get('camera_exclusion_zones') or {})
+        fragment_cameras=set(str(cid) for cid in (cfg.get('fragment_duplicate_cameras') or []))
         self.visual_tracker=VisualTracker(
             hold_ms=cfg.get('hold_ms',800),memory_ms=cfg.get('memory_ms',6000),prediction_ms=cfg.get('prediction_ms',350),
             match_iou=cfg.get('match_iou',0.20),reacquire_distance=cfg.get('reacquire_distance',1.05),
             duplicate_iou=cfg.get('duplicate_iou',0.50),duplicate_containment=cfg.get('duplicate_containment',0.82),
-            duplicate_center_distance=cfg.get('duplicate_center_distance',0.40),smoothing=cfg.get('smoothing',0.68),
-            low_conf_confirm=cfg.get('low_conf_confirm',0.16),start_conf=cfg.get('start_conf',0.18),
+            duplicate_center_distance=cfg.get('duplicate_center_distance',0.40),
+            fragment_duplicate=(camera_id in fragment_cameras),
+            fragment_horizontal_overlap=cfg.get('fragment_horizontal_overlap',0.70),
+            fragment_x_center=cfg.get('fragment_x_center',0.30),
+            fragment_max_area_ratio=cfg.get('fragment_max_area_ratio',0.70),
+            fragment_min_vertical_overlap=cfg.get('fragment_min_vertical_overlap',0.12),
+            fragment_max_vertical_gap=cfg.get('fragment_max_vertical_gap',0.10),
+            smoothing=cfg.get('smoothing',0.68),low_conf_confirm=cfg.get('low_conf_confirm',0.16),start_conf=cfg.get('start_conf',0.18),
             exclusion_zones=camera_zones.get(camera_id,[]),exclusion_max_box_height=cfg.get('exclusion_max_box_height',0.34),
         )
         self._stop=threading.Event();self._thread=None;self._lock=threading.Lock();self._condition=threading.Condition(self._lock)
