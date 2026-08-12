@@ -24,12 +24,13 @@ core_v1:
     model: "models/yolo26m.pt"
     device: "cuda:0"
     imgsz: [384, 640]
-    half: false
+    quantize: 32
     conf: 0.15
     iou: 0.45
     max_det: 40
     batch_size: 3
-    batch_interval_ms: 20
-    # Draw only a recent *real* detector result. This is intentionally not a
+    poll_interval_ms: 5
+    start_delay_sec: 2.0
+    # Draw only a recent real detector result. This is intentionally not a
     # tracker/prediction bridge; it lets us evaluate raw YOLO cadence first.
     overlay_max_age_ms: 350
