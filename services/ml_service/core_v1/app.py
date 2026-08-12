@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from shared.config import camera_config
 from .manager import CameraManager
 from .jpeg_publisher import LatestJpegPublisher
+from .detector import YoloDetectorWorker
 
 ROOT=Path(__file__).resolve().parents[3]
 
@@ -22,27 +23,63 @@ def _load_yaml(path):
 camera_cfg=camera_config().get('cameras',[])
 core_cfg=_load_yaml(ROOT/'config/core_v1.yaml').get('core_v1',{})
 manager=CameraManager(camera_cfg,core_cfg)
-publishers={cid:LatestJpegPublisher(cid,store,core_cfg.get('display_fps',12),core_cfg.get('jpeg_quality',82),core_cfg.get('max_display_width',960),core_cfg.get('max_display_height',540)) for cid,store in manager.stores.items()}
-app=FastAPI(title='AI Surveillance ML Core v1',version='1.0')
+detector_cfg=dict(core_cfg.get('detector') or {})
+detector=YoloDetectorWorker(manager.stores,detector_cfg,ROOT) if bool(detector_cfg.get('enabled',False)) else None
+publishers={
+    cid:LatestJpegPublisher(
+        cid,store,
+        core_cfg.get('display_fps',12),
+        core_cfg.get('jpeg_quality',82),
+        core_cfg.get('max_display_width',960),
+        core_cfg.get('max_display_height',540),
+        detections=(detector.results if detector else None),
+        overlay_max_age_ms=detector_cfg.get('overlay_max_age_ms',350),
+    )
+    for cid,store in manager.stores.items()
+}
+app=FastAPI(title='AI Surveillance ML Core v1',version='1.1')
 
 @app.on_event('startup')
 def startup():
     manager.start()
     for publisher in publishers.values():publisher.start()
+    if detector:detector.start()
 
 @app.on_event('shutdown')
 def shutdown():
+    if detector:
+        detector.stop();detector.join(10)
     for publisher in publishers.values():publisher.stop()
     for publisher in publishers.values():publisher.join()
     manager.stop()
 
 @app.get('/health')
 def health():
-    metrics=manager.metrics();return {'status':'ok','mode':'camera-only','cameras':metrics,'online':sum(bool(v.get('online')) for v in metrics.values()),'total':len(metrics)}
+    metrics=manager.metrics()
+    return {
+        'status':'ok',
+        'mode':'camera+yolo' if detector else 'camera-only',
+        'cameras':metrics,
+        'online':sum(bool(v.get('online')) for v in metrics.values()),
+        'total':len(metrics),
+        'detector':detector.metrics() if detector else None,
+    }
 
 @app.get('/cameras')
 def cameras():
     metrics=manager.metrics();return [{'id':cid,**metrics[cid]} for cid in sorted(metrics)]
+
+@app.get('/detections')
+def detections():
+    if detector is None:return {'enabled':False,'cameras':{}}
+    now=time.monotonic();results={}
+    for cid,result in detector.results.snapshot().items():
+        results[cid]={
+            'frame_id':result.frame_id,
+            'age_ms':max(0.0,(now-result.produced_monotonic)*1000.0),
+            'boxes':[{'bbox':[b.x1,b.y1,b.x2,b.y2],'confidence':b.confidence} for b in result.boxes],
+        }
+    return {'enabled':True,'cameras':results,'metrics':detector.metrics()}
 
 def _mjpeg(camera_id):
     publisher=publishers[camera_id];last=-1
