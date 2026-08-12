@@ -100,28 +100,23 @@ class VisualTracker:
         if box_h>self.exclusion_max_box_height:return False
         return any(x1<=cx<=x2 and y1<=cy<=y2 for x1,y1,x2,y2 in self.exclusion_zones)
 
+    def _is_duplicate(self, box:VisualBox, other:VisualBox) -> bool:
+        iou=_iou(box,other)
+        containment=_containment(box,other)
+        center_distance=_center_distance(box,other)
+        return iou>=self.duplicate_iou or (
+            containment>=self.duplicate_containment and
+            center_distance<=self.duplicate_center_distance
+        )
+
     def _dedupe(self, boxes, source_width=None, source_height=None) -> list[VisualBox]:
         candidates=[VisualBox(float(b.x1),float(b.y1),float(b.x2),float(b.y2),float(b.confidence)) for b in boxes]
         candidates=[b for b in candidates if not self._excluded(b,source_width,source_height)]
         candidates.sort(key=lambda b:b.confidence,reverse=True)
         kept=[]
         for box in candidates:
-            duplicate=False
-            for other in kept:
-                iou=_iou(box,other)
-                containment=_containment(box,other)
-                center_distance=_center_distance(box,other)
-                # Standard overlap catches two nearly identical boxes. The
-                # containment+center rule catches the common YOLO26 case where
-                # one duplicate is nested/shifted inside the other and therefore
-                # has only moderate IoU. Nearby distinct people normally have
-                # separated centers and survive this second rule.
-                if iou>=self.duplicate_iou or (
-                    containment>=self.duplicate_containment and
-                    center_distance<=self.duplicate_center_distance
-                ):
-                    duplicate=True;break
-            if not duplicate:kept.append(box)
+            if any(self._is_duplicate(box,other) for other in kept):continue
+            kept.append(box)
         return kept
 
     def _predicted_box(self, track:_Track, now:float) -> VisualBox:
@@ -191,19 +186,27 @@ class VisualTracker:
 
         for di in unmatched_dets:
             det=detections[di]
-            if det.confidence<self.start_conf and not self._confirm_weak_new_track(det,now):
-                continue
+            if det.confidence<self.start_conf and not self._confirm_weak_new_track(det,now):continue
             tid=self._next_id;self._next_id+=1
             self._tracks[tid]=_Track(tid,det,det,now,now)
 
     def visible(self, now:float) -> list[VisualBox]:
-        visible=[]
+        candidates=[]
         for track in self._tracks.values():
             age=now-track.last_seen
             if age>self.hold_sec:continue
             if track.hits<2 and track.box.confidence<self.low_conf_confirm:continue
             predicted=self._predicted_box(track,now)
-            conf=max(0.01,track.box.confidence*(1.0-0.30*min(1.0,age/self.hold_sec)))
-            predicted.confidence=conf
-            visible.append(predicted)
+            predicted.confidence=max(0.01,track.box.confidence*(1.0-0.30*min(1.0,age/self.hold_sec)))
+            candidates.append(predicted)
+
+        # A duplicate can survive at track level even after raw detector boxes
+        # were deduped (e.g. two tracks were created on adjacent detector cycles).
+        # Final visual suppression prevents two rectangles being drawn on one
+        # person while preserving genuinely separated people.
+        candidates.sort(key=lambda b:b.confidence,reverse=True)
+        visible=[]
+        for box in candidates:
+            if any(self._is_duplicate(box,other) for other in visible):continue
+            visible.append(box)
         return visible
