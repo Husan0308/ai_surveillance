@@ -37,7 +37,12 @@ class CameraReader:
         self._on_frame = on_frame
         self._stop, self._lock = threading.Event(), threading.RLock()
         self._thread, self._capture = None, None
-        self._metrics = ReaderMetrics()
+        # CameraManager injects this private runtime-only value when a reader is
+        # replaced. It keeps frame ids monotonic inside one ML-service runtime,
+        # so downstream stale/duplicate guards never confuse a new reader with
+        # an old frame-id domain.
+        initial_frame_id=max(0,int(config.get("_initial_frame_id",0) or 0))
+        self._metrics = ReaderMetrics(recv_frame_id=initial_frame_id)
         self._last_receive = self._fps_started = 0.0
         self._fps_frames = 0;self._publication_intervals=deque(maxlen=2000);self._handoff_ms=deque(maxlen=2000)
 
@@ -51,7 +56,9 @@ class CameraReader:
         deepstream = project_config().get("deepstream", {})
         if bool(deepstream.get("enabled", False)):
             from .gstreamer import GStreamerCapture
-            configured={**config,"decoder_backend":deepstream.get("decoder_backend","nvv4l2decoder")}
+            configured={**config,
+                        "decoder_backend":deepstream.get("decoder_backend","nvv4l2decoder"),
+                        "decoder_extra_surfaces":config.get("decoder_extra_surfaces",deepstream.get("decoder_extra_surfaces",2))}
             capture = GStreamerCapture(configured)
             if capture.isOpened() or not bool(deepstream.get("fallback_to_opencv", False)): return capture
             capture.release(); log.warning("%s NVDEC open failed; explicitly falling back to FFmpeg", self.camera_id)

@@ -61,9 +61,13 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
         decoder="nvh264dec name=decoder max-display-delay=0" if codec=="h264" else "nvh265dec name=decoder max-display-delay=0"
         conversion="video/x-raw,format=NV12 ! videoconvert name=converter ! video/x-raw,format=BGR"
     elif decoder_backend=="nvv4l2decoder":
-        decoder="nvv4l2decoder name=decoder low-latency-mode=true num-extra-surfaces=2"
+        # NVIDIA documents num-extra-surfaces as a starvation/backpressure
+        # tuning knob, not a universally optimal constant. Keep it configurable
+        # so CAM04/05/06 can be A/B tested without changing code.
+        extra_surfaces=max(0,int(config.get("decoder_extra_surfaces",2) or 0))
+        decoder=f"nvv4l2decoder name=decoder low-latency-mode=true num-extra-surfaces={extra_surfaces}"
         # Map BGRx once and strip the padding channel while making the required
-        # owned NumPy copy.  A full-resolution videoconvert BGR buffer is avoided.
+        # owned NumPy copy. A full-resolution videoconvert BGR buffer is avoided.
         conversion="nvvideoconvert name=converter ! video/x-raw,format=BGRx"
     else:raise ValueError(f"unsupported NVIDIA decoder backend: {decoder_backend}")
     encoding="H264" if codec=="h264" else "H265"
