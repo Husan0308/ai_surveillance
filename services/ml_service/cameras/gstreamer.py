@@ -71,7 +71,7 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
         raise ValueError(f"camera {config.get('id')} NVIDIA backend requires an RTSP source")
 
     depay, parser = SUPPORTED_CODECS[codec]
-    latency = max(0, int(config.get("latency_ms", 100)))
+    latency = max(0, int(config.get("latency_ms", 50)))
     decoder_backend = str(config.get("decoder_backend", "nvv4l2decoder")).lower()
     extra_surfaces = max(0, int(config.get("decoder_extra_surfaces", 2)))
     low_latency = bool(config.get("decoder_low_latency_mode", False))
@@ -92,9 +92,14 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
     if transport not in {"tcp", "udp", "auto"}:
         raise ValueError(f"unsupported RTSP transport: {transport}")
 
+    buffer_mode = str(config.get("rtsp_buffer_mode", "auto")).strip().lower()
+    if buffer_mode not in {"none", "slave", "buffer", "auto", "synced"}:
+        raise ValueError(f"unsupported rtspsrc buffer-mode: {buffer_mode}")
+
     source_options = [
         f"location={_gst_quote(source)}",
         f"latency={latency}",
+        f"buffer-mode={buffer_mode}",
         f"drop-on-latency={'true' if bool(config.get('drop_on_latency', False)) else 'false'}",
     ]
     if transport != "auto":
@@ -107,7 +112,7 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
         f"rtspsrc name=source {' '.join(source_options)} ! "
         f"application/x-rtp,media=video,encoding-name={encoding} ! "
         f"{depay} name=depay ! {parser} name=parser ! {decoder} ! {conversion} ! "
-        "appsink name=sink drop=true max-buffers=1 sync=false"
+        "appsink name=sink drop=true max-buffers=1 sync=false wait-on-eos=false"
     )
 
 
@@ -117,15 +122,39 @@ class GStreamerCapture:
     def __init__(self, config: dict):
         Gst = _gstreamer()
         self.Gst = Gst
+        self.config = dict(config)
         self.pipeline = nvidia_rtsp_pipeline(config)
         self._pull_timeout_ns = max(100, int(config.get("capture_timeout_ms", 1000))) * Gst.MSECOND
         self._last_bus_error = ""
         self._last_bus_warning = ""
         self._state_change_result = "UNKNOWN"
+        self._last_pipeline_lag_ms = None
+        self._pipeline_lag_ms = deque(maxlen=2000)
+        self._source_runtime = {}
 
         self._pipeline = Gst.parse_launch(self.pipeline)
         self._bus = self._pipeline.get_bus()
+        self._source = self._pipeline.get_by_name("source")
         self._sink = self._pipeline.get_by_name("sink") or self._pipeline.get_by_name("appsink0")
+
+        # GStreamer 1.24.10+ exposes tcp-timestamp. When available it timestamps
+        # every RTP-over-TCP packet at receive time, preventing sender/client
+        # clock drift from silently growing end-to-end latency. Older 1.24 builds
+        # simply skip the property and continue with the configured buffer mode.
+        if self._source is not None:
+            tcp_timestamp_requested = bool(config.get("tcp_timestamp", True))
+            pspec = self._source.find_property("tcp-timestamp")
+            if pspec is not None:
+                self._source.set_property("tcp-timestamp", tcp_timestamp_requested)
+                self._source_runtime["tcp_timestamp_supported"] = True
+                self._source_runtime["tcp_timestamp"] = tcp_timestamp_requested
+            else:
+                self._source_runtime["tcp_timestamp_supported"] = False
+                self._source_runtime["tcp_timestamp"] = None
+            self._source_runtime["buffer_mode"] = str(config.get("rtsp_buffer_mode", "auto"))
+            self._source_runtime["transport"] = str(config.get("rtsp_transport", "tcp"))
+            self._source_runtime["latency_ms"] = int(config.get("latency_ms", 50))
+            self._source_runtime["drop_on_latency"] = bool(config.get("drop_on_latency", False))
 
         stages = ("rtp_receive", "jitterbuffer_input", "jitterbuffer_output", "depay_output", "parser_input", "parser_output", "decoder_input", "decoder_output", "conversion_output", "appsink")
         self._stage_last = {}
@@ -205,6 +234,28 @@ class GStreamerCapture:
     def last_error(self):
         return self._last_bus_error
 
+    def current_pipeline_lag_ms(self):
+        return self._last_pipeline_lag_ms
+
+    def _measure_pipeline_lag(self, buffer):
+        try:
+            pts = buffer.pts
+            if pts == self.Gst.CLOCK_TIME_NONE:
+                return
+            clock = self._pipeline.get_clock()
+            if clock is None:
+                return
+            base_time = self._pipeline.get_base_time()
+            clock_time = clock.get_time()
+            if base_time == self.Gst.CLOCK_TIME_NONE or clock_time < base_time:
+                return
+            running_time = clock_time - base_time
+            lag_ms = max(0.0, float(running_time - pts) / float(self.Gst.MSECOND)) if running_time >= pts else 0.0
+            self._last_pipeline_lag_ms = lag_ms
+            self._pipeline_lag_ms.append(lag_ms)
+        except Exception:
+            pass
+
     def read(self):
         if not self._opened or self._sink is None:
             return False, None
@@ -221,6 +272,7 @@ class GStreamerCapture:
         height = caps.get_value("height")
         pixel_format = str(caps.get_value("format"))
         buffer = sample.get_buffer()
+        self._measure_pipeline_lag(buffer)
         ok, mapped = buffer.map(self.Gst.MapFlags.READ)
         if not ok:
             return False, None
@@ -265,6 +317,9 @@ class GStreamerCapture:
             **{f"{name}_interval_ms": stats(values) for name, values in self._stage_intervals.items()},
             "rtp_jitterbuffer": jitter,
             "map_copy_ms": stats(self._map_copy_ms),
+            "pipeline_lag_ms": stats(self._pipeline_lag_ms),
+            "current_pipeline_lag_ms": self._last_pipeline_lag_ms,
+            "source_runtime": dict(self._source_runtime),
             "state_change_result": self._state_change_result,
             "last_bus_error": self._last_bus_error,
             "last_bus_warning": self._last_bus_warning,
