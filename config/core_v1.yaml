@@ -4,7 +4,6 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Camera/display baseline. Keep presentation light and latest-only.
   display_fps: 12
   jpeg_quality: 76
   max_display_width: 800
@@ -15,9 +14,6 @@ core_v1:
   max_read_timeouts: 3
   reconnect_delay_sec: 2.0
 
-  # Stable RTSP receive settings. We do NOT aggressively discard compressed
-  # H264/H265 reference data; that can produce the blocky/smeared corruption
-  # seen on fast motion. Latency is bounded safely after decode instead.
   rtsp_transport: "tcp"
   rtsp_latency_ms: 50
   rtsp_buffer_mode: "auto"
@@ -27,44 +23,46 @@ core_v1:
   decoder_low_latency_mode: false
   postdecode_queue_buffers: 1
 
-  # Stage 2: YOLO person detector only. The actual ML model runs on CUDA.
   detector:
     enabled: true
     model: "models/yolo26m.pt"
     device: "cuda:0"
     imgsz: [448, 704]
     quantize: 32
-    # Keep raw recall high for small/partly occluded people. New low-confidence
-    # tracks are confirmed temporally by visual_tracker before being displayed.
     conf: 0.06
-    # A slightly higher NMS IoU is important in crowded/overlapping views so
-    # two nearby people are less likely to be collapsed into one detection.
-    iou: 0.58
+    # Ultralytics documents that lower IoU removes more overlapping detections.
+    # YOLO26 end-to-end mode does not use traditional IoU NMS the same way, so
+    # our visual layer below remains the final duplicate guard.
+    iou: 0.50
     max_det: 50
     batch_size: 3
     poll_interval_ms: 5
     start_delay_sec: 2.0
-    # Final duplicate guard only for very heavy overlap; nearby real people stay.
-    duplicate_iou: 0.82
+    duplicate_iou: 0.70
     overlay_max_age_ms: 300
 
-  # Visual-only per-camera stabilization. No identity/ReID evidence is produced.
   visual_tracker:
-    # Hold a confirmed person through short desk/chair occlusion so the box does
-    # not blink off on sparse detector misses.
     hold_ms: 1600
     prediction_ms: 450
-    # After the box is hidden, remember the track (without drawing it) so when
-    # the person appears again it is reacquired immediately instead of waiting
-    # for a brand-new track lifecycle.
     memory_ms: 6000
     match_iou: 0.16
     reacquire_distance: 1.05
-    duplicate_iou: 0.62
-    duplicate_containment: 0.93
+
+    # Stronger duplicate suppression than before. This runs both on fresh YOLO
+    # results and again on currently visible tracks, so two tracks created on
+    # adjacent detector cycles cannot keep drawing two boxes around one person.
+    duplicate_iou: 0.50
+    duplicate_containment: 0.82
+    duplicate_center_distance: 0.40
+
     smoothing: 0.72
-    # A strong detection starts immediately. Weak new detections must repeat in
-    # roughly the same location twice; this reduces chair/background false starts
-    # while retaining low detector conf for difficult people.
     start_conf: 0.18
     low_conf_confirm: 0.12
+
+    # Ignore only small detections whose center is inside a known static screen.
+    # This is deliberately narrow instead of a broad room ROI, so real people
+    # walking underneath/near the TV are still eligible for detection.
+    exclusion_max_box_height: 0.22
+    camera_exclusion_zones:
+      CAM-06:
+        - [0.48, 0.00, 0.70, 0.18]
