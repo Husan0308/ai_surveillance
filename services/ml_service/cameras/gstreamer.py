@@ -1,4 +1,4 @@
-"""NVIDIA/GStreamer RTSP capture adapter with latest-sample semantics."""
+"""NVIDIA/GStreamer RTSP capture adapter with bounded latest-frame buffering."""
 from __future__ import annotations
 
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -7,7 +7,11 @@ import threading
 import time
 from collections import deque
 
-SUPPORTED_CODECS = {"h264": ("rtph264depay", "h264parse"), "h265": ("rtph265depay", "h265parse"), "hevc": ("rtph265depay", "h265parse")}
+SUPPORTED_CODECS = {
+    "h264": ("rtph264depay", "h264parse"),
+    "h265": ("rtph265depay", "h265parse"),
+    "hevc": ("rtph265depay", "h265parse"),
+}
 _GST_INIT_LOCK = threading.Lock()
 _GST = None
 
@@ -66,6 +70,7 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
     codec = str(config.get("codec", "")).lower()
     if codec not in SUPPORTED_CODECS:
         raise ValueError(f"camera {config.get('id')} requires codec=h264 or codec=h265")
+
     source = authenticated_source(config)
     if not isinstance(source, str) or not source.lower().startswith(("rtsp://", "rtsps://")):
         raise ValueError(f"camera {config.get('id')} NVIDIA backend requires an RTSP source")
@@ -75,6 +80,7 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
     decoder_backend = str(config.get("decoder_backend", "nvv4l2decoder")).lower()
     extra_surfaces = max(0, int(config.get("decoder_extra_surfaces", 2)))
     low_latency = bool(config.get("decoder_low_latency_mode", False))
+    postdecode_queue_buffers = max(1, int(config.get("postdecode_queue_buffers", 1)))
 
     if decoder_backend == "nvcodec":
         decoder = "nvh264dec name=decoder max-display-delay=0" if codec == "h264" else "nvh265dec name=decoder max-display-delay=0"
@@ -104,14 +110,25 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
     ]
     if transport != "auto":
         source_options.append(f"protocols={transport}")
+
     udp_buffer_size = int(config.get("udp_buffer_size", 0) or 0)
     if transport in {"udp", "auto"} and udp_buffer_size > 0:
         source_options.append(f"udp-buffer-size={udp_buffer_size}")
+
+    # IMPORTANT: the leaky queue is AFTER decode/conversion. Dropping encoded
+    # H264/H265 packets before the decoder can corrupt reference pictures until
+    # the next IDR. Dropping already-decoded display frames is safe and keeps the
+    # consumer on the newest picture without creating long latency.
+    postdecode_queue = (
+        f"queue name=latest_queue max-size-buffers={postdecode_queue_buffers} "
+        "max-size-bytes=0 max-size-time=0 leaky=downstream silent=true"
+    )
 
     return (
         f"rtspsrc name=source {' '.join(source_options)} ! "
         f"application/x-rtp,media=video,encoding-name={encoding} ! "
         f"{depay} name=depay ! {parser} name=parser ! {decoder} ! {conversion} ! "
+        f"{postdecode_queue} ! "
         "appsink name=sink drop=true max-buffers=1 sync=false wait-on-eos=false"
     )
 
@@ -135,12 +152,9 @@ class GStreamerCapture:
         self._pipeline = Gst.parse_launch(self.pipeline)
         self._bus = self._pipeline.get_bus()
         self._source = self._pipeline.get_by_name("source")
+        self._latest_queue = self._pipeline.get_by_name("latest_queue")
         self._sink = self._pipeline.get_by_name("sink") or self._pipeline.get_by_name("appsink0")
 
-        # GStreamer 1.24.10+ exposes tcp-timestamp. When available it timestamps
-        # every RTP-over-TCP packet at receive time, preventing sender/client
-        # clock drift from silently growing end-to-end latency. Older 1.24 builds
-        # simply skip the property and continue with the configured buffer mode.
         if self._source is not None:
             tcp_timestamp_requested = bool(config.get("tcp_timestamp", True))
             pspec = self._source.find_property("tcp-timestamp")
@@ -155,8 +169,13 @@ class GStreamerCapture:
             self._source_runtime["transport"] = str(config.get("rtsp_transport", "tcp"))
             self._source_runtime["latency_ms"] = int(config.get("latency_ms", 50))
             self._source_runtime["drop_on_latency"] = bool(config.get("drop_on_latency", False))
+            self._source_runtime["postdecode_queue_buffers"] = int(config.get("postdecode_queue_buffers", 1))
 
-        stages = ("rtp_receive", "jitterbuffer_input", "jitterbuffer_output", "depay_output", "parser_input", "parser_output", "decoder_input", "decoder_output", "conversion_output", "appsink")
+        stages = (
+            "rtp_receive", "jitterbuffer_input", "jitterbuffer_output",
+            "depay_output", "parser_input", "parser_output",
+            "decoder_input", "decoder_output", "conversion_output", "appsink",
+        )
         self._stage_last = {}
         self._stage_intervals = {name: deque(maxlen=2000) for name in stages}
         self._map_copy_ms = deque(maxlen=2000)
@@ -213,7 +232,9 @@ class GStreamerCapture:
     def _consume_bus_messages(self):
         terminal = None
         while self._bus is not None:
-            message = self._bus.pop_filtered(self.Gst.MessageType.ERROR | self.Gst.MessageType.WARNING | self.Gst.MessageType.EOS)
+            message = self._bus.pop_filtered(
+                self.Gst.MessageType.ERROR | self.Gst.MessageType.WARNING | self.Gst.MessageType.EOS
+            )
             if message is None:
                 break
             source = message.src.get_name() if message.src is not None else "unknown"
@@ -236,6 +257,14 @@ class GStreamerCapture:
 
     def current_pipeline_lag_ms(self):
         return self._last_pipeline_lag_ms
+
+    def current_queue_buffers(self):
+        if self._latest_queue is None:
+            return None
+        try:
+            return int(self._latest_queue.get_property("current-level-buffers"))
+        except Exception:
+            return None
 
     def _measure_pipeline_lag(self, buffer):
         try:
@@ -319,6 +348,7 @@ class GStreamerCapture:
             "map_copy_ms": stats(self._map_copy_ms),
             "pipeline_lag_ms": stats(self._pipeline_lag_ms),
             "current_pipeline_lag_ms": self._last_pipeline_lag_ms,
+            "current_postdecode_queue_buffers": self.current_queue_buffers(),
             "source_runtime": dict(self._source_runtime),
             "state_change_result": self._state_change_result,
             "last_bus_error": self._last_bus_error,
