@@ -115,10 +115,10 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
     if transport in {"udp", "auto"} and udp_buffer_size > 0:
         source_options.append(f"udp-buffer-size={udp_buffer_size}")
 
-    # IMPORTANT: the leaky queue is AFTER decode/conversion. Dropping encoded
-    # H264/H265 packets before the decoder can corrupt reference pictures until
-    # the next IDR. Dropping already-decoded display frames is safe and keeps the
-    # consumer on the newest picture without creating long latency.
+    # Drop only *decoded* frames. Never leak compressed H264/H265 packets before
+    # the decoder because doing so can break reference-picture chains. Placing
+    # the one-buffer leaky queue immediately after NVDEC also avoids spending
+    # conversion/host-copy work on frames that are already obsolete.
     postdecode_queue = (
         f"queue name=latest_queue max-size-buffers={postdecode_queue_buffers} "
         "max-size-bytes=0 max-size-time=0 leaky=downstream silent=true"
@@ -127,8 +127,8 @@ def nvidia_rtsp_pipeline(config: dict) -> str:
     return (
         f"rtspsrc name=source {' '.join(source_options)} ! "
         f"application/x-rtp,media=video,encoding-name={encoding} ! "
-        f"{depay} name=depay ! {parser} name=parser ! {decoder} ! {conversion} ! "
-        f"{postdecode_queue} ! "
+        f"{depay} name=depay ! {parser} name=parser ! {decoder} ! "
+        f"{postdecode_queue} ! {conversion} ! "
         "appsink name=sink drop=true max-buffers=1 sync=false wait-on-eos=false"
     )
 
@@ -265,6 +265,9 @@ class GStreamerCapture:
             return int(self._latest_queue.get_property("current-level-buffers"))
         except Exception:
             return None
+
+    def source_runtime(self):
+        return dict(self._source_runtime)
 
     def _measure_pipeline_lag(self, buffer):
         try:
