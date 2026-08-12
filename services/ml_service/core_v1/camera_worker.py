@@ -19,6 +19,8 @@ class CameraMetrics:
     startup_waiting: bool=False
     last_frame_age_ms: float=0.0
     pipeline_lag_ms: float|None=None
+    postdecode_queue_buffers: int|None=None
+    source_runtime: dict|None=None
     last_error: str=""
 
 class CameraWorker:
@@ -26,7 +28,7 @@ class CameraWorker:
     def __init__(self,config:dict,store:LatestFrameStore,core_config:dict|None=None):
         self.config=dict(config);self.core_config=dict(core_config or {});self.camera_id=str(config["id"]);self.store=store
         self._stop=threading.Event();self._thread=None;self._lock=threading.Lock();self._capture=None
-        self._metrics=CameraMetrics();self._fps_started=time.monotonic();self._fps_frames=0
+        self._metrics=CameraMetrics(source_runtime={});self._fps_started=time.monotonic();self._fps_frames=0
         self.startup_grace_sec=max(2.0,float(self.core_config.get("startup_grace_sec",15.0)))
         self.max_read_timeouts=max(1,int(self.core_config.get("max_read_timeouts",5)))
         self.reconnect_delay_sec=max(.25,float(self.core_config.get("reconnect_delay_sec",2.0)))
@@ -60,6 +62,7 @@ class CameraWorker:
             "rtsp_transport":str(self.core_config.get("rtsp_transport",self.config.get("rtsp_transport","tcp"))),
             "rtsp_buffer_mode":str(self.core_config.get("rtsp_buffer_mode",self.config.get("rtsp_buffer_mode","auto"))),
             "tcp_timestamp":bool(self.core_config.get("tcp_timestamp",True)),
+            "postdecode_queue_buffers":int(self.core_config.get("postdecode_queue_buffers",1)),
         }
         return GStreamerCapture(cfg)
     def _run(self):
@@ -71,6 +74,7 @@ class CameraWorker:
                 opened_at=time.monotonic();had_frame=False;timeouts=0
                 with self._lock:
                     self._metrics.online=False;self._metrics.startup_waiting=True;self._metrics.last_error="";self._metrics.consecutive_timeouts=0
+                    self._metrics.source_runtime=cap.source_runtime() if hasattr(cap,"source_runtime") else {}
                 while not self._stop.is_set():
                     ok,image=cap.read()
                     if not ok or image is None:
@@ -88,8 +92,9 @@ class CameraWorker:
                     had_frame=True;timeouts=0
                     now=time.time();mono=time.monotonic();h,w=image.shape[:2]
                     pipeline_lag=cap.current_pipeline_lag_ms() if hasattr(cap,"current_pipeline_lag_ms") else None
+                    queue_buffers=cap.current_queue_buffers() if hasattr(cap,"current_queue_buffers") else None
                     with self._lock:
-                        self._metrics.online=True;self._metrics.startup_waiting=False;self._metrics.consecutive_timeouts=0;self._metrics.last_error="";self._metrics.pipeline_lag_ms=pipeline_lag
+                        self._metrics.online=True;self._metrics.startup_waiting=False;self._metrics.consecutive_timeouts=0;self._metrics.last_error="";self._metrics.pipeline_lag_ms=pipeline_lag;self._metrics.postdecode_queue_buffers=queue_buffers
                         self._metrics.frame_id+=1;frame_id=self._metrics.frame_id;self._metrics.width=w;self._metrics.height=h
                         self._fps_frames+=1;elapsed=mono-self._fps_started
                         if elapsed>=1.0:
