@@ -40,12 +40,17 @@ publishers={
     )
     for cid,store in manager.stores.items()
 }
-app=FastAPI(title='AI Surveillance ML Core v1',version='1.3')
+app=FastAPI(title='AI Surveillance ML Core v1',version='1.4')
 
 @app.on_event('startup')
 def startup():
     manager.start()
-    for publisher in publishers.values():publisher.start()
+    # Do not wake all six resize/JPEG encoder threads on exactly the same phase.
+    # A tiny stagger spreads their CPU bursts across the presentation interval.
+    stagger=max(0.0,float(core_cfg.get('publisher_start_stagger_ms',0.0))/1000.0)
+    for index,publisher in enumerate(publishers.values()):
+        publisher.start()
+        if stagger and index+1<len(publishers):time.sleep(stagger)
     if detector:detector.start()
 
 @app.on_event('shutdown')
