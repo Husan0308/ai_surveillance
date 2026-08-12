@@ -4,8 +4,9 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # 15 FPS presentation is still latest-frame-only. No display backlog is built.
-  display_fps: 15
+  # 12 FPS was the stable long-running presentation baseline. The frontend is
+  # latest-only, so increasing presentation FPS is not needed for lower latency.
+  display_fps: 12
   jpeg_quality: 76
   max_display_width: 800
   max_display_height: 450
@@ -13,7 +14,13 @@ core_v1:
   startup_stagger_sec: 0.20
   capture_timeout_ms: 1000
   max_read_timeouts: 3
-  reconnect_delay_sec: 2.0
+  reconnect_delay_sec: 1.0
+
+  # If an RTSP/GStreamer pipeline itself drifts far behind live time for several
+  # consecutive samples, rebuild only that camera pipeline. This flushes hidden
+  # RTP/decoder state instead of letting hour-long latency accumulate.
+  max_pipeline_lag_ms: 1200
+  max_pipeline_lag_samples: 8
 
   rtsp_transport: "tcp"
   rtsp_latency_ms: 50
@@ -40,13 +47,14 @@ core_v1:
     fusion_containment: 0.84
     fusion_center_distance: 0.40
 
-    # A box may be predicted toward the current display frame only while the
-    # detector observation is still recent. Internal track memory is separate.
-    overlay_max_age_ms: 650
+    # Never paint a detector observation that has become old relative to the
+    # current display. Track memory remains separate for reacquisition.
+    overlay_max_age_ms: 450
 
-    # Keep the useful entrance high-resolution verifier. CAM-06's previous
-    # rotated sofa ROI was removed because it amplified sofa/TV false positives
-    # and added avoidable GPU work/jitter.
+    # High-resolution second pass is selective and bounded. CAM-05 verifies its
+    # known difficult desk/chair region. CAM-06 gets one native-orientation sofa
+    # crop only; no 90/270-degree variants, which previously multiplied GPU work
+    # and false positives. It runs every second eligible CAM-06 observation.
     roi_second_pass:
       enabled: true
       imgsz: [512, 640]
@@ -64,11 +72,22 @@ core_v1:
           rotations: [0]
           box: [0.27, 0.00, 0.72, 0.54]
 
+        # Sofa only. This larger native crop makes a horizontal/occluded person
+        # occupy more detector pixels without rotating furniture into person-like
+        # shapes. It augments full-frame YOLO rather than replacing it.
+        CAM-06:
+          mode: "augment"
+          every_n: 2
+          always_run: true
+          accept_conf: 0.075
+          rotations: [0]
+          box: [0.36, 0.12, 0.74, 0.48]
+
   visual_tracker:
-    # Visible prediction is intentionally short. Lost-person memory is longer,
-    # so occlusion recovery does not require drawing an old ghost rectangle.
-    hold_ms: 700
-    prediction_ms: 450
+    # Internal memory can survive occlusion, but a rectangle is only displayed
+    # briefly without a fresh observation. This prevents ghost/stale boxes.
+    hold_ms: 500
+    prediction_ms: 220
     memory_ms: 6000
     match_iou: 0.16
     reacquire_distance: 1.05
@@ -83,37 +102,37 @@ core_v1:
     fragment_min_vertical_overlap: 0.08
     fragment_max_vertical_gap: 0.14
 
-    # Responsive to the newest detector observation while still limiting noisy
-    # velocity extrapolation.
     smoothing: 0.96
-    velocity_smoothing: 0.70
-    max_prediction_shift_boxes: 1.20
+    velocity_smoothing: 0.66
+    max_prediction_shift_boxes: 0.75
 
-    # ByteTrack-style birth policy: low-score detections are allowed to refresh
-    # an existing track, but they cannot freely create a new person track.
+    # Low-score detections can refresh an existing person, but new tracks need a
+    # much stronger observation. This is the ByteTrack-style birth/continue split.
     start_conf: 0.34
     new_track_min_conf: 0.24
     weak_confirm_hits: 3
     low_conf_confirm: 0.12
 
     camera_start_conf:
-      CAM-05: 0.28
-      CAM-06: 0.40
-
+      CAM-05: 0.30
+      CAM-06: 0.38
     camera_low_conf_confirm:
       CAM-05: 0.18
 
-    # Static sofa/clutter in main-room-2 needs a stronger score to CREATE a new
-    # track. Existing real tracks can still be refreshed by lower-score boxes.
+    # Static clutter zones need stronger evidence before they may create a new
+    # person. Existing real tracks are still allowed to continue through them.
     camera_new_track_zones:
+      CAM-05:
+        - [0.27, 0.00, 0.72, 0.54, 0.38]
       CAM-06:
-        - [0.48, 0.16, 0.72, 0.41, 0.50]
+        - [0.36, 0.12, 0.76, 0.49, 0.42]
 
-    # Hard restriction only for the physical wall TV. Suppression uses either
-    # bbox-center inclusion or sufficient bbox/zone overlap, while the max-height
-    # guard keeps a real full-height person near the TV eligible for tracking.
-    exclusion_max_box_height: 0.24
-    exclusion_overlap_threshold: 0.35
+    # Physical TV hard mask. The zone is deliberately a little wider than the
+    # visible screen because YOLO often returns a box extending outside the TV.
+    # Only relatively short boxes are rejected, so a real standing person in
+    # front of the wall can still produce a tall valid person box.
+    exclusion_max_box_height: 0.30
+    exclusion_overlap_threshold: 0.15
     camera_exclusion_zones:
       CAM-06:
-        - [0.58, 0.00, 0.73, 0.18]
+        - [0.50, 0.00, 0.78, 0.22]
