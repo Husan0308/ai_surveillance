@@ -4,20 +4,32 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
+  # Camera/display baseline (already validated smooth on six cameras).
   display_fps: 12
   jpeg_quality: 82
   max_display_width: 960
   max_display_height: 540
-
-  rtsp_transport: "tcp"
-  rtsp_latency_ms: 100
-  drop_on_latency: false
-
+  startup_grace_sec: 8.0
+  startup_stagger_sec: 0.20
+  capture_timeout_ms: 1000
+  max_read_timeouts: 3
+  reconnect_delay_sec: 2.0
   decoder_extra_surfaces: 2
   decoder_low_latency_mode: false
+  drop_on_latency: false
 
-  capture_timeout_ms: 1000
-  startup_grace_sec: 15
-  startup_stagger_sec: 0.5
-  max_read_timeouts: 5
-  reconnect_delay_sec: 2.0
+  # Stage 2: detector only. No tracking/ReID/identity/prediction/ROI/heatmap.
+  detector:
+    enabled: true
+    model: "models/yolo26m.pt"
+    device: "cuda:0"
+    imgsz: [384, 640]
+    half: false
+    conf: 0.15
+    iou: 0.45
+    max_det: 40
+    batch_size: 3
+    batch_interval_ms: 20
+    # Draw only a recent *real* detector result. This is intentionally not a
+    # tracker/prediction bridge; it lets us evaluate raw YOLO cadence first.
+    overlay_max_age_ms: 350
