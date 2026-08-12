@@ -24,7 +24,8 @@ class LatestJpegPublisher:
             fragment_max_area_ratio=cfg.get('fragment_max_area_ratio',0.70),
             fragment_min_vertical_overlap=cfg.get('fragment_min_vertical_overlap',0.12),
             fragment_max_vertical_gap=cfg.get('fragment_max_vertical_gap',0.10),
-            smoothing=cfg.get('smoothing',0.68),
+            smoothing=cfg.get('smoothing',0.88),velocity_smoothing=cfg.get('velocity_smoothing',0.58),
+            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes',1.35),
             low_conf_confirm=camera_low_conf.get(camera_id,cfg.get('low_conf_confirm',0.16)),
             start_conf=camera_start_conf.get(camera_id,cfg.get('start_conf',0.18)),
             exclusion_zones=camera_zones.get(camera_id,[]),exclusion_max_box_height=cfg.get('exclusion_max_box_height',0.34),
@@ -51,12 +52,12 @@ class LatestJpegPublisher:
                 if remaining<=0:break
                 self._condition.wait(remaining)
             return self._jpeg,self._version,self._published_monotonic,self._source_frame_id
-    def _draw_detection(self,image,source_width,source_height,now):
+    def _draw_detection(self,image,source_width,source_height,now,display_frame_time):
         if self.detections is not None:
             result=self.detections.get(self.camera_id)
             if result is not None:
                 self.visual_tracker.update(result,now,source_width,source_height)
-        boxes=self.visual_tracker.visible(now)
+        boxes=self.visual_tracker.visible(now,target_time=display_frame_time)
         if not boxes:return image
         h,w=image.shape[:2];sx=w/max(1.0,float(source_width));sy=h/max(1.0,float(source_height))
         for box in boxes:
@@ -79,7 +80,7 @@ class LatestJpegPublisher:
             image=frame.image;source_h,source_w=image.shape[:2];scale=min(1.0,self.max_width/max(1,source_w),self.max_height/max(1,source_h))
             if scale<1.0:image=cv2.resize(image,(max(1,round(source_w*scale)),max(1,round(source_h*scale))),interpolation=cv2.INTER_AREA)
             else:image=image.copy()
-            image=self._draw_detection(image,source_w,source_h,now)
+            image=self._draw_detection(image,source_w,source_h,now,frame.captured_monotonic)
             ok,encoded=cv2.imencode('.jpg',image,[cv2.IMWRITE_JPEG_QUALITY,self.quality])
             if not ok:continue
             published=time.monotonic();payload=encoded.tobytes()
