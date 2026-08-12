@@ -40,11 +40,8 @@ core_v1:
     fusion_center_distance: 0.30
     overlay_max_age_ms: 300
 
-    # Selective high-resolution passes. CAM-05 uses augment mode to recover
-    # difficult/occluded people around the entrance desk. CAM-06 uses verify
-    # mode over the sofa/TV clutter region: inside that region the high-res pass
-    # becomes the source of truth, which removes furniture/screen false persons
-    # without disabling detection when a real person actually enters the area.
+    # High-resolution recovery is currently enabled only for the difficult
+    # entrance camera. Full-frame inference remains active everywhere.
     roi_second_pass:
       enabled: true
       imgsz: [512, 640]
@@ -55,14 +52,7 @@ core_v1:
       trigger_max_full_roi_persons: 1
       cameras:
         CAM-05:
-          mode: "augment"
-          every_n: 2
           box: [0.27, 0.00, 0.72, 0.54]
-        CAM-06:
-          mode: "verify"
-          every_n: 1
-          # Sofa + wall-screen clutter region in main-room-2.
-          box: [0.40, 0.04, 0.74, 0.53]
 
   visual_tracker:
     hold_ms: 1600
@@ -74,23 +64,25 @@ core_v1:
     duplicate_containment: 0.82
     duplicate_center_distance: 0.40
 
-    # These views can produce one large body box plus a smaller upper-body box
-    # for the same person (occlusion, sparse observations, or a high-res pass).
-    # Fragment suppression is camera-scoped so separated real people are kept.
+    # Main-room-1, entrance-1 and main-room-2 are the views where one physical
+    # person can be represented by a large body box plus a smaller body fragment.
+    # This stronger rule is deliberately camera-scoped.
     fragment_duplicate_cameras: ["CAM-03", "CAM-05", "CAM-06"]
-    fragment_horizontal_overlap: 0.70
-    fragment_x_center: 0.30
-    fragment_max_area_ratio: 0.70
-    fragment_min_vertical_overlap: 0.12
-    fragment_max_vertical_gap: 0.10
+    fragment_horizontal_overlap: 0.64
+    fragment_x_center: 0.34
+    fragment_max_area_ratio: 0.76
+    fragment_min_vertical_overlap: 0.08
+    fragment_max_vertical_gap: 0.14
 
     smoothing: 0.72
     start_conf: 0.18
     low_conf_confirm: 0.12
 
-    # Tiny visual-only screen mask remains as a final guard for CAM-06. The
-    # detector still evaluates that area via the high-resolution verify pass.
-    exclusion_max_box_height: 0.22
+    # CAM-06 has a static sofa/wall-screen area that repeatedly looks like a
+    # person to YOLO. This is a presentation/track exclusion, not a detector ROI:
+    # the detector still sees the full frame. Only relatively small boxes whose
+    # center falls in the known static clutter patch are suppressed.
+    exclusion_max_box_height: 0.32
     camera_exclusion_zones:
       CAM-06:
-        - [0.48, 0.00, 0.70, 0.18]
+        - [0.44, 0.03, 0.72, 0.43]
