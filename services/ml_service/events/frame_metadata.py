@@ -1,7 +1,7 @@
 """Build one complete metadata message for each source camera frame."""
 from __future__ import annotations
 from dataclasses import replace
-from services.ml_service.identity.schemas import GlobalTrackResult
+from services.ml_service.identity.schemas import GlobalTrack,GlobalTrackResult,IdentityStatus
 from services.ml_service.tracking.schemas import TrackState
 
 def frame_metadata_messages(packets,identity_results,canonicalize=None,identity_version=0,runtime_epoch=None):
@@ -45,8 +45,47 @@ def frame_metadata_messages(packets,identity_results,canonicalize=None,identity_
         })
     return messages
 
+def _tentative_local_visual(track):
+    """Expose only a *fresh real* tentative detection to the UI.
+
+    Tentative tracks deliberately have no global identity and are never cached or
+    predicted through a miss. This lets the operator see YOLO immediately on the
+    first real observation while preserving the existing multi-hit confirmation
+    barrier for identity, ReID and miss persistence.
+    """
+    return GlobalTrack(
+        local_track_id=getattr(track,"local_track_id",None) or getattr(track,"track_id",None),
+        global_id=None,
+        bbox=getattr(track,"bbox",(0.0,0.0,0.0,0.0)),
+        confidence=float(getattr(track,"confidence",0.0)),
+        identity_confidence=0.0,
+        identity_status=IdentityStatus.ACTIVE,
+        decision_reason="tentative_local_visual",
+        person_id=None,
+        display_name=None,
+        observation_type="detected",
+        last_detection_timestamp=float(getattr(track,"last_detection_timestamp",0.0)),
+        prediction_age_ms=0.0,
+        tracker_state=TrackState.TENTATIVE.value,
+        identity_version=0,
+        detection_source=getattr(track,"detection_source","FULL_FRAME"),
+        detection_id=getattr(track,"detection_id",None),
+        velocity=tuple(getattr(track,"velocity",(0.0,0.0))),
+        state_timestamp=float(getattr(track,"state_timestamp",0.0)),
+        visual_expires_at=float(getattr(track,"visual_expires_at",0.0)),
+        track_generation=int(getattr(track,"track_generation",1)),
+        geometry_monotonic=float(getattr(track,"geometry_monotonic",0.0)),
+        visual_visible=bool(getattr(track,"visual_visible",True)),
+        boundary_exit=bool(getattr(track,"boundary_exit",False)),
+    )
+
 def merge_visual_identity_results(tracking_results,live_results,cache,max_missing_frames=18):
-    """Keep cached identity visual for observation gaps; never admits tentative tracks."""
+    """Merge tracker geometry with identity state.
+
+    Confirmed/lost identities may use the bounded cache for visual persistence.
+    A fresh TENTATIVE real detection is also rendered immediately, but it is
+    local-only, never cached and disappears on its first miss until confirmed.
+    """
     output=[];live_keys=set()
     tracking_by_key={(camera.camera_id,getattr(track,"local_track_id",None) or getattr(track,"track_id",None)):track for camera in tracking_results.results for track in camera.tracks}
     for result in live_results:
@@ -60,7 +99,11 @@ def merge_visual_identity_results(tracking_results,live_results,cache,max_missin
         for track in camera.tracks:
             key=(camera.camera_id,getattr(track,"local_track_id",None) or getattr(track,"track_id",None));present.add(key)
             if key in live_keys:continue
-            predicted=getattr(track,"observation_type","")=="predicted" or (getattr(track,"state",None) in (TrackState.CONFIRMED,TrackState.LOST) and not getattr(track,"visual_hidden",False) and getattr(track,"prediction_age_ms",0.0)<=2000.0)
+            state=getattr(track,"state",None);misses=int(getattr(track,"misses",0) or 0)
+            if state==TrackState.TENTATIVE and misses==0:
+                output.append(GlobalTrackResult(camera.camera_id,camera.frame_id,(_tentative_local_visual(track),)))
+                continue
+            predicted=getattr(track,"observation_type","")=="predicted" or (state in (TrackState.CONFIRMED,TrackState.LOST) and not getattr(track,"visual_hidden",False) and getattr(track,"prediction_age_ms",0.0)<=2000.0)
             if predicted and key in cache:
                 item=replace(cache[key],bbox=track.predicted_bbox or track.bbox,observation_type="predicted",last_detection_timestamp=getattr(track,"last_detection_timestamp",cache[key].last_detection_timestamp),prediction_age_ms=getattr(track,"prediction_age_ms",0.0),velocity=getattr(track,"velocity",cache[key].velocity),state_timestamp=getattr(track,"state_timestamp",cache[key].state_timestamp),visual_expires_at=getattr(track,"visual_expires_at",cache[key].visual_expires_at),track_generation=getattr(track,"track_generation",cache[key].track_generation),geometry_monotonic=getattr(track,"geometry_monotonic",cache[key].geometry_monotonic),visual_visible=getattr(track,"visual_visible",cache[key].visual_visible),boundary_exit=getattr(track,"boundary_exit",cache[key].boundary_exit))
                 output.append(GlobalTrackResult(camera.camera_id,camera.frame_id,(item,)))
