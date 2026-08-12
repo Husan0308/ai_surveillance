@@ -35,13 +35,13 @@ core_v1:
     batch_size: 3
     poll_interval_ms: 5
     start_delay_sec: 2.0
-    duplicate_iou: 0.70
-    fusion_containment: 0.90
-    fusion_center_distance: 0.30
+    duplicate_iou: 0.58
+    fusion_containment: 0.84
+    fusion_center_distance: 0.40
     overlay_max_age_ms: 300
 
-    # High-resolution recovery is currently enabled only for the difficult
-    # entrance camera. Full-frame inference remains active everywhere.
+    # Camera-specific high-resolution verification/recovery. Full-frame YOLO
+    # always remains active outside these boxes.
     roi_second_pass:
       enabled: true
       imgsz: [512, 640]
@@ -51,8 +51,28 @@ core_v1:
       every_n: 2
       trigger_max_full_roi_persons: 1
       cameras:
+        # entrance-1 desk/chair region: use high-res as source of truth there.
+        # This removes persistent chair/fixture false positives while retaining
+        # true people in the same area.
         CAM-05:
+          mode: "verify"
+          every_n: 1
+          always_run: true
+          accept_conf: 0.11
+          rotations: [0]
           box: [0.27, 0.00, 0.72, 0.54]
+
+        # main-room-2 sofa region: horizontal/lying people are difficult for the
+        # normal full-frame view. Run the same crop at 0/90/270 degrees and map
+        # detections back to the original frame. High-res result is authoritative
+        # inside the region so furniture false positives are discarded.
+        CAM-06:
+          mode: "verify"
+          every_n: 1
+          always_run: true
+          accept_conf: 0.075
+          rotations: [0, 90, 270]
+          box: [0.39, 0.08, 0.74, 0.52]
 
   visual_tracker:
     hold_ms: 1600
@@ -64,9 +84,6 @@ core_v1:
     duplicate_containment: 0.82
     duplicate_center_distance: 0.40
 
-    # Main-room-1, entrance-1 and main-room-2 are the views where one physical
-    # person can be represented by a large body box plus a smaller body fragment.
-    # This stronger rule is deliberately camera-scoped.
     fragment_duplicate_cameras: ["CAM-03", "CAM-05", "CAM-06"]
     fragment_horizontal_overlap: 0.64
     fragment_x_center: 0.34
@@ -74,15 +91,24 @@ core_v1:
     fragment_min_vertical_overlap: 0.08
     fragment_max_vertical_gap: 0.14
 
-    smoothing: 0.72
+    # Favor newest measurement and predict to the current display-frame time so
+    # boxes follow a walking person instead of trailing behind detector latency.
+    smoothing: 0.90
+    velocity_smoothing: 0.62
+    max_prediction_shift_boxes: 1.35
     start_conf: 0.18
     low_conf_confirm: 0.12
 
-    # CAM-06 has a static sofa/wall-screen area that repeatedly looks like a
-    # person to YOLO. This is a presentation/track exclusion, not a detector ROI:
-    # the detector still sees the full frame. Only relatively small boxes whose
-    # center falls in the known static clutter patch are suppressed.
-    exclusion_max_box_height: 0.32
+    # Entrance chair clutter must repeat strongly before becoming a visible track.
+    camera_start_conf:
+      CAM-05: 0.26
+    camera_low_conf_confirm:
+      CAM-05: 0.18
+
+    # Hard restriction is ONLY the physical wall TV itself, not the sofa below.
+    # This prevents people displayed on the TV from becoming CCTV people while a
+    # real person lying/sitting on the sofa remains eligible for CAM-06 ROI recovery.
+    exclusion_max_box_height: 0.20
     camera_exclusion_zones:
       CAM-06:
-        - [0.44, 0.03, 0.72, 0.43]
+        - [0.51, 0.00, 0.68, 0.15]
