@@ -25,9 +25,6 @@ core_v1:
   tcp_timestamp: true
   decoder_extra_surfaces: 2
   decoder_low_latency_mode: false
-
-  # Safe latest-only queue after decoder/conversion. If the consumer is slow,
-  # old decoded frames are dropped; encoded reference frames remain intact.
   postdecode_queue_buffers: 1
 
   # Stage 2: YOLO person detector only. The actual ML model runs on CUDA.
@@ -35,22 +32,39 @@ core_v1:
     enabled: true
     model: "models/yolo26m.pt"
     device: "cuda:0"
-    imgsz: [384, 640]
+    imgsz: [448, 704]
     quantize: 32
-    conf: 0.08
-    iou: 0.45
-    max_det: 40
+    # Keep raw recall high for small/partly occluded people. New low-confidence
+    # tracks are confirmed temporally by visual_tracker before being displayed.
+    conf: 0.06
+    # A slightly higher NMS IoU is important in crowded/overlapping views so
+    # two nearby people are less likely to be collapsed into one detection.
+    iou: 0.58
+    max_det: 50
     batch_size: 3
     poll_interval_ms: 5
     start_delay_sec: 2.0
-    overlay_max_age_ms: 250
+    # Final duplicate guard only for very heavy overlap; nearby real people stay.
+    duplicate_iou: 0.82
+    overlay_max_age_ms: 300
 
   # Visual-only per-camera stabilization. No identity/ReID evidence is produced.
   visual_tracker:
-    hold_ms: 850
-    prediction_ms: 350
-    match_iou: 0.20
-    duplicate_iou: 0.55
-    duplicate_containment: 0.88
-    smoothing: 0.68
-    low_conf_confirm: 0.16
+    # Hold a confirmed person through short desk/chair occlusion so the box does
+    # not blink off on sparse detector misses.
+    hold_ms: 1600
+    prediction_ms: 450
+    # After the box is hidden, remember the track (without drawing it) so when
+    # the person appears again it is reacquired immediately instead of waiting
+    # for a brand-new track lifecycle.
+    memory_ms: 6000
+    match_iou: 0.16
+    reacquire_distance: 1.05
+    duplicate_iou: 0.62
+    duplicate_containment: 0.93
+    smoothing: 0.72
+    # A strong detection starts immediately. Weak new detections must repeat in
+    # roughly the same location twice; this reduces chair/background false starts
+    # while retaining low detector conf for difficult people.
+    start_conf: 0.18
+    low_conf_confirm: 0.12
