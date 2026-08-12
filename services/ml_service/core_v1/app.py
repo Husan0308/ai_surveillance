@@ -2,8 +2,8 @@ from __future__ import annotations
 import os,time
 from pathlib import Path
 import yaml
-from fastapi import FastAPI,HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI,HTTPException,Query
+from fastapi.responses import StreamingResponse,Response
 from shared.config import camera_config
 from .manager import CameraManager
 from .jpeg_publisher import LatestJpegPublisher
@@ -24,6 +24,7 @@ camera_cfg=camera_config().get('cameras',[])
 core_cfg=_load_yaml(ROOT/'config/core_v1.yaml').get('core_v1',{})
 manager=CameraManager(camera_cfg,core_cfg)
 detector_cfg=dict(core_cfg.get('detector') or {})
+visual_cfg=dict(core_cfg.get('visual_tracker') or {})
 detector=YoloDetectorWorker(manager.stores,detector_cfg,ROOT) if bool(detector_cfg.get('enabled',False)) else None
 publishers={
     cid:LatestJpegPublisher(
@@ -34,10 +35,11 @@ publishers={
         core_cfg.get('max_display_height',540),
         detections=(detector.results if detector else None),
         overlay_max_age_ms=detector_cfg.get('overlay_max_age_ms',350),
+        tracker_config=visual_cfg,
     )
     for cid,store in manager.stores.items()
 }
-app=FastAPI(title='AI Surveillance ML Core v1',version='1.1')
+app=FastAPI(title='AI Surveillance ML Core v1',version='1.2')
 
 @app.on_event('startup')
 def startup():
@@ -57,11 +59,8 @@ def shutdown():
 def health():
     metrics=manager.metrics()
     return {
-        'status':'ok',
-        'mode':'camera+yolo' if detector else 'camera-only',
-        'cameras':metrics,
-        'online':sum(bool(v.get('online')) for v in metrics.values()),
-        'total':len(metrics),
+        'status':'ok','mode':'camera+yolo' if detector else 'camera-only','cameras':metrics,
+        'online':sum(bool(v.get('online')) for v in metrics.values()),'total':len(metrics),
         'detector':detector.metrics() if detector else None,
     }
 
@@ -75,18 +74,35 @@ def detections():
     now=time.monotonic();results={}
     for cid,result in detector.results.snapshot().items():
         results[cid]={
-            'frame_id':result.frame_id,
-            'age_ms':max(0.0,(now-result.produced_monotonic)*1000.0),
+            'frame_id':result.frame_id,'age_ms':max(0.0,(now-result.produced_monotonic)*1000.0),
             'boxes':[{'bbox':[b.x1,b.y1,b.x2,b.y2],'confidence':b.confidence} for b in result.boxes],
         }
     return {'enabled':True,'cameras':results,'metrics':detector.metrics()}
 
+@app.get('/frame/{camera_id}')
+def latest_frame(camera_id:str,after:int=Query(-1),wait_ms:int=Query(200,ge=0,le=500)):
+    """Return exactly one newest JPEG, optionally long-polling for a newer one.
+
+    Unlike MJPEG this endpoint cannot accumulate an unread stream buffer in the
+    frontend. Every response contains one current frame and the next request
+    starts from the newest server-side publisher version.
+    """
+    if camera_id not in publishers:raise HTTPException(404,'camera not found')
+    publisher=publishers[camera_id]
+    jpeg,version,published,source_frame_id=publisher.wait_newer(after,wait_ms/1000.0)
+    if jpeg is None:raise HTTPException(503,'frame not ready')
+    headers={
+        'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma':'no-cache','X-Frame-Version':str(version),'X-Source-Frame-Id':str(source_frame_id),
+        'X-Published-Monotonic':f'{published:.6f}',
+    }
+    return Response(content=jpeg,media_type='image/jpeg',headers=headers)
+
 def _mjpeg(camera_id):
     publisher=publishers[camera_id];last=-1
     while True:
-        jpeg,version=publisher.latest()
-        if jpeg is None or version<=last:
-            time.sleep(.005);continue
+        jpeg,version,_,_=publisher.wait_newer(last,0.5)
+        if jpeg is None or version<=last:continue
         last=version
         yield b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '+str(len(jpeg)).encode()+b'\r\n\r\n'+jpeg+b'\r\n'
 
