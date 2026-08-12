@@ -3,6 +3,7 @@ import logging,threading,time
 from dataclasses import dataclass,asdict
 from .latest_frame import Frame,LatestFrameStore
 from services.ml_service.cameras.gstreamer import GStreamerCapture
+from services.ml_service.cameras.deepstream import DeepStreamCapture, deepstream_available
 
 log=logging.getLogger(__name__)
 
@@ -23,15 +24,16 @@ class CameraMetrics:
     pipeline_lag_ms: float|None=None
     postdecode_queue_buffers: int|None=None
     source_runtime: dict|None=None
+    capture_backend: str=""
     last_error: str=""
 
 class CameraWorker:
-    """Exactly one capture thread and one single-slot frame store per camera.
+    """One capture thread and one single-slot frame store per camera.
 
-    If the GStreamer pipeline itself drifts far behind live time for several
-    consecutive decoded samples, only that camera pipeline is rebuilt. The
-    LatestFrameStore is never turned into a FIFO and no historical frames are
-    replayed after reconnect.
+    DeepStream is preferred for RTSP/NVDEC when available. It is used only for
+    URI ingest/decode/conversion; YOLO remains in the isolated PyTorch CUDA child.
+    If DeepStream cannot build on this host, Core-v1 falls back to the proven
+    GStreamer/NVDEC backend instead of taking the camera service down.
     """
     def __init__(self,config:dict,store:LatestFrameStore,core_config:dict|None=None):
         self.config=dict(config);self.core_config=dict(core_config or {});self.camera_id=str(config["id"]);self.store=store
@@ -42,6 +44,7 @@ class CameraWorker:
         self.reconnect_delay_sec=max(.25,float(self.core_config.get("reconnect_delay_sec",2.0)))
         self.max_pipeline_lag_ms=max(0.0,float(self.core_config.get("max_pipeline_lag_ms",0.0)))
         self.max_pipeline_lag_samples=max(1,int(self.core_config.get("max_pipeline_lag_samples",8)))
+        self.capture_backend=str(self.core_config.get("capture_backend","auto")).strip().lower()
     def start(self):
         if self._thread and self._thread.is_alive():return
         self._stop.clear();self._thread=threading.Thread(target=self._run,name=f"core-v1-{self.camera_id}",daemon=False);self._thread.start()
@@ -59,28 +62,48 @@ class CameraWorker:
             if self._metrics.frame_id:result["last_frame_age_ms"]=max(0.0,(time.monotonic()-getattr(self,"_last_frame_mono",time.monotonic()))*1000)
             result["replaced_frames"]=self.store.replaced
             return result
-    def _open(self):
-        cfg={
+    def _capture_cfg(self):
+        return {
             **self.config,
             "source":self.config.get("display_source") or self.config.get("source"),
             "codec":self.config.get("display_codec") or self.config.get("codec"),
-            "latency_ms":int(self.core_config.get("rtsp_latency_ms",self.config.get("latency_ms",100))),
-            "drop_on_latency":bool(self.core_config.get("drop_on_latency",False)),
-            "decoder_extra_surfaces":int(self.core_config.get("decoder_extra_surfaces",2)),
+            "latency_ms":int(self.core_config.get("rtsp_latency_ms",self.config.get("latency_ms",150))),
+            "drop_on_latency":bool(self.core_config.get("drop_on_latency",True)),
+            "decoder_extra_surfaces":int(self.core_config.get("decoder_extra_surfaces",4)),
             "decoder_low_latency_mode":bool(self.core_config.get("decoder_low_latency_mode",False)),
             "capture_timeout_ms":int(self.core_config.get("capture_timeout_ms",1000)),
-            "rtsp_transport":str(self.core_config.get("rtsp_transport",self.config.get("rtsp_transport","tcp"))),
+            "rtsp_transport":str(self.core_config.get("rtsp_transport",self.config.get("rtsp_transport","auto"))),
             "rtsp_buffer_mode":str(self.core_config.get("rtsp_buffer_mode",self.config.get("rtsp_buffer_mode","auto"))),
-            "tcp_timestamp":bool(self.core_config.get("tcp_timestamp",True)),
+            "tcp_timestamp":bool(self.core_config.get("tcp_timestamp",False)),
+            "udp_buffer_size":int(self.core_config.get("udp_buffer_size",1048576)),
             "postdecode_queue_buffers":int(self.core_config.get("postdecode_queue_buffers",1)),
+            "deepstream_reconnect_interval_sec":int(self.core_config.get("deepstream_reconnect_interval_sec",2)),
+            "deepstream_reconnect_attempts":int(self.core_config.get("deepstream_reconnect_attempts",-1)),
         }
-        return GStreamerCapture(cfg)
+    def _open(self):
+        cfg=self._capture_cfg()
+        backend=self.capture_backend
+        if backend not in {"auto","deepstream","gstreamer"}:
+            raise ValueError(f"unsupported capture_backend={backend}")
+
+        if backend in {"auto","deepstream"} and deepstream_available():
+            try:
+                cap=DeepStreamCapture(cfg)
+                with self._lock:self._metrics.capture_backend=cap.backend
+                return cap
+            except Exception as exc:
+                if backend=="deepstream":raise
+                log.warning("CORE_V1_DEEPSTREAM_FALLBACK camera=%s error=%s",self.camera_id,exc)
+
+        cap=GStreamerCapture(cfg)
+        with self._lock:self._metrics.capture_backend=cap.backend
+        return cap
     def _run(self):
         while not self._stop.is_set():
             cap=None
             try:
                 cap=self._open();self._capture=cap
-                if not cap.isOpened():raise RuntimeError("GStreamer pipeline did not open")
+                if not cap.isOpened():raise RuntimeError("capture pipeline did not open")
                 opened_at=time.monotonic();had_frame=False;timeouts=0;lag_samples=0
                 with self._lock:
                     self._metrics.online=False;self._metrics.startup_waiting=True;self._metrics.last_error="";self._metrics.consecutive_timeouts=0;self._metrics.consecutive_lag_samples=0
@@ -93,7 +116,7 @@ class CameraWorker:
                             self._metrics.read_failures+=1;self._metrics.consecutive_timeouts+=1
                         if not cap.isOpened():
                             detail=cap.last_error() if hasattr(cap,"last_error") else ""
-                            raise RuntimeError(f"GStreamer pipeline error before sample: {detail}")
+                            raise RuntimeError(f"capture pipeline error before sample: {detail}")
                         timeouts+=1
                         if not had_frame and time.monotonic()-opened_at < self.startup_grace_sec:continue
                         if had_frame and timeouts < self.max_read_timeouts:continue
@@ -118,9 +141,8 @@ class CameraWorker:
                             self._metrics.source_fps=self._fps_frames/elapsed;self._fps_frames=0;self._fps_started=mono
                         self._last_frame_mono=mono
 
-                    # Publish the newest sample immediately. If the stream has
-                    # drifted, this frame is still the freshest one available;
-                    # then rebuild the source so subsequent frames return to live.
+                    # LatestFrameStore is one slot only. New decoded frames replace
+                    # older ones immediately; there is never a replay/backlog path.
                     self.store.put(Frame(self.camera_id,frame_id,now,mono,image,w,h))
 
                     if self.max_pipeline_lag_ms>0 and lag_samples>=self.max_pipeline_lag_samples:
@@ -133,7 +155,7 @@ class CameraWorker:
                 if cap is not None:
                     try:stage=cap.stage_metrics()
                     except Exception:pass
-                log.warning("CORE_V1_CAMERA_RECONNECT camera=%s error=%s stage=%s",self.camera_id,exc,stage)
+                log.warning("CORE_V1_CAMERA_RECONNECT camera=%s backend=%s error=%s stage=%s",self.camera_id,getattr(cap,"backend",None),exc,stage)
                 if not self._stop.is_set():self._stop.wait(self.reconnect_delay_sec)
             finally:
                 if cap is not None:
