@@ -3,9 +3,15 @@ import threading,time
 import cv2
 
 class LatestJpegPublisher:
-    """Encode at most once per camera per presentation tick; all clients reuse bytes."""
-    def __init__(self,camera_id,store,fps=12,quality=82,max_width=960,max_height=540):
+    """Encode at most once per camera per presentation tick; all clients reuse bytes.
+
+    The display path never waits for YOLO. When a fresh detector result exists,
+    it is drawn as a best-effort overlay on the newest camera frame. No tracker
+    or prediction is used in core-v1 stage 2.
+    """
+    def __init__(self,camera_id,store,fps=12,quality=82,max_width=960,max_height=540,detections=None,overlay_max_age_ms=350):
         self.camera_id=camera_id;self.store=store;self.interval=1/max(1.0,float(fps));self.quality=int(quality);self.max_width=int(max_width);self.max_height=int(max_height)
+        self.detections=detections;self.overlay_max_age_ms=max(0.0,float(overlay_max_age_ms))
         self._stop=threading.Event();self._thread=None;self._lock=threading.Lock();self._jpeg=None;self._version=0;self.encoded=0;self.skipped_same_frame=0
     def start(self):
         self._thread=threading.Thread(target=self._run,name=f"core-v1-jpeg-{self.camera_id}",daemon=False);self._thread.start()
@@ -14,6 +20,20 @@ class LatestJpegPublisher:
         if self._thread:self._thread.join(timeout)
     def latest(self):
         with self._lock:return self._jpeg,self._version
+    def _draw_detection(self,image,frame):
+        if self.detections is None:return image
+        result=self.detections.get(self.camera_id)
+        if result is None:return image
+        age_ms=max(0.0,(time.monotonic()-result.produced_monotonic)*1000.0)
+        if age_ms>self.overlay_max_age_ms:return image
+        # Result coordinates are from the source frame used by YOLO. We only
+        # reuse them briefly on the latest frame to observe raw detector cadence.
+        canvas=image.copy()
+        for box in result.boxes:
+            x1,y1,x2,y2=(int(round(box.x1)),int(round(box.y1)),int(round(box.x2)),int(round(box.y2)))
+            cv2.rectangle(canvas,(x1,y1),(x2,y2),(0,255,0),2)
+            cv2.putText(canvas,f"person {box.confidence:.2f}",(x1,max(18,y1-6)),cv2.FONT_HERSHEY_SIMPLEX,0.55,(0,255,0),2,cv2.LINE_AA)
+        return canvas
     def _run(self):
         last_frame_id=-1;next_at=time.monotonic()
         while not self._stop.is_set():
@@ -24,7 +44,8 @@ class LatestJpegPublisher:
             frame,_=self.store.get()
             if frame is None:continue
             if frame.frame_id==last_frame_id:self.skipped_same_frame+=1;continue
-            image=frame.image;h,w=image.shape[:2];scale=min(1.0,self.max_width/max(1,w),self.max_height/max(1,h))
+            image=self._draw_detection(frame.image,frame)
+            h,w=image.shape[:2];scale=min(1.0,self.max_width/max(1,w),self.max_height/max(1,h))
             if scale<1.0:image=cv2.resize(image,(max(1,round(w*scale)),max(1,round(h*scale))),interpolation=cv2.INTER_AREA)
             ok,encoded=cv2.imencode('.jpg',image,[cv2.IMWRITE_JPEG_QUALITY,self.quality])
             if not ok:continue
