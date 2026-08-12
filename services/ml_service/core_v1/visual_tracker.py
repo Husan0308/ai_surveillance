@@ -100,12 +100,13 @@ class VisualTracker:
     """Visual-only per-camera continuity and latency compensation layer.
 
     Low-confidence detections can associate to an existing track, but creating a
-    *new* person track is deliberately stricter. This mirrors the useful part of
-    ByteTrack's high/low score separation without turning this presentation layer
-    into an identity tracker.
+    new person requires repeated evidence. Strong detections require two hits,
+    medium detections require three by default, and low-score detections may only
+    refresh an already associated track. This reduces static-object ghosts while
+    keeping occlusion recovery permissive.
     """
 
-    def __init__(self, *, hold_ms=700, memory_ms=6000, prediction_ms=450,
+    def __init__(self, *, hold_ms=500, memory_ms=6000, prediction_ms=220,
                  match_iou=0.16, reacquire_distance=1.05,
                  duplicate_iou=0.50, duplicate_containment=0.82,
                  duplicate_center_distance=0.40,
@@ -115,11 +116,11 @@ class VisualTracker:
                  fragment_max_area_ratio=0.70,
                  fragment_min_vertical_overlap=0.12,
                  fragment_max_vertical_gap=0.10,
-                 smoothing=0.96, velocity_smoothing=0.70,
-                 max_prediction_shift_boxes=1.20,
+                 smoothing=0.96, velocity_smoothing=0.66,
+                 max_prediction_shift_boxes=0.75,
                  low_conf_confirm=0.12, start_conf=0.34,
-                 new_track_min_conf=0.24, weak_confirm_hits=3,
-                 new_track_zones=None,
+                 new_track_min_conf=0.24, strong_confirm_hits=2,
+                 weak_confirm_hits=3, new_track_zones=None,
                  exclusion_zones=None, exclusion_max_box_height=0.24,
                  exclusion_overlap_threshold=0.35):
         self.hold_sec=max(0.05,float(hold_ms)/1000.0)
@@ -142,7 +143,8 @@ class VisualTracker:
         self.low_conf_confirm=float(low_conf_confirm)
         self.start_conf=float(start_conf)
         self.new_track_min_conf=float(new_track_min_conf)
-        self.weak_confirm_hits=max(2,int(weak_confirm_hits))
+        self.strong_confirm_hits=max(1,int(strong_confirm_hits))
+        self.weak_confirm_hits=max(self.strong_confirm_hits,int(weak_confirm_hits))
         self.new_track_zones=[tuple(float(v) for v in zone[:5]) for zone in (new_track_zones or []) if len(zone)>=5]
         self.exclusion_zones=[tuple(float(v) for v in zone[:4]) for zone in (exclusion_zones or []) if len(zone)>=4]
         self.exclusion_max_box_height=max(0.0,float(exclusion_max_box_height))
@@ -150,7 +152,7 @@ class VisualTracker:
         self._tracks:dict[int,_Track]={}
         self._next_id=1
         self._last_result_frame_id=-1
-        self._weak_candidates:list[tuple[VisualBox,float,int]]=[]
+        self._birth_candidates:list[tuple[VisualBox,float,int]]=[]
 
     def _excluded(self, box:VisualBox, source_width:float|None, source_height:float|None) -> bool:
         if not self.exclusion_zones or not source_width or not source_height:return False
@@ -204,19 +206,19 @@ class VisualTracker:
         shifts=tuple(max(-max_shift,min(max_shift,value)) for value in shifts)
         return VisualBox(track.box.x1+shifts[0],track.box.y1+shifts[1],track.box.x2+shifts[2],track.box.y2+shifts[3],track.box.confidence)
 
-    def _confirm_weak_new_track(self, det:VisualBox, now:float, required_hits:int) -> bool:
+    def _confirm_new_track(self, det:VisualBox, now:float, required_hits:int) -> bool:
         fresh=[];matched=None
-        for box,ts,hits in self._weak_candidates:
+        for box,ts,hits in self._birth_candidates:
             if now-ts<=1.5:
                 fresh.append((box,ts,hits))
                 if matched is None and (_iou(box,det)>=0.20 or _center_distance(box,det)<=0.55):matched=(box,ts,hits)
-        self._weak_candidates=fresh
+        self._birth_candidates=fresh
         if matched is None:
-            self._weak_candidates.append((det,now,1));return False
-        self._weak_candidates.remove(matched)
+            self._birth_candidates.append((det,now,1));return required_hits<=1
+        self._birth_candidates.remove(matched)
         hits=matched[2]+1
         if hits>=required_hits:return True
-        self._weak_candidates.append((det,now,hits));return False
+        self._birth_candidates.append((det,now,hits));return False
 
     def update(self, result, now:float, source_width=None, source_height=None) -> None:
         if result is None or int(result.frame_id)==self._last_result_frame_id:return
@@ -260,12 +262,15 @@ class VisualTracker:
 
         for di in unmatched_dets:
             det=detections[di]
-            birth_threshold=max(self.start_conf,self._birth_threshold(det,source_width,source_height))
-            if det.confidence>=birth_threshold:
-                confirmed=True
-            elif det.confidence>=self._birth_threshold(det,source_width,source_height):
-                confirmed=self._confirm_weak_new_track(det,now,self.weak_confirm_hits)
+            zone_threshold=self._birth_threshold(det,source_width,source_height)
+            strong_threshold=max(self.start_conf,zone_threshold)
+            if det.confidence>=strong_threshold:
+                confirmed=self._confirm_new_track(det,now,self.strong_confirm_hits)
+            elif det.confidence>=zone_threshold:
+                confirmed=self._confirm_new_track(det,now,self.weak_confirm_hits)
             else:
+                # Weak detections may refresh an existing track above, but can
+                # never invent a new person here.
                 confirmed=False
             if not confirmed:continue
             tid=self._next_id;self._next_id+=1
@@ -276,7 +281,8 @@ class VisualTracker:
         for track in self._tracks.values():
             age=now-track.last_seen
             if age>self.hold_sec:continue
-            if max_observation_age_sec is not None and age>max_observation_age_sec:continue
+            source_age=max(0.0,target-track.last_observation)
+            if max_observation_age_sec is not None and source_age>max_observation_age_sec:continue
             if track.hits<2 and track.box.confidence<self.low_conf_confirm:continue
             predicted=self._predicted_box(track,target)
             predicted.confidence=max(0.01,track.box.confidence*(1.0-0.30*min(1.0,age/self.hold_sec)))
