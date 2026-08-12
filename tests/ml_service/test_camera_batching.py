@@ -76,8 +76,7 @@ class CameraBatchingTests(unittest.TestCase):
         self.assertEqual(len(delivered), 1); self.assertEqual(metrics["stale_drops"], 1)
         self.assertEqual(metrics["cameras"]["CAM-01"]["duplicate_count"], 1)
 
-
-    def test_risk_aware_scheduler_prioritizes_danger_age_without_starvation(self):
+    def test_risk_aware_scheduler_prioritizes_danger_without_reducing_batch_capacity(self):
         scheduler=BatchScheduler(5000,batch_collect_window_ms=0,max_batch_size=3,mode="risk_aware",min_batch_size=2,fairness_deadline_ms=900)
         buffers={camera:LatestFrameBuffer() for camera in ("CAM-01","CAM-02","CAM-03","CAM-04","CAM-05","CAM-06")}
         for camera,buffer in buffers.items():scheduler.register_camera(camera,buffer);buffer.put(self.packet(camera,1))
@@ -87,10 +86,19 @@ class CameraBatchingTests(unittest.TestCase):
             batch=scheduler._collect_locked();self.assertIsNotNone(batch);batches.append(batch)
             for camera_id in batch.camera_ids:buffers[camera_id].put(self.packet(camera_id,frame_id))
         self.assertIn("CAM-04",batches[0].camera_ids)
-        self.assertTrue(all(2<=len(batch.frames)<=3 for batch in batches), "Strict batch size adherence even during recovery burst")
+        self.assertTrue(all(len(batch.frames)==3 for batch in batches), "Recovery priority must not shrink or exceed configured batch=3")
         self.assertTrue(all(len(batch.camera_ids)==len(set(batch.camera_ids)) for batch in batches), "No duplicate cameras in batch")
         selected={camera_id for batch in batches[:4] for camera_id in batch.camera_ids}
-        self.assertEqual(selected,set(buffers), "Zero starvation: all cameras served within limits")
+        self.assertEqual(selected,set(buffers), "Zero starvation: all cameras served within fairness window")
         metrics=scheduler.snapshot_metrics({camera:{"online":True,"last_decode_timestamp":time.time()} for camera in buffers})
-        self.assertEqual(metrics["scheduler_mode"],"risk_aware");self.assertGreaterEqual(metrics["scheduler_target_batch_size"],2)
+        self.assertEqual(metrics["scheduler_mode"],"risk_aware");self.assertEqual(metrics["scheduler_target_batch_size"],3)
+
+    def test_adaptive_mode_expands_to_full_batch_when_recovery_is_urgent(self):
+        scheduler=BatchScheduler(5000,batch_collect_window_ms=0,max_batch_size=3,mode="adaptive",min_batch_size=2,fairness_deadline_ms=900)
+        buffers={camera:LatestFrameBuffer() for camera in ("CAM-01","CAM-02","CAM-03")}
+        for camera,buffer in buffers.items():scheduler.register_camera(camera,buffer);buffer.put(self.packet(camera,1))
+        scheduler.update_camera_risks({"CAM-02":{"observation_age_ms":900,"lost_tracks":1}})
+        batch=scheduler._collect_locked();self.assertIsNotNone(batch)
+        self.assertEqual(len(batch.frames),3);self.assertIn("CAM-02",batch.camera_ids)
+
 if __name__ == "__main__": unittest.main()
