@@ -15,15 +15,20 @@ core_v1:
   max_read_timeouts: 3
   reconnect_delay_sec: 2.0
 
-  # Proven stable, now switch from conservative buffering to bounded low latency.
-  # The old stream could remain smooth while drifting many seconds behind live.
+  # Stable RTSP receive settings. We do NOT aggressively discard compressed
+  # H264/H265 reference data; that can produce the blocky/smeared corruption
+  # seen on fast motion. Latency is bounded safely after decode instead.
   rtsp_transport: "tcp"
-  rtsp_latency_ms: 20
-  rtsp_buffer_mode: "none"
-  drop_on_latency: true
+  rtsp_latency_ms: 50
+  rtsp_buffer_mode: "auto"
+  drop_on_latency: false
   tcp_timestamp: true
-  decoder_extra_surfaces: 1
-  decoder_low_latency_mode: true
+  decoder_extra_surfaces: 2
+  decoder_low_latency_mode: false
+
+  # Safe latest-only queue after decoder/conversion. If the consumer is slow,
+  # old decoded frames are dropped; encoded reference frames remain intact.
+  postdecode_queue_buffers: 1
 
   # Stage 2: YOLO person detector only. The actual ML model runs on CUDA.
   detector:
