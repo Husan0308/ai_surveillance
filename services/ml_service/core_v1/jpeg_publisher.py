@@ -15,7 +15,7 @@ class LatestJpegPublisher:
         camera_start_conf=dict(cfg.get('camera_start_conf') or {})
         camera_low_conf=dict(cfg.get('camera_low_conf_confirm') or {})
         self.visual_tracker=VisualTracker(
-            hold_ms=cfg.get('hold_ms',700),memory_ms=cfg.get('memory_ms',6000),prediction_ms=cfg.get('prediction_ms',450),
+            hold_ms=cfg.get('hold_ms',500),memory_ms=cfg.get('memory_ms',6000),prediction_ms=cfg.get('prediction_ms',220),
             match_iou=cfg.get('match_iou',0.16),reacquire_distance=cfg.get('reacquire_distance',1.05),
             duplicate_iou=cfg.get('duplicate_iou',0.50),duplicate_containment=cfg.get('duplicate_containment',0.82),
             duplicate_center_distance=cfg.get('duplicate_center_distance',0.40),
@@ -25,8 +25,8 @@ class LatestJpegPublisher:
             fragment_max_area_ratio=cfg.get('fragment_max_area_ratio',0.70),
             fragment_min_vertical_overlap=cfg.get('fragment_min_vertical_overlap',0.12),
             fragment_max_vertical_gap=cfg.get('fragment_max_vertical_gap',0.10),
-            smoothing=cfg.get('smoothing',0.96),velocity_smoothing=cfg.get('velocity_smoothing',0.70),
-            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes',1.20),
+            smoothing=cfg.get('smoothing',0.96),velocity_smoothing=cfg.get('velocity_smoothing',0.66),
+            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes',0.75),
             low_conf_confirm=camera_low_conf.get(camera_id,cfg.get('low_conf_confirm',0.12)),
             start_conf=camera_start_conf.get(camera_id,cfg.get('start_conf',0.34)),
             new_track_min_conf=cfg.get('new_track_min_conf',0.24),
@@ -38,7 +38,7 @@ class LatestJpegPublisher:
         )
         self._stop=threading.Event();self._thread=None;self._lock=threading.Lock();self._condition=threading.Condition(self._lock)
         self._jpeg=None;self._version=0;self._published_monotonic=0.0;self._source_frame_id=0
-        self.encoded=0;self.skipped_same_frame=0
+        self.encoded=0;self.skipped_same_frame=0;self.stale_detection_rejects=0
     def start(self):
         self._thread=threading.Thread(target=self._run,name=f"core-v1-jpeg-{self.camera_id}",daemon=False);self._thread.start()
     def stop(self):
@@ -59,11 +59,19 @@ class LatestJpegPublisher:
                 self._condition.wait(remaining)
             return self._jpeg,self._version,self._published_monotonic,self._source_frame_id
     def _draw_detection(self,image,source_width,source_height,now,display_frame_time):
+        max_age_sec=(self.overlay_max_age_ms/1000.0) if self.overlay_max_age_ms>0 else None
         if self.detections is not None:
             result=self.detections.get(self.camera_id)
             if result is not None:
-                self.visual_tracker.update(result,now,source_width,source_height)
-        max_age_sec=(self.overlay_max_age_ms/1000.0) if self.overlay_max_age_ms>0 else None
+                source_age=max(0.0,float(display_frame_time)-float(result.frame_captured_monotonic))
+                if max_age_sec is None or source_age<=max_age_sec:
+                    self.visual_tracker.update(result,now,source_width,source_height)
+                else:
+                    # Critical realtime rule: a late detector result must never
+                    # refresh last_seen and resurrect an old rectangle on top of
+                    # a newer camera frame. Internal state from earlier fresh
+                    # observations may still expire/reacquire normally.
+                    self.stale_detection_rejects+=1
         boxes=self.visual_tracker.visible(now,target_time=display_frame_time,max_observation_age_sec=max_age_sec)
         if not boxes:return image
         h,w=image.shape[:2];sx=w/max(1.0,float(source_width));sy=h/max(1.0,float(source_height))
@@ -80,6 +88,8 @@ class LatestJpegPublisher:
             now=time.monotonic()
             if now<next_at:
                 self._stop.wait(next_at-now);continue
+            # Late ticks are skipped instead of replayed: presentation is always
+            # anchored to the newest source frame.
             next_at=now+self.interval
             frame,_=self.store.get()
             if frame is None:continue
