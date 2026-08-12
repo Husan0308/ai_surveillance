@@ -4,6 +4,18 @@ from dataclasses import replace
 from services.ml_service.identity.schemas import GlobalTrack,GlobalTrackResult,IdentityStatus
 from services.ml_service.tracking.schemas import TrackState
 
+def _track_key(item):
+    """Canonical local trajectory key shared by tracker and identity layers.
+
+    TrackedPerson exposes both ``track_id`` (camera-scoped stable string) and
+    ``local_track_id`` (numeric local id), while GlobalTrack stores the stable
+    string in ``local_track_id``. Always prefer ``track_id`` so the visual cache
+    is addressable from both representations. The old mixed int/string keys made
+    the single visual publisher miss its identity cache and emit empty metadata.
+    """
+    value=getattr(item,"track_id",None) or getattr(item,"local_track_id",None) or getattr(item,"global_id",None)
+    return None if value is None else str(value)
+
 def frame_metadata_messages(packets,identity_results,canonicalize=None,identity_version=0,runtime_epoch=None):
     grouped={}
     for result in identity_results:
@@ -14,8 +26,8 @@ def frame_metadata_messages(packets,identity_results,canonicalize=None,identity_
         current=grouped.get((packet.camera_id,packet.frame_id),())
         deduped={}
         for item in current:
-            key=getattr(item,"local_track_id",None) or getattr(item,"global_id",None)
-            if key is not None:deduped[str(key)]=item
+            key=_track_key(item)
+            if key is not None:deduped[key]=item
         tracks=tuple(deduped.values())
         version=max([int(identity_version),*[int(getattr(item,"identity_version",0)) for item in tracks]])
         messages.append({
@@ -46,15 +58,14 @@ def frame_metadata_messages(packets,identity_results,canonicalize=None,identity_
     return messages
 
 def _tentative_local_visual(track):
-    """Expose only a *fresh real* tentative detection to the UI.
+    """Expose only a fresh real tentative detection to the UI.
 
     Tentative tracks deliberately have no global identity and are never cached or
-    predicted through a miss. This lets the operator see YOLO immediately on the
-    first real observation while preserving the existing multi-hit confirmation
-    barrier for identity, ReID and miss persistence.
+    predicted through a real detector miss. This lets the operator see YOLO on
+    the first observation while preserving the multi-hit identity barrier.
     """
     return GlobalTrack(
-        local_track_id=getattr(track,"local_track_id",None) or getattr(track,"track_id",None),
+        local_track_id=_track_key(track),
         global_id=None,
         bbox=getattr(track,"bbox",(0.0,0.0,0.0,0.0)),
         confidence=float(getattr(track,"confidence",0.0)),
@@ -65,7 +76,7 @@ def _tentative_local_visual(track):
         display_name=None,
         observation_type="detected",
         last_detection_timestamp=float(getattr(track,"last_detection_timestamp",0.0)),
-        prediction_age_ms=0.0,
+        prediction_age_ms=float(getattr(track,"prediction_age_ms",0.0)),
         tracker_state=TrackState.TENTATIVE.value,
         identity_version=0,
         detection_source=getattr(track,"detection_source","FULL_FRAME"),
@@ -80,24 +91,22 @@ def _tentative_local_visual(track):
     )
 
 def merge_visual_identity_results(tracking_results,live_results,cache,max_missing_frames=18):
-    """Merge tracker geometry with identity state.
-
-    Confirmed/lost identities may use the bounded cache for visual persistence.
-    A fresh TENTATIVE real detection is also rendered immediately, but it is
-    local-only, never cached and disappears on its first miss until confirmed.
-    """
+    """Merge tracker geometry with identity state using one stable local key."""
     output=[];live_keys=set()
-    tracking_by_key={(camera.camera_id,getattr(track,"local_track_id",None) or getattr(track,"track_id",None)):track for camera in tracking_results.results for track in camera.tracks}
+    tracking_by_key={(camera.camera_id,_track_key(track)):track for camera in tracking_results.results for track in camera.tracks if _track_key(track) is not None}
     for result in live_results:
         annotated=[]
         for raw in result.tracks:
-            key=(result.camera_id,getattr(raw,"local_track_id",None) or getattr(raw,"track_id",None));track=tracking_by_key.get(key);item=replace(raw,observation_type="detected",last_detection_timestamp=getattr(track,"last_detection_timestamp",0.0),prediction_age_ms=0.0,velocity=getattr(track,"velocity",(0.0,0.0,0.0,0.0)),state_timestamp=getattr(track,"state_timestamp",0.0),visual_expires_at=getattr(track,"visual_expires_at",0.0),track_generation=getattr(track,"track_generation",1),geometry_monotonic=getattr(track,"geometry_monotonic",0.0),visual_visible=getattr(track,"visual_visible",True),boundary_exit=getattr(track,"boundary_exit",False))
+            key=(result.camera_id,_track_key(raw));track=tracking_by_key.get(key)
+            item=replace(raw,observation_type="detected",last_detection_timestamp=getattr(track,"last_detection_timestamp",0.0),prediction_age_ms=0.0,velocity=getattr(track,"velocity",(0.0,0.0,0.0,0.0)),state_timestamp=getattr(track,"state_timestamp",0.0),visual_expires_at=getattr(track,"visual_expires_at",0.0),track_generation=getattr(track,"track_generation",1),geometry_monotonic=getattr(track,"geometry_monotonic",0.0),visual_visible=getattr(track,"visual_visible",True),boundary_exit=getattr(track,"boundary_exit",False))
             cache[key]=item;live_keys.add(key);annotated.append(item)
         output.append(GlobalTrackResult(result.camera_id,result.frame_id,tuple(annotated)))
     for camera in tracking_results.results:
         present=set()
         for track in camera.tracks:
-            key=(camera.camera_id,getattr(track,"local_track_id",None) or getattr(track,"track_id",None));present.add(key)
+            local_key=_track_key(track)
+            if local_key is None:continue
+            key=(camera.camera_id,local_key);present.add(key)
             if key in live_keys:continue
             state=getattr(track,"state",None);misses=int(getattr(track,"misses",0) or 0)
             if state==TrackState.TENTATIVE and misses==0:
