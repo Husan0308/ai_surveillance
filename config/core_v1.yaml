@@ -4,12 +4,15 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Stable latest-only presentation baseline. Higher JPEG FPS does not reduce
-  # detector latency and only adds CPU encode/network/UI work on this hardware.
-  display_fps: 12
-  jpeg_quality: 76
-  max_display_width: 800
-  max_display_height: 450
+  # Presentation is separate from inference. Most cameras deliver about 19-21
+  # decoded FPS, so a 12 FPS JPEG cap caused visible walking judder even while
+  # capture/detector health looked good. Publish up to 18 FPS, but keep the
+  # presentation image smaller/lighter so CPU work stays bounded.
+  display_fps: 18
+  jpeg_quality: 72
+  max_display_width: 720
+  max_display_height: 405
+  publisher_start_stagger_ms: 8
   startup_grace_sec: 8.0
   startup_stagger_sec: 0.20
   capture_timeout_ms: 1000
@@ -49,21 +52,10 @@ core_v1:
     fusion_containment: 0.84
     fusion_center_distance: 0.40
 
-    # Start inference only from a genuinely fresh camera frame. Once a batch has
-    # started, allow enough time for this GTX 1050 Ti-class GPU to finish it so
-    # accepted detections do not blink off simply because a batch took >450 ms.
-    # One in-flight batch and a size-1 input queue still prevent detector backlog.
     max_submit_age_ms: 300
     max_result_age_ms: 900
-
-    # Publisher freshness must not be stricter than detector freshness. The old
-    # 450 ms value caused valid 500-800 ms detector results to be rejected again
-    # by the overlay layer, which made boxes flash on/off.
     overlay_max_age_ms: 900
 
-    # Detector-level hard mask: TV candidates are discarded before ROI fusion,
-    # tracker birth, metrics and rendering. Tall real people in front of the TV
-    # remain eligible because the mask only rejects relatively short boxes.
     hard_exclusion:
       max_box_height_ratio: 0.30
       overlap_threshold: 0.15
@@ -71,9 +63,6 @@ core_v1:
         CAM-06:
           - [0.50, 0.00, 0.78, 0.22]
 
-    # Second-pass inference is bounded. CAM-05 remains a reduced-frequency
-    # verifier for persistent desk/chair clutter. CAM-06 is conditional: its sofa
-    # crop runs only when the full-frame pass sees no person centered in the ROI.
     roi_second_pass:
       enabled: true
       imgsz: [512, 640]
@@ -102,9 +91,6 @@ core_v1:
           box: [0.36, 0.12, 0.74, 0.48]
 
   visual_tracker:
-    # Keep the last confirmed person visible across the normal detector cadence,
-    # while using bounded motion prediction instead of repeatedly resurrecting
-    # old detector boxes. Internal memory remains separate for reacquisition.
     hold_ms: 900
     prediction_ms: 500
     memory_ms: 6000
@@ -125,8 +111,6 @@ core_v1:
     velocity_smoothing: 0.62
     max_prediction_shift_boxes: 0.60
 
-    # Birth/continue split: strong new people need 2 observations, medium need 3,
-    # low-score detections can only refresh an existing track.
     start_conf: 0.34
     new_track_min_conf: 0.24
     strong_confirm_hits: 2
@@ -139,16 +123,12 @@ core_v1:
     camera_low_conf_confirm:
       CAM-05: 0.18
 
-    # Static clutter requires stronger evidence to create a new person, but an
-    # already tracked real person may continue through these regions.
     camera_new_track_zones:
       CAM-05:
         - [0.27, 0.00, 0.72, 0.54, 0.38]
       CAM-06:
         - [0.36, 0.12, 0.76, 0.49, 0.42]
 
-    # Keep the same mask in the visual layer as a defense-in-depth guard. The
-    # primary rejection happens earlier inside detector.py.
     exclusion_max_box_height: 0.30
     exclusion_overlap_threshold: 0.15
     camera_exclusion_zones:
