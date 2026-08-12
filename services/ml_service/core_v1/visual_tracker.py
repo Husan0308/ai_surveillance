@@ -20,6 +20,7 @@ class _Track:
     raw_box: VisualBox
     last_seen: float
     last_update: float
+    last_observation: float
     hits: int = 1
     vx1: float = 0.0
     vy1: float = 0.0
@@ -96,17 +97,14 @@ def _area_ratio(a:VisualBox,b:VisualBox) -> float:
 
 
 class VisualTracker:
-    """Visual-only per-camera continuity layer.
+    """Visual-only per-camera continuity and latency compensation layer.
 
-    Real detector observations create/refresh tracks. Short detector misses are
-    bridged visually, dormant tracks remain briefly for reacquisition, and no
-    predicted/dormant state is used as identity evidence.
-
-    The optional fragment-duplicate rule is intended for cameras that also use a
-    high-resolution ROI second pass. In that situation one real seated/occluded
-    person can appear once as a large full-frame body box and again as a smaller
-    upper-body ROI box. The rule collapses only strongly x-aligned, differently
-    sized fragments; it is not enabled globally.
+    Detector boxes belong to an older captured frame. The display, however,
+    renders the newest camera frame. Tracks therefore estimate short-term box
+    velocity from detector *capture timestamps* and project the box to the
+    timestamp of the frame currently being displayed. This removes the visible
+    "box trailing behind the walking person" effect without feeding prediction
+    into identity/ReID.
     """
 
     def __init__(self, *, hold_ms=1600, memory_ms=6000, prediction_ms=450,
@@ -119,7 +117,9 @@ class VisualTracker:
                  fragment_max_area_ratio=0.70,
                  fragment_min_vertical_overlap=0.12,
                  fragment_max_vertical_gap=0.10,
-                 smoothing=0.72, low_conf_confirm=0.16, start_conf=0.18,
+                 smoothing=0.88, velocity_smoothing=0.58,
+                 max_prediction_shift_boxes=1.35,
+                 low_conf_confirm=0.16, start_conf=0.18,
                  exclusion_zones=None, exclusion_max_box_height=0.34):
         self.hold_sec=max(0.05,float(hold_ms)/1000.0)
         self.memory_sec=max(self.hold_sec,float(memory_ms)/1000.0)
@@ -135,7 +135,9 @@ class VisualTracker:
         self.fragment_max_area_ratio=float(fragment_max_area_ratio)
         self.fragment_min_vertical_overlap=float(fragment_min_vertical_overlap)
         self.fragment_max_vertical_gap=float(fragment_max_vertical_gap)
-        self.smoothing=min(0.95,max(0.05,float(smoothing)))
+        self.smoothing=min(0.98,max(0.05,float(smoothing)))
+        self.velocity_smoothing=min(0.95,max(0.05,float(velocity_smoothing)))
+        self.max_prediction_shift_boxes=max(0.25,float(max_prediction_shift_boxes))
         self.low_conf_confirm=float(low_conf_confirm)
         self.start_conf=float(start_conf)
         self.exclusion_zones=[tuple(float(v) for v in zone[:4]) for zone in (exclusion_zones or []) if len(zone)>=4]
@@ -155,10 +157,6 @@ class VisualTracker:
 
     def _fragment_duplicate_match(self, box:VisualBox, other:VisualBox) -> bool:
         if not self.fragment_duplicate:return False
-        # Different sized boxes that are strongly aligned on the x-axis and
-        # overlap/touch vertically are very likely full-frame + ROI fragments of
-        # the same person. Similar-sized boxes are left alone so two real people
-        # standing close together are not collapsed.
         if _area_ratio(box,other)>self.fragment_max_area_ratio:return False
         if _horizontal_overlap_ratio(box,other)<self.fragment_horizontal_overlap:return False
         if _x_center_ratio(box,other)>self.fragment_x_center:return False
@@ -187,11 +185,14 @@ class VisualTracker:
             kept.append(box)
         return kept
 
-    def _predicted_box(self, track:_Track, now:float) -> VisualBox:
-        age=max(0.0,now-track.last_seen);dt=min(age,self.prediction_sec)
+    def _predicted_box(self, track:_Track, target_time:float) -> VisualBox:
+        dt=min(max(0.0,float(target_time)-track.last_observation),self.prediction_sec)
+        max_shift=max(20.0,max(_width(track.box),_height(track.box))*self.max_prediction_shift_boxes)
+        shifts=(track.vx1*dt,track.vy1*dt,track.vx2*dt,track.vy2*dt)
+        shifts=tuple(max(-max_shift,min(max_shift,value)) for value in shifts)
         return VisualBox(
-            track.box.x1+track.vx1*dt,track.box.y1+track.vy1*dt,
-            track.box.x2+track.vx2*dt,track.box.y2+track.vy2*dt,
+            track.box.x1+shifts[0],track.box.y1+shifts[1],
+            track.box.x2+shifts[2],track.box.y2+shifts[3],
             track.box.confidence,
         )
 
@@ -214,6 +215,8 @@ class VisualTracker:
         if result is None or int(result.frame_id)==self._last_result_frame_id:return
         self._last_result_frame_id=int(result.frame_id)
         detections=self._dedupe(result.boxes,source_width,source_height)
+        observation=float(getattr(result,'frame_captured_monotonic',now) or now)
+        if not math.isfinite(observation) or observation<=0:observation=now
 
         for tid in list(self._tracks):
             if now-self._tracks[tid].last_seen>self.memory_sec:
@@ -223,9 +226,12 @@ class VisualTracker:
         unmatched_dets=set(range(len(detections)))
         pairs=[]
         for tid,track in self._tracks.items():
-            reference=self._predicted_box(track,now)
+            # Compare the new detector observation with where the previous track
+            # should have been at the timestamp of that observation, not at wall
+            # clock 'now'. This avoids matching against a box projected too far.
+            reference=self._predicted_box(track,observation)
             dormant=(now-track.last_seen)>self.hold_sec
-            max_distance=self.reacquire_distance if dormant else 0.78
+            max_distance=self.reacquire_distance if dormant else 0.82
             for di,det in enumerate(detections):
                 iou=_iou(reference,det);dist=_center_distance(reference,det)
                 if iou>=self.match_iou or dist<=max_distance:
@@ -237,26 +243,29 @@ class VisualTracker:
         for _score,tid,di in pairs:
             if tid not in unmatched_tracks or di not in unmatched_dets:continue
             track=self._tracks[tid];det=detections[di]
-            dt=max(0.01,now-track.last_update);old=track.raw_box
-            velocity_alpha=0.40
-            nv=((det.x1-old.x1)/dt,(det.y1-old.y1)/dt,(det.x2-old.x2)/dt,(det.y2-old.y2)/dt)
-            track.vx1=(1-velocity_alpha)*track.vx1+velocity_alpha*nv[0]
-            track.vy1=(1-velocity_alpha)*track.vy1+velocity_alpha*nv[1]
-            track.vx2=(1-velocity_alpha)*track.vx2+velocity_alpha*nv[2]
-            track.vy2=(1-velocity_alpha)*track.vy2+velocity_alpha*nv[3]
+            old=track.raw_box
+            obs_dt=observation-track.last_observation
+            if obs_dt<=0.005:
+                obs_dt=max(0.01,now-track.last_update)
+            nv=((det.x1-old.x1)/obs_dt,(det.y1-old.y1)/obs_dt,(det.x2-old.x2)/obs_dt,(det.y2-old.y2)/obs_dt)
+            va=self.velocity_smoothing;vb=1.0-va
+            track.vx1=vb*track.vx1+va*nv[0]
+            track.vy1=vb*track.vy1+va*nv[1]
+            track.vx2=vb*track.vx2+va*nv[2]
+            track.vy2=vb*track.vy2+va*nv[3]
+
+            # Favor the newest measurement strongly. Heavy smoothing on a sparse
+            # detector is another source of visible trailing.
             a=self.smoothing;b=1.0-a
             track.box=VisualBox(
                 b*track.box.x1+a*det.x1,b*track.box.y1+a*det.y1,
                 b*track.box.x2+a*det.x2,b*track.box.y2+a*det.y2,
                 max(det.confidence,track.box.confidence*0.82),
             )
-            track.raw_box=det;track.last_seen=now;track.last_update=now;track.hits+=1
+            track.raw_box=det;track.last_seen=now;track.last_update=now;track.last_observation=observation;track.hits+=1
             matched_tracks.add(tid)
             unmatched_tracks.remove(tid);unmatched_dets.remove(di)
 
-        # Do not create a second track from an unmatched ROI/body fragment when
-        # it geometrically belongs to a track that was already refreshed in this
-        # same detector observation.
         for di in list(unmatched_dets):
             det=detections[di]
             if any(self._is_duplicate(det,self._tracks[tid].box) for tid in matched_tracks):
@@ -266,21 +275,22 @@ class VisualTracker:
             det=detections[di]
             if det.confidence<self.start_conf and not self._confirm_weak_new_track(det,now):continue
             tid=self._next_id;self._next_id+=1
-            self._tracks[tid]=_Track(tid,det,det,now,now)
+            self._tracks[tid]=_Track(
+                track_id=tid,box=det,raw_box=det,last_seen=now,last_update=now,
+                last_observation=observation,
+            )
 
-    def visible(self, now:float) -> list[VisualBox]:
+    def visible(self, now:float, target_time:float|None=None) -> list[VisualBox]:
+        target=float(target_time if target_time is not None else now)
         candidates=[]
         for track in self._tracks.values():
             age=now-track.last_seen
             if age>self.hold_sec:continue
             if track.hits<2 and track.box.confidence<self.low_conf_confirm:continue
-            predicted=self._predicted_box(track,now)
+            predicted=self._predicted_box(track,target)
             predicted.confidence=max(0.01,track.box.confidence*(1.0-0.30*min(1.0,age/self.hold_sec)))
             candidates.append(predicted)
 
-        # Final presentation guard: even if two tracks were born on different
-        # detector cycles, only one rectangle is drawn when they match the same
-        # duplicate geometry rule.
         candidates.sort(key=lambda b:b.confidence,reverse=True)
         visible=[]
         for box in candidates:
