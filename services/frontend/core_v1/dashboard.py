@@ -304,13 +304,48 @@ class CameraViewport(QWidget):
             return
 
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        iw, ih = self._image.width(), self._image.height()
-        tw, th = max(1, self.width()), max(1, self.height())
-        scale = max(tw / iw, th / ih)
-        dw, dh = iw * scale, ih * scale
-        x = (tw - dw) * 0.5
-        y = (th - dh) * 0.5
-        painter.drawImage(QRectF(x, y, dw, dh), self._image)
+
+        iw = float(self._image.width())
+        ih = float(self._image.height())
+        tw = float(max(1, self.width()))
+        th = float(max(1, self.height()))
+
+        # Ambient background fills spare UI area only.
+        # It does NOT replace/crop the actual camera view.
+        cover_scale = max(tw / iw, th / ih)
+        bg_w = iw * cover_scale
+        bg_h = ih * cover_scale
+
+        bg_rect = QRectF(
+            (tw - bg_w) * 0.5,
+            (th - bg_h) * 0.5,
+            bg_w,
+            bg_h,
+        )
+
+        painter.save()
+        painter.setOpacity(0.08)
+        painter.drawImage(bg_rect, self._image)
+        painter.restore()
+
+        # PRIMARY CAMERA:
+        # contain -> 100% frame visible
+        # no crop
+        # no stretch
+        # original aspect ratio preserved
+        fit_scale = min(tw / iw, th / ih)
+
+        frame_w = iw * fit_scale
+        frame_h = ih * fit_scale
+
+        frame_rect = QRectF(
+            (tw - frame_w) * 0.5,
+            (th - frame_h) * 0.5,
+            frame_w,
+            frame_h,
+        )
+
+        painter.drawImage(frame_rect, self._image)
 
 
 class CameraTile(QFrame):
