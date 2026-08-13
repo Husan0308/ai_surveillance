@@ -16,21 +16,17 @@ core_v1:
   reconnect_delay_sec: 1.0
 
   capture_backend: "auto"
-
   max_pipeline_lag_ms: 0
   max_pipeline_lag_samples: 8
-
   rtsp_transport: "auto"
   rtsp_latency_ms: 150
   rtsp_buffer_mode: "auto"
   drop_on_latency: true
   tcp_timestamp: false
   udp_buffer_size: 1048576
-
   decoder_extra_surfaces: 4
   decoder_low_latency_mode: false
   postdecode_queue_buffers: 1
-
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
@@ -49,18 +45,15 @@ core_v1:
     duplicate_iou: 0.58
     fusion_containment: 0.84
     fusion_center_distance: 0.40
-
     max_submit_age_ms: 300
     max_result_age_ms: 900
     overlay_max_age_ms: 900
-
     hard_exclusion:
       max_box_height_ratio: 0.30
       overlap_threshold: 0.15
       cameras:
         CAM-06:
           - [0.50, 0.00, 0.78, 0.22]
-
     roi_second_pass:
       enabled: true
       imgsz: [512, 640]
@@ -78,7 +71,6 @@ core_v1:
           rotations: [0]
           trigger_max_full_roi_persons: 1
           box: [0.27, 0.00, 0.72, 0.54]
-
         CAM-06:
           mode: "augment"
           every_n: 2
@@ -145,22 +137,24 @@ core_v1:
 
   reid:
     enabled: true
-    model: "osnet_x0_5"
-    model_path: ""
+    model: "osnet_ain_x1_0"
+    model_path: "models/reid/osnet_ain_x1_0_msmt17.pth"
+    model_url: "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth?download=true"
+    model_sha256: "8a07e8da38946f7cee37f4561617bf8b6d2fe8f3a4027852893ea092e46d919f"
     device: "cpu"
     torch_cpu_threads: 1
     input_height: 256
     input_width: 128
+    flip_tta: true
 
     poll_interval_ms: 35
     min_track_hits: 2
     local_track_timeout_sec: 2.5
     local_match_iou: 0.12
     local_match_center: 0.72
-
     embed_cooldown_sec: 0.75
     refresh_sec: 3.0
-    quality_improvement: 0.05
+    quality_improvement: 0.04
     batch_size: 4
     batch_wait_ms: 20
     queue_size: 8
@@ -168,13 +162,10 @@ core_v1:
 
     tracklet:
       min_samples: 3
-      max_samples: 6
-      topk: 4
-      # Initial samples must not be filtered away on a static standing person.
-      # Near-identical later samples are still suppressed once they are truly
-      # almost numerically identical.
-      duplicate_feature_cos: 0.9995
-      duplicate_quality_gain: 0.04
+      max_samples: 8
+      topk: 5
+      duplicate_feature_cos: 0.995
+      duplicate_quality_gain: 0.03
 
     crop:
       min_width: 42
@@ -193,25 +184,25 @@ core_v1:
         - [CAM-01, CAM-04]
         - [CAM-02, CAM-05]
         - [CAM-03, CAM-06]
-      candidate_threshold: 0.68
-      strong_threshold: 0.76
-      margin: 0.035
+      candidate_threshold: 0.58
+      strong_threshold: 0.70
+      margin: 0.025
       confirm_hits: 2
       strong_confirm_hits: 1
-      evidence_ttl_sec: 2.0
+      evidence_ttl_sec: 2.5
       overrides:
         "CAM-01:CAM-04":
-          candidate_threshold: 0.68
-          strong_threshold: 0.76
-          margin: 0.035
+          candidate_threshold: 0.58
+          strong_threshold: 0.70
+          margin: 0.025
         "CAM-02:CAM-05":
-          candidate_threshold: 0.68
-          strong_threshold: 0.76
-          margin: 0.035
+          candidate_threshold: 0.58
+          strong_threshold: 0.70
+          margin: 0.025
         "CAM-03:CAM-06":
-          candidate_threshold: 0.68
-          strong_threshold: 0.76
-          margin: 0.035
+          candidate_threshold: 0.58
+          strong_threshold: 0.70
+          margin: 0.025
 
     identity:
       prototype_alpha: 0.18
