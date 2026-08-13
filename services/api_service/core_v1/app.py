@@ -20,4 +20,22 @@ def health():
 @app.get('/api/v1/cameras')
 def cameras():
     config=yaml.safe_load((ROOT/'config/cameras.yaml').read_text()) or {}
-    return [{'id':c.get('id'),'name':c.get('name'),'location':c.get('location'),'online':c.get('online',True)} for c in config.get('cameras',[])]
+    live={}
+    try:
+        with urllib.request.urlopen(ml_url+'/health',timeout=.75) as response:
+            live=(json.loads(response.read().decode()).get('cameras') or {})
+    except Exception:
+        pass
+    return [
+        {
+            'id':camera.get('id'),
+            'name':camera.get('name'),
+            'location':camera.get('location'),
+            'enabled':bool(camera.get('online',True)),
+            'online':bool((live.get(str(camera.get('id'))) or {}).get('online',False)),
+            'source_fps':float((live.get(str(camera.get('id'))) or {}).get('source_fps',0.0) or 0.0),
+            'last_frame_age_ms':(live.get(str(camera.get('id'))) or {}).get('last_frame_age_ms'),
+            'last_error':str((live.get(str(camera.get('id'))) or {}).get('last_error') or ''),
+        }
+        for camera in config.get('cameras',[])
+    ]

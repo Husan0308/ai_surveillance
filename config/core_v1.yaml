@@ -89,32 +89,40 @@ core_v1:
           box: [0.36, 0.12, 0.74, 0.48]
 
   visual_tracker:
-    hold_ms: 900
-    memory_ms: 6000
-    prediction_ms: 550
-    match_iou: 0.10
-    reacquire_distance: 1.05
-    byte_match_center: 0.82
+    hold_ms: 800
+    memory_ms: 3000
+    prediction_ms: 420
+    match_iou: 0.12
+    reacquire_distance: 0.85
+    byte_match_center: 0.70
     byte_second_match_iou: 0.04
-    byte_second_match_center: 0.55
-    low_match_max_age_ms: 700
+    byte_second_match_center: 0.50
+    low_match_max_age_ms: 650
     byte_high_conf: 0.24
     byte_low_conf: 0.08
     low_conf_confirm: 0.08
-    process_noise: 1.0
-    measurement_noise: 0.85
-    velocity_damping: 0.985
-    max_prediction_shift_boxes: 0.70
-    max_prediction_size_ratio: 0.12
-    duplicate_iou: 0.50
-    duplicate_containment: 0.82
-    duplicate_center_distance: 0.40
+    process_noise: 0.85
+    measurement_noise: 0.90
+    velocity_damping: 0.96
+    size_velocity_damping: 0.60
+    max_prediction_shift_boxes: 0.55
+    max_prediction_size_ratio: 0.08
+    adaptive_error_low: 0.08
+    adaptive_error_high: 0.25
+    center_response_slow: 0.42
+    center_response_fast: 0.88
+    size_response: 0.30
+    snap_distance_boxes: 0.65
+    reversal_damping: 0.15
+    duplicate_iou: 0.68
+    duplicate_containment: 0.90
+    duplicate_center_distance: 0.20
     fragment_duplicate_cameras: ["CAM-03", "CAM-05", "CAM-06"]
-    fragment_horizontal_overlap: 0.64
-    fragment_x_center: 0.34
-    fragment_max_area_ratio: 0.76
-    fragment_min_vertical_overlap: 0.08
-    fragment_max_vertical_gap: 0.14
+    fragment_horizontal_overlap: 0.78
+    fragment_x_center: 0.18
+    fragment_max_area_ratio: 0.55
+    fragment_min_vertical_overlap: 0.20
+    fragment_max_vertical_gap: 0.06
     start_conf: 0.34
     new_track_min_conf: 0.24
     strong_confirm_hits: 2
