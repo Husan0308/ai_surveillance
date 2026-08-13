@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import math
 import threading
 import time
 
@@ -32,9 +31,10 @@ class GlobalIdentity:
 class GlobalIdentityManager:
     """Conservative cross-camera identity association.
 
-    Appearance is necessary but never sufficient: same-camera concurrency is a
-    hard conflict, optional camera topology/time windows gate impossible moves,
-    and ambiguous nearest neighbours are not merged.
+    ReID embeddings update appearance. Track activity, however, is managed
+    independently from the embedding refresh cadence. This is important because
+    ReID may intentionally run only every few seconds; an active local track must
+    not lose its Global ID just because no new embedding was requested.
     """
 
     def __init__(self, config: dict | None = None):
@@ -50,14 +50,23 @@ class GlobalIdentityManager:
             str(src): {str(dst): tuple(map(float, bounds)) for dst, bounds in (targets or {}).items()}
             for src, targets in (cfg.get("topology") or {}).items()
         }
+
         self._lock = threading.Lock()
         self._identities: dict[str, GlobalIdentity] = {}
         self._track_to_global: dict[str, str] = {}
+        self._track_activity: dict[str, float] = {}
         self._counter = 1
         self._merges = 0
         self._new = 0
+        self._existing_updates = 0
         self._ambiguous = 0
         self._conflicts = 0
+        self._released = 0
+        self._expired = 0
+
+    @staticmethod
+    def _local_key(camera_id: str, local_track_id: int) -> str:
+        return f"{str(camera_id)}:{int(local_track_id)}"
 
     def _new_identity(self, camera_id: str, local_key: str, embedding, observed_at: float):
         gid = f"Unknown_{self._counter:03d}"
@@ -74,19 +83,28 @@ class GlobalIdentityManager:
         )
         self._identities[gid] = identity
         self._track_to_global[str(local_key)] = gid
+        self._track_activity[str(local_key)] = float(observed_at)
         self._new += 1
         return gid, 1.0, "new"
 
+    def _unlink_track_locked(self, local_key: str) -> None:
+        gid = self._track_to_global.pop(local_key, None)
+        self._track_activity.pop(local_key, None)
+        if gid is None:
+            return
+        identity = self._identities.get(gid)
+        if identity is None:
+            return
+        for camera_id, key in list(identity.active_tracks.items()):
+            if key == local_key:
+                identity.active_tracks.pop(camera_id, None)
+
     def _expire_active(self, now: float):
-        active_local = set(self._track_to_global)
-        for identity in self._identities.values():
-            if now - identity.last_seen > self.active_timeout_sec:
-                identity.active_tracks.clear()
-        for key in list(active_local):
-            gid = self._track_to_global.get(key)
-            identity = self._identities.get(gid) if gid else None
-            if identity is None or key not in identity.active_tracks.values():
-                self._track_to_global.pop(key, None)
+        for local_key, last_active in list(self._track_activity.items()):
+            if float(now) - float(last_active) <= self.active_timeout_sec:
+                continue
+            self._unlink_track_locked(local_key)
+            self._expired += 1
 
     def _transition_allowed(self, identity: GlobalIdentity, camera_id: str, observed_at: float) -> bool:
         if identity.last_camera == camera_id:
@@ -109,9 +127,37 @@ class GlobalIdentityManager:
         active = identity.active_tracks.get(camera_id)
         return active is not None and active != local_key
 
+    def touch_track(self, camera_id: str, local_track_id: int, observed_at: float | None = None):
+        """Refresh activity for an already-bound local track without ReID work."""
+        camera_id = str(camera_id)
+        local_key = self._local_key(camera_id, local_track_id)
+        observed_at = float(observed_at if observed_at is not None else time.monotonic())
+        with self._lock:
+            self._expire_active(observed_at)
+            gid = self._track_to_global.get(local_key)
+            identity = self._identities.get(gid) if gid else None
+            if identity is None:
+                return None
+            self._track_activity[local_key] = observed_at
+            identity.active_tracks[camera_id] = local_key
+            # Physical track activity is stronger timing evidence than sparse
+            # embedding refreshes, so keep transition timing current as well.
+            identity.last_seen = max(float(identity.last_seen), observed_at)
+            identity.last_camera = camera_id
+            return gid
+
+    def release_track(self, camera_id: str, local_track_id: int) -> None:
+        """Explicitly release a local track when the local tracker times out."""
+        local_key = self._local_key(camera_id, local_track_id)
+        with self._lock:
+            existed = local_key in self._track_to_global
+            self._unlink_track_locked(local_key)
+            if existed:
+                self._released += 1
+
     def assign(self, *, camera_id: str, local_track_id: int, embedding, observed_at: float | None = None):
         camera_id = str(camera_id)
-        local_key = f"{camera_id}:{int(local_track_id)}"
+        local_key = self._local_key(camera_id, local_track_id)
         observed_at = float(observed_at if observed_at is not None else time.monotonic())
         vector = _norm(embedding)
 
@@ -121,6 +167,10 @@ class GlobalIdentityManager:
             if existing_gid and existing_gid in self._identities:
                 identity = self._identities[existing_gid]
                 self._update_identity(identity, camera_id, local_key, vector, observed_at)
+                self._track_activity[local_key] = observed_at
+                self._existing_updates += 1
+                # Similarity 1.0 here means the binding is already established;
+                # it is not a fresh cross-camera similarity measurement.
                 return existing_gid, 1.0, "existing"
 
             candidates = []
@@ -149,6 +199,7 @@ class GlobalIdentityManager:
                 return self._new_identity(camera_id, local_key, vector, observed_at)
 
             self._track_to_global[local_key] = best_gid
+            self._track_activity[local_key] = observed_at
             self._update_identity(best_identity, camera_id, local_key, vector, observed_at)
             self._merges += 1
             return best_gid, float(best_score), "merged"
@@ -165,7 +216,7 @@ class GlobalIdentityManager:
         identity.active_tracks[str(camera_id)] = str(local_key)
 
     def lookup_track(self, camera_id: str, local_track_id: int):
-        key = f"{camera_id}:{int(local_track_id)}"
+        key = self._local_key(camera_id, local_track_id)
         with self._lock:
             return self._track_to_global.get(key)
 
@@ -189,8 +240,11 @@ class GlobalIdentityManager:
                 "active_local_tracks": len(self._track_to_global),
                 "new": self._new,
                 "merges": self._merges,
+                "existing_updates": self._existing_updates,
                 "ambiguous": self._ambiguous,
                 "conflicts": self._conflicts,
+                "released": self._released,
+                "expired": self._expired,
                 "match_threshold": self.match_threshold,
                 "strong_threshold": self.strong_threshold,
             }
