@@ -4,10 +4,6 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Six CPU JPEG publishers are the dominant presentation cost. 18 FPS across
-  # all feeds can cause bursty CPU scheduling on this machine even though camera
-  # ingest itself remains healthy. Use a stable 15 FPS presentation budget and
-  # smaller frames; detector/capture FPS are unchanged.
   display_fps: 15
   jpeg_quality: 70
   max_display_width: 640
@@ -47,7 +43,11 @@ core_v1:
     conf: 0.06
     iou: 0.50
     max_det: 50
-    batch_size: 3
+
+    # Batch=2 lowers per-batch latency on this GPU while keeping the bridge
+    # latest-only. That gives the visual tracker fresher observations, which is
+    # more important for spatial box lag than a tiny gain in aggregate throughput.
+    batch_size: 2
     poll_interval_ms: 5
     start_delay_sec: 2.0
     duplicate_iou: 0.58
@@ -96,9 +96,12 @@ core_v1:
     hold_ms: 900
     memory_ms: 6000
 
-    prediction_ms: 250
-    max_prediction_shift_boxes: 0.40
-    max_prediction_size_ratio: 0.12
+    # Current camera frames are fresh (<~60 ms), while detector observations can
+    # be a few hundred ms old. Predict far enough to reach the timestamp of the
+    # current display frame, but bound both spatial and size extrapolation.
+    prediction_ms: 420
+    max_prediction_shift_boxes: 0.55
+    max_prediction_size_ratio: 0.10
 
     match_iou: 0.16
     reacquire_distance: 1.05
@@ -113,15 +116,19 @@ core_v1:
     fragment_min_vertical_overlap: 0.08
     fragment_max_vertical_gap: 0.14
 
-    smoothing: 0.72
-    center_smoothing: 0.72
-    size_smoothing: 0.52
-    velocity_smoothing: 0.45
+    # Follow position faster than before; keep width/height damped so YOLO edge
+    # jitter does not make the rectangle breathe while walking.
+    smoothing: 0.84
+    center_smoothing: 0.84
+    size_smoothing: 0.50
+    velocity_smoothing: 0.60
 
-    adaptive_center_smoothing: 0.88
-    adaptive_error_boxes: 0.28
-    snap_distance_boxes: 0.80
-    reversal_damping: 0.30
+    # If the predicted center starts falling behind, correct aggressively before
+    # a visible trail forms. Direction reversals still damp stale velocity.
+    adaptive_center_smoothing: 0.96
+    adaptive_error_boxes: 0.16
+    snap_distance_boxes: 0.65
+    reversal_damping: 0.25
 
     start_conf: 0.34
     new_track_min_conf: 0.24
