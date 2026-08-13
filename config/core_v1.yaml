@@ -4,31 +4,26 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Presentation is separate from inference. Most cameras deliver about 19-21
-  # decoded FPS. Publish up to 18 FPS, with a small JPEG to keep CPU bounded.
-  display_fps: 18
-  jpeg_quality: 72
-  max_display_width: 720
-  max_display_height: 405
-  publisher_start_stagger_ms: 8
+  # Six CPU JPEG publishers are the dominant presentation cost. 18 FPS across
+  # all feeds can cause bursty CPU scheduling on this machine even though camera
+  # ingest itself remains healthy. Use a stable 15 FPS presentation budget and
+  # smaller frames; detector/capture FPS are unchanged.
+  display_fps: 15
+  jpeg_quality: 70
+  max_display_width: 640
+  max_display_height: 360
+  publisher_start_stagger_ms: 11
   startup_grace_sec: 8.0
   startup_stagger_sec: 0.20
   capture_timeout_ms: 1000
   max_read_timeouts: 3
   reconnect_delay_sec: 1.0
 
-  # Capture backend: prefer DeepStream nvurisrcbin/NVDEC when the plugin exists,
-  # otherwise automatically fall back to the previous GStreamer/NVDEC path.
-  # DeepStream is used for ingest/decode only; YOLO stays PyTorch CUDA.
   capture_backend: "auto"
 
-  # Do not reconnect only from clock/PTS lag. Real stalls are recovered by
-  # source errors/timeouts and DeepStream's RTSP reconnect support.
   max_pipeline_lag_ms: 0
   max_pipeline_lag_samples: 8
 
-  # Give RTSP a bounded jitter window and discard late data instead of allowing
-  # transport buffering to grow. Auto transport permits UDP with TCP fallback.
   rtsp_transport: "auto"
   rtsp_latency_ms: 150
   rtsp_buffer_mode: "auto"
@@ -98,12 +93,9 @@ core_v1:
           box: [0.36, 0.12, 0.74, 0.48]
 
   visual_tracker:
-    # Visual continuity only. This state is never ReID/global-ID evidence.
     hold_ms: 900
     memory_ms: 6000
 
-    # Short bounded constant-velocity prediction bridges detector cadence without
-    # letting a box run away when a person stops or reverses direction.
     prediction_ms: 250
     max_prediction_shift_boxes: 0.40
     max_prediction_size_ratio: 0.12
@@ -121,16 +113,11 @@ core_v1:
     fragment_min_vertical_overlap: 0.08
     fragment_max_vertical_gap: 0.14
 
-    # Center and size are filtered independently. Position follows motion faster;
-    # width/height are damped more because detector edge jitter is visually noisy.
     smoothing: 0.72
     center_smoothing: 0.72
     size_smoothing: 0.52
     velocity_smoothing: 0.45
 
-    # Adaptive correction: small detector noise is smoothed, but if the predicted
-    # center falls materially behind a walking person it catches up quickly. A
-    # very large discontinuity snaps to the detector and damps old velocity.
     adaptive_center_smoothing: 0.88
     adaptive_error_boxes: 0.28
     snap_distance_boxes: 0.80
