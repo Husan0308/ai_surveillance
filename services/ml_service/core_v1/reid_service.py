@@ -26,6 +26,7 @@ class _LocalTrack:
     best_quality: float = 0.0
     global_id: str | None = None
     last_similarity: float | None = None
+    last_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,8 @@ class ReIDCoordinator:
         self._frame_misses = 0
         self._batches = 0
         self._last_batch_ms = 0.0
+        self._released_tracks = 0
+        self._activity_touches = 0
 
     def start(self):
         if not self.enabled:
@@ -190,7 +193,9 @@ class ReIDCoordinator:
         tracks = self._tracks[camera_id]
         for tid in list(tracks):
             if observed_at - tracks[tid].last_seen > self.track_timeout:
+                self.identities.release_track(camera_id, tid)
                 del tracks[tid]
+                self._released_tracks += 1
 
         pairs = []
         for tid, track in tracks.items():
@@ -252,6 +257,15 @@ class ReIDCoordinator:
                 assigned = self._associate(camera_id, list(result.boxes), observed)
                 now = time.monotonic()
                 for track, box in assigned:
+                    # Once a Global ID is established, every real detector
+                    # observation refreshes its physical activity. This is cheap
+                    # and prevents sparse 4 s ReID refreshes from expiring IDs.
+                    if track.global_id:
+                        gid = self.identities.touch_track(camera_id, track.local_id, observed)
+                        if gid:
+                            track.global_id = gid
+                            self._activity_touches += 1
+
                     if track.hits < self.min_hits:
                         continue
                     decision = self.selector.evaluate(frame, box)
@@ -346,7 +360,7 @@ class ReIDCoordinator:
             self._batches += 1
 
             for job, feature in zip(jobs, features):
-                gid, similarity, _reason = self.identities.assign(
+                gid, similarity, reason = self.identities.assign(
                     camera_id=job.camera_id,
                     local_track_id=job.local_id,
                     embedding=feature,
@@ -356,6 +370,7 @@ class ReIDCoordinator:
                 if track is not None:
                     track.global_id = gid
                     track.last_similarity = float(similarity)
+                    track.last_reason = str(reason)
                 self._embedded += 1
 
     def labels(self, camera_id: str):
@@ -370,6 +385,7 @@ class ReIDCoordinator:
                         "global_id": track.global_id,
                         "box": track.box,
                         "similarity": track.last_similarity,
+                        "reason": track.last_reason,
                     }
                 )
         return result
@@ -384,6 +400,7 @@ class ReIDCoordinator:
                     "last_seen": track.last_seen,
                     "hits": track.hits,
                     "similarity": track.last_similarity,
+                    "reason": track.last_reason,
                 }
                 for track in tracks.values()
             ]
@@ -405,6 +422,8 @@ class ReIDCoordinator:
             "stale_jobs": self._stale_jobs,
             "crop_rejects": self._crop_rejects,
             "frame_misses": self._frame_misses,
+            "released_tracks": self._released_tracks,
+            "activity_touches": self._activity_touches,
             "queue_depth": self._job_queue.qsize(),
             "last_error": self._last_error,
             "identity": self.identities.metrics(),
