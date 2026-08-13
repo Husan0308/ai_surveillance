@@ -15,10 +15,11 @@ class CropDecision:
 
 
 class PersonCropSelector:
-    """Cheap CPU quality gate before any ReID inference.
+    """Quality gate for real detector crops used by ReID v2.
 
-    It operates only on a real detector observation and the exact source frame
-    that produced that observation. Prediction-only boxes are never accepted.
+    Tracklet aggregation needs several useful and different views, not many
+    noisy crops. This gate is deliberately cheap and never consumes a predicted
+    visual-tracker box: it only receives the exact frame/box from YOLO.
     """
 
     def __init__(self, config: dict | None = None):
@@ -27,7 +28,11 @@ class PersonCropSelector:
         self.min_height = max(24, int(cfg.get("min_height", 96)))
         self.min_area = max(512, int(cfg.get("min_area", 6500)))
         self.min_conf = max(0.0, float(cfg.get("min_conf", 0.20)))
+        self.max_width_height_ratio = max(
+            0.30, float(cfg.get("max_width_height_ratio", 0.95))
+        )
         self.edge_margin = max(0.0, min(0.25, float(cfg.get("edge_margin", 0.015))))
+        self.reject_edge = bool(cfg.get("reject_edge", False))
         self.min_sharpness = max(0.0, float(cfg.get("min_sharpness", 18.0)))
         self.pad_x = max(0.0, min(0.30, float(cfg.get("pad_x", 0.04))))
         self.pad_y = max(0.0, min(0.30, float(cfg.get("pad_y", 0.02))))
@@ -40,14 +45,21 @@ class PersonCropSelector:
         bh = max(0.0, y2 - y1)
         area = bw * bh
         conf = float(box.confidence)
+
         if conf < self.min_conf:
             return CropDecision(False, 0.0, "low_conf", None)
         if bw < self.min_width or bh < self.min_height or area < self.min_area:
             return CropDecision(False, 0.0, "small", None)
 
+        aspect = bw / max(1.0, bh)
+        if aspect > self.max_width_height_ratio:
+            return CropDecision(False, 0.0, "wide_fragment", None)
+
         mx = self.edge_margin * w
         my = self.edge_margin * h
         touches = x1 <= mx or y1 <= my or x2 >= w - mx or y2 >= h - my
+        if touches and self.reject_edge:
+            return CropDecision(False, 0.0, "edge", None)
 
         px = bw * self.pad_x
         py = bh * self.pad_y
@@ -64,11 +76,25 @@ class PersonCropSelector:
         if sharpness < self.min_sharpness:
             return CropDecision(False, 0.0, "blur", None)
 
-        # Reward confidence, useful pixels and sharpness, while mildly penalizing
-        # clipping. Absolute score only ranks crops from the same local track.
-        size_score = min(1.0, math.sqrt(area / max(1.0, float(w * h))) / 0.45)
+        frame_ratio = area / max(1.0, float(w * h))
+        size_score = min(1.0, math.sqrt(frame_ratio) / 0.45)
         sharp_score = min(1.0, sharpness / max(self.min_sharpness * 5.0, 1.0))
-        score = 0.52 * conf + 0.28 * size_score + 0.20 * sharp_score
+        portrait_score = max(
+            0.0,
+            min(1.0, (self.max_width_height_ratio - aspect + 0.20) / 0.55),
+        )
+        score = (
+            0.43 * conf
+            + 0.25 * size_score
+            + 0.18 * sharp_score
+            + 0.14 * portrait_score
+        )
         if touches:
-            score *= 0.82
-        return CropDecision(True, float(score), "ok_edge" if touches else "ok", crop.copy())
+            score *= 0.84
+
+        return CropDecision(
+            True,
+            float(score),
+            "ok_edge" if touches else "ok",
+            crop.copy(),
+        )
