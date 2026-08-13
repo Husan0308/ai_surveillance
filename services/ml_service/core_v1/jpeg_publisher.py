@@ -15,7 +15,7 @@ class LatestJpegPublisher:
         camera_start_conf=dict(cfg.get('camera_start_conf') or {})
         camera_low_conf=dict(cfg.get('camera_low_conf_confirm') or {})
         self.visual_tracker=VisualTracker(
-            hold_ms=cfg.get('hold_ms',500),memory_ms=cfg.get('memory_ms',6000),prediction_ms=cfg.get('prediction_ms',220),
+            hold_ms=cfg.get('hold_ms',900),memory_ms=cfg.get('memory_ms',6000),prediction_ms=cfg.get('prediction_ms',250),
             match_iou=cfg.get('match_iou',0.16),reacquire_distance=cfg.get('reacquire_distance',1.05),
             duplicate_iou=cfg.get('duplicate_iou',0.50),duplicate_containment=cfg.get('duplicate_containment',0.82),
             duplicate_center_distance=cfg.get('duplicate_center_distance',0.40),
@@ -25,8 +25,16 @@ class LatestJpegPublisher:
             fragment_max_area_ratio=cfg.get('fragment_max_area_ratio',0.70),
             fragment_min_vertical_overlap=cfg.get('fragment_min_vertical_overlap',0.12),
             fragment_max_vertical_gap=cfg.get('fragment_max_vertical_gap',0.10),
-            smoothing=cfg.get('smoothing',0.96),velocity_smoothing=cfg.get('velocity_smoothing',0.66),
-            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes',0.75),
+            smoothing=cfg.get('smoothing',0.72),
+            center_smoothing=cfg.get('center_smoothing',0.72),
+            size_smoothing=cfg.get('size_smoothing',0.52),
+            velocity_smoothing=cfg.get('velocity_smoothing',0.45),
+            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes',0.40),
+            max_prediction_size_ratio=cfg.get('max_prediction_size_ratio',0.12),
+            adaptive_center_smoothing=cfg.get('adaptive_center_smoothing',0.88),
+            adaptive_error_boxes=cfg.get('adaptive_error_boxes',0.28),
+            snap_distance_boxes=cfg.get('snap_distance_boxes',0.80),
+            reversal_damping=cfg.get('reversal_damping',0.30),
             low_conf_confirm=camera_low_conf.get(camera_id,cfg.get('low_conf_confirm',0.12)),
             start_conf=camera_start_conf.get(camera_id,cfg.get('start_conf',0.34)),
             new_track_min_conf=cfg.get('new_track_min_conf',0.24),
@@ -56,16 +64,7 @@ class LatestJpegPublisher:
         now=time.monotonic()
         with self._lock:
             elapsed=max(0.001,now-self._started_mono)
-            return {
-                'encoded':self.encoded,
-                'publish_rate':self.encoded/elapsed,
-                'skipped_same_frame':self.skipped_same_frame,
-                'stale_detection_rejects':self.stale_detection_rejects,
-                'last_encode_ms':self._last_encode_ms,
-                'last_publish_source_age_ms':self._last_publish_source_age_ms,
-                'last_published_age_ms':((now-self._published_monotonic)*1000.0) if self._published_monotonic else None,
-                'source_frame_id':self._source_frame_id,
-            }
+            return {'encoded':self.encoded,'publish_rate':self.encoded/elapsed,'skipped_same_frame':self.skipped_same_frame,'stale_detection_rejects':self.stale_detection_rejects,'last_encode_ms':self._last_encode_ms,'last_publish_source_age_ms':self._last_publish_source_age_ms,'last_published_age_ms':((now-self._published_monotonic)*1000.0) if self._published_monotonic else None,'source_frame_id':self._source_frame_id}
     def wait_newer(self,last_version:int,timeout:float=0.25):
         deadline=time.monotonic()+max(0.0,float(timeout))
         with self._condition:
@@ -80,40 +79,30 @@ class LatestJpegPublisher:
             result=self.detections.get(self.camera_id)
             if result is not None:
                 source_age=max(0.0,float(display_frame_time)-float(result.frame_captured_monotonic))
-                if max_age_sec is None or source_age<=max_age_sec:
-                    self.visual_tracker.update(result,now,source_width,source_height)
-                else:
-                    self.stale_detection_rejects+=1
+                if max_age_sec is None or source_age<=max_age_sec:self.visual_tracker.update(result,now,source_width,source_height)
+                else:self.stale_detection_rejects+=1
         boxes=self.visual_tracker.visible(now,target_time=display_frame_time,max_observation_age_sec=max_age_sec)
         if not boxes:return image
         h,w=image.shape[:2];sx=w/max(1.0,float(source_width));sy=h/max(1.0,float(source_height))
         for box in boxes:
-            x1=int(round(box.x1*sx));y1=int(round(box.y1*sy));x2=int(round(box.x2*sx));y2=int(round(box.y2*sy))
-            x1=max(0,min(w-1,x1));x2=max(0,min(w-1,x2));y1=max(0,min(h-1,y1));y2=max(0,min(h-1,y2))
+            x1=int(round(box.x1*sx));y1=int(round(box.y1*sy));x2=int(round(box.x2*sx));y2=int(round(box.y2*sy));x1=max(0,min(w-1,x1));x2=max(0,min(w-1,x2));y1=max(0,min(h-1,y1));y2=max(0,min(h-1,y2))
             if x2<=x1 or y2<=y1:continue
-            cv2.rectangle(image,(x1,y1),(x2,y2),(0,255,0),2)
-            cv2.putText(image,f"person {box.confidence:.2f}",(x1,max(18,y1-6)),cv2.FONT_HERSHEY_SIMPLEX,0.50,(0,255,0),2,cv2.LINE_AA)
+            cv2.rectangle(image,(x1,y1),(x2,y2),(0,255,0),2);cv2.putText(image,f"person {box.confidence:.2f}",(x1,max(18,y1-6)),cv2.FONT_HERSHEY_SIMPLEX,0.50,(0,255,0),2,cv2.LINE_AA)
         return image
     def _run(self):
         last_frame_id=-1;next_at=time.monotonic()
         while not self._stop.is_set():
             now=time.monotonic()
-            if now<next_at:
-                self._stop.wait(next_at-now);continue
-            next_at=now+self.interval
-            frame,_=self.store.get()
+            if now<next_at:self._stop.wait(next_at-now);continue
+            next_at=now+self.interval;frame,_=self.store.get()
             if frame is None:continue
             if frame.frame_id==last_frame_id:self.skipped_same_frame+=1;continue
-            encode_started=time.perf_counter()
-            image=frame.image;source_h,source_w=image.shape[:2];scale=min(1.0,self.max_width/max(1,source_w),self.max_height/max(1,source_h))
+            encode_started=time.perf_counter();image=frame.image;source_h,source_w=image.shape[:2];scale=min(1.0,self.max_width/max(1,source_w),self.max_height/max(1,source_h))
             if scale<1.0:image=cv2.resize(image,(max(1,round(source_w*scale)),max(1,round(source_h*scale))),interpolation=cv2.INTER_AREA)
             else:image=image.copy()
-            image=self._draw_detection(image,source_w,source_h,now,frame.captured_monotonic)
-            ok,encoded=cv2.imencode('.jpg',image,[cv2.IMWRITE_JPEG_QUALITY,self.quality])
+            image=self._draw_detection(image,source_w,source_h,now,frame.captured_monotonic);ok,encoded=cv2.imencode('.jpg',image,[cv2.IMWRITE_JPEG_QUALITY,self.quality])
             if not ok:continue
             published=time.monotonic();payload=encoded.tobytes();encode_ms=(time.perf_counter()-encode_started)*1000.0
             with self._condition:
-                self._jpeg=payload;self._version+=1;self._published_monotonic=published;self._source_frame_id=frame.frame_id;self._last_source_capture_mono=float(frame.captured_monotonic)
-                self._last_encode_ms=encode_ms;self._last_publish_source_age_ms=max(0.0,(published-float(frame.captured_monotonic))*1000.0)
-                self._condition.notify_all()
+                self._jpeg=payload;self._version+=1;self._published_monotonic=published;self._source_frame_id=frame.frame_id;self._last_source_capture_mono=float(frame.captured_monotonic);self._last_encode_ms=encode_ms;self._last_publish_source_age_ms=max(0.0,(published-float(frame.captured_monotonic))*1000.0);self._condition.notify_all()
             last_frame_id=frame.frame_id;self.encoded+=1
