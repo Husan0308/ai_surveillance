@@ -46,6 +46,7 @@ class _LocalTrack:
     last_reason: str | None = None
     samples: deque = field(default_factory=deque)
     descriptor: np.ndarray | None = None
+    descriptor_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -174,7 +175,7 @@ class ReIDCoordinator:
             nearest=max(_cosine(vector,s.embedding) for s in track.samples);best_q=max(s.quality for s in track.samples)
             if nearest>=self.duplicate_feature_cos and quality<best_q+self.duplicate_quality_gain:self._duplicate_features+=1;return False
         track.samples.append(_FeatureSample(vector,float(quality),float(observed_at)))
-        ranked=sorted(track.samples,key=lambda s:s.quality,reverse=True)[:min(self.topk,len(track.samples))];weights=np.asarray([max(.05,s.quality) for s in ranked],dtype=np.float32);weights=weights/weights.sum();track.descriptor=_norm(sum(float(w)*s.embedding for w,s in zip(weights,ranked)));self._descriptor_updates+=1;return True
+        ranked=sorted(track.samples,key=lambda s:s.quality,reverse=True)[:min(self.topk,len(track.samples))];weights=np.asarray([max(.05,s.quality) for s in ranked],dtype=np.float32);weights=weights/weights.sum();track.descriptor=_norm(sum(float(w)*s.embedding for w,s in zip(weights,ranked)));track.descriptor_version+=1;self._descriptor_updates+=1;return True
 
     def _pair_params(self,left,right):
         cfg={}
@@ -186,8 +187,7 @@ class ReIDCoordinator:
         now=time.monotonic();return [t for t in self._tracks.get(camera_id,{}).values() if t.descriptor is not None and len(t.samples)>=self.min_descriptor_samples and now-t.last_seen<=self.track_timeout]
 
     def _assignment(self,left_tracks,right_tracks):
-        scores=np.asarray([[_cosine(a.descriptor,b.descriptor) for b in right_tracks] for a in left_tracks],dtype=np.float32)
-        assignments=[]
+        scores=np.asarray([[_cosine(a.descriptor,b.descriptor) for b in right_tracks] for a in left_tracks],dtype=np.float32);assignments=[]
         try:
             import lap
             size=max(scores.shape);cost=np.ones((size,size),dtype=np.float64)*2.0;cost[:scores.shape[0],:scores.shape[1]]=1.0-scores;_total,x,_y=lap.lapjv(cost,extend_cost=False)
@@ -207,14 +207,14 @@ class ReIDCoordinator:
             if not left or not right:continue
             assignments,scores=self._assignment(left,right);candidate,strong,margin=self._pair_params(left_cam,right_cam)
             for li,ri,score in assignments:
-                a=left[li];b=right[ri];self._pair_attempts+=1
-                row=sorted((float(v) for v in scores[li,:]),reverse=True);col=sorted((float(v) for v in scores[:,ri]),reverse=True);row2=row[1] if len(row)>1 else -1.0;col2=col[1] if len(col)>1 else -1.0;actual_margin=min(score-row2,score-col2);self._pair_scores.append({"pair":f"{left_cam}:{right_cam}","left":a.local_id,"right":b.local_id,"score":round(score,5),"margin":round(actual_margin,5),"ts":now})
-                key=(left_cam,a.local_id,right_cam,b.local_id);previous=self._evidence.get(key,{"hits":0,"last":0.0})
+                a=left[li];b=right[ri]
+                if a.global_id and b.global_id and a.global_id==b.global_id:continue
+                self._pair_attempts+=1;row=sorted((float(v) for v in scores[li,:]),reverse=True);col=sorted((float(v) for v in scores[:,ri]),reverse=True);row2=row[1] if len(row)>1 else -1.0;col2=col[1] if len(col)>1 else -1.0;actual_margin=min(score-row2,score-col2);self._pair_scores.append({"pair":f"{left_cam}:{right_cam}","left":a.local_id,"right":b.local_id,"score":round(score,5),"margin":round(actual_margin,5),"ts":now})
+                key=(left_cam,a.local_id,right_cam,b.local_id);sig=(a.descriptor_version,b.descriptor_version);previous=self._evidence.get(key,{"hits":0,"last":0.0,"sig":None})
+                if previous.get("sig")==sig:continue
                 if score<candidate or actual_margin<margin:
-                    self._pair_rejects+=1
-                    if now-previous["last"]>self.evidence_ttl:self._evidence.pop(key,None)
-                    continue
-                hits=1 if now-previous["last"]>self.evidence_ttl else previous["hits"]+1;self._evidence[key]={"hits":hits,"last":now,"score":score};required=self.strong_confirm_hits if score>=strong else self.confirm_hits
+                    self._pair_rejects+=1;self._evidence[key]={"hits":0,"last":now,"sig":sig,"score":score};continue
+                hits=1 if now-previous["last"]>self.evidence_ttl else previous["hits"]+1;self._evidence[key]={"hits":hits,"last":now,"sig":sig,"score":score};required=self.strong_confirm_hits if score>=strong else self.confirm_hits
                 if hits<required:continue
                 self._pair_confirms+=1;gid,reason=self.identities.merge_tracks(left_cam,a.local_id,right_cam,b.local_id,score,now)
                 if gid:
@@ -259,8 +259,7 @@ class ReIDCoordinator:
         now=time.monotonic();return [{"local_id":t.local_id,"global_id":t.global_id,"box":t.box,"similarity":t.last_similarity,"reason":t.last_reason} for t in list(self._tracks.get(str(camera_id),{}).values()) if t.global_id and now-t.last_seen<=self.track_timeout]
 
     def snapshot(self):
-        cameras={cid:[{"local_id":t.local_id,"global_id":t.global_id,"last_seen":t.last_seen,"hits":t.hits,"similarity":t.last_similarity,"reason":t.last_reason,"tracklet_samples":len(t.samples),"descriptor_ready":t.descriptor is not None and len(t.samples)>=self.min_descriptor_samples} for t in tracks.values()] for cid,tracks in self._tracks.items()}
-        return {"algorithm":"tracklet-reid-v2","cameras":cameras,"global":self.identities.snapshot(),"recent_pair_scores":list(self._pair_scores)[-40:]}
+        cameras={cid:[{"local_id":t.local_id,"global_id":t.global_id,"last_seen":t.last_seen,"hits":t.hits,"similarity":t.last_similarity,"reason":t.last_reason,"tracklet_samples":len(t.samples),"descriptor_version":t.descriptor_version,"descriptor_ready":t.descriptor is not None and len(t.samples)>=self.min_descriptor_samples} for t in tracks.values()] for cid,tracks in self._tracks.items()};return {"algorithm":"tracklet-reid-v2","cameras":cameras,"global":self.identities.snapshot(),"recent_pair_scores":list(self._pair_scores)[-40:]}
 
     def metrics(self):
         elapsed=max(.001,time.monotonic()-self._started);return {"enabled":self.enabled,"ready":self._ready,"algorithm":"tracklet-reid-v2","model":self.config.get("model","osnet_x0_5"),"device":self.config.get("device","cpu"),"submitted":self._submitted,"embedded":self._embedded,"embed_rate":self._embedded/elapsed,"batches":self._batches,"last_batch_ms":self._last_batch_ms,"descriptor_updates":self._descriptor_updates,"duplicate_features":self._duplicate_features,"pair_attempts":self._pair_attempts,"pair_confirms":self._pair_confirms,"pair_merges":self._pair_merges,"pair_rejects":self._pair_rejects,"replaced_jobs":self._replaced_jobs,"stale_jobs":self._stale_jobs,"crop_rejects":self._crop_rejects,"frame_misses":self._frame_misses,"released_tracks":self._released_tracks,"queue_depth":self._job_queue.qsize(),"last_error":self._last_error,"identity":self.identities.metrics()}
