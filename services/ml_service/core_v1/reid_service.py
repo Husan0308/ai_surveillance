@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import hashlib
 import logging
 import math
+from pathlib import Path
 import queue
 import threading
 import time
+import urllib.request
 
 import cv2
 import numpy as np
@@ -24,6 +27,39 @@ def _norm(vector):
 
 def _cosine(a, b) -> float:
     return float(np.dot(_norm(a), _norm(b)))
+
+
+def _sha256(path: Path) -> str:
+    digest=hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda:handle.read(1024*1024),b''):digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ensure_checkpoint(config: dict) -> str:
+    path=Path(str(config.get('model_path') or 'models/reid/osnet_ain_x1_0_msmt17.pth')).expanduser()
+    expected=str(config.get('model_sha256') or '').strip().lower()
+    if path.exists() and (not expected or _sha256(path)==expected):return str(path)
+    url=str(config.get('model_url') or '').strip()
+    if not url:raise RuntimeError(f'ReID checkpoint missing: {path}')
+    path.parent.mkdir(parents=True,exist_ok=True);tmp=path.with_suffix(path.suffix+'.part')
+    log.info('CORE_V1_REID_MODEL_DOWNLOAD url=%s target=%s',url,path)
+    request=urllib.request.Request(url,headers={'User-Agent':'Apsidal-Core-v1/1.0'})
+    try:
+        with urllib.request.urlopen(request,timeout=45) as response,tmp.open('wb') as output:
+            while True:
+                chunk=response.read(1024*1024)
+                if not chunk:break
+                output.write(chunk)
+        if expected:
+            actual=_sha256(tmp)
+            if actual!=expected:raise RuntimeError(f'ReID checkpoint SHA256 mismatch: {actual}')
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            try:tmp.unlink()
+            except Exception:pass
+    return str(path)
 
 
 @dataclass
@@ -75,14 +111,16 @@ def _center_distance(a,b):
 
 class _OSNetExtractor:
     def __init__(self, config: dict):
-        self.config=dict(config);self.device=str(self.config.get("device","cpu"));self.model_name=str(self.config.get("model","osnet_x0_5"));self.model_path=str(self.config.get("model_path","") or "");self.height=max(64,int(self.config.get("input_height",256)));self.width=max(32,int(self.config.get("input_width",128)))
-        import torch, torchreid
-        self.torch=torch;use_cuda=self.device.startswith("cuda") and torch.cuda.is_available()
-        if self.device.startswith("cuda") and not use_cuda:raise RuntimeError("ReID CUDA requested but unavailable")
-        try:torch.set_num_threads(max(1,int(self.config.get("torch_cpu_threads",1))))
+        self.config=dict(config);self.device=str(self.config.get('device','cpu'));self.model_name=str(self.config.get('model','osnet_ain_x1_0'));self.height=max(64,int(self.config.get('input_height',256)));self.width=max(32,int(self.config.get('input_width',128)));self.flip_tta=bool(self.config.get('flip_tta',True))
+        import torch,torchreid
+        self.torch=torch;use_cuda=self.device.startswith('cuda') and torch.cuda.is_available()
+        if self.device.startswith('cuda') and not use_cuda:raise RuntimeError('ReID CUDA requested but unavailable')
+        try:torch.set_num_threads(max(1,int(self.config.get('torch_cpu_threads',1))))
         except Exception:pass
-        model=torchreid.models.build_model(name=self.model_name,num_classes=1000,loss="softmax",pretrained=not bool(self.model_path),use_gpu=use_cuda)
-        if self.model_path:torchreid.utils.load_pretrained_weights(model,self.model_path)
+        # Critical: use an actual person-ReID checkpoint, not ImageNet-only pretrained weights.
+        self.model_path=_ensure_checkpoint(self.config)
+        model=torchreid.models.build_model(name=self.model_name,num_classes=1000,loss='softmax',pretrained=False,use_gpu=use_cuda)
+        torchreid.utils.load_pretrained_weights(model,self.model_path)
         model.eval();model.to(self.device);self.model=model
         self.mean=np.asarray([0.485,0.456,0.406],dtype=np.float32).reshape(3,1,1);self.std=np.asarray([0.229,0.224,0.225],dtype=np.float32).reshape(3,1,1)
 
@@ -90,28 +128,32 @@ class _OSNetExtractor:
         rgb=cv2.cvtColor(crop,cv2.COLOR_BGR2RGB);rgb=cv2.resize(rgb,(self.width,self.height),interpolation=cv2.INTER_LINEAR);arr=rgb.astype(np.float32).transpose(2,0,1)/255.0;arr=(arr-self.mean)/self.std
         return self.torch.from_numpy(arr)
 
-    def extract(self,crops):
-        batch=self.torch.stack([self._tensor(c) for c in crops],dim=0).to(self.device,non_blocking=False)
+    def _forward(self,batch):
         with self.torch.inference_mode():features=self.model(batch)
         if isinstance(features,(tuple,list)):features=features[0]
-        features=features.float();features=features/(features.norm(dim=1,keepdim=True)+1e-12)
+        return features.float()/(features.float().norm(dim=1,keepdim=True)+1e-12)
+
+    def extract(self,crops):
+        batch=self.torch.stack([self._tensor(c) for c in crops],dim=0).to(self.device,non_blocking=False);features=self._forward(batch)
+        if self.flip_tta:
+            flipped=self.torch.flip(batch,dims=[3]);flip_features=self._forward(flipped);features=features+flip_features;features=features/(features.norm(dim=1,keepdim=True)+1e-12)
         return features.detach().cpu().numpy()
 
 
 class ReIDCoordinator:
-    """Tracklet ReID v2: asynchronous embeddings + multi-frame pair matching."""
+    """Tracklet ReID v3: true ReID checkpoint + robust multi-frame pair matching."""
 
     def __init__(self, frame_stores, detections, config: dict | None = None):
-        self.frame_stores=dict(frame_stores);self.detections=detections;self.config=dict(config or {});self.enabled=bool(self.config.get("enabled",False));self.selector=PersonCropSelector(self.config.get("crop"));self.identities=GlobalIdentityManager(self.config.get("identity"))
-        self.poll_sec=max(.01,float(self.config.get("poll_interval_ms",35))/1000.0);self.track_timeout=max(.5,float(self.config.get("local_track_timeout_sec",2.5)));self.match_iou=max(0.0,float(self.config.get("local_match_iou",.12)));self.match_center=max(.1,float(self.config.get("local_match_center",.72)));self.min_hits=max(1,int(self.config.get("min_track_hits",2)))
-        self.embed_cooldown=max(.2,float(self.config.get("embed_cooldown_sec",.75)));self.refresh_sec=max(self.embed_cooldown,float(self.config.get("refresh_sec",3.0)));self.quality_improvement=max(0.0,float(self.config.get("quality_improvement",.05)));self.batch_size=max(1,int(self.config.get("batch_size",4)));self.batch_wait=max(0.0,float(self.config.get("batch_wait_ms",20))/1000.0);self.max_job_age=max(.1,float(self.config.get("max_job_age_ms",700))/1000.0)
-        tracklet=dict(self.config.get("tracklet") or {});self.sample_capacity=max(3,int(tracklet.get("max_samples",6)));self.min_descriptor_samples=max(2,int(tracklet.get("min_samples",3)));self.topk=max(2,int(tracklet.get("topk",4)));self.duplicate_feature_cos=max(.90,min(.9999,float(tracklet.get("duplicate_feature_cos",.985))));self.duplicate_quality_gain=max(0.0,float(tracklet.get("duplicate_quality_gain",.04)))
-        self.pair_cfg=dict(self.config.get("pair_matching") or {});self.same_room_pairs=[tuple(map(str,p[:2])) for p in self.pair_cfg.get("pairs",[]) if isinstance(p,(list,tuple)) and len(p)>=2];self.default_candidate=float(self.pair_cfg.get("candidate_threshold",.68));self.default_strong=float(self.pair_cfg.get("strong_threshold",.76));self.default_margin=max(0.0,float(self.pair_cfg.get("margin",.035)));self.confirm_hits=max(1,int(self.pair_cfg.get("confirm_hits",2)));self.strong_confirm_hits=max(1,int(self.pair_cfg.get("strong_confirm_hits",1)));self.evidence_ttl=max(.2,float(self.pair_cfg.get("evidence_ttl_sec",2.0)));self.pair_overrides=dict(self.pair_cfg.get("overrides") or {})
-        self._lock=threading.RLock();self._stop=threading.Event();self._observer=None;self._infer=None;self._job_queue=queue.Queue(maxsize=max(1,int(self.config.get("queue_size",8))));self._latest_jobs={};self._last_result_frame={};self._tracks={cid:{} for cid in self.frame_stores};self._next_local={cid:1 for cid in self.frame_stores};self._evidence={};self._pair_scores=deque(maxlen=512);self._extractor=None;self._ready=False;self._last_error="";self._started=time.monotonic();self._submitted=0;self._embedded=0;self._batches=0;self._last_batch_ms=0.0;self._replaced_jobs=0;self._stale_jobs=0;self._crop_rejects=0;self._frame_misses=0;self._released_tracks=0;self._descriptor_updates=0;self._duplicate_features=0;self._pair_attempts=0;self._pair_confirms=0;self._pair_merges=0;self._pair_rejects=0
+        self.frame_stores=dict(frame_stores);self.detections=detections;self.config=dict(config or {});self.enabled=bool(self.config.get('enabled',False));self.selector=PersonCropSelector(self.config.get('crop'));self.identities=GlobalIdentityManager(self.config.get('identity'))
+        self.poll_sec=max(.01,float(self.config.get('poll_interval_ms',35))/1000.0);self.track_timeout=max(.5,float(self.config.get('local_track_timeout_sec',2.5)));self.match_iou=max(0.0,float(self.config.get('local_match_iou',.12)));self.match_center=max(.1,float(self.config.get('local_match_center',.72)));self.min_hits=max(1,int(self.config.get('min_track_hits',2)))
+        self.embed_cooldown=max(.2,float(self.config.get('embed_cooldown_sec',.75)));self.refresh_sec=max(self.embed_cooldown,float(self.config.get('refresh_sec',3.0)));self.quality_improvement=max(0.0,float(self.config.get('quality_improvement',.05)));self.batch_size=max(1,int(self.config.get('batch_size',4)));self.batch_wait=max(0.0,float(self.config.get('batch_wait_ms',20))/1000.0);self.max_job_age=max(.1,float(self.config.get('max_job_age_ms',700))/1000.0)
+        tracklet=dict(self.config.get('tracklet') or {});self.sample_capacity=max(3,int(tracklet.get('max_samples',8)));self.min_descriptor_samples=max(2,int(tracklet.get('min_samples',3)));self.topk=max(2,int(tracklet.get('topk',5)));self.duplicate_feature_cos=max(.90,min(.9999,float(tracklet.get('duplicate_feature_cos',.995))));self.duplicate_quality_gain=max(0.0,float(tracklet.get('duplicate_quality_gain',.03)))
+        self.pair_cfg=dict(self.config.get('pair_matching') or {});self.same_room_pairs=[tuple(map(str,p[:2])) for p in self.pair_cfg.get('pairs',[]) if isinstance(p,(list,tuple)) and len(p)>=2];self.default_candidate=float(self.pair_cfg.get('candidate_threshold',.58));self.default_strong=float(self.pair_cfg.get('strong_threshold',.70));self.default_margin=max(0.0,float(self.pair_cfg.get('margin',.025)));self.confirm_hits=max(1,int(self.pair_cfg.get('confirm_hits',2)));self.strong_confirm_hits=max(1,int(self.pair_cfg.get('strong_confirm_hits',1)));self.evidence_ttl=max(.2,float(self.pair_cfg.get('evidence_ttl_sec',2.5)));self.pair_overrides=dict(self.pair_cfg.get('overrides') or {})
+        self._lock=threading.RLock();self._stop=threading.Event();self._observer=None;self._infer=None;self._job_queue=queue.Queue(maxsize=max(1,int(self.config.get('queue_size',8))));self._latest_jobs={};self._last_result_frame={};self._tracks={cid:{} for cid in self.frame_stores};self._next_local={cid:1 for cid in self.frame_stores};self._evidence={};self._pair_scores=deque(maxlen=512);self._extractor=None;self._ready=False;self._last_error='';self._started=time.monotonic();self._submitted=0;self._embedded=0;self._batches=0;self._last_batch_ms=0.0;self._replaced_jobs=0;self._stale_jobs=0;self._crop_rejects=0;self._frame_misses=0;self._released_tracks=0;self._descriptor_updates=0;self._duplicate_features=0;self._pair_attempts=0;self._pair_confirms=0;self._pair_merges=0;self._pair_rejects=0
 
     def start(self):
         if not self.enabled:return
-        self._stop.clear();self._observer=threading.Thread(target=self._observe_loop,name="core-v1-reid-observer",daemon=False);self._infer=threading.Thread(target=self._infer_loop,name="core-v1-reid-infer",daemon=False);self._observer.start();self._infer.start()
+        self._stop.clear();self._observer=threading.Thread(target=self._observe_loop,name='core-v1-reid-observer',daemon=False);self._infer=threading.Thread(target=self._infer_loop,name='core-v1-reid-infer',daemon=False);self._observer.start();self._infer.start()
     def stop(self):
         self._stop.set()
         try:self._job_queue.put_nowait(None)
@@ -152,7 +194,7 @@ class ReIDCoordinator:
             snapshot=self.detections.snapshot() if self.detections is not None else {}
             for camera_id,result in snapshot.items():
                 if int(result.frame_id)<=int(self._last_result_frame.get(camera_id,-1)):continue
-                self._last_result_frame[camera_id]=int(result.frame_id);store=self.frame_stores.get(camera_id);frame=store.get_frame(result.frame_id) if store and hasattr(store,"get_frame") else None
+                self._last_result_frame[camera_id]=int(result.frame_id);store=self.frame_stores.get(camera_id);frame=store.get_frame(result.frame_id) if store and hasattr(store,'get_frame') else None
                 if frame is None:self._frame_misses+=1;continue
                 observed=float(result.frame_captured_monotonic);assigned=self._associate(camera_id,list(result.boxes),observed);now=time.monotonic()
                 for track,box in assigned:
@@ -175,13 +217,18 @@ class ReIDCoordinator:
             nearest=max(_cosine(vector,s.embedding) for s in track.samples);best_q=max(s.quality for s in track.samples)
             if nearest>=self.duplicate_feature_cos and quality<best_q+self.duplicate_quality_gain:self._duplicate_features+=1;return False
         track.samples.append(_FeatureSample(vector,float(quality),float(observed_at)))
-        ranked=sorted(track.samples,key=lambda s:s.quality,reverse=True)[:min(self.topk,len(track.samples))];weights=np.asarray([max(.05,s.quality) for s in ranked],dtype=np.float32);weights=weights/weights.sum();track.descriptor=_norm(sum(float(w)*s.embedding for w,s in zip(weights,ranked)));track.descriptor_version+=1;self._descriptor_updates+=1;return True
+        ranked=sorted(track.samples,key=lambda s:s.quality,reverse=True)[:min(self.topk,len(track.samples))]
+        base=_norm(sum(s.embedding for s in ranked))
+        weights=[]
+        for sample in ranked:
+            consensus=max(.05,(1.0+_cosine(sample.embedding,base))*.5);weights.append(max(.05,sample.quality)*(consensus**2))
+        weights=np.asarray(weights,dtype=np.float32);weights=weights/weights.sum();track.descriptor=_norm(sum(float(w)*s.embedding for w,s in zip(weights,ranked)));track.descriptor_version+=1;self._descriptor_updates+=1;return True
 
     def _pair_params(self,left,right):
         cfg={}
-        for key in (f"{left}:{right}",f"{right}:{left}"):
+        for key in (f'{left}:{right}',f'{right}:{left}'):
             if key in self.pair_overrides:cfg=dict(self.pair_overrides[key] or {});break
-        return float(cfg.get("candidate_threshold",self.default_candidate)),float(cfg.get("strong_threshold",self.default_strong)),float(cfg.get("margin",self.default_margin))
+        return float(cfg.get('candidate_threshold',self.default_candidate)),float(cfg.get('strong_threshold',self.default_strong)),float(cfg.get('margin',self.default_margin))
 
     def _mature(self,camera_id):
         now=time.monotonic();return [t for t in self._tracks.get(camera_id,{}).values() if t.descriptor is not None and len(t.samples)>=self.min_descriptor_samples and now-t.last_seen<=self.track_timeout]
@@ -209,22 +256,22 @@ class ReIDCoordinator:
             for li,ri,score in assignments:
                 a=left[li];b=right[ri]
                 if a.global_id and b.global_id and a.global_id==b.global_id:continue
-                self._pair_attempts+=1;row=sorted((float(v) for v in scores[li,:]),reverse=True);col=sorted((float(v) for v in scores[:,ri]),reverse=True);row2=row[1] if len(row)>1 else -1.0;col2=col[1] if len(col)>1 else -1.0;actual_margin=min(score-row2,score-col2);self._pair_scores.append({"pair":f"{left_cam}:{right_cam}","left":a.local_id,"right":b.local_id,"score":round(score,5),"margin":round(actual_margin,5),"ts":now})
-                key=(left_cam,a.local_id,right_cam,b.local_id);sig=(a.descriptor_version,b.descriptor_version);previous=self._evidence.get(key,{"hits":0,"last":0.0,"sig":None})
-                if previous.get("sig")==sig:continue
+                self._pair_attempts+=1;row=sorted((float(v) for v in scores[li,:]),reverse=True);col=sorted((float(v) for v in scores[:,ri]),reverse=True);row2=row[1] if len(row)>1 else -1.0;col2=col[1] if len(col)>1 else -1.0;actual_margin=min(score-row2,score-col2);self._pair_scores.append({'pair':f'{left_cam}:{right_cam}','left':a.local_id,'right':b.local_id,'score':round(score,5),'margin':round(actual_margin,5),'ts':now})
+                key=(left_cam,a.local_id,right_cam,b.local_id);sig=(a.descriptor_version,b.descriptor_version);previous=self._evidence.get(key,{'hits':0,'last':0.0,'sig':None})
+                if previous.get('sig')==sig:continue
                 if score<candidate or actual_margin<margin:
-                    self._pair_rejects+=1;self._evidence[key]={"hits":0,"last":now,"sig":sig,"score":score};continue
-                hits=1 if now-previous["last"]>self.evidence_ttl else previous["hits"]+1;self._evidence[key]={"hits":hits,"last":now,"sig":sig,"score":score};required=self.strong_confirm_hits if score>=strong else self.confirm_hits
+                    self._pair_rejects+=1;self._evidence[key]={'hits':0,'last':now,'sig':sig,'score':score};continue
+                hits=1 if now-previous['last']>self.evidence_ttl else previous['hits']+1;self._evidence[key]={'hits':hits,'last':now,'sig':sig,'score':score};required=self.strong_confirm_hits if score>=strong else self.confirm_hits
                 if hits<required:continue
                 self._pair_confirms+=1;gid,reason=self.identities.merge_tracks(left_cam,a.local_id,right_cam,b.local_id,score,now)
                 if gid:
-                    a.global_id=gid;b.global_id=gid;a.last_similarity=score;b.last_similarity=score;a.last_reason="pair_"+reason;b.last_reason="pair_"+reason
-                    if reason=="merged":self._pair_merges+=1
+                    a.global_id=gid;b.global_id=gid;a.last_similarity=score;b.last_similarity=score;a.last_reason='pair_'+reason;b.last_reason='pair_'+reason
+                    if reason=='merged':self._pair_merges+=1
                 self._evidence.pop(key,None)
 
     def _infer_loop(self):
-        try:self._extractor=_OSNetExtractor(self.config);self._ready=True;log.info("CORE_V1_REID_V2_READY model=%s device=%s",self.config.get("model","osnet_x0_5"),self.config.get("device","cpu"))
-        except Exception as exc:self._last_error=f"{type(exc).__name__}: {exc}";log.exception("CORE_V1_REID_DISABLED error=%s",self._last_error);return
+        try:self._extractor=_OSNetExtractor(self.config);self._ready=True;log.info('CORE_V1_REID_V3_READY model=%s device=%s checkpoint=%s',self.config.get('model','osnet_ain_x1_0'),self.config.get('device','cpu'),self._extractor.model_path)
+        except Exception as exc:self._last_error=f'{type(exc).__name__}: {exc}';log.exception('CORE_V1_REID_DISABLED error=%s',self._last_error);return
         while not self._stop.is_set():
             try:key=self._job_queue.get(timeout=.25)
             except queue.Empty:self._evaluate_pairs();continue
@@ -245,7 +292,7 @@ class ReIDCoordinator:
             if not fresh:continue
             started=time.perf_counter()
             try:features=self._extractor.extract([j.crop for j in fresh])
-            except Exception as exc:self._last_error=f"{type(exc).__name__}: {exc}";log.exception("CORE_V1_REID_BATCH_FAILED");continue
+            except Exception as exc:self._last_error=f'{type(exc).__name__}: {exc}';log.exception('CORE_V1_REID_BATCH_FAILED');continue
             self._last_batch_ms=(time.perf_counter()-started)*1000.0;self._batches+=1
             for job,feature in zip(fresh,features):
                 track=self._tracks.get(job.camera_id,{}).get(job.local_id)
@@ -256,10 +303,10 @@ class ReIDCoordinator:
             self._evaluate_pairs()
 
     def labels(self,camera_id):
-        now=time.monotonic();return [{"local_id":t.local_id,"global_id":t.global_id,"box":t.box,"similarity":t.last_similarity,"reason":t.last_reason} for t in list(self._tracks.get(str(camera_id),{}).values()) if t.global_id and now-t.last_seen<=self.track_timeout]
+        now=time.monotonic();return [{'local_id':t.local_id,'global_id':t.global_id,'box':t.box,'similarity':t.last_similarity,'reason':t.last_reason} for t in list(self._tracks.get(str(camera_id),{}).values()) if t.global_id and now-t.last_seen<=self.track_timeout]
 
     def snapshot(self):
-        cameras={cid:[{"local_id":t.local_id,"global_id":t.global_id,"last_seen":t.last_seen,"hits":t.hits,"similarity":t.last_similarity,"reason":t.last_reason,"tracklet_samples":len(t.samples),"descriptor_version":t.descriptor_version,"descriptor_ready":t.descriptor is not None and len(t.samples)>=self.min_descriptor_samples} for t in tracks.values()] for cid,tracks in self._tracks.items()};return {"algorithm":"tracklet-reid-v2","cameras":cameras,"global":self.identities.snapshot(),"recent_pair_scores":list(self._pair_scores)[-40:]}
+        cameras={cid:[{'local_id':t.local_id,'global_id':t.global_id,'last_seen':t.last_seen,'hits':t.hits,'similarity':t.last_similarity,'reason':t.last_reason,'tracklet_samples':len(t.samples),'descriptor_version':t.descriptor_version,'descriptor_ready':t.descriptor is not None and len(t.samples)>=self.min_descriptor_samples} for t in tracks.values()] for cid,tracks in self._tracks.items()};return {'algorithm':'tracklet-reid-v3','cameras':cameras,'global':self.identities.snapshot(),'recent_pair_scores':list(self._pair_scores)[-40:]}
 
     def metrics(self):
-        elapsed=max(.001,time.monotonic()-self._started);return {"enabled":self.enabled,"ready":self._ready,"algorithm":"tracklet-reid-v2","model":self.config.get("model","osnet_x0_5"),"device":self.config.get("device","cpu"),"submitted":self._submitted,"embedded":self._embedded,"embed_rate":self._embedded/elapsed,"batches":self._batches,"last_batch_ms":self._last_batch_ms,"descriptor_updates":self._descriptor_updates,"duplicate_features":self._duplicate_features,"pair_attempts":self._pair_attempts,"pair_confirms":self._pair_confirms,"pair_merges":self._pair_merges,"pair_rejects":self._pair_rejects,"replaced_jobs":self._replaced_jobs,"stale_jobs":self._stale_jobs,"crop_rejects":self._crop_rejects,"frame_misses":self._frame_misses,"released_tracks":self._released_tracks,"queue_depth":self._job_queue.qsize(),"last_error":self._last_error,"identity":self.identities.metrics()}
+        elapsed=max(.001,time.monotonic()-self._started);return {'enabled':self.enabled,'ready':self._ready,'algorithm':'tracklet-reid-v3','model':self.config.get('model','osnet_ain_x1_0'),'device':self.config.get('device','cpu'),'checkpoint':getattr(self._extractor,'model_path',None),'flip_tta':bool(self.config.get('flip_tta',True)),'submitted':self._submitted,'embedded':self._embedded,'embed_rate':self._embedded/elapsed,'batches':self._batches,'last_batch_ms':self._last_batch_ms,'descriptor_updates':self._descriptor_updates,'duplicate_features':self._duplicate_features,'pair_attempts':self._pair_attempts,'pair_confirms':self._pair_confirms,'pair_merges':self._pair_merges,'pair_rejects':self._pair_rejects,'replaced_jobs':self._replaced_jobs,'stale_jobs':self._stale_jobs,'crop_rejects':self._crop_rejects,'frame_misses':self._frame_misses,'released_tracks':self._released_tracks,'queue_depth':self._job_queue.qsize(),'last_error':self._last_error,'identity':self.identities.metrics()}
