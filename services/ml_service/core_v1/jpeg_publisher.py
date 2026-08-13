@@ -7,10 +7,6 @@ import cv2
 
 from .visual_tracker import VisualTracker
 
-# Six publisher threads run in the same ML process. Letting every OpenCV call
-# fan out into its own parallel worker pool can oversubscribe a small CPU and
-# create bursty frame pacing. Keep each publisher operation single-threaded;
-# camera ingest and CUDA detection are independent of this setting.
 try:
     cv2.setNumThreads(1)
     cv2.setUseOptimized(True)
@@ -43,8 +39,8 @@ class LatestJpegPublisher:
         self.visual_tracker = VisualTracker(
             hold_ms=cfg.get('hold_ms', 900),
             memory_ms=cfg.get('memory_ms', 6000),
-            prediction_ms=cfg.get('prediction_ms', 250),
-            match_iou=cfg.get('match_iou', 0.16),
+            prediction_ms=cfg.get('prediction_ms', 550),
+            match_iou=cfg.get('match_iou', 0.10),
             reacquire_distance=cfg.get('reacquire_distance', 1.05),
             duplicate_iou=cfg.get('duplicate_iou', 0.50),
             duplicate_containment=cfg.get('duplicate_containment', 0.82),
@@ -55,21 +51,22 @@ class LatestJpegPublisher:
             fragment_max_area_ratio=cfg.get('fragment_max_area_ratio', 0.70),
             fragment_min_vertical_overlap=cfg.get('fragment_min_vertical_overlap', 0.12),
             fragment_max_vertical_gap=cfg.get('fragment_max_vertical_gap', 0.10),
-            smoothing=cfg.get('smoothing', 0.72),
-            center_smoothing=cfg.get('center_smoothing', 0.72),
-            size_smoothing=cfg.get('size_smoothing', 0.52),
-            velocity_smoothing=cfg.get('velocity_smoothing', 0.45),
-            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes', 0.40),
-            max_prediction_size_ratio=cfg.get('max_prediction_size_ratio', 0.12),
-            adaptive_center_smoothing=cfg.get('adaptive_center_smoothing', 0.88),
-            adaptive_error_boxes=cfg.get('adaptive_error_boxes', 0.28),
-            snap_distance_boxes=cfg.get('snap_distance_boxes', 0.80),
-            reversal_damping=cfg.get('reversal_damping', 0.30),
-            low_conf_confirm=camera_low_conf.get(camera_id, cfg.get('low_conf_confirm', 0.12)),
+            low_conf_confirm=camera_low_conf.get(camera_id, cfg.get('low_conf_confirm', 0.08)),
             start_conf=camera_start_conf.get(camera_id, cfg.get('start_conf', 0.34)),
             new_track_min_conf=cfg.get('new_track_min_conf', 0.24),
             strong_confirm_hits=cfg.get('strong_confirm_hits', 2),
             weak_confirm_hits=cfg.get('weak_confirm_hits', 3),
+            byte_high_conf=cfg.get('byte_high_conf', 0.24),
+            byte_low_conf=cfg.get('byte_low_conf', 0.08),
+            byte_second_match_iou=cfg.get('byte_second_match_iou', 0.04),
+            byte_match_center=cfg.get('byte_match_center', 0.82),
+            byte_second_match_center=cfg.get('byte_second_match_center', 0.55),
+            low_match_max_age_ms=cfg.get('low_match_max_age_ms', 700),
+            process_noise=cfg.get('process_noise', 1.0),
+            measurement_noise=cfg.get('measurement_noise', 1.0),
+            velocity_damping=cfg.get('velocity_damping', 0.985),
+            max_prediction_shift_boxes=cfg.get('max_prediction_shift_boxes', 0.70),
+            max_prediction_size_ratio=cfg.get('max_prediction_size_ratio', 0.12),
             new_track_zones=camera_birth_zones.get(camera_id, []),
             exclusion_zones=camera_zones.get(camera_id, []),
             exclusion_max_box_height=cfg.get('exclusion_max_box_height', 0.24),
@@ -125,6 +122,7 @@ class LatestJpegPublisher:
         now = time.monotonic()
         with self._lock:
             elapsed = max(0.001, now - self._started_mono)
+            tracker_metrics = self.visual_tracker.metrics()
             return {
                 'encoded': self.encoded,
                 'publish_rate': self.encoded / elapsed,
@@ -140,6 +138,7 @@ class LatestJpegPublisher:
                 'last_published_age_ms': ((now - self._published_monotonic) * 1000.0)
                     if self._published_monotonic else None,
                 'source_frame_id': self._source_frame_id,
+                'tracker': tracker_metrics,
             }
 
     def wait_newer(self, last_version: int, timeout: float = 0.25):
@@ -203,8 +202,6 @@ class LatestJpegPublisher:
                 self._stop.wait(next_at - now)
                 continue
 
-            # Keep a stable target cadence. If one cycle is late, skip the missed
-            # slot instead of replaying work and creating a burst/backlog.
             next_at += self.interval
             if next_at < now:
                 missed = int((now - next_at) / self.interval) + 1
