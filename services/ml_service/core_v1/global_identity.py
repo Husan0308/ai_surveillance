@@ -31,10 +31,13 @@ class GlobalIdentity:
 class GlobalIdentityManager:
     """Conservative cross-camera identity association.
 
-    ReID embeddings update appearance. Track activity, however, is managed
-    independently from the embedding refresh cadence. This is important because
-    ReID may intentionally run only every few seconds; an active local track must
-    not lose its Global ID just because no new embedding was requested.
+    Appearance is combined with physical camera-room constraints. Two local
+    tracks may share one Global ID concurrently only when they are in cameras
+    mapped to the same room (typically overlapping views). Different-room active
+    tracks are a hard conflict even if OSNet appearance happens to be similar.
+
+    ReID embeddings update appearance; local track activity independently keeps
+    an established binding alive between sparse embedding refreshes.
     """
 
     def __init__(self, config: dict | None = None):
@@ -44,10 +47,18 @@ class GlobalIdentityManager:
         self.ambiguity_margin = max(0.0, float(cfg.get("ambiguity_margin", 0.045)))
         self.prototype_alpha = max(0.01, min(1.0, float(cfg.get("prototype_alpha", 0.22))))
         self.gallery_size = max(1, int(cfg.get("gallery_size", 8)))
-        self.active_timeout_sec = max(0.2, float(cfg.get("active_timeout_sec", 2.5)))
+        self.active_timeout_sec = max(0.2, float(cfg.get("active_timeout_sec", 6.0)))
         self.max_transition_sec = max(0.1, float(cfg.get("max_transition_sec", 45.0)))
+        self.camera_rooms = {
+            str(camera_id): str(room_id)
+            for camera_id, room_id in (cfg.get("camera_rooms") or {}).items()
+        }
+        self.block_concurrent_cross_room = bool(cfg.get("block_concurrent_cross_room", True))
         self.topology = {
-            str(src): {str(dst): tuple(map(float, bounds)) for dst, bounds in (targets or {}).items()}
+            str(src): {
+                str(dst): tuple(map(float, bounds))
+                for dst, bounds in (targets or {}).items()
+            }
             for src, targets in (cfg.get("topology") or {}).items()
         }
 
@@ -61,8 +72,10 @@ class GlobalIdentityManager:
         self._existing_updates = 0
         self._ambiguous = 0
         self._conflicts = 0
+        self._room_rejects = 0
         self._released = 0
         self._expired = 0
+        self._merge_scores: list[float] = []
 
     @staticmethod
     def _local_key(camera_id: str, local_track_id: int) -> str:
@@ -127,6 +140,27 @@ class GlobalIdentityManager:
         active = identity.active_tracks.get(camera_id)
         return active is not None and active != local_key
 
+    def _concurrent_room_conflict(self, identity: GlobalIdentity, camera_id: str) -> bool:
+        if not self.block_concurrent_cross_room or not self.camera_rooms:
+            return False
+        candidate_room = self.camera_rooms.get(str(camera_id))
+        if candidate_room is None:
+            return False
+        for active_camera in identity.active_tracks:
+            active_room = self.camera_rooms.get(str(active_camera))
+            if active_room is not None and active_room != candidate_room:
+                return True
+        return False
+
+    @staticmethod
+    def _similarity_to_identity(vector, identity: GlobalIdentity) -> float:
+        prototype_score = _cosine(vector, identity.prototype)
+        gallery_score = max(
+            (_cosine(vector, item) for item in identity.gallery),
+            default=prototype_score,
+        )
+        return float(max(prototype_score, gallery_score))
+
     def touch_track(self, camera_id: str, local_track_id: int, observed_at: float | None = None):
         """Refresh activity for an already-bound local track without ReID work."""
         camera_id = str(camera_id)
@@ -140,14 +174,11 @@ class GlobalIdentityManager:
                 return None
             self._track_activity[local_key] = observed_at
             identity.active_tracks[camera_id] = local_key
-            # Physical track activity is stronger timing evidence than sparse
-            # embedding refreshes, so keep transition timing current as well.
             identity.last_seen = max(float(identity.last_seen), observed_at)
             identity.last_camera = camera_id
             return gid
 
     def release_track(self, camera_id: str, local_track_id: int) -> None:
-        """Explicitly release a local track when the local tracker times out."""
         local_key = self._local_key(camera_id, local_track_id)
         with self._lock:
             existed = local_key in self._track_to_global
@@ -166,22 +197,22 @@ class GlobalIdentityManager:
             existing_gid = self._track_to_global.get(local_key)
             if existing_gid and existing_gid in self._identities:
                 identity = self._identities[existing_gid]
+                similarity = self._similarity_to_identity(vector, identity)
                 self._update_identity(identity, camera_id, local_key, vector, observed_at)
                 self._track_activity[local_key] = observed_at
                 self._existing_updates += 1
-                # Similarity 1.0 here means the binding is already established;
-                # it is not a fresh cross-camera similarity measurement.
-                return existing_gid, 1.0, "existing"
+                return existing_gid, similarity, "existing"
 
             candidates = []
             for gid, identity in self._identities.items():
                 if self._same_camera_conflict(identity, camera_id, local_key):
                     continue
+                if self._concurrent_room_conflict(identity, camera_id):
+                    self._room_rejects += 1
+                    continue
                 if not self._transition_allowed(identity, camera_id, observed_at):
                     continue
-                prototype_score = _cosine(vector, identity.prototype)
-                gallery_score = max((_cosine(vector, item) for item in identity.gallery), default=prototype_score)
-                score = max(prototype_score, gallery_score)
+                score = self._similarity_to_identity(vector, identity)
                 candidates.append((score, gid, identity))
 
             candidates.sort(key=lambda item: item[0], reverse=True)
@@ -197,11 +228,17 @@ class GlobalIdentityManager:
             if self._same_camera_conflict(best_identity, camera_id, local_key):
                 self._conflicts += 1
                 return self._new_identity(camera_id, local_key, vector, observed_at)
+            if self._concurrent_room_conflict(best_identity, camera_id):
+                self._room_rejects += 1
+                return self._new_identity(camera_id, local_key, vector, observed_at)
 
             self._track_to_global[local_key] = best_gid
             self._track_activity[local_key] = observed_at
             self._update_identity(best_identity, camera_id, local_key, vector, observed_at)
             self._merges += 1
+            self._merge_scores.append(float(best_score))
+            if len(self._merge_scores) > 128:
+                del self._merge_scores[:-128]
             return best_gid, float(best_score), "merged"
 
     def _update_identity(self, identity: GlobalIdentity, camera_id: str, local_key: str, vector, observed_at: float):
@@ -228,6 +265,10 @@ class GlobalIdentityManager:
                     "last_seen": identity.last_seen,
                     "last_camera": identity.last_camera,
                     "active_tracks": dict(identity.active_tracks),
+                    "active_rooms": sorted({
+                        self.camera_rooms.get(camera_id, "unknown")
+                        for camera_id in identity.active_tracks
+                    }),
                     "gallery_size": len(identity.gallery),
                 }
                 for gid, identity in self._identities.items()
@@ -235,6 +276,7 @@ class GlobalIdentityManager:
 
     def metrics(self):
         with self._lock:
+            scores = list(self._merge_scores)
             return {
                 "global_identities": len(self._identities),
                 "active_local_tracks": len(self._track_to_global),
@@ -243,8 +285,13 @@ class GlobalIdentityManager:
                 "existing_updates": self._existing_updates,
                 "ambiguous": self._ambiguous,
                 "conflicts": self._conflicts,
+                "room_rejects": self._room_rejects,
                 "released": self._released,
                 "expired": self._expired,
                 "match_threshold": self.match_threshold,
                 "strong_threshold": self.strong_threshold,
+                "camera_rooms": dict(self.camera_rooms),
+                "merge_score_last": scores[-1] if scores else None,
+                "merge_score_min": min(scores) if scores else None,
+                "merge_score_max": max(scores) if scores else None,
             }
