@@ -137,8 +137,6 @@ core_v1:
 
   reid:
     enabled: true
-    # x0.5 is materially stronger than x0.25 while ReID stays asynchronous on
-    # one CPU thread, so YOLO/DeepStream GPU presentation remains untouched.
     model: "osnet_x0_5"
     model_path: ""
     device: "cpu"
@@ -152,7 +150,6 @@ core_v1:
     local_match_iou: 0.12
     local_match_center: 0.72
 
-    # Build a useful tracklet quickly, then sample only meaningful refreshes.
     embed_cooldown_sec: 0.75
     refresh_sec: 3.0
     quality_improvement: 0.05
@@ -165,7 +162,10 @@ core_v1:
       min_samples: 3
       max_samples: 6
       topk: 4
-      duplicate_feature_cos: 0.985
+      # Initial samples must not be filtered away on a static standing person.
+      # Near-identical later samples are still suppressed once they are truly
+      # almost numerically identical.
+      duplicate_feature_cos: 0.9995
       duplicate_quality_gain: 0.04
 
     crop:
@@ -180,9 +180,6 @@ core_v1:
       pad_x: 0.04
       pad_y: 0.02
 
-    # Same-room cameras are overlapping views. The matcher solves all active
-    # people jointly one-to-one, requires a nearest-neighbour margin, and waits
-    # for repeat evidence unless the score is already very strong.
     pair_matching:
       pairs:
         - [CAM-01, CAM-04]
