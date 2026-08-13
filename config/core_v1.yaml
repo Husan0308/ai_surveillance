@@ -137,47 +137,81 @@ core_v1:
 
   reid:
     enabled: true
-    model: "osnet_x0_25"
+    # x0.5 is materially stronger than x0.25 while ReID stays asynchronous on
+    # one CPU thread, so YOLO/DeepStream GPU presentation remains untouched.
+    model: "osnet_x0_5"
     model_path: ""
     device: "cpu"
     torch_cpu_threads: 1
     input_height: 256
     input_width: 128
+
     poll_interval_ms: 35
     min_track_hits: 2
-    local_track_timeout_sec: 2.0
+    local_track_timeout_sec: 2.5
     local_match_iou: 0.12
     local_match_center: 0.72
-    embed_cooldown_sec: 1.2
-    refresh_sec: 4.0
-    quality_improvement: 0.08
+
+    # Build a useful tracklet quickly, then sample only meaningful refreshes.
+    embed_cooldown_sec: 0.75
+    refresh_sec: 3.0
+    quality_improvement: 0.05
     batch_size: 4
     batch_wait_ms: 20
     queue_size: 8
     max_job_age_ms: 700
+
+    tracklet:
+      min_samples: 3
+      max_samples: 6
+      topk: 4
+      duplicate_feature_cos: 0.985
+      duplicate_quality_gain: 0.04
 
     crop:
       min_width: 42
       min_height: 96
       min_area: 6500
       min_conf: 0.20
+      max_width_height_ratio: 0.95
       edge_margin: 0.015
+      reject_edge: false
       min_sharpness: 18.0
       pad_x: 0.04
       pad_y: 0.02
 
-    identity:
-      match_threshold: 0.78
-      strong_threshold: 0.84
-      ambiguity_margin: 0.045
-      prototype_alpha: 0.22
-      gallery_size: 8
-      active_timeout_sec: 6.0
-      max_transition_sec: 45.0
+    # Same-room cameras are overlapping views. The matcher solves all active
+    # people jointly one-to-one, requires a nearest-neighbour margin, and waits
+    # for repeat evidence unless the score is already very strong.
+    pair_matching:
+      pairs:
+        - [CAM-01, CAM-04]
+        - [CAM-02, CAM-05]
+        - [CAM-03, CAM-06]
+      candidate_threshold: 0.68
+      strong_threshold: 0.76
+      margin: 0.035
+      confirm_hits: 2
+      strong_confirm_hits: 1
+      evidence_ttl_sec: 2.0
+      overrides:
+        "CAM-01:CAM-04":
+          candidate_threshold: 0.68
+          strong_threshold: 0.76
+          margin: 0.035
+        "CAM-02:CAM-05":
+          candidate_threshold: 0.68
+          strong_threshold: 0.76
+          margin: 0.035
+        "CAM-03:CAM-06":
+          candidate_threshold: 0.68
+          strong_threshold: 0.76
+          margin: 0.035
 
-      # Physical room map. Concurrent cross-camera Global-ID sharing is only
-      # valid inside one room/overlapping pair. This blocks impossible merges
-      # such as CAM-01 <-> CAM-03 while both people are actively visible.
+    identity:
+      prototype_alpha: 0.18
+      gallery_size: 12
+      active_timeout_sec: 6.0
       camera_rooms:
         CAM-01: ROOM-1
         CAM-04: ROOM-1
@@ -186,8 +220,3 @@ core_v1:
         CAM-03: ROOM-3
         CAM-06: ROOM-3
       block_concurrent_cross_room: true
-
-      # Leave inter-room transition timing unconstrained until actual doorway/
-      # travel times are measured. The hard concurrent-room guard is safe now;
-      # guessed transition windows would risk false negatives.
-      topology: {}
