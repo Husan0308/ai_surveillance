@@ -27,11 +27,8 @@ core_v1:
   max_pipeline_lag_ms: 0
   max_pipeline_lag_samples: 8
 
-  # A tiny 50 ms jitterbuffer was too aggressive for six office RTSP feeds and
-  # can manifest as stop/go playback when packet arrival is bursty. Give the
-  # source a bounded 150 ms window and DROP late packets instead of allowing the
-  # jitterbuffer to grow. "auto" lets RTP try the normal UDP path with TCP
-  # fallback instead of forcing TCP head-of-line blocking on every camera.
+  # Give RTSP a bounded jitter window and discard late data instead of allowing
+  # transport buffering to grow. Auto transport permits UDP with TCP fallback.
   rtsp_transport: "auto"
   rtsp_latency_ms: 150
   rtsp_buffer_mode: "auto"
@@ -39,14 +36,10 @@ core_v1:
   tcp_timestamp: false
   udp_buffer_size: 1048576
 
-  # Extra NVDEC surfaces reduce decoder starvation under six concurrent streams.
-  # low-latency-mode stays false because it is only safe for streams without
-  # B-frames; the camera GOP structure is not guaranteed yet.
   decoder_extra_surfaces: 4
   decoder_low_latency_mode: false
   postdecode_queue_buffers: 1
 
-  # nvurisrcbin handles source-level RTSP stalls independently per camera.
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
@@ -105,9 +98,16 @@ core_v1:
           box: [0.36, 0.12, 0.74, 0.48]
 
   visual_tracker:
+    # Visual continuity only. This state is never ReID/global-ID evidence.
     hold_ms: 900
-    prediction_ms: 500
     memory_ms: 6000
+
+    # Short bounded constant-velocity prediction bridges detector cadence without
+    # letting a box run away when a person stops or reverses direction.
+    prediction_ms: 250
+    max_prediction_shift_boxes: 0.40
+    max_prediction_size_ratio: 0.12
+
     match_iou: 0.16
     reacquire_distance: 1.05
     duplicate_iou: 0.50
@@ -121,9 +121,20 @@ core_v1:
     fragment_min_vertical_overlap: 0.08
     fragment_max_vertical_gap: 0.14
 
-    smoothing: 0.96
-    velocity_smoothing: 0.62
-    max_prediction_shift_boxes: 0.60
+    # Center and size are filtered independently. Position follows motion faster;
+    # width/height are damped more because detector edge jitter is visually noisy.
+    smoothing: 0.72
+    center_smoothing: 0.72
+    size_smoothing: 0.52
+    velocity_smoothing: 0.45
+
+    # Adaptive correction: small detector noise is smoothed, but if the predicted
+    # center falls materially behind a walking person it catches up quickly. A
+    # very large discontinuity snaps to the detector and damps old velocity.
+    adaptive_center_smoothing: 0.88
+    adaptive_error_boxes: 0.28
+    snap_distance_boxes: 0.80
+    reversal_damping: 0.30
 
     start_conf: 0.34
     new_track_min_conf: 0.24
