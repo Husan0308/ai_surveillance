@@ -16,6 +16,7 @@ core_v1:
   reconnect_delay_sec: 1.0
 
   capture_backend: "auto"
+
   max_pipeline_lag_ms: 0
   max_pipeline_lag_samples: 8
 
@@ -29,6 +30,7 @@ core_v1:
   decoder_extra_surfaces: 4
   decoder_low_latency_mode: false
   postdecode_queue_buffers: 1
+
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
@@ -47,6 +49,7 @@ core_v1:
     duplicate_iou: 0.58
     fusion_containment: 0.84
     fusion_center_distance: 0.40
+
     max_submit_age_ms: 300
     max_result_age_ms: 900
     overlay_max_age_ms: 900
@@ -75,6 +78,7 @@ core_v1:
           rotations: [0]
           trigger_max_full_roi_persons: 1
           box: [0.27, 0.00, 0.72, 0.54]
+
         CAM-06:
           mode: "augment"
           every_n: 2
@@ -131,9 +135,6 @@ core_v1:
       CAM-06:
         - [0.50, 0.00, 0.78, 0.22]
 
-  # ReID is deliberately outside the camera/detector hot path. On this 4 GB
-  # machine YOLO already uses most GPU compute, so OSNet starts on one CPU thread.
-  # It runs only for selected real detector crops and never for prediction boxes.
   reid:
     enabled: true
     model: "osnet_x0_25"
@@ -166,14 +167,13 @@ core_v1:
       pad_y: 0.02
 
     identity:
-      # Conservative defaults. Tune only from real same-person/different-person
-      # scores collected in this office. Ambiguous matches become a new Unknown
-      # instead of risking an irreversible false merge.
       match_threshold: 0.78
       strong_threshold: 0.84
       ambiguity_margin: 0.045
       prototype_alpha: 0.22
       gallery_size: 8
-      active_timeout_sec: 2.5
+      # Must exceed the 4 s embedding refresh cadence. Local tracker activity
+      # keeps the binding alive; this timeout is now only a safety expiry.
+      active_timeout_sec: 6.0
       max_transition_sec: 45.0
       topology: {}
