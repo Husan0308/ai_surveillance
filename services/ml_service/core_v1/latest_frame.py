@@ -16,14 +16,14 @@ class Frame:
     height: int
 
 class LatestFrameStore:
-    """Latest-only hot path plus a tiny bounded history for exact evidence.
+    """Latest-only hot path plus bounded exact-frame history for ReID.
 
     Normal camera/display/detector consumers still read one newest frame only.
-    The history is not replayed and cannot create presentation backlog; it only
-    lets asynchronous modules such as ReID retrieve the exact detector frame by
-    frame_id after inference finishes.
+    History is never replayed and cannot create presentation backlog. Ten source
+    frames cover roughly 0.5 s at 20 FPS, enough for the measured detector p95
+    latency while keeping memory usage bounded.
     """
-    def __init__(self, history_size: int = 4) -> None:
+    def __init__(self, history_size: int = 10) -> None:
         self._lock=threading.Lock();self._frame=None;self._version=0;self.replaced=0
         self._history=deque(maxlen=max(1,int(history_size)))
         self.history_hits=0;self.history_misses=0
