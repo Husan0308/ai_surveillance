@@ -172,8 +172,22 @@ core_v1:
       ambiguity_margin: 0.045
       prototype_alpha: 0.22
       gallery_size: 8
-      # Must exceed the 4 s embedding refresh cadence. Local tracker activity
-      # keeps the binding alive; this timeout is now only a safety expiry.
       active_timeout_sec: 6.0
       max_transition_sec: 45.0
+
+      # Physical room map. Concurrent cross-camera Global-ID sharing is only
+      # valid inside one room/overlapping pair. This blocks impossible merges
+      # such as CAM-01 <-> CAM-03 while both people are actively visible.
+      camera_rooms:
+        CAM-01: ROOM-1
+        CAM-04: ROOM-1
+        CAM-02: ROOM-2
+        CAM-05: ROOM-2
+        CAM-03: ROOM-3
+        CAM-06: ROOM-3
+      block_concurrent_cross_room: true
+
+      # Leave inter-room transition timing unconstrained until actual doorway/
+      # travel times are measured. The hard concurrent-room guard is safe now;
+      # guessed transition windows would risk false negatives.
       topology: {}
