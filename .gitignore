@@ -1,46 +1,40 @@
-# Python Cache
+# Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
-# AI Models (YOLO weights)
+# Virtual environments / IDE
+venv/
+.venv/
+.vscode/
+.idea/
+
+# Secrets / local camera overrides
+.env
+config/cameras.local.yaml
+
+# Models and generated inference artifacts
+models/
 *.pt
 *.pth
 *.onnx
 *.engine
 *.weights
-models/
 
-# Snapshots and Media
-snapshots/
-!services/ml_service/snapshots/
-!services/ml_service/snapshots/__init__.py
-!services/ml_service/snapshots/manager.py
+# Runtime state: never commit machine-local binaries, DB/WAL, logs or captures
+.runtime/
+data/
+logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# Generated media / diagnostics
 *.png
 *.jpg
 *.jpeg
 *.mp4
 *.avi
-
-# Virtual Environment & Settings
-venv/
-.venv/
-.env
-config/cameras.local.yaml
-.vscode/
-.idea/
-
-# Database & Backups
-*.db
-*.sqlite3
-data/*.db
-backups/
-
-# Logs
-*.log
-logs/
-# Runtime-owned P4 data
-data/snapshots/
-data/enrollment_staging/
-data/backups/
-data/validation/
-data/detection_miss_debug/
+core_v1_*.jsonl

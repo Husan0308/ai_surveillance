@@ -1,5 +1,7 @@
 -r base.txt
 --extra-index-url https://download.pytorch.org/whl/cu121
+fastapi>=0.110
+uvicorn[standard]>=0.27
 numpy>=1.24
 opencv-python>=4.8
 torch>=2.1
@@ -8,7 +10,6 @@ ultralytics>=8.2
 lap>=0.5.12
 torchreid>=0.2.5
 gdown>=6.1
-insightface>=0.7.3
-onnxruntime-gpu>=1.18
 psutil>=5.9
 nvidia-ml-py>=11.5
+# GStreamer/DeepStream Python bindings come from the host installation (python3-gi / Gst), not pip.

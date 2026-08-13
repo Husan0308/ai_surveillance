@@ -1,58 +1,64 @@
-# Project Architecture
+# Core v1 Architecture
 
-## Production data path
+## Realtime hot path
 
 ```text
-6 × RTSP
-  → GStreamer appsink + NVIDIA nvv4l2decoder/NVDEC
-  → capacity-one latest-frame buffers
-  → event-driven fresh-frame BatchScheduler
-  → optimized batched YOLO/PyTorch detector
-  → custom_motion_iou camera-local tracker
-  → asynchronous OSNet ReID and InsightFace
-  → GlobalIdentityManager
-  → per-camera occupancy heatmaps + canonical domain events
-  → FastAPI SQLite/WebSocket/MJPEG
-  → PySide6 frontend
+RTSP
+ -> DeepStream `nvurisrcbin` when available, otherwise GStreamer/NVDEC
+ -> decoded-frame queue bounded to one
+ -> `LatestFrameStore`
+ -> latest-only YOLO bridge
+ -> isolated spawned CUDA process
+ -> Kalman + Byte-style camera-local visual tracker
+ -> JPEG publisher
+ -> persistent HTTP reader in PySide6
 ```
 
-The production tracker is `custom_motion_iou`, not ByteTrack. The isolated ByteTrack adapter exists only for the completed P2 comparison. DeepStream/GStreamer provides hardware video ingestion and decode; detection remains the optimized YOLO/PyTorch path rather than `nvinfer`. Pose is disabled. Heatmaps are camera-space and are not floorplan/world-coordinate maps.
+The display path does not wait for ReID. There is one detector batch in flight; stale input/results are dropped instead of queued. `nvstreammux` and TensorRT `nvinfer` are not part of this GTX-1050-Ti Core-v1 path.
 
-## Service ownership
+## ReID v2 side path
 
-- `services/ml_service`: RTSP readers, latest buffers, batching, YOLO, local tracking, asynchronous ReID/face work, global identity, unknown snapshots, heatmaps, ML metrics, MJPEG source frames, and the internal ML control API.
-- `services/api_service`: public REST API, canonical SQLite storage, camera/person/enrollment/event/settings CRUD, ML control client, WebSocket fan-out, and persistence.
-- `services/frontend`: PySide6 widgets, asynchronous REST client, WebSocket client, MJPEG rendering, synchronized overlays, and user interaction. It does not import ML or camera-reader modules.
-- `shared`: service contracts, configuration, topology validation, event taxonomy, logging, and controlled enrollment staging.
+ReID consumes only exact real detector frames retained in a tiny bounded history. Prediction-only visual boxes cannot produce identity evidence.
 
-Raw realtime frames are not transported through Redis or WebSocket. Video uses the ML MJPEG endpoint; WebSocket carries bounded metadata.
-
-## Persistent state
-
-`data/surveillance.db` is the runtime authority. SQLite WAL is enabled. `api_resources` stores cameras, persons, settings, enrollment sessions, heatmaps, and events. `api_face_embeddings` stores normalized float32 embeddings with dimension, model version, quality, metadata, and enabled state.
-
-Unknown representative crops are stored under `data/snapshots/` with a bounded identity count, retention window, server-generated filenames, and quality replacement. Enrollment imports are copied by the same-host desktop client into `data/enrollment_staging/`; the API rejects paths outside that root and validates regular-file status, size, extension, and actual image decoding.
-
-## Identity and topology
-
-Local track IDs are camera-local. Global IDs are independent and bounded in memory. Appearance embeddings, camera history, and track history have explicit limits. A strong known-face assignment is locked against weak evidence; contradictory known evidence is recorded as a conflict.
-
-Physical topology is configured only in `config/topology.yaml`. It remains `verified: false` until an on-site inspection confirms every room, overlap, adjacency, and travel time. Unverified cross-camera layout is never treated as a hard identity fact. Run `python scripts/topology_calibration.py` for a credential-masked inventory.
-
-## Events and heatmaps
-
-Persistent canonical events are `camera.online`, `camera.offline`, `person.identified`, `identity.conflict`, `enrollment.completed`, and `enrollment.failed`. Existing historical types are preserved and marked legacy by the API. `frame.metadata` is realtime transport data and is not a persistent business event.
-
-Heatmaps use bbox bottom-center at a controlled interval and keep independent grids per camera. Live decay and bounded minute/hour/day accumulators prevent detector-rate or infinite accumulation.
-
-## Lifecycle
-
-Supported startup is `scripts/run_all.sh`. It starts API, waits for readiness, starts ML, waits for control readiness, then starts the frontend. SIGINT/SIGTERM are forwarded and child processes are joined. Individual entry points remain:
-
-```bash
-python -m services.api_service.app
-python -m services.ml_service.app
-python -m services.frontend.main
+```text
+real YOLO observation
+ -> crop quality gate
+ -> local ReID track
+ -> 3-6 diverse quality crops
+ -> OSNet tracklet embeddings
+ -> quality-weighted descriptor
+ -> same-room pair similarity matrix
+ -> one-to-one assignment + margin/evidence confirmation
+ -> Global ID merge
 ```
 
-Use `python scripts/check_environment.py` for read-only prerequisite validation and `python scripts/backup_database.py` for SQLite's online backup API.
+Physical same-room pairs:
+
+- ROOM-1: CAM-01 <-> CAM-04
+- ROOM-2: CAM-02 <-> CAM-05
+- ROOM-3: CAM-03 <-> CAM-06
+
+Concurrent cross-room Global-ID sharing is blocked. ReID remains a bounded asynchronous side workload so camera capture, detection and smooth display keep running even if ReID is slow or unavailable.
+
+## Repository ownership
+
+```text
+config/
+  cameras.yaml
+  core_v1.yaml
+requirements/
+  base.txt
+  api.txt
+  ml.txt
+  frontend.txt
+services/
+  api_service/core_v1/
+  frontend/core_v1/
+  ml_service/core_v1/
+  ml_service/cameras/{deepstream.py,gstreamer.py}
+shared/config/
+scripts/{core_v1_soak.py,core_v1_reid_v2_check.py}
+docs/core_v1_freeze_checklist.md
+```
+
+Everything else from the previous monolithic/legacy architecture is intentionally excluded from this clean branch.

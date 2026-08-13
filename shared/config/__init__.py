@@ -1,4 +1,4 @@
-"""Single read-only configuration layer for all services."""
+"""Configuration helpers used by the current Core v1 services."""
 from functools import lru_cache
 from pathlib import Path
 import os,re
@@ -7,7 +7,6 @@ import yaml
 
 PROJECT_ROOT=Path(__file__).resolve().parents[2]
 CONFIG_ROOT=PROJECT_ROOT/"config"
-
 
 @lru_cache(maxsize=None)
 def load_yaml(name):
@@ -22,15 +21,6 @@ def _expand(value):
         match=_ENV.match(value)
         if match:return os.getenv(match.group(1),match.group(2) or "")
     return value
-
-
-def project_config():
-    return load_yaml("project.yaml")
-
-
-def topology_config():
-    return load_yaml("topology.yaml")
-
 
 def camera_config():
     base=_expand(load_yaml("cameras.yaml"));local_path=CONFIG_ROOT/"cameras.local.yaml"
