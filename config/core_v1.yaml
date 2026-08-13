@@ -43,10 +43,6 @@ core_v1:
     conf: 0.06
     iou: 0.50
     max_det: 50
-
-    # Batch=2 lowers per-batch latency on this GPU while keeping the bridge
-    # latest-only. That gives the visual tracker fresher observations, which is
-    # more important for spatial box lag than a tiny gain in aggregate throughput.
     batch_size: 2
     poll_interval_ms: 5
     start_delay_sec: 2.0
@@ -93,18 +89,36 @@ core_v1:
           box: [0.36, 0.12, 0.74, 0.48]
 
   visual_tracker:
+    # PaddleDetection/ByteTrack-style visual tracking: Kalman predict/correct,
+    # high-confidence association first, then low-confidence second association.
+    # This tracker is presentation-only and never contributes ReID/global-ID evidence.
     hold_ms: 900
     memory_ms: 6000
+    prediction_ms: 550
 
-    # Current camera frames are fresh (<~60 ms), while detector observations can
-    # be a few hundred ms old. Predict far enough to reach the timestamp of the
-    # current display frame, but bound both spatial and size extrapolation.
-    prediction_ms: 420
-    max_prediction_shift_boxes: 0.55
-    max_prediction_size_ratio: 0.10
-
-    match_iou: 0.16
+    # Association geometry. Kalman prediction handles normal walking motion;
+    # center-distance fallback covers sparse detector cadence where IoU gets small.
+    match_iou: 0.10
     reacquire_distance: 1.05
+    byte_match_center: 0.82
+    byte_second_match_iou: 0.04
+    byte_second_match_center: 0.55
+    low_match_max_age_ms: 700
+
+    # Byte-style two-stage confidence policy. Detector itself runs from 0.06,
+    # so 0.08-0.24 boxes can rescue an existing track but cannot freely create one.
+    byte_high_conf: 0.24
+    byte_low_conf: 0.08
+    low_conf_confirm: 0.08
+
+    # Kalman noise/velocity behavior. Keep enough responsiveness to remove bbox
+    # trailing while damping tiny detector edge jitter and direction reversals.
+    process_noise: 1.0
+    measurement_noise: 0.85
+    velocity_damping: 0.985
+    max_prediction_shift_boxes: 0.70
+    max_prediction_size_ratio: 0.12
+
     duplicate_iou: 0.50
     duplicate_containment: 0.82
     duplicate_center_distance: 0.40
@@ -116,25 +130,11 @@ core_v1:
     fragment_min_vertical_overlap: 0.08
     fragment_max_vertical_gap: 0.14
 
-    # Follow position faster than before; keep width/height damped so YOLO edge
-    # jitter does not make the rectangle breathe while walking.
-    smoothing: 0.84
-    center_smoothing: 0.84
-    size_smoothing: 0.50
-    velocity_smoothing: 0.60
-
-    # If the predicted center starts falling behind, correct aggressively before
-    # a visible trail forms. Direction reversals still damp stale velocity.
-    adaptive_center_smoothing: 0.96
-    adaptive_error_boxes: 0.16
-    snap_distance_boxes: 0.65
-    reversal_damping: 0.25
-
+    # Track birth stays conservative against static chair/TV clutter.
     start_conf: 0.34
     new_track_min_conf: 0.24
     strong_confirm_hits: 2
     weak_confirm_hits: 3
-    low_conf_confirm: 0.12
 
     camera_start_conf:
       CAM-05: 0.30
