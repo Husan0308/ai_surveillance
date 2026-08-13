@@ -16,7 +16,6 @@ core_v1:
   reconnect_delay_sec: 1.0
 
   capture_backend: "auto"
-
   max_pipeline_lag_ms: 0
   max_pipeline_lag_samples: 8
 
@@ -30,7 +29,6 @@ core_v1:
   decoder_extra_surfaces: 4
   decoder_low_latency_mode: false
   postdecode_queue_buffers: 1
-
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
@@ -49,7 +47,6 @@ core_v1:
     duplicate_iou: 0.58
     fusion_containment: 0.84
     fusion_center_distance: 0.40
-
     max_submit_age_ms: 300
     max_result_age_ms: 900
     overlay_max_age_ms: 900
@@ -78,7 +75,6 @@ core_v1:
           rotations: [0]
           trigger_max_full_roi_persons: 1
           box: [0.27, 0.00, 0.72, 0.54]
-
         CAM-06:
           mode: "augment"
           every_n: 2
@@ -89,67 +85,95 @@ core_v1:
           box: [0.36, 0.12, 0.74, 0.48]
 
   visual_tracker:
-    # PaddleDetection/ByteTrack-style visual tracking: Kalman predict/correct,
-    # high-confidence association first, then low-confidence second association.
-    # This tracker is presentation-only and never contributes ReID/global-ID evidence.
     hold_ms: 900
     memory_ms: 6000
     prediction_ms: 550
-
-    # Association geometry. Kalman prediction handles normal walking motion;
-    # center-distance fallback covers sparse detector cadence where IoU gets small.
     match_iou: 0.10
     reacquire_distance: 1.05
     byte_match_center: 0.82
     byte_second_match_iou: 0.04
     byte_second_match_center: 0.55
     low_match_max_age_ms: 700
-
-    # Byte-style two-stage confidence policy. Detector itself runs from 0.06,
-    # so 0.08-0.24 boxes can rescue an existing track but cannot freely create one.
     byte_high_conf: 0.24
     byte_low_conf: 0.08
     low_conf_confirm: 0.08
-
-    # Kalman noise/velocity behavior. Keep enough responsiveness to remove bbox
-    # trailing while damping tiny detector edge jitter and direction reversals.
     process_noise: 1.0
     measurement_noise: 0.85
     velocity_damping: 0.985
     max_prediction_shift_boxes: 0.70
     max_prediction_size_ratio: 0.12
-
     duplicate_iou: 0.50
     duplicate_containment: 0.82
     duplicate_center_distance: 0.40
-
     fragment_duplicate_cameras: ["CAM-03", "CAM-05", "CAM-06"]
     fragment_horizontal_overlap: 0.64
     fragment_x_center: 0.34
     fragment_max_area_ratio: 0.76
     fragment_min_vertical_overlap: 0.08
     fragment_max_vertical_gap: 0.14
-
-    # Track birth stays conservative against static chair/TV clutter.
     start_conf: 0.34
     new_track_min_conf: 0.24
     strong_confirm_hits: 2
     weak_confirm_hits: 3
-
     camera_start_conf:
       CAM-05: 0.30
       CAM-06: 0.38
     camera_low_conf_confirm:
       CAM-05: 0.18
-
     camera_new_track_zones:
       CAM-05:
         - [0.27, 0.00, 0.72, 0.54, 0.38]
       CAM-06:
         - [0.36, 0.12, 0.76, 0.49, 0.42]
-
     exclusion_max_box_height: 0.30
     exclusion_overlap_threshold: 0.15
     camera_exclusion_zones:
       CAM-06:
         - [0.50, 0.00, 0.78, 0.22]
+
+  # ReID is deliberately outside the camera/detector hot path. On this 4 GB
+  # machine YOLO already uses most GPU compute, so OSNet starts on one CPU thread.
+  # It runs only for selected real detector crops and never for prediction boxes.
+  reid:
+    enabled: true
+    model: "osnet_x0_25"
+    model_path: ""
+    device: "cpu"
+    torch_cpu_threads: 1
+    input_height: 256
+    input_width: 128
+    poll_interval_ms: 35
+    min_track_hits: 2
+    local_track_timeout_sec: 2.0
+    local_match_iou: 0.12
+    local_match_center: 0.72
+    embed_cooldown_sec: 1.2
+    refresh_sec: 4.0
+    quality_improvement: 0.08
+    batch_size: 4
+    batch_wait_ms: 20
+    queue_size: 8
+    max_job_age_ms: 700
+
+    crop:
+      min_width: 42
+      min_height: 96
+      min_area: 6500
+      min_conf: 0.20
+      edge_margin: 0.015
+      min_sharpness: 18.0
+      pad_x: 0.04
+      pad_y: 0.02
+
+    identity:
+      # Conservative defaults. Tune only from real same-person/different-person
+      # scores collected in this office. Ambiguous matches become a new Unknown
+      # instead of risking an irreversible false merge.
+      match_threshold: 0.78
+      strong_threshold: 0.84
+      ambiguity_margin: 0.045
+      prototype_alpha: 0.22
+      gallery_size: 8
+      active_timeout_sec: 2.5
+      max_transition_sec: 45.0
+      topology: {}
