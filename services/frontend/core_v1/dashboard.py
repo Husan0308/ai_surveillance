@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 import http.client
 import json
 import threading
@@ -8,10 +7,10 @@ import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMainWindow, QProgressBar, QPushButton, QScrollArea, QComboBox,
+    QLabel, QLineEdit, QMainWindow, QProgressBar, QPushButton, QScrollArea,
     QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 )
 
@@ -19,11 +18,11 @@ CAMERAS = [f"CAM-{i:02d}" for i in range(1, 7)]
 ML_HOST = "127.0.0.1"
 ML_PORT = 8001
 
-BG = "#000a1c"
-SIDEBAR = "#000f27"
-PANEL = "#001126"
-CARD = "#00162f"
-BORDER = "#073154"
+BG = "#020b18"
+SIDEBAR = "#061426"
+PANEL = "#07192d"
+CARD = "#0a2038"
+BORDER = "#143a60"
 TEXT = "#f6f8fc"
 MUTED = "#a8b5c8"
 BLUE = "#0d63ff"
@@ -40,6 +39,12 @@ CAMERA_TITLES = {
     "CAM-04": "Office 1 (B)",
     "CAM-05": "Office 2 (B)",
     "CAM-06": "Office 3 (B)",
+}
+
+ROOM_TITLES = {
+    "ROOM-1": "Office 1",
+    "ROOM-2": "Office 2",
+    "ROOM-3": "Office 3",
 }
 
 
@@ -203,10 +208,13 @@ class RealtimeState:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread = None
-        self.state = {"connected": False, "health": {}, "detections": {}, "reid": {}, "room_mapping": {}}
-        self.recent = deque(maxlen=30)
-        self.events = deque(maxlen=100)
-        self._seen = {}
+        self.state = {
+            "connected": False,
+            "health": {},
+            "detections": {},
+            "reid": {},
+            "room_sessions": {},
+        }
 
     def start(self):
         self._thread = threading.Thread(target=self._run, name="ui-state", daemon=True)
@@ -217,7 +225,12 @@ class RealtimeState:
 
     def snapshot(self):
         with self._lock:
-            return dict(self.state), list(self.recent), list(self.events)
+            state = dict(self.state)
+            sessions = dict(state.get("room_sessions") or {})
+        recent = list(sessions.get("active_sessions") or []) + list(sessions.get("recent_sessions") or [])
+        recent.sort(key=lambda item: int(item.get("session_id") or 0), reverse=True)
+        events = list(sessions.get("events") or [])
+        return state, recent, events
 
     @staticmethod
     def _json(connection, path):
@@ -227,30 +240,6 @@ class RealtimeState:
         if response.status != 200:
             raise RuntimeError(response.status)
         return json.loads(payload.decode("utf-8"))
-
-    def _observe(self, reid_payload):
-        cameras = ((reid_payload.get("state") or {}).get("cameras") or {})
-        now = datetime.now()
-        for camera_id, tracks in cameras.items():
-            for track in tracks or []:
-                gid = str(track.get("global_id") or "")
-                if not gid:
-                    continue
-                local_id = int(track.get("local_id") or 0)
-                key = (camera_id, local_id)
-                old = self._seen.get(key)
-                self._seen[key] = gid
-                if old == gid:
-                    continue
-                entry = {
-                    "time": now.strftime("%H:%M:%S"),
-                    "camera": camera_id,
-                    "global_id": gid,
-                    "similarity": track.get("similarity"),
-                    "reason": str(track.get("reason") or "detected"),
-                }
-                self.recent.appendleft(entry)
-                self.events.appendleft(entry)
 
     def _run(self):
         connection = None
@@ -262,13 +251,17 @@ class RealtimeState:
                 detections = self._json(connection, "/detections")
                 reid = self._json(connection, "/reid")
                 try:
-                    room_mapping = self._json(connection, "/room-mapping")
+                    room_sessions = self._json(connection, "/room-sessions")
                 except Exception:
-                    with self._lock:
-                        room_mapping = self.state.get("room_mapping") or {}
-                self._observe(reid)
+                    room_sessions = {"enabled": False, "active_sessions": [], "recent_sessions": [], "events": []}
                 with self._lock:
-                    self.state = {"connected": True, "health": health, "detections": detections, "reid": reid, "room_mapping": room_mapping}
+                    self.state = {
+                        "connected": True,
+                        "health": health,
+                        "detections": detections,
+                        "reid": reid,
+                        "room_sessions": room_sessions,
+                    }
                 self._stop.wait(0.35)
             except Exception:
                 if connection is not None:
@@ -283,15 +276,12 @@ class RealtimeState:
 
 
 class CameraViewport(QWidget):
-    """Fill the tile without stretching the camera image.
+    """Render the complete camera image with in-frame surveillance overlays."""
 
-    The source aspect ratio is preserved. Any mismatch is handled by a minimal
-    center crop, so there are no black side bars and no geometric distortion.
-    """
     def __init__(self):
         super().__init__()
         self._image: QImage | None = None
-        self.setMinimumSize(180, 100)
+        self.setMinimumSize(160, 90)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
@@ -301,120 +291,107 @@ class CameraViewport(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#020913"))
-        if self._image is None or self._image.isNull():
-            painter.setPen(QColor(MUTED))
-            painter.setFont(app_font(13))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Connecting...")
-            return
-
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.fillRect(self.rect(), QColor("#030915"))
+
+        if self._image is None or self._image.isNull():
+            painter.setPen(QColor("#8293aa"))
+            painter.setFont(app_font(12))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Connecting…")
+            return
 
         iw = float(self._image.width())
         ih = float(self._image.height())
         tw = float(max(1, self.width()))
         th = float(max(1, self.height()))
 
-        # Ambient background fills spare UI area only.
-        # It does NOT replace/crop the actual camera view.
-        cover_scale = max(tw / iw, th / ih)
-        bg_w = iw * cover_scale
-        bg_h = ih * cover_scale
-
-        bg_rect = QRectF(
-            (tw - bg_w) * 0.5,
-            (th - bg_h) * 0.5,
-            bg_w,
-            bg_h,
-        )
-
-        painter.save()
-        painter.setOpacity(0.08)
-        painter.drawImage(bg_rect, self._image)
-        painter.restore()
-
-        # PRIMARY CAMERA:
-        # contain -> 100% frame visible
-        # no crop
-        # no stretch
-        # original aspect ratio preserved
-        fit_scale = min(tw / iw, th / ih)
-
-        frame_w = iw * fit_scale
-        frame_h = ih * fit_scale
-
-        frame_rect = QRectF(
-            (tw - frame_w) * 0.5,
-            (th - frame_h) * 0.5,
-            frame_w,
-            frame_h,
-        )
-
+        # CONTAIN only: no crop, no stretch, full CCTV frame remains visible.
+        fit = min(tw / iw, th / ih)
+        frame_w = iw * fit
+        frame_h = ih * fit
+        frame_rect = QRectF((tw - frame_w) * 0.5, (th - frame_h) * 0.5, frame_w, frame_h)
         painter.drawImage(frame_rect, self._image)
+
+        overlay_top = min(44.0, frame_rect.height())
+        top_grad = QLinearGradient(0, frame_rect.top(), 0, frame_rect.top() + overlay_top)
+        top_grad.setColorAt(0.0, QColor(2, 12, 27, 215))
+        top_grad.setColorAt(1.0, QColor(2, 12, 27, 20))
+        painter.fillRect(QRectF(frame_rect.left(), frame_rect.top(), frame_rect.width(), overlay_top), top_grad)
+
+        overlay_bottom = min(40.0, frame_rect.height())
+        bottom_top = frame_rect.bottom() - overlay_bottom
+        bottom_grad = QLinearGradient(0, bottom_top, 0, frame_rect.bottom())
+        bottom_grad.setColorAt(0.0, QColor(2, 12, 27, 10))
+        bottom_grad.setColorAt(1.0, QColor(2, 12, 27, 220))
+        painter.fillRect(QRectF(frame_rect.left(), bottom_top, frame_rect.width(), overlay_bottom), bottom_grad)
+
+        tile = self.parentWidget()
+        camera_id = str(getattr(tile, "camera_id", "CAM"))
+        title = CAMERA_TITLES.get(camera_id, camera_id)
+        left = frame_rect.left()
+        top = frame_rect.top()
+        right = frame_rect.right()
+        bottom = frame_rect.bottom()
+
+        painter.setFont(app_font(12, QFont.Weight.DemiBold))
+        painter.setPen(QColor("#f8fafc"))
+        painter.drawText(
+            QRectF(left + 12, top + 7, max(40.0, frame_rect.width() - 100), 24),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            f"{camera_id}  {title}",
+        )
+
+        painter.setPen(QPen(QColor("#16e487"), 1.6))
+        painter.setBrush(QColor("#16e487"))
+        painter.drawEllipse(QRectF(right - 67, top + 14, 7, 7))
+        painter.setPen(QColor("#d8fbe9"))
+        painter.setFont(app_font(10, QFont.Weight.DemiBold))
+        painter.drawText(
+            QRectF(right - 55, top + 7, 46, 22),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            "LIVE",
+        )
+
+        people_text = str(getattr(tile, "_people_text", "0 People"))
+        fps_text = str(getattr(tile, "_fps_text", "-- FPS"))
+        painter.setPen(QColor("#e7edf5"))
+        painter.drawText(
+            QRectF(left + 12, bottom - 30, frame_rect.width() * 0.5, 20),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            people_text,
+        )
+        painter.drawText(
+            QRectF(left + frame_rect.width() * 0.5, bottom - 30, frame_rect.width() * 0.5 - 12, 20),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            fps_text,
+        )
 
 
 class CameraTile(QFrame):
     def __init__(self, camera_id: str, number: int):
         super().__init__()
         self.camera_id = camera_id
+        self.number = number
+        self._people_text = "0 People"
+        self._fps_text = "-- FPS"
         self.setObjectName("cameraTile")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(160, 90)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         root = QVBoxLayout(self)
         root.setContentsMargins(0,0,0,0)
         root.setSpacing(0)
-
-        self.header = QWidget()
-        self.header.setObjectName("cameraHeader")
-        self.header.setFixedHeight(46)
-        h = QHBoxLayout(self.header)
-        h.setContentsMargins(9,0,10,0)
-        h.setSpacing(9)
-        chip = QLabel(f"{number:02d}")
-        chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        chip.setFixedSize(35,32)
-        chip.setFont(app_font(15, QFont.Weight.DemiBold))
-        chip.setStyleSheet(f"background:{BLUE_2};color:white;border-radius:6px;")
-        self.title = QLabel(CAMERA_TITLES[camera_id])
-        self.title.setFont(app_font(16, QFont.Weight.Medium))
-        dot = QLabel("●")
-        dot.setStyleSheet(f"color:{GREEN};")
-        live = QLabel("LIVE")
-        live.setFont(app_font(14, QFont.Weight.Medium))
-        h.addWidget(chip)
-        h.addWidget(self.title)
-        h.addStretch()
-        h.addWidget(dot)
-        h.addWidget(live)
-        root.addWidget(self.header)
-
         self.viewport = CameraViewport()
         root.addWidget(self.viewport, 1)
 
-        self.footer = QWidget()
-        self.footer.setObjectName("cameraFooter")
-        self.footer.setFixedHeight(36)
-        f = QHBoxLayout(self.footer)
-        f.setContentsMargins(10,0,10,0)
-        self.people = QLabel("0 People")
-        self.people.setFont(app_font(13))
-        self.fps = QLabel("-- FPS")
-        self.fps.setFont(app_font(13))
-        bars = QLabel("▂▄▆█")
-        bars.setFont(app_font(13, QFont.Weight.Bold))
-        bars.setStyleSheet(f"color:{GREEN};")
-        f.addWidget(self.people)
-        f.addStretch()
-        f.addWidget(self.fps)
-        f.addWidget(bars)
-        root.addWidget(self.footer)
-
     def update_metrics(self, count: int, fps: float):
-        self.people.setText(f"{count} {'Person' if count == 1 else 'People'}")
-        self.fps.setText(f"{fps:.0f} FPS" if fps > 0 else "-- FPS")
+        self._people_text = f"{count} {'Person' if count == 1 else 'People'}"
+        self._fps_text = f"{fps:.0f} FPS" if fps > 0 else "-- FPS"
+        self.viewport.update()
 
     def cameras_only(self, enabled: bool):
-        self.header.setVisible(not enabled)
-        self.footer.setVisible(not enabled)
+        # Header/footer chrome no longer exists; metadata is always in-frame.
+        return
 
 
 class NavButton(QPushButton):
@@ -451,8 +428,8 @@ class Sidebar(QFrame):
 
         self.buttons = {}
         for index, (label, icon_name) in enumerate([
-            ("Live View","monitor"), ("Room Map","report"),
-            ("People","person"), ("Events","bell")
+            ("Live View","monitor"), ("People","person"), ("Events","bell"),
+            ("Reports","report"), ("Settings","settings")
         ]):
             button = NavButton(label, icon_name)
             button.clicked.connect(lambda checked=False, i=index: change_page(i))
@@ -613,7 +590,7 @@ class RightRail(QWidget):
             if widget:
                 widget.deleteLater()
         if not recent:
-            empty = QLabel("No recent detections yet")
+            empty = QLabel("No room visits yet")
             empty.setStyleSheet(f"color:{MUTED};")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setMinimumHeight(70)
@@ -629,13 +606,16 @@ class RightRail(QWidget):
                 avatar.setPixmap(icon_pixmap("person", MUTED, 25))
                 avatar.setStyleSheet("background:#243345;border-radius:6px;")
                 texts = QVBoxLayout()
-                gid = QLabel(entry["global_id"])
+                gid = QLabel(str(entry.get("global_id") or "Unknown"))
                 gid.setFont(app_font(13, QFont.Weight.Medium))
-                cam = QLabel(f"{entry['camera']} · {entry['time']}")
-                cam.setFont(app_font(12))
-                cam.setStyleSheet(f"color:{MUTED};")
+                room_id = str(entry.get("room_id") or "")
+                room = ROOM_TITLES.get(room_id, room_id or "Room")
+                time_text = str(entry.get("time") or entry.get("entered_time") or "")
+                place = QLabel(f"{room} · {time_text}" if time_text else room)
+                place.setFont(app_font(12))
+                place.setStyleSheet(f"color:{MUTED};")
                 texts.addWidget(gid)
-                texts.addWidget(cam)
+                texts.addWidget(place)
                 r.addWidget(avatar)
                 r.addLayout(texts,1)
                 self.recent_layout.addWidget(row)
@@ -664,32 +644,46 @@ class LivePage(QWidget):
         l.addWidget(self.title_row)
         self.grid = QGridLayout()
         self.grid.setContentsMargins(0,0,0,0)
-        self.grid.setHorizontalSpacing(12)
+        self.grid.setHorizontalSpacing(10)
         self.grid.setVerticalSpacing(10)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.tiles = {}
         for index, camera_id in enumerate(CAMERAS):
             tile = CameraTile(camera_id, index+1)
             self.tiles[camera_id] = tile
             self.grid.addWidget(tile, index//2, index%2)
-        for row in range(3):
-            self.grid.setRowStretch(row,1)
-        for col in range(2):
-            self.grid.setColumnStretch(col,1)
         l.addLayout(self.grid,1)
+        QTimer.singleShot(0, self._apply_tile_sizes)
 
-    def update_mapping(self, mapping):
-        for room in (mapping.get("rooms") or {}).values():
-            cameras=room.get("cameras") or [];label=str(room.get("label") or "Room")
-            for index,camera_id in enumerate(cameras):
-                if camera_id in self.tiles:
-                    self.tiles[camera_id].title.setText(f"{label} ({chr(65+index)})")
+    def _apply_tile_sizes(self):
+        if not self.tiles:
+            return
+        title_height = self.title_row.height() if self.title_row.isVisible() else 0
+        available_w = max(320, self.width())
+        available_h = max(240, self.height() - title_height - 14)
+        h_gap = max(0, self.grid.horizontalSpacing())
+        v_gap = max(0, self.grid.verticalSpacing()) * 2
+        max_tile_w_by_width = max(160.0, (available_w - h_gap) / 2.0)
+        max_tile_h_by_height = max(90.0, (available_h - v_gap) / 3.0)
+        max_tile_w_by_height = max_tile_h_by_height * (16.0 / 9.0)
+        tile_w = int(max(160.0, min(max_tile_w_by_width, max_tile_w_by_height)))
+        tile_h = int(round(tile_w * 9.0 / 16.0))
+        for tile in self.tiles.values():
+            tile.setFixedSize(tile_w, tile_h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_tile_sizes()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_tile_sizes()
 
     def cameras_only(self, enabled: bool):
         self.title_row.setVisible(not enabled)
-        self.grid.setHorizontalSpacing(2 if enabled else 12)
+        self.grid.setHorizontalSpacing(2 if enabled else 10)
         self.grid.setVerticalSpacing(2 if enabled else 10)
-        for tile in self.tiles.values():
-            tile.cameras_only(enabled)
+        QTimer.singleShot(0, self._apply_tile_sizes)
 
 
 def table_item(text):
@@ -740,12 +734,12 @@ class EventsPage(QWidget):
         l.setContentsMargins(0,0,0,0)
         header = QLabel("Events")
         header.setFont(app_font(27, QFont.Weight.DemiBold))
-        subtitle = QLabel("Realtime identity events generated by the current pipeline.")
+        subtitle = QLabel("Room entry events generated from global identity visit sessions.")
         subtitle.setStyleSheet(f"color:{MUTED};")
         l.addWidget(header)
         l.addWidget(subtitle)
         self.table = QTableWidget(0,5)
-        self.table.setHorizontalHeaderLabels(["TIME","EVENT","CAMERA","IDENTITY","DETAILS"])
+        self.table.setHorizontalHeaderLabels(["TIME","EVENT","ROOM","IDENTITY","DETAILS"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().hide()
         self.table.setShowGrid(False)
@@ -756,237 +750,40 @@ class EventsPage(QWidget):
     def update_live(self, events):
         self.table.setRowCount(len(events))
         for r, entry in enumerate(events):
-            sim = entry.get("similarity")
-            detail = entry.get("reason","detected")
-            if isinstance(sim,(float,int)):
-                detail += f" · {sim:.3f}"
-            row = [entry["time"],"Person detected",entry["camera"],entry["global_id"],detail]
+            room_id = str(entry.get("room_id") or "")
+            room = ROOM_TITLES.get(room_id, room_id or "Room")
+            cameras = entry.get("cameras") or []
+            detail = " / ".join(str(camera) for camera in cameras)
+            if not detail:
+                detail = str(entry.get("camera") or "")
+            row = [
+                str(entry.get("time") or ""),
+                "Entered",
+                room,
+                str(entry.get("global_id") or "Unknown"),
+                detail,
+            ]
             self.table.setRowHeight(r,48)
             for c, value in enumerate(row):
                 self.table.setItem(r,c,table_item(value))
 
 
-class RoomMapCanvas(QWidget):
-    def __init__(self):
+class PlaceholderPage(QWidget):
+    def __init__(self, title):
         super().__init__()
-        self.mapping = {}
-        self.room_id = "ROOM-1"
-        self.debug = False
-        self.setMinimumHeight(310)
-        self.setObjectName("roomCanvas")
-
-    def update_mapping(self, mapping):
-        self.mapping = mapping or {}
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.fillRect(self.rect(), QColor(PANEL))
-        area = QRectF(24, 20, max(20, self.width()-48), max(20, self.height()-40))
-        p.setPen(QPen(QColor("#1a527e"), 2))
-        p.setBrush(QColor("#001a34"))
-        p.drawRoundedRect(area, 10, 10)
-        room = (self.mapping.get("rooms") or {}).get(self.room_id) or {}
-        p.setFont(app_font(18, QFont.Weight.DemiBold))
-        p.setPen(QColor(TEXT))
-        p.drawText(QRectF(area.left()+18, area.top()+12, area.width()-36, 28), str(room.get("label") or self.room_id))
-        inner = QRectF(area.left()+22, area.top()+52, area.width()-44, area.height()-72)
-        p.setPen(QPen(QColor("#073b62"), 1))
-        for i in range(1, 5):
-            x=inner.left()+inner.width()*i/5.0;y=inner.top()+inner.height()*i/5.0
-            p.drawLine(QPointF(x,inner.top()),QPointF(x,inner.bottom()))
-            p.drawLine(QPointF(inner.left(),y),QPointF(inner.right(),y))
-
-        overlap = room.get("overlap_polygon") or []
-        if len(overlap) >= 3:
-            path=QPainterPath()
-            for index, point in enumerate(overlap):
-                q=QPointF(inner.left()+float(point[0])*inner.width(),inner.top()+float(point[1])*inner.height())
-                path.moveTo(q) if index==0 else path.lineTo(q)
-            path.closeSubpath();p.fillPath(path,QColor(13,99,255,55));p.setPen(QPen(QColor(CYAN),1));p.drawPath(path)
-
-        calibrations=self.mapping.get("calibrations") or {}
-        calibrated=0
-        for camera_id in room.get("cameras") or []:
-            calibration=calibrations.get(camera_id) or {}
-            position=calibration.get("camera_position")
-            fov=calibration.get("fov_polygon") or []
-            if calibration.get("homography") and calibration.get("status") in {"good","calibrated","automatic"}:
-                calibrated+=1
-            if position and len(position)==2:
-                px=inner.left()+float(position[0])*inner.width();py=inner.top()+float(position[1])*inner.height()
-                p.setBrush(QColor(BLUE));p.setPen(Qt.PenStyle.NoPen);p.drawEllipse(QPointF(px,py),7,7)
-                p.setPen(QColor(TEXT));p.setFont(app_font(12,QFont.Weight.DemiBold));p.drawText(QPointF(px+10,py+4),camera_id)
-            if len(fov)>=3:
-                path=QPainterPath()
-                for index, point in enumerate(fov):
-                    q=QPointF(inner.left()+float(point[0])*inner.width(),inner.top()+float(point[1])*inner.height())
-                    path.moveTo(q) if index==0 else path.lineTo(q)
-                path.closeSubpath();p.fillPath(path,QColor(22,185,255,28));p.setPen(QPen(QColor(CYAN),1));p.drawPath(path)
-
-        people=[item for item in self.mapping.get("people") or [] if item.get("room_id")==self.room_id]
-        for person in people:
-            try:x=float(person["x"]);y=float(person["y"])
-            except (KeyError,TypeError,ValueError):continue
-            px=inner.left()+x*inner.width();py=inner.top()+y*inner.height()
-            p.setBrush(QColor(ORANGE));p.setPen(QPen(QColor("#ffd08a"),2));p.drawEllipse(QPointF(px,py),8,8)
-            p.setPen(QColor(TEXT));p.setFont(app_font(12,QFont.Weight.DemiBold));p.drawText(QPointF(px+12,py-2),str(person.get("global_id") or "Unknown"))
-            if self.debug:
-                sources=", ".join(str(item.get("camera_id")) for item in person.get("sources") or [])
-                p.setPen(QColor(MUTED));p.setFont(app_font(10));p.drawText(QPointF(px+12,py+13),f"({x:.3f}, {y:.3f}) · {sources}")
-
-        if calibrated < 2:
-            p.setPen(QColor(ORANGE));p.setFont(app_font(14,QFont.Weight.Medium))
-            p.drawText(inner,Qt.AlignmentFlag.AlignCenter,"Spatial calibration required\nSelect 6–8 matching floor landmarks below")
-        elif not people:
-            p.setPen(QColor(MUTED));p.setFont(app_font(13));p.drawText(inner,Qt.AlignmentFlag.AlignCenter,"No calibrated person positions right now")
-
-
-class LandmarkCanvas(QWidget):
-    def __init__(self, mode, callback):
-        super().__init__();self.mode=mode;self.callback=callback;self.image=None;self.points=[];self.setMinimumSize(260,170);self.setCursor(Qt.CursorShape.CrossCursor)
-
-    def set_image(self,image):
-        self.image=image;self.update()
-
-    def set_points(self,points):
-        self.points=list(points);self.update()
-
-    def _image_rect(self):
-        if self.image is None or self.image.isNull():return QRectF()
-        scale=min(self.width()/self.image.width(),self.height()/self.image.height())
-        w=self.image.width()*scale;h=self.image.height()*scale
-        return QRectF((self.width()-w)/2,(self.height()-h)/2,w,h)
-
-    def mousePressEvent(self,event):
-        pos=event.position()
-        if self.mode=="image":
-            rect=self._image_rect()
-            if not rect.contains(pos) or self.image is None:return
-            value=((pos.x()-rect.left())/rect.width()*self.image.width(),(pos.y()-rect.top())/rect.height()*self.image.height())
-        else:
-            margin=14.0;rect=QRectF(margin,margin,self.width()-2*margin,self.height()-2*margin)
-            if not rect.contains(pos):return
-            value=((pos.x()-rect.left())/rect.width(),(pos.y()-rect.top())/rect.height())
-        self.callback(value)
-
-    def paintEvent(self,event):
-        p=QPainter(self);p.setRenderHint(QPainter.RenderHint.Antialiasing,True);p.fillRect(self.rect(),QColor("#001327"))
-        if self.mode=="image":
-            rect=self._image_rect()
-            if self.image is not None and not self.image.isNull():p.drawImage(rect,self.image)
-            else:
-                p.setPen(QColor(MUTED));p.drawText(self.rect(),Qt.AlignmentFlag.AlignCenter,"Waiting for live camera")
-            for i,point in enumerate(self.points):
-                if self.image is None or self.image.isNull():continue
-                q=QPointF(rect.left()+point[0]/self.image.width()*rect.width(),rect.top()+point[1]/self.image.height()*rect.height())
-                self._point(p,q,i+1)
-        else:
-            margin=14.0;rect=QRectF(margin,margin,self.width()-2*margin,self.height()-2*margin)
-            p.setPen(QPen(QColor("#15517d"),1));p.setBrush(QColor("#001a34"));p.drawRect(rect)
-            for i in range(1,5):
-                p.drawLine(QPointF(rect.left()+rect.width()*i/5,rect.top()),QPointF(rect.left()+rect.width()*i/5,rect.bottom()))
-                p.drawLine(QPointF(rect.left(),rect.top()+rect.height()*i/5),QPointF(rect.right(),rect.top()+rect.height()*i/5))
-            for i,point in enumerate(self.points):
-                self._point(p,QPointF(rect.left()+point[0]*rect.width(),rect.top()+point[1]*rect.height()),i+1)
-
-    @staticmethod
-    def _point(p,q,index):
-        p.setBrush(QColor(ORANGE));p.setPen(QPen(QColor("#ffe0a3"),2));p.drawEllipse(q,6,6);p.setPen(QColor(TEXT));p.setFont(app_font(10,QFont.Weight.Bold));p.drawText(QPointF(q.x()+8,q.y()-7),str(index))
-
-
-class CalibrationPanel(QFrame):
-    def __init__(self):
-        super().__init__();self.setObjectName("rightPanel");self.image_points=[];self.room_points=[];self.pending_image=None;self.mapping={};self._images={};self._result_lock=threading.Lock();self._result_message=""
-        root=QVBoxLayout(self);root.setContentsMargins(14,12,14,12);root.setSpacing(8)
-        head=QHBoxLayout();title=QLabel("Assisted floor calibration");title.setFont(app_font(16,QFont.Weight.DemiBold));self.camera=QComboBox();self.camera.addItems(CAMERAS);self.camera.currentTextChanged.connect(self._camera_changed)
-        self.auto=QPushButton("Check automatic");self.auto.setObjectName("actionButton");self.auto.clicked.connect(self.try_automatic)
-        self.clear=QPushButton("Clear points");self.clear.setObjectName("actionButton");self.clear.clicked.connect(self.clear_points)
-        self.save=QPushButton("Save calibration");self.save.setObjectName("primaryButton");self.save.clicked.connect(self.save_points)
-        head.addWidget(title);head.addSpacing(12);head.addWidget(self.camera);head.addWidget(self.auto);head.addStretch();head.addWidget(self.clear);head.addWidget(self.save);root.addLayout(head)
-        canvases=QHBoxLayout();left=QVBoxLayout();right=QVBoxLayout();lt=QLabel("1. Click a floor landmark in the live camera");rt=QLabel("2. Click the same point on the normalized room map");lt.setStyleSheet(f"color:{MUTED};");rt.setStyleSheet(f"color:{MUTED};")
-        self.image_canvas=LandmarkCanvas("image",self._image_clicked);self.map_canvas=LandmarkCanvas("map",self._map_clicked);left.addWidget(lt);left.addWidget(self.image_canvas);right.addWidget(rt);right.addWidget(self.map_canvas);canvases.addLayout(left,1);canvases.addLayout(right,1);root.addLayout(canvases,1)
-        self.status=QLabel("Use 6–8 stationary floor landmarks. Geometry stays disabled until calibration is good.");self.status.setStyleSheet(f"color:{MUTED};");root.addWidget(self.status)
-
-    def _camera_changed(self,_camera):
-        self.clear_points();self.image_canvas.set_image(self._images.get(self.camera.currentText()));self._show_calibration_status()
-
-    def update_image(self,camera_id,image):
-        self._images[camera_id]=image
-        if camera_id==self.camera.currentText():self.image_canvas.set_image(image)
-
-    def update_mapping(self,mapping):
-        self.mapping=mapping or {};self._show_calibration_status()
-        with self._result_lock:
-            message=self._result_message;self._result_message=""
-        if message:self.status.setText(message)
-
-    def _show_calibration_status(self):
-        item=(self.mapping.get("calibrations") or {}).get(self.camera.currentText()) or {}
-        status=item.get("status","uncalibrated");error=item.get("reprojection_error_normalized");confidence=float(item.get("confidence") or 0)
-        suffix=f" · error {float(error):.4f}" if isinstance(error,(int,float)) else ""
-        self.status.setText(f"{self.camera.currentText()}: {status} · confidence {confidence:.0%}{suffix} · {len(self.image_points)} pending points")
-
-    def _image_clicked(self,point):
-        self.pending_image=point;self.status.setText("Camera point selected. Click its matching floor position on the right.")
-
-    def _map_clicked(self,point):
-        if self.pending_image is None:self.status.setText("First click the matching point in the camera image.");return
-        self.image_points.append(self.pending_image);self.room_points.append(point);self.pending_image=None;self.image_canvas.set_points(self.image_points);self.map_canvas.set_points(self.room_points);self._show_calibration_status()
-
-    def clear_points(self):
-        self.image_points=[];self.room_points=[];self.pending_image=None;self.image_canvas.set_points([]);self.map_canvas.set_points([]);self._show_calibration_status()
-
-    def _post(self,path,payload,success_prefix):
-        def work():
-            message=""
-            try:
-                conn=http.client.HTTPConnection(ML_HOST,ML_PORT,timeout=8.0);body=json.dumps(payload).encode("utf-8");conn.request("POST",path,body=body,headers={"Content-Type":"application/json","Connection":"close"});response=conn.getresponse();data=json.loads(response.read().decode("utf-8") or "{}");conn.close()
-                if response.status>=300:message=f"Failed: {data.get('detail') or response.status}"
-                else:message=f"{success_prefix}: {json.dumps(data,ensure_ascii=False)[:220]}"
-            except Exception as exc:message=f"Request failed: {type(exc).__name__}: {exc}"
-            with self._result_lock:self._result_message=message
-        threading.Thread(target=work,name="ui-calibration-request",daemon=True).start()
-
-    def save_points(self):
-        if len(self.image_points)<6:self.status.setText("At least 6 corresponding floor landmarks are required.");return
-        image=self._images.get(self.camera.currentText());size=[image.width(),image.height()] if image is not None and not image.isNull() else None
-        self._post("/room-mapping/calibrate",{"camera_id":self.camera.currentText(),"image_points":[list(p) for p in self.image_points],"room_points":[list(p) for p in self.room_points],"image_size":size},"Calibration saved")
-
-    def try_automatic(self):
-        camera=self.camera.currentText();rooms=self.mapping.get("rooms") or {};pair=None
-        for room in rooms.values():
-            cameras=room.get("cameras") or []
-            if camera in cameras and len(cameras)==2:pair=cameras;break
-        if not pair:self.status.setText("No verified same-room pair found.");return
-        self._post("/room-mapping/auto-discovery",{"left_camera":pair[0],"right_camera":pair[1]},"Automatic relation check")
-
-
-class RoomMapPage(QWidget):
-    def __init__(self):
-        super().__init__();self.mapping={};root=QVBoxLayout(self);root.setContentsMargins(0,0,0,0);root.setSpacing(10)
-        head=QHBoxLayout();title=QLabel("Room Map");title.setFont(app_font(27,QFont.Weight.DemiBold));self.room_buttons={}
-        head.addWidget(title);head.addStretch()
-        for room_id in ("ROOM-1","ROOM-2","ROOM-3"):
-            button=QPushButton(room_id.replace("-"," "));button.setCheckable(True);button.setObjectName("roomButton");button.clicked.connect(lambda checked=False,r=room_id:self.set_room(r));self.room_buttons[room_id]=button;head.addWidget(button)
-        self.debug=QPushButton("Debug");self.debug.setCheckable(True);self.debug.setObjectName("roomButton");self.debug.toggled.connect(self._debug_changed);head.addWidget(self.debug);root.addLayout(head)
-        self.canvas=RoomMapCanvas();root.addWidget(self.canvas,3);self.calibration=CalibrationPanel();root.addWidget(self.calibration,2);self.set_room("ROOM-1")
-
-    def set_room(self,room_id):
-        self.canvas.room_id=room_id
-        for key,button in self.room_buttons.items():button.setChecked(key==room_id)
-        self.canvas.update()
-
-    def _debug_changed(self,enabled):
-        self.canvas.debug=enabled;self.canvas.update()
-
-    def update_live(self,mapping):
-        self.mapping=mapping or {};self.canvas.update_mapping(self.mapping);self.calibration.update_mapping(self.mapping)
-
-    def update_camera_frame(self,camera_id,image):
-        self.calibration.update_image(camera_id,image)
-
+        l = QVBoxLayout(self)
+        l.setContentsMargins(0,0,0,0)
+        h = QLabel(title)
+        h.setFont(app_font(27,QFont.Weight.DemiBold))
+        l.addWidget(h)
+        card = QFrame()
+        card.setObjectName("placeholder")
+        c = QVBoxLayout(card)
+        text = QLabel("This page has no realtime backend source yet.")
+        text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        text.setStyleSheet(f"color:{MUTED};")
+        c.addWidget(text)
+        l.addWidget(card,1)
 
 
 class DashboardWindow(QMainWindow):
@@ -1011,7 +808,7 @@ class DashboardWindow(QMainWindow):
 
         self.topbar = QWidget()
         self.topbar.setObjectName("topbar")
-        self.topbar.setFixedHeight(70)
+        self.topbar.setFixedHeight(58)
         top = QHBoxLayout(self.topbar)
         top.setContentsMargins(20,0,24,0)
         menu = QPushButton()
@@ -1038,15 +835,16 @@ class DashboardWindow(QMainWindow):
 
         self.content = QWidget()
         self.content_layout = QHBoxLayout(self.content)
-        self.content_layout.setContentsMargins(14,10,14,16)
-        self.content_layout.setSpacing(14)
+        self.content_layout.setContentsMargins(12,8,12,12)
+        self.content_layout.setSpacing(12)
         body_layout.addWidget(self.content,1)
         self.stack = QStackedWidget()
         self.live = LivePage()
-        self.room_page = RoomMapPage()
         self.people_page = PeoplePage()
         self.events_page = EventsPage()
-        for page in [self.live,self.room_page,self.people_page,self.events_page]:
+        self.reports_page = PlaceholderPage("Reports")
+        self.settings_page = PlaceholderPage("Settings")
+        for page in [self.live,self.people_page,self.events_page,self.reports_page,self.settings_page]:
             self.stack.addWidget(page)
         self.content_layout.addWidget(self.stack,1)
         self.right = RightRail()
@@ -1086,28 +884,19 @@ class DashboardWindow(QMainWindow):
     def apply_style(self):
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{ background:{BG}; color:{TEXT}; }}
-            #sidebar {{ background:{SIDEBAR}; border-right:1px solid #07243f; }}
+            #sidebar {{ background:{SIDEBAR}; border-right:1px solid #102c48; }}
             #topbar {{ background:{BG}; }}
             QPushButton {{ border:0; color:{TEXT}; outline:none; background:transparent; }}
-            #sidebar QPushButton {{ text-align:left; padding-left:18px; border-radius:7px; }}
-            #sidebar QPushButton:hover {{ background:#061d3a; }}
-            #sidebar QPushButton:checked {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #075ff0,stop:1 #073bc8);
-                border:1px solid #1470ff;
-            }}
+            #sidebar QPushButton {{ color:#e7eef8; text-align:left; padding-left:16px; border-radius:8px; }}
+            #sidebar QPushButton:hover {{ background:#0b223c; }}
+            #sidebar QPushButton:checked {{ background:{BLUE}; border:1px solid #2b7bff; }}
             #statusCard, #rightPanel, #cameraTile, #placeholder {{
-                background:{PANEL}; border:1px solid {BORDER}; border-radius:9px;
+                background:{PANEL}; border:1px solid {BORDER}; border-radius:10px;
             }}
-            #cameraHeader, #cameraFooter {{ background:{CARD}; }}
-            #statCard {{ background:{CARD}; border-radius:8px; min-height:104px; }}
+            #cameraTile {{ background:#030915; border:1px solid #123557; }}
+            #statCard {{ background:{CARD}; border-radius:9px; min-height:104px; }}
             #squareButton, #topButton {{ background:{CARD}; border:1px solid {BORDER}; border-radius:7px; }}
-            #squareButton:hover, #topButton:hover {{ background:#08294c; }}
-            #roomCanvas {{ background:{PANEL}; border:1px solid {BORDER}; border-radius:9px; }}
-            #roomButton, #actionButton {{ background:{CARD}; border:1px solid {BORDER}; border-radius:6px; padding:8px 13px; }}
-            #roomButton:checked, #primaryButton {{ background:{BLUE_2}; border:1px solid #1470ff; border-radius:6px; padding:8px 13px; }}
-            #roomButton:hover, #actionButton:hover, #primaryButton:hover {{ background:#0a4389; }}
-            QComboBox {{ background:{CARD}; border:1px solid {BORDER}; border-radius:6px; padding:7px 24px 7px 10px; color:{TEXT}; }}
-            QComboBox QAbstractItemView {{ background:{CARD}; color:{TEXT}; selection-background-color:{BLUE_2}; }}
+            #squareButton:hover, #topButton:hover {{ background:#0b2d4e; }}
             QProgressBar {{ background:#06325b; border:0; border-radius:4px; }}
             QProgressBar::chunk {{ background:{BLUE}; border-radius:4px; }}
             QTableWidget#dataTable {{ background:{PANEL}; border:1px solid {BORDER}; border-radius:8px; color:{TEXT}; }}
@@ -1126,14 +915,14 @@ class DashboardWindow(QMainWindow):
     def _apply_responsive_widths(self):
         width = max(1,self.width())
         if width >= 1550:
-            self.sidebar.setFixedWidth(235)
-            self.right.setFixedWidth(350)
+            self.sidebar.setFixedWidth(225)
+            self.right.setFixedWidth(330)
         elif width >= 1300:
-            self.sidebar.setFixedWidth(205)
-            self.right.setFixedWidth(300)
+            self.sidebar.setFixedWidth(200)
+            self.right.setFixedWidth(295)
         else:
-            self.sidebar.setFixedWidth(185)
-            self.right.setFixedWidth(260)
+            self.sidebar.setFixedWidth(180)
+            self.right.setFixedWidth(255)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1152,7 +941,6 @@ class DashboardWindow(QMainWindow):
             if image is not None and version > self.seen_versions[camera_id]:
                 self.seen_versions[camera_id] = version
                 self.live.tiles[camera_id].viewport.set_frame(image)
-                self.room_page.update_camera_frame(camera_id,image)
 
     def refresh_fps(self):
         now = time.monotonic()
@@ -1171,9 +959,6 @@ class DashboardWindow(QMainWindow):
         state, recent, events = self.state_reader.snapshot()
         self.sidebar.update_live(state)
         self.right.update_live(state,recent)
-        mapping=state.get("room_mapping") or {}
-        self.live.update_mapping(mapping)
-        self.room_page.update_live(mapping)
         self.people_page.update_live(state)
         self.events_page.update_live(events)
 
@@ -1189,8 +974,8 @@ class DashboardWindow(QMainWindow):
         self.sidebar.setVisible(not enabled)
         self.topbar.setVisible(not enabled)
         self.right.setVisible(not enabled)
-        self.content_layout.setContentsMargins(0 if enabled else 14, 0 if enabled else 10, 0 if enabled else 14, 0 if enabled else 16)
-        self.content_layout.setSpacing(0 if enabled else 14)
+        self.content_layout.setContentsMargins(0 if enabled else 12, 0 if enabled else 8, 0 if enabled else 12, 0 if enabled else 12)
+        self.content_layout.setSpacing(0 if enabled else 12)
         if enabled:
             self.showFullScreen()
         else:

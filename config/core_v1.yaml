@@ -97,8 +97,7 @@ core_v1:
     measurement_noise: 0.90
     velocity_damping: 0.96
     size_velocity_damping: 0.60
-    # Measured detector-to-display age is about 0.30–0.34 s. 0.68 keeps a
-    # walking box current without removing the hard stop/reversal bound.
+    # Keep enough prediction travel for the measured ~0.30–0.34 s detector-to-display age.
     max_prediction_shift_boxes: 0.68
     max_prediction_size_ratio: 0.08
     adaptive_error_low: 0.08
@@ -136,6 +135,18 @@ core_v1:
     camera_exclusion_zones:
       CAM-06:
         - [0.50, 0.00, 0.78, 0.22]
+
+  # Events and Recent Views are room-level visits, not per-camera detections.
+  # Confirmation is longer than ReID's three-sample warmup so same-room pair
+  # matching can settle before a user-visible ENTER event is committed.
+  room_sessions:
+    enabled: true
+    poll_interval_ms: 200
+    enter_confirm_sec: 1.8
+    inactive_timeout_sec: 4.0
+    pending_timeout_sec: 3.0
+    max_events: 100
+    max_recent_sessions: 100
 
   reid:
     enabled: true

@@ -11,7 +11,7 @@ This branch contains only the current three-service rebuild and the files it act
   -> isolated PyTorch/Ultralytics YOLO CUDA worker, one in-flight batch
   -> per-camera Kalman + Byte-style visual tracker
   -> smooth JPEG presentation -> PySide6 frontend
-  -> side-path ReID: exact-frame tracklets -> OSNet -> optional calibrated spatial fusion -> Global ID
+  -> side-path ReID v2: quality-gated multi-frame tracklets -> OSNet -> same-room pair assignment -> Global ID
 ```
 
 Camera pairs that view the same room are CAM-01/CAM-04, CAM-02/CAM-05, and CAM-03/CAM-06. Visual prediction boxes are presentation-only and are never ReID evidence.
@@ -28,20 +28,7 @@ Camera pairs that view the same room are CAM-01/CAM-04, CAM-02/CAM-05, and CAM-0
 
 - `config/cameras.yaml` — canonical camera definitions.
 - `config/cameras.local.yaml` — optional local/secret overrides; ignored by git.
-- `config/core_v1.yaml` — current runtime, detector, tracker and ReID settings.
-- `config/room_mapping.yaml` — verified room pairs, normalized floor calibration and fusion settings.
-
-## Room calibration
-
-Open `Room Map` in the PySide6 UI. Automatic relation checking is on-demand and
-never saves a guessed floor plane. If its confidence is insufficient, select a
-camera and click 6–8 matching stationary floor landmarks in the live image and
-normalized room map. Spatial fusion stays disabled for that room until both
-cameras have a valid persisted homography.
-
-The mapping API is available at `/room-mapping`; assisted calibration uses
-`/room-mapping/calibrate`. Person room coordinates always come from the real
-detector box bottom-center, never from presentation-predicted boxes.
+- `config/core_v1.yaml` — current runtime, detector, tracker and ReID-v2 settings.
 
 ## Run
 
