@@ -14,6 +14,9 @@ class VisualBox:
     x2: float
     y2: float
     confidence: float
+    track_id: int | None = None
+    left_ankle: tuple[float, float, float] | None = None
+    right_ankle: tuple[float, float, float] | None = None
 
 
 @dataclass(slots=True)
@@ -29,6 +32,8 @@ class _Track:
     last_measurement: np.ndarray
     last_motion_observation: float
     motion_anchor_confidence: float
+    last_ground_measurement: np.ndarray | None
+    last_ground_observation: float
     last_match_frame_id: int
     reacquire_pending: bool
 
@@ -60,10 +65,30 @@ def _center_size(box: VisualBox):
     return (box.x1 + box.x2) * 0.5, (box.y1 + box.y2) * 0.5, w, h
 
 
-def _from_center_size(cx: float, cy: float, w: float, h: float, confidence: float) -> VisualBox:
+def _ground_point(box: VisualBox, minimum_confidence: float = 0.25):
+    points = []
+    for point in (box.left_ankle, box.right_ankle):
+        if not isinstance(point, (list, tuple)) or len(point) < 3:
+            continue
+        try:
+            x, y, confidence = float(point[0]), float(point[1]), float(point[2])
+        except (TypeError, ValueError):
+            continue
+        if all(map(math.isfinite, (x, y, confidence))) and confidence >= minimum_confidence:
+            points.append((x, y, confidence))
+    if not points:
+        return None
+    total = sum(point[2] for point in points)
+    return np.asarray([
+        sum(point[0] * point[2] for point in points) / total,
+        sum(point[1] * point[2] for point in points) / total,
+    ], dtype=np.float64)
+
+
+def _from_center_size(cx: float, cy: float, w: float, h: float, confidence: float, track_id: int | None = None) -> VisualBox:
     w = max(2.0, float(w))
     h = max(2.0, float(h))
-    return VisualBox(cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5, confidence)
+    return VisualBox(cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5, confidence, track_id=track_id)
 
 
 def _intersection(a: VisualBox, b: VisualBox) -> float:
@@ -385,7 +410,25 @@ class VisualTracker:
                 if x2 <= x1 or y2 <= y1:
                     self._invalid_detections += 1
                     continue
-            box = VisualBox(x1, y1, x2, y2, min(1.0, confidence))
+            def pose_point(name):
+                point = getattr(raw, name, None)
+                if not isinstance(point, (list, tuple)) or len(point) < 3:
+                    return None
+                try:
+                    px, py, pose_confidence = float(point[0]), float(point[1]), float(point[2])
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if not all(math.isfinite(value) for value in (px, py, pose_confidence)) or pose_confidence <= 0.0:
+                    return None
+                if source_w is not None and source_h is not None:
+                    px=max(0.0,min(source_w,px));py=max(0.0,min(source_h,py))
+                return (px,py,min(1.0,pose_confidence))
+
+            box = VisualBox(
+                x1, y1, x2, y2, min(1.0, confidence),
+                left_ankle=pose_point("left_ankle"),
+                right_ankle=pose_point("right_ankle"),
+            )
             if not self._excluded(box, source_width, source_height):
                 candidates.append(box)
 
@@ -526,6 +569,13 @@ class VisualTracker:
             if dt > 1e-3:
                 previous = self._measurement(previous_box)
                 measured = (z - previous) / dt
+                current_ground = _ground_point(box)
+                previous_ground = _ground_point(previous_box)
+                if current_ground is not None and previous_ground is not None:
+                    ground_velocity = (current_ground - previous_ground) / dt
+                    ground_limits = np.asarray([6.0*z[2],6.0*z[3]],dtype=np.float64)
+                    if np.all(np.abs(ground_velocity) <= ground_limits):
+                        measured[:2] = 0.35 * measured[:2] + 0.65 * ground_velocity
                 mean[4] = float(np.clip(measured[0], -5.0 * z[2], 5.0 * z[2]))
                 mean[5] = float(np.clip(measured[1], -5.0 * z[3], 5.0 * z[3]))
                 # Size velocity begins at zero. A second sequence of real
@@ -552,6 +602,8 @@ class VisualTracker:
             last_measurement=z.copy(),
             last_motion_observation=float(observation),
             motion_anchor_confidence=float(box.confidence),
+            last_ground_measurement=_ground_point(box),
+            last_ground_observation=float(observation),
             last_match_frame_id=int(frame_id),
             reacquire_pending=False,
         )
@@ -695,6 +747,7 @@ class VisualTracker:
             posterior[2:4] - prior[2:4], -size_cap, size_cap
         )
 
+        ground_measurement = _ground_point(box)
         motion_dt = max(
             0.0, float(observation) - track.last_motion_observation
         )
@@ -702,6 +755,20 @@ class VisualTracker:
             displacement = z - track.last_measurement
             measured_velocity = displacement / motion_dt
             measured_center_velocity = measured_velocity[:2].copy()
+            if (
+                ground_measurement is not None
+                and track.last_ground_measurement is not None
+                and observation > track.last_ground_observation + 1e-3
+            ):
+                ground_dt = float(observation) - track.last_ground_observation
+                ground_velocity = (
+                    ground_measurement - track.last_ground_measurement
+                ) / ground_dt
+                ground_limits = np.asarray([6.0*z[2],6.0*z[3]],dtype=np.float64)
+                if np.all(np.isfinite(ground_velocity)) and np.all(np.abs(ground_velocity) <= ground_limits):
+                    measured_center_velocity = (
+                        0.35 * measured_center_velocity + 0.65 * ground_velocity
+                    )
             old_velocity = prior[4:6].copy()
 
             # A far correction reinitializes position; the large innovation is
@@ -822,6 +889,13 @@ class VisualTracker:
                 (1.0 - anchor_weight) * track.motion_anchor_confidence
                 + anchor_weight * confidence
             )
+        if (
+            ground_measurement is not None
+            and not low_stage
+            and confidence >= self.byte_high_conf
+        ):
+            track.last_ground_measurement = ground_measurement
+            track.last_ground_observation = float(observation)
         track.last_match_frame_id = int(frame_id)
         if observation_gap > self.hold_sec:
             track.reacquire_pending = True
@@ -834,7 +908,8 @@ class VisualTracker:
     def _box_from_track(track: _Track, mean: np.ndarray | None = None) -> VisualBox:
         state = track.mean if mean is None else mean
         return _from_center_size(
-            float(state[0]), float(state[1]), float(state[2]), float(state[3]), track.confidence
+            float(state[0]), float(state[1]), float(state[2]), float(state[3]),
+            track.confidence, track_id=track.track_id,
         )
 
     def _associate(

@@ -137,14 +137,37 @@ class RoomSpatialMapper:
             }
 
     def project_box_footpoint(self, camera_id: str, box: object, source_size: tuple[float, float] | None = None) -> dict | None:
+        ankle_points = []
+        for name in ("left_ankle", "right_ankle"):
+            point = getattr(box, name, None)
+            if not isinstance(point, (list, tuple)) or len(point) < 3:
+                continue
+            try:
+                x, y, confidence = float(point[0]), float(point[1]), float(point[2])
+            except (TypeError, ValueError):
+                continue
+            if all(map(math.isfinite, (x, y, confidence))) and confidence >= 0.25:
+                ankle_points.append((x, y, confidence))
         try:
-            footpoint = (
-                (float(box.x1) + float(box.x2)) * 0.5,
-                float(box.y2),
-            )
+            if ankle_points:
+                total = sum(point[2] for point in ankle_points)
+                footpoint = (
+                    sum(point[0] * point[2] for point in ankle_points) / total,
+                    sum(point[1] * point[2] for point in ankle_points) / total,
+                )
+                source = "ankles"
+            else:
+                footpoint = (
+                    (float(box.x1) + float(box.x2)) * 0.5,
+                    float(box.y2),
+                )
+                source = "bbox_bottom_center"
         except (AttributeError, TypeError, ValueError):
             return None
-        return self.project_point(camera_id, footpoint, source_size=source_size)
+        projected = self.project_point(camera_id, footpoint, source_size=source_size)
+        if projected is not None:
+            projected["footpoint_source"] = source
+        return projected
 
     def calibrate(
         self,

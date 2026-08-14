@@ -32,8 +32,14 @@ core_v1:
 
   detector:
     enabled: true
-    model: "models/yolo26m.pt"
+    model: "models/yolo26m-pose.pt"
     device: "cuda:0"
+    pose:
+      enabled: true
+      ankle_min_conf: 0.25
+      ankle_heatmap: true
+      heatmap_radius: 13
+      heatmap_alpha: 0.42
     imgsz: [448, 704]
     quantize: 32
     conf: 0.06

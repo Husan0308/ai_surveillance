@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import multiprocessing as mp
 import queue
 import threading
@@ -21,6 +22,8 @@ class PersonBox:
     x2: float
     y2: float
     confidence: float
+    left_ankle: tuple[float, float, float] | None = None
+    right_ankle: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,43 +142,68 @@ def _raw_prediction_boxes(prediction):
         return []
     xyxy = pred_boxes.xyxy.detach().cpu().tolist()
     confs = pred_boxes.conf.detach().cpu().tolist()
-    return [(float(c[0]), float(c[1]), float(c[2]), float(c[3]), float(conf)) for c, conf in zip(xyxy, confs)]
+    keypoints = getattr(prediction, "keypoints", None)
+    keypoint_xy = keypoints.xy.detach().cpu().tolist() if keypoints is not None else []
+    keypoint_conf = keypoints.conf.detach().cpu().tolist() if keypoints is not None and getattr(keypoints, "conf", None) is not None else []
+
+    def ankle(index, keypoint_index):
+        if index >= len(keypoint_xy) or keypoint_index >= len(keypoint_xy[index]):
+            return None
+        point = keypoint_xy[index][keypoint_index]
+        confidence = float(keypoint_conf[index][keypoint_index]) if index < len(keypoint_conf) and keypoint_index < len(keypoint_conf[index]) else 0.0
+        x, y = float(point[0]), float(point[1])
+        if not all(map(math.isfinite, (x, y, confidence))) or confidence <= 0.0:
+            return None
+        return (x, y, confidence)
+
+    return [
+        (float(coords[0]), float(coords[1]), float(coords[2]), float(coords[3]),
+         float(confidence), ankle(index, 15), ankle(index, 16))
+        for index, (coords, confidence) in enumerate(zip(xyxy, confs))
+    ]
+
+
+def _scale_pose_point(point, sx, sy, offset_x=0.0, offset_y=0.0):
+    if point is None:
+        return None
+    return (float(offset_x)+float(point[0])*float(sx),float(offset_y)+float(point[1])*float(sy),float(point[2]))
 
 
 def _map_full_boxes(prediction, source_w: int, source_h: int, resized_shape):
     resized_h, resized_w = resized_shape
     sx = float(source_w) / max(1.0, float(resized_w))
     sy = float(source_h) / max(1.0, float(resized_h))
-    return [(x1*sx, y1*sy, x2*sx, y2*sy, conf) for x1,y1,x2,y2,conf in _raw_prediction_boxes(prediction)]
+    return [(x1*sx,y1*sy,x2*sx,y2*sy,conf,_scale_pose_point(left,sx,sy),_scale_pose_point(right,sx,sy)) for x1,y1,x2,y2,conf,left,right in _raw_prediction_boxes(prediction)]
+
+
+def _inverse_rotate_point(point, rotation: int, original_w: int, original_h: int):
+    if point is None:return None
+    x,y,confidence=point;rotation=int(rotation)%360
+    if rotation==0:ox,oy=x,y
+    elif rotation==90:ox,oy=y,original_h-x
+    elif rotation==270:ox,oy=original_w-y,x
+    elif rotation==180:ox,oy=original_w-x,original_h-y
+    else:raise ValueError(f"unsupported ROI rotation: {rotation}")
+    return (max(0.0,min(float(original_w),ox)),max(0.0,min(float(original_h),oy)),confidence)
 
 
 def _inverse_rotate_box(box, rotation: int, original_w: int, original_h: int):
-    x1, y1, x2, y2, conf = box
-    rotation = int(rotation) % 360
-    if rotation == 0:
-        return box
-    if rotation == 90:
-        ox1, oy1, ox2, oy2 = y1, original_h-x2, y2, original_h-x1
-    elif rotation == 270:
-        ox1, oy1, ox2, oy2 = original_w-y2, x1, original_w-y1, x2
-    elif rotation == 180:
-        ox1, oy1, ox2, oy2 = original_w-x2, original_h-y2, original_w-x1, original_h-y1
-    else:
-        raise ValueError(f"unsupported ROI rotation: {rotation}")
-    return (max(0.0,min(float(original_w),ox1)),max(0.0,min(float(original_h),oy1)),max(0.0,min(float(original_w),ox2)),max(0.0,min(float(original_h),oy2)),conf)
+    x1,y1,x2,y2,conf,left,right=box;rotation=int(rotation)%360
+    if rotation==0:return box
+    if rotation==90:ox1,oy1,ox2,oy2=y1,original_h-x2,y2,original_h-x1
+    elif rotation==270:ox1,oy1,ox2,oy2=original_w-y2,x1,original_w-y1,x2
+    elif rotation==180:ox1,oy1,ox2,oy2=original_w-x2,original_h-y2,original_w-x1,original_h-y1
+    else:raise ValueError(f"unsupported ROI rotation: {rotation}")
+    return (max(0.0,min(float(original_w),ox1)),max(0.0,min(float(original_h),oy1)),max(0.0,min(float(original_w),ox2)),max(0.0,min(float(original_h),oy2)),conf,_inverse_rotate_point(left,rotation,original_w,original_h),_inverse_rotate_point(right,rotation,original_w,original_h))
 
 
 def _map_roi_boxes(prediction, roi: dict, rotation: int):
-    rx1, ry1, rx2, ry2 = roi["bounds"]
-    resized_h, resized_w = roi["shape"]
-    sx = max(1.0, float(rx2-rx1)) / max(1.0, float(resized_w))
-    sy = max(1.0, float(ry2-ry1)) / max(1.0, float(resized_h))
-    mapped=[]
+    rx1,ry1,rx2,ry2=roi["bounds"];resized_h,resized_w=roi["shape"]
+    sx=max(1.0,float(rx2-rx1))/max(1.0,float(resized_w));sy=max(1.0,float(ry2-ry1))/max(1.0,float(resized_h));mapped=[]
     for raw in _raw_prediction_boxes(prediction):
-        x1,y1,x2,y2,conf=_inverse_rotate_box(raw,rotation,resized_w,resized_h)
-        mapped.append((float(rx1)+x1*sx,float(ry1)+y1*sy,float(rx1)+x2*sx,float(ry1)+y2*sy,conf))
+        x1,y1,x2,y2,conf,left,right=_inverse_rotate_box(raw,rotation,resized_w,resized_h)
+        mapped.append((float(rx1)+x1*sx,float(ry1)+y1*sy,float(rx1)+x2*sx,float(ry1)+y2*sy,conf,_scale_pose_point(left,sx,sy,rx1,ry1),_scale_pose_point(right,sx,sy,rx1,ry1)))
     return mapped
-
 
 def _rotate_image(image, rotation: int):
     import cv2
@@ -326,7 +354,7 @@ class YoloDetectorWorker:
         model_value=str(self.config.get("model","models/yolo26m.pt"));model_path=Path(model_value).expanduser();self.model_path=model_path if model_path.is_absolute() else self.project_root/model_path
         self.start_delay_sec=max(0.0,float(self.config.get("start_delay_sec",2.0)));self.results=LatestDetectionStore();self._stop=threading.Event();self._thread=None;self._process=None;self._ctx=mp.get_context("spawn");self._input_queue=None;self._output_queue=None
         self._last_versions={cid:0 for cid in self.camera_ids};self._cursor=0;self._batch_id=0;self._inflight_batch_id=None;self._lock=threading.Lock();self._started_mono=time.monotonic();self._ready=False
-        self._submitted=0;self._batches=0;self._inputs=0;self._detections=0;self._roi_inputs=0;self._roi_variants=0;self._hard_rejects=0;self._stale_submit_drops=0;self._stale_result_drops=0;self._queue_full_drops=0;self._skipped_latest=0
+        self._submitted=0;self._batches=0;self._inputs=0;self._detections=0;self._pose_boxes=0;self._ankle_points=0;self._roi_inputs=0;self._roi_variants=0;self._hard_rejects=0;self._stale_submit_drops=0;self._stale_result_drops=0;self._queue_full_drops=0;self._skipped_latest=0
         self._last_batch_ms=0.0;self._last_roi_ms=0.0;self._last_prepare_ms=0.0;self._last_submit_age_ms=0.0;self._last_finish_age_ms=0.0;self._last_error=""
         self._batch_ms=deque(maxlen=300);self._finish_age_ms=deque(maxlen=300);self._submit_age_ms=deque(maxlen=300)
         self._per_camera_inputs={cid:0 for cid in self.camera_ids};self._per_camera_last_frame_id={cid:0 for cid in self.camera_ids};self._per_camera_last_detection_mono={cid:0.0 for cid in self.camera_ids};self._per_camera_finish_age_ms={cid:None for cid in self.camera_ids}
@@ -423,8 +451,8 @@ class YoloDetectorWorker:
                 finish_age_ms=max(0.0,(now-float(captured_mono))*1000.0);self._last_finish_age_ms=finish_age_ms;self._finish_age_ms.append(finish_age_ms);self._per_camera_finish_age_ms[str(cid)]=finish_age_ms
                 if self.max_result_age_ms>0 and finish_age_ms>self.max_result_age_ms:
                     self._stale_result_drops+=1;continue
-                boxes=tuple(PersonBox(*map(float,box)) for box in raw_boxes);self.results.put(DetectionResult(camera_id=str(cid),frame_id=int(frame_id),frame_captured_monotonic=float(captured_mono),produced_monotonic=float(produced_mono),boxes=boxes))
-                with self._lock:self._per_camera_inputs[str(cid)]+=1;self._per_camera_last_frame_id[str(cid)]=int(frame_id);self._per_camera_last_detection_mono[str(cid)]=float(produced_mono)
+                boxes=tuple(PersonBox(float(box[0]),float(box[1]),float(box[2]),float(box[3]),float(box[4]),box[5],box[6]) for box in raw_boxes);self.results.put(DetectionResult(camera_id=str(cid),frame_id=int(frame_id),frame_captured_monotonic=float(captured_mono),produced_monotonic=float(produced_mono),boxes=boxes))
+                with self._lock:self._pose_boxes+=sum(1 for box in boxes if box.left_ankle or box.right_ankle);self._ankle_points+=sum(int(box.left_ankle is not None)+int(box.right_ankle is not None) for box in boxes);self._per_camera_inputs[str(cid)]+=1;self._per_camera_last_frame_id[str(cid)]=int(frame_id);self._per_camera_last_detection_mono[str(cid)]=float(produced_mono)
             with self._lock:
                 self._batches+=1;self._inputs+=int(payload["inputs"]);self._detections+=int(payload["detections"]);self._roi_inputs+=int(payload.get("roi_inputs",0));self._roi_variants+=int(payload.get("roi_variants",0));self._hard_rejects+=int(payload.get("hard_rejects",0));self._last_batch_ms=float(payload["wall_ms"]);self._last_roi_ms=float(payload.get("roi_wall_ms",0.0));self._batch_ms.append(self._last_batch_ms);self._last_error=""
 
@@ -453,4 +481,4 @@ class YoloDetectorWorker:
             for cid in self.camera_ids:
                 last=self._per_camera_last_detection_mono[cid];cameras[cid]={"inputs":self._per_camera_inputs[cid],"input_rate":self._per_camera_inputs[cid]/elapsed,"last_frame_id":self._per_camera_last_frame_id[cid],"observation_age_ms":((now-last)*1000.0) if last else None,"last_finish_age_ms":self._per_camera_finish_age_ms[cid]}
             resource=process_metrics(process.pid if process and process.is_alive() else None)
-            return {"ready":self._ready,"process_alive":bool(process and process.is_alive()),"process_pid":process.pid if process else None,"process_exitcode":process.exitcode if process and not process.is_alive() else None,"start_method":"spawn","model":str(self.model_path),"device":str(self.config.get("device","cuda:0")),"quantize":self.config.get("quantize",32),"batch_size":self.batch_size,"inflight_batch_id":self._inflight_batch_id,"submitted_camera_inputs":self._submitted,"batches":self._batches,"batch_rate":self._batches/elapsed,"camera_inputs":self._inputs,"camera_input_rate":self._inputs/elapsed,"detections":self._detections,"hard_rejects":self._hard_rejects,"roi_inputs":self._roi_inputs,"roi_variants":self._roi_variants,"roi_rate":self._roi_inputs/elapsed,"stale_submit_drops":self._stale_submit_drops,"stale_result_drops":self._stale_result_drops,"queue_full_drops":self._queue_full_drops,"skipped_latest":self._skipped_latest,"last_prepare_ms":self._last_prepare_ms,"last_batch_ms":self._last_batch_ms,"batch_ms":_stats(self._batch_ms),"last_roi_ms":self._last_roi_ms,"last_submit_age_ms":self._last_submit_age_ms,"submit_age_ms":_stats(self._submit_age_ms),"last_finish_age_ms":self._last_finish_age_ms,"finish_age_ms":_stats(self._finish_age_ms),"resources":resource,"last_error":self._last_error,"cameras":cameras}
+            return {"ready":self._ready,"process_alive":bool(process and process.is_alive()),"process_pid":process.pid if process else None,"process_exitcode":process.exitcode if process and not process.is_alive() else None,"start_method":"spawn","model":str(self.model_path),"device":str(self.config.get("device","cuda:0")),"quantize":self.config.get("quantize",32),"batch_size":self.batch_size,"inflight_batch_id":self._inflight_batch_id,"submitted_camera_inputs":self._submitted,"batches":self._batches,"batch_rate":self._batches/elapsed,"camera_inputs":self._inputs,"camera_input_rate":self._inputs/elapsed,"detections":self._detections,"pose_boxes":self._pose_boxes,"ankle_points":self._ankle_points,"hard_rejects":self._hard_rejects,"roi_inputs":self._roi_inputs,"roi_variants":self._roi_variants,"roi_rate":self._roi_inputs/elapsed,"stale_submit_drops":self._stale_submit_drops,"stale_result_drops":self._stale_result_drops,"queue_full_drops":self._queue_full_drops,"skipped_latest":self._skipped_latest,"last_prepare_ms":self._last_prepare_ms,"last_batch_ms":self._last_batch_ms,"batch_ms":_stats(self._batch_ms),"last_roi_ms":self._last_roi_ms,"last_submit_age_ms":self._last_submit_age_ms,"submit_age_ms":_stats(self._submit_age_ms),"last_finish_age_ms":self._last_finish_age_ms,"finish_age_ms":_stats(self._finish_age_ms),"resources":resource,"last_error":self._last_error,"cameras":cameras}
