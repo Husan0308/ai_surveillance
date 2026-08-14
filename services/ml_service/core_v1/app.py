@@ -9,6 +9,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 
 from shared.config import camera_config
+from services.ml_service.heatmap import FloorHeatmapCoordinator
+from services.ml_service.pose import PoseCoordinator
 
 from .jpeg_publisher import LatestJpegPublisher
 from .manager import CameraManager
@@ -46,18 +48,15 @@ heatmap_cfg = dict(core_cfg.get("heatmap") or {})
 reid_cfg = dict(core_cfg.get("reid") or {})
 
 spatial_mapper = RoomSpatialMapper(ROOT / "config/room_mapping.yaml")
+
 detector = (
     StableYoloDetectorWorker(manager.stores, detector_cfg, ROOT)
     if bool(detector_cfg.get("enabled", False))
     else None
 )
 
-# Stable baseline rule: optional analytics must never gate detector startup or
-# frame publication. Pose/heatmap stay available in the repository but are not
-# constructed in the baseline runtime.
-pose = None
-heatmap = None
-
+# Optional analytics consume detector outputs asynchronously. They are never
+# prerequisites for detector startup or frame publication.
 reid = (
     ReIDCoordinator(
         manager.stores,
@@ -66,6 +65,23 @@ reid = (
         spatial_mapper=spatial_mapper,
     )
     if detector is not None and bool(reid_cfg.get("enabled", False))
+    else None
+)
+
+pose = (
+    PoseCoordinator(manager.stores, detector.results, pose_cfg)
+    if detector is not None and bool(pose_cfg.get("enabled", False))
+    else None
+)
+
+heatmap = (
+    FloorHeatmapCoordinator(
+        pose,
+        manager.stores,
+        spatial_mapper,
+        heatmap_cfg,
+    )
+    if pose is not None and bool(heatmap_cfg.get("enabled", False))
     else None
 )
 
@@ -85,7 +101,20 @@ publishers = {
     for cid, store in manager.stores.items()
 }
 
-app = FastAPI(title="AI Surveillance ML Core v1", version="1.9-stable")
+app = FastAPI(title="AI Surveillance ML Core v1", version="2.0-full-safe")
+
+
+def _mode() -> str:
+    parts = ["camera"]
+    if detector:
+        parts.append("yolo")
+    if reid:
+        parts.append("reid")
+    if pose:
+        parts.append("pose")
+    if heatmap:
+        parts.append("heatmap")
+    return "+".join(parts)
 
 
 @app.on_event("startup")
@@ -101,16 +130,26 @@ def startup():
         if stagger and index + 1 < len(publishers):
             time.sleep(stagger)
 
-    # Detector is the first analytics service to start. Nothing optional is
-    # allowed to block its process warm-up or result bridge.
+    # The detector owns the production hot path. All other components can fail
+    # independently without blocking camera frames or detections.
     if detector:
         detector.start()
     if reid:
         reid.start()
+    if pose:
+        pose.start()
+    if heatmap:
+        heatmap.start()
 
 
 @app.on_event("shutdown")
 def shutdown():
+    if heatmap:
+        heatmap.stop()
+        heatmap.join(6)
+    if pose:
+        pose.stop()
+        pose.join(6)
     if reid:
         reid.stop()
         reid.join(6)
@@ -131,23 +170,17 @@ def health():
     detector_metrics = detector.metrics() if detector else None
     detector_ready = bool(detector_metrics and detector_metrics.get("ready"))
     return {
+        # Optional analytics are deliberately non-gating. Health is degraded only
+        # when the primary detector is configured but unavailable.
         "status": "ok" if detector_ready or detector is None else "degraded",
-        "mode": "camera+yolo+reid" if reid else ("camera+yolo" if detector else "camera-only"),
-        "profile": "stable-detection-ui-baseline",
+        "mode": _mode(),
+        "profile": str(core_cfg.get("profile", "full-features-safe")),
         "cameras": metrics,
-        "online": sum(bool(v.get("online")) for v in metrics.values()),
+        "online": sum(bool(value.get("online")) for value in metrics.values()),
         "total": len(metrics),
         "detector": detector_metrics,
-        "pose": {
-            "enabled": False,
-            "configured_enabled": bool(pose_cfg.get("enabled", False)),
-            "reason": "disabled in stable baseline so pose cannot block detection",
-        },
-        "heatmap": {
-            "enabled": False,
-            "configured_enabled": bool(heatmap_cfg.get("enabled", False)),
-            "reason": "disabled until detection/UI baseline passes acceptance",
-        },
+        "pose": pose.metrics() if pose else {"enabled": False},
+        "heatmap": heatmap.snapshot() if heatmap else {"enabled": False},
         "reid": reid.metrics() if reid else {"enabled": False},
         "publishers": {cid: publisher.metrics() for cid, publisher in publishers.items()},
         "frame_history": {
@@ -193,30 +226,71 @@ def detections():
 
 @app.get("/poses")
 def poses_state():
-    return {
-        "enabled": False,
-        "cameras": {},
-        "reason": "stable baseline: re-enable only after detector/UI acceptance",
-    }
+    if pose is None:
+        return {"enabled": False, "cameras": {}}
+
+    now = time.monotonic()
+    results = {}
+    for cid, result in pose.snapshot().items():
+        results[cid] = {
+            "frame_id": result.frame_id,
+            "result_age_ms": max(0.0, (now - result.produced_monotonic) * 1000.0),
+            "capture_age_ms": max(
+                0.0,
+                (now - result.frame_captured_monotonic) * 1000.0,
+            ),
+            "people": [
+                {
+                    "bbox": list(person.bbox),
+                    "confidence": person.confidence,
+                    "keypoints": [
+                        {
+                            "x": point.x,
+                            "y": point.y,
+                            "confidence": point.confidence,
+                        }
+                        for point in person.keypoints
+                    ],
+                }
+                for person in result.people
+            ],
+        }
+    return {"enabled": True, "cameras": results, "metrics": pose.metrics()}
 
 
 @app.get("/heatmap")
 def heatmap_state():
-    return {
-        "enabled": False,
-        "rooms": {},
-        "reason": "stable baseline: re-enable only after detector/UI acceptance",
-    }
+    if heatmap is None:
+        return {"enabled": False, "rooms": {}}
+    return heatmap.snapshot()
 
 
 @app.get("/heatmap/{room_id}.png")
 def heatmap_png(room_id: str):
-    raise HTTPException(503, "heatmap is disabled in the stable baseline")
+    if heatmap is None:
+        raise HTTPException(503, "heatmap is disabled")
+    payload = heatmap.render_png(room_id)
+    if payload is None:
+        raise HTTPException(404, "room not found")
+    return Response(
+        content=payload,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @app.post("/heatmap/reset/{room_id}")
 def reset_heatmap(room_id: str):
-    raise HTTPException(503, "heatmap is disabled in the stable baseline")
+    if heatmap is None:
+        raise HTTPException(503, "heatmap is disabled")
+    try:
+        heatmap.reset(room_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"ok": True, "room_id": room_id}
 
 
 @app.get("/reid")
@@ -230,7 +304,7 @@ def reid_state():
 def room_mapping():
     payload = spatial_mapper.snapshot()
     payload["people"] = reid.room_people() if reid is not None else []
-    payload["heatmap"] = {}
+    payload["heatmap"] = heatmap.snapshot().get("rooms", {}) if heatmap is not None else {}
     return payload
 
 
