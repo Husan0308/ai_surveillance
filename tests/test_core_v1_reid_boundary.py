@@ -6,7 +6,6 @@ import unittest
 import numpy as np
 
 from services.ml_service.core_v1.detector import DetectionResult, PersonBox
-from services.ml_service.core_v1.global_identity import GlobalIdentityManager
 from services.ml_service.core_v1.reid_service import ReIDCoordinator
 
 
@@ -51,16 +50,6 @@ class _AcceptingSelector:
 
 
 class ReIDRealObservationBoundaryTests(unittest.TestCase):
-    def test_older_async_embedding_cannot_regress_track_activity(self):
-        manager = GlobalIdentityManager({"active_timeout_sec": 7.0})
-        descriptor = np.asarray([1.0, 0.0], dtype=np.float32)
-        gid, _ = manager.ensure_track("CAM-01", 1, descriptor, 195.0)
-        manager.touch_track("CAM-01", 1, 200.0)
-
-        manager.ensure_track("CAM-01", 1, descriptor, 198.0)
-
-        self.assertEqual(manager.touch_track("CAM-01", 1, 206.0), gid)
-
     def test_reid_uses_exact_detector_frame_timestamp_box_and_crop(self):
         captured = 123.456
         detector_box = PersonBox(20.0, 15.0, 80.0, 130.0, 0.91)

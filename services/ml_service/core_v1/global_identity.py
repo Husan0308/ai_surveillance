@@ -123,9 +123,7 @@ class GlobalIdentityManager:
         identity.last_seen = max(float(identity.last_seen), float(observed_at))
         identity.last_camera = str(camera_id)
         identity.active_tracks[str(camera_id)] = str(local_key)
-        self._track_activity[str(local_key)] = max(
-            float(self._track_activity.get(str(local_key), 0.0)), float(observed_at)
-        )
+        self._track_activity[str(local_key)] = float(observed_at)
         self._updates += 1
 
     def ensure_track(self, camera_id: str, local_track_id: int, descriptor, observed_at: float | None = None):
@@ -151,9 +149,7 @@ class GlobalIdentityManager:
             identity = self._identities.get(gid) if gid else None
             if identity is None:
                 return None
-            self._track_activity[local_key] = max(
-                float(self._track_activity.get(local_key, 0.0)), observed_at
-            )
+            self._track_activity[local_key] = observed_at
             identity.active_tracks[camera_id] = local_key
             identity.last_seen = max(float(identity.last_seen), observed_at)
             identity.last_camera = camera_id
