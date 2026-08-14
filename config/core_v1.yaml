@@ -1,5 +1,5 @@
 core_v1:
-  profile: "detection-tracking-room-consensus-reid-face-cuda-v1"
+  profile: "detection-tracking-room-consensus-reid-face-cuda-v2"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
