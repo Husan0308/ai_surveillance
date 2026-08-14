@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging,threading,time
 from dataclasses import dataclass,asdict
 from .latest_frame import Frame,LatestFrameStore
-from services.ml_service.cameras.gstreamer import GStreamerCapture
+from services.ml_service.cameras.smooth_gstreamer import SmoothGStreamerCapture
 from services.ml_service.cameras.deepstream import DeepStreamCapture, deepstream_available
 
 log=logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class CameraWorker:
             except Exception as exc:
                 if backend=="deepstream":raise
                 log.warning("CORE_V1_DEEPSTREAM_FALLBACK camera=%s error=%s",self.camera_id,exc)
-        cap=GStreamerCapture(cfg)
+        cap=SmoothGStreamerCapture(cfg)
         with self._lock:self._metrics.capture_backend=cap.backend
         return cap
     def _run(self):
