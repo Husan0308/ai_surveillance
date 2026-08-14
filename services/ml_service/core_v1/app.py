@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from shared.config import camera_config
 
-from .face_service_safe import SafeFaceRecognitionService
+from .face_service_cuda import CudaFaceRecognitionService
 from .manager import CameraManager
 from .room_consensus_reid import RoomConsensusGlobalReIdCoordinator
 from .runtime_metrics import process_metrics
@@ -81,7 +81,7 @@ reid = (
 )
 
 face = (
-    SafeFaceRecognitionService(
+    CudaFaceRecognitionService(
         manager.stores,
         publishers,
         face_cfg,
@@ -98,8 +98,8 @@ if identity_provider is not None:
         publisher.identity_provider = identity_provider
 
 app = FastAPI(
-    title="AI Surveillance Detection + Tracking + ReID + Face Core",
-    version="1.5-face",
+    title="AI Surveillance Detection + Tracking + ReID + CUDA Face Core",
+    version="1.6-face-cuda",
 )
 
 
@@ -110,7 +110,7 @@ def _mode() -> str:
     if reid is not None:
         parts.append("room-consensus-reid")
     if face is not None:
-        parts.append("face-cpu")
+        parts.append("face-cuda-sidepath")
     return "+".join(parts)
 
 

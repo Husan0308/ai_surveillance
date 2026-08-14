@@ -10,16 +10,23 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DetectionTrackingReidBaselineTests(unittest.TestCase):
-    def test_config_keeps_pose_heatmap_removed_and_face_is_cpu_sidepath(self):
+    def test_config_keeps_pose_heatmap_removed_and_face_is_bounded_cuda_sidepath(self):
         payload = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))
         core = payload["core_v1"]
-        self.assertEqual(core["profile"], "detection-tracking-room-consensus-reid-face-v1")
+        self.assertEqual(core["profile"], "detection-tracking-room-consensus-reid-face-cuda-v2")
         for required in ("detector", "visual_tracker", "reid", "face"):
             self.assertIn(required, core)
         self.assertTrue(bool(core["reid"]["enabled"]))
         self.assertEqual(str(core["reid"]["device"]), "cpu")
         self.assertTrue(bool(core["face"]["enabled"]))
-        self.assertEqual(core["face"]["provider"], "CPUExecutionProvider")
+        face = core["face"]
+        self.assertEqual(face["provider"], "CUDAExecutionProvider")
+        self.assertEqual(int(face["device_id"]), 0)
+        self.assertTrue(bool(face["allow_cpu_fallback"]))
+        self.assertLessEqual(int(face["gpu_mem_limit_mb"]), 1024)
+        self.assertGreaterEqual(int(face["sample_interval_ms"]), 1000)
+        self.assertLessEqual(int(face["max_people_per_camera"]), 2)
+        self.assertEqual(face["model_pack"], "buffalo_m")
         for forbidden in ("pose", "heatmap"):
             self.assertNotIn(forbidden, core)
 
@@ -62,6 +69,8 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
             "services/ml_service/core_v1/instant_reid.py",
             "services/ml_service/core_v1/room_consensus_reid.py",
             "services/ml_service/core_v1/face_service.py",
+            "services/ml_service/core_v1/face_service_safe.py",
+            "services/ml_service/core_v1/face_service_cuda.py",
         ):
             self.assertTrue((ROOT / required).exists(), required)
 
@@ -82,8 +91,22 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
         for forbidden in ("/poses", "/heatmap", "/room-mapping", "/overlays"):
             self.assertNotIn(forbidden, source)
         self.assertIn("RoomConsensusGlobalReIdCoordinator", source)
-        self.assertIn("FaceRecognitionService", source)
+        self.assertIn("CudaFaceRecognitionService", source)
         self.assertIn("TrackingJpegPublisher", source)
+
+    def test_cuda_face_service_verifies_real_onnx_sessions_and_preserves_safety(self):
+        source = (ROOT / "services/ml_service/core_v1/face_service_cuda.py").read_text(encoding="utf-8")
+        self.assertIn("SafeFaceRecognitionService", source)
+        self.assertIn('import torch', source)
+        self.assertIn('CUDAExecutionProvider', source)
+        self.assertIn('CPUExecutionProvider', source)
+        self.assertIn('ort.get_available_providers()', source)
+        self.assertIn('get_providers', source)
+        self.assertIn('gpu_mem_limit', source)
+        self.assertIn('kSameAsRequested', source)
+        self.assertIn('HEURISTIC', source)
+        self.assertIn('cuda_verified', source)
+        self.assertIn('cpu_fallback', source)
 
     def test_capture_pipeline_is_latest_only(self):
         deepstream = (ROOT / "services/ml_service/cameras/deepstream.py").read_text(encoding="utf-8")
@@ -104,11 +127,12 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
         self.assertLessEqual(float(config["max_result_age_ms"]), 700.0)
         self.assertFalse(bool(config["roi_second_pass"]["enabled"]))
 
-    def test_frontend_keeps_mukammal_base_and_adds_face_adapter(self):
+    def test_frontend_keeps_mukammal_face_ui_and_adds_cuda_runtime_adapter(self):
         main = (ROOT / "services/frontend/core_v1/main.py").read_text(encoding="utf-8")
         base_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py").read_text(encoding="utf-8")
         face_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_face.py").read_text(encoding="utf-8")
-        self.assertIn("operator_dashboard_face", main)
+        cuda_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_face_cuda.py").read_text(encoding="utf-8")
+        self.assertIn("operator_dashboard_face_cuda", main)
         self.assertIn("class Header", base_ui)
         self.assertIn("class SideBar", base_ui)
         self.assertIn("class CameraCard", base_ui)
@@ -120,7 +144,9 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
         self.assertIn("class PersonManagementPage", face_ui)
         self.assertIn("class EnrollmentPage", face_ui)
         self.assertIn("Capture 10 samples", face_ui)
-        self.assertIn("CPUExecutionProvider", face_ui)
+        self.assertIn("InsightFace buffalo_m", cuda_ui)
+        self.assertIn("CUDAExecutionProvider", cuda_ui)
+        self.assertIn("768 MB ORT arena cap", cuda_ui)
 
     def test_frontend_shares_one_mjpeg_reader_per_camera(self):
         ui = (ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py").read_text(encoding="utf-8")
