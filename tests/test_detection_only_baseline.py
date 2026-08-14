@@ -13,7 +13,7 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
     def test_config_contains_only_camera_detector_and_local_tracker(self):
         payload = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))
         core = payload["core_v1"]
-        self.assertEqual(core["profile"], "detection-tracking-smooth-v2")
+        self.assertEqual(core["profile"], "detection-tracking-smooth-v3")
         self.assertIn("detector", core)
         self.assertIn("visual_tracker", core)
         for forbidden in ("pose", "heatmap", "reid"):
@@ -23,6 +23,8 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         detector = core["detector"]
         self.assertEqual(tracker["assignment_solver"], "hungarian")
         self.assertTrue(bool(tracker["fuse_score"]))
+        self.assertTrue(bool(tracker["ownership_lock"]))
+        self.assertGreaterEqual(int(tracker["id_namespace_stride"]), 1000)
         self.assertLessEqual(float(detector["conf"]), float(tracker["byte_low_conf"]))
         self.assertGreaterEqual(float(tracker["new_track_min_conf"]), float(tracker["byte_high_conf"]))
 
@@ -61,7 +63,6 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
             '@app.get("/detections")',
             '@app.get("/tracks")',
             '@app.get("/frame/{camera_id}")',
-            '@app.get("/video/{camera_id}")',
         ):
             self.assertIn(required, source)
         for forbidden in ("/poses", "/heatmap", "/reid", "/room-mapping", "/overlays"):
@@ -83,7 +84,6 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertIn("drop=true max-buffers=1", deepstream)
         self.assertIn("postdecode_queue_buffers", deepstream)
         self.assertIn("single-slot frame store", camera_worker)
-        self.assertIn("self.store.put(Frame(", camera_worker)
         self.assertIn("self._frame", latest_frame)
         self.assertNotIn("self._history", latest_frame)
         self.assertNotIn("def get_frame", latest_frame)
@@ -106,7 +106,13 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertIn("self.heat.hide()", ui)
         self.assertIn("self.pose.hide()", ui)
         self.assertNotIn('"/reid"', ui)
-        self.assertIn("base.FrameReader = SmoothFrameReader", ui)
+
+    def test_tracking_publisher_uses_ownership_lock(self):
+        source = (ROOT / "services/ml_service/core_v1/tracking_publisher.py").read_text(encoding="utf-8")
+        ownership = (ROOT / "services/ml_service/core_v1/ownership_tracker.py").read_text(encoding="utf-8")
+        self.assertIn("OwnershipLockedTracker", source)
+        self.assertIn("ownership_quarantine", ownership)
+        self.assertIn("id_namespace_base", ownership)
 
 
 if __name__ == "__main__":

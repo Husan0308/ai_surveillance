@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from .event_publisher import EventDrivenJpegPublisher
-from .local_tracker import LocalByteTracker
+from .ownership_tracker import OwnershipLockedTracker
 
 
-def _build_tracker(camera_id: str, config: dict) -> LocalByteTracker:
+def _build_tracker(camera_id: str, config: dict) -> OwnershipLockedTracker:
     cfg = dict(config or {})
     camera_zones = dict(cfg.get("camera_exclusion_zones") or {})
     camera_birth_zones = dict(cfg.get("camera_new_track_zones") or {})
@@ -12,7 +12,18 @@ def _build_tracker(camera_id: str, config: dict) -> LocalByteTracker:
     camera_start_conf = dict(cfg.get("camera_start_conf") or {})
     camera_low_conf = dict(cfg.get("camera_low_conf_confirm") or {})
 
-    return LocalByteTracker(
+    return OwnershipLockedTracker(
+        camera_id=camera_id,
+        ownership_lock=cfg.get("ownership_lock", True),
+        ownership_min_hits=cfg.get("ownership_min_hits", 3),
+        ownership_margin=cfg.get("ownership_margin", 0.09),
+        ownership_low_margin_multiplier=cfg.get("ownership_low_margin_multiplier", 1.5),
+        ownership_proximity=cfg.get("ownership_proximity", 0.70),
+        ownership_overlap_iou=cfg.get("ownership_overlap_iou", 0.08),
+        ownership_iou_advantage=cfg.get("ownership_iou_advantage", 0.14),
+        ownership_distance_advantage=cfg.get("ownership_distance_advantage", 0.14),
+        ownership_max_competitor_age_ms=cfg.get("ownership_max_competitor_age_ms", 700),
+        id_namespace_stride=cfg.get("id_namespace_stride", 10000),
         hold_ms=cfg.get("hold_ms", 800),
         memory_ms=cfg.get("memory_ms", 3000),
         prediction_ms=cfg.get("prediction_ms", 420),
@@ -60,7 +71,7 @@ def _build_tracker(camera_id: str, config: dict) -> LocalByteTracker:
 
 
 class TrackingJpegPublisher(EventDrivenJpegPublisher):
-    """Event-driven latest-frame publisher with stable camera-local IDs."""
+    """Event-driven latest-frame publisher with ownership-locked camera IDs."""
 
     def __init__(self, *args, tracker_config=None, **kwargs):
         super().__init__(*args, tracker_config=tracker_config, **kwargs)
@@ -69,7 +80,7 @@ class TrackingJpegPublisher(EventDrivenJpegPublisher):
     def _identity_for_box(self, box):
         track_id = int(getattr(box, "track_id", 0) or 0)
         if track_id > 0:
-            return {"global_id": f"Unknown_{track_id:03d}"}
+            return {"global_id": self.visual_tracker.display_label(track_id)}
         return super()._identity_for_box(box)
 
     def track_snapshot(self):
