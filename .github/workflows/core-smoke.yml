@@ -3,7 +3,7 @@ name: Detection + tracking + smooth camera smoke tests
 on:
   push:
     branches:
-      - "agent/event-driven-camera-publisher"
+      - "agent/tracker-id-ownership-lock"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -37,6 +37,7 @@ jobs:
             services/ml_service/core_v1/stable_detector.py \
             services/ml_service/core_v1/visual_tracker.py \
             services/ml_service/core_v1/local_tracker.py \
+            services/ml_service/core_v1/ownership_tracker.py \
             services/ml_service/core_v1/jpeg_publisher.py \
             services/ml_service/core_v1/event_publisher.py \
             services/ml_service/core_v1/tracking_publisher.py \
@@ -62,6 +63,9 @@ jobs:
 
       - name: Test Hungarian local tracking
         run: python -m unittest discover -s tests -p "test_local_tracking.py" -v
+
+      - name: Test ID ownership lock
+        run: python -m unittest discover -s tests -p "test_id_ownership.py" -v
 
       - name: Test smooth camera pipeline
         run: python -m unittest discover -s tests -p "test_camera_smoothness.py" -v

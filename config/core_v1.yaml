@@ -1,20 +1,17 @@
 core_v1:
-  profile: "detection-tracking-smooth-v2"
+  profile: "detection-tracking-smooth-v3"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Keep one presentation cadence close to the actual CCTV cadence. Frames are
-  # never queued to reach this rate: if work falls behind, the newest frame wins.
   display_fps: 20
   jpeg_quality: 70
   max_display_width: 736
   max_display_height: 416
   publisher_start_stagger_ms: 10
 
-  # Six independent RTSP capture loops. DeepStream/NVDEC is preferred.
   startup_grace_sec: 8.0
   startup_stagger_sec: 0.20
   capture_timeout_ms: 1000
@@ -34,16 +31,10 @@ core_v1:
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
-  # Critical smoothness optimization: decode can remain at the camera's native
-  # resolution, but nvvideoconvert scales on the NVIDIA path before the RAW BGR
-  # frame is copied into Python. This removes the six-camera full-HD host-copy
-  # bottleneck and also matches the detector input exactly.
   capture_output_width: 736
   capture_output_height: 416
   capture_metrics_interval_sec: 5.0
 
-  # Do not rebuild a healthy RTSP pipe for a brief jitter spike. A sustained
-  # stale stream is still reconnected, but short LAN jitter is allowed to heal.
   max_pipeline_lag_ms: 900
   max_pipeline_lag_samples: 20
 
@@ -60,8 +51,6 @@ core_v1:
     iou: 0.50
     max_det: 30
 
-    # Keep conservative latency until real six-camera telemetry proves a larger
-    # batch helps. Camera smoothness is intentionally independent of this batch.
     batch_size: 2
     poll_interval_ms: 4
     start_delay_sec: 1.0
@@ -84,19 +73,35 @@ core_v1:
       cameras: {}
 
   visual_tracker:
-    tracker_type: "bytetrack-hungarian"
+    tracker_type: "bytetrack-hungarian-ownership"
     assignment_solver: "hungarian"
     fuse_score: true
 
-    hold_ms: 800
-    memory_ms: 2500
-    prediction_ms: 320
+    # Prefer a short identity hold over assigning an existing ID to a nearby
+    # different person. This is still camera-local tracking, not ReID.
+    ownership_lock: true
+    ownership_min_hits: 3
+    ownership_margin: 0.09
+    ownership_low_margin_multiplier: 1.50
+    ownership_proximity: 0.70
+    ownership_overlap_iou: 0.08
+    ownership_iou_advantage: 0.14
+    ownership_distance_advantage: 0.14
+    ownership_max_competitor_age_ms: 700
+
+    # IDs are unique across cameras even before ReID. CAM-01 uses the 10000
+    # namespace, CAM-02 the 20000 namespace, etc. UI renders friendly C01-001.
+    id_namespace_stride: 10000
+
+    hold_ms: 850
+    memory_ms: 2800
+    prediction_ms: 340
 
     match_iou: 0.12
-    reacquire_distance: 0.82
-    byte_match_center: 0.70
-    byte_second_match_iou: 0.04
-    byte_second_match_center: 0.50
+    reacquire_distance: 0.78
+    byte_match_center: 0.66
+    byte_second_match_iou: 0.05
+    byte_second_match_center: 0.46
     low_match_max_age_ms: 600
 
     byte_high_conf: 0.25
@@ -107,18 +112,18 @@ core_v1:
     strong_confirm_hits: 2
     weak_confirm_hits: 3
 
-    process_noise: 0.85
-    measurement_noise: 0.90
+    process_noise: 0.82
+    measurement_noise: 0.88
     velocity_damping: 0.95
     size_velocity_damping: 0.60
-    max_prediction_shift_boxes: 0.60
+    max_prediction_shift_boxes: 0.55
     max_prediction_size_ratio: 0.06
     adaptive_error_low: 0.08
     adaptive_error_high: 0.25
     center_response_slow: 0.42
-    center_response_fast: 0.88
+    center_response_fast: 0.84
     size_response: 0.30
-    snap_distance_boxes: 0.65
+    snap_distance_boxes: 0.62
     reversal_damping: 0.15
 
     duplicate_iou: 0.68
