@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import threading
 
-from .face_service import FaceRecognitionService
+from .face_service_safe import SafeFaceRecognitionService
 
 
-class CudaFaceRecognitionService(FaceRecognitionService):
+class CudaFaceRecognitionService(SafeFaceRecognitionService):
     """CUDA-first Face service with bounded VRAM use and CPU fallback.
 
     Face inference remains a low-rate side-path. The detector/tracker hot path is
     unchanged. CUDA is verified from the actual InsightFace ONNX sessions so a
     silent CPU fallback is visible in /health instead of being mistaken for GPU.
+    All ambiguity and enrollment-consistency guards from SafeFaceRecognitionService
+    remain active.
     """
 
     def __init__(self, *args, **kwargs):
