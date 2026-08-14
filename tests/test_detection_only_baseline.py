@@ -26,6 +26,16 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertLessEqual(float(detector["conf"]), float(tracker["byte_low_conf"]))
         self.assertGreaterEqual(float(tracker["new_track_min_conf"]), float(tracker["byte_high_conf"]))
 
+    def test_detector_shape_is_stride_aligned_and_near_16_by_9(self):
+        detector = yaml.safe_load(
+            (ROOT / "config/core_v1.yaml").read_text(encoding="utf-8")
+        )["core_v1"]["detector"]
+        height, width = [int(value) for value in detector["imgsz"]]
+        self.assertEqual(height % 32, 0)
+        self.assertEqual(width % 32, 0)
+        self.assertLess(abs((width / height) - (16.0 / 9.0)), 0.02)
+        self.assertLessEqual(height * width, 448 * 704)
+
     def test_optional_model_modules_are_removed(self):
         forbidden = [
             "services/ml_service/core_v1/global_identity.py",
