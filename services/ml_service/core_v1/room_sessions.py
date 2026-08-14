@@ -39,7 +39,7 @@ class RoomVisitSessionManager:
     Short detector/ReID gaps keep the existing room session alive.
     """
 
-    def __init__(self, config: dict | None = None):
+    def __init__(self, config: dict | None = None, camera_rooms: dict | None = None):
         cfg = dict(config or {})
         self.enabled = bool(cfg.get("enabled", True))
         self.enter_confirm_sec = max(0.0, float(cfg.get("enter_confirm_sec", 0.8)))
@@ -50,6 +50,10 @@ class RoomVisitSessionManager:
         )
         self.max_events = max(10, int(cfg.get("max_events", 100)))
         self.max_recent = max(10, int(cfg.get("max_recent_sessions", 100)))
+        self.camera_rooms = {
+            str(camera_id): str(room_id)
+            for camera_id, room_id in (camera_rooms or {}).items()
+        }
 
         self._lock = threading.RLock()
         self._pending: dict[tuple[str, str], _PendingVisit] = {}
@@ -67,14 +71,14 @@ class RoomVisitSessionManager:
         now = datetime.now().astimezone()
         return now.isoformat(timespec="seconds"), now.strftime("%H:%M:%S")
 
-    @staticmethod
-    def _latest_room_observations(reid_state: dict, now: float, max_age: float) -> dict[str, dict]:
+    def _latest_room_observations(self, reid_state: dict, now: float, max_age: float) -> dict[str, dict]:
         observations: dict[str, dict] = {}
         cameras = (reid_state or {}).get("cameras") or {}
         for camera_id, tracks in cameras.items():
+            camera_id = str(camera_id)
             for track in tracks or []:
                 gid = str(track.get("global_id") or "").strip()
-                room_id = str(track.get("room_id") or "").strip()
+                room_id = str(track.get("room_id") or self.camera_rooms.get(camera_id) or "").strip()
                 if not gid or not room_id or room_id.lower() == "unknown":
                     continue
                 try:
@@ -89,14 +93,14 @@ class RoomVisitSessionManager:
                         "global_id": gid,
                         "room_id": room_id,
                         "last_seen": last_seen,
-                        "camera_id": str(camera_id),
-                        "cameras": {str(camera_id)},
+                        "camera_id": camera_id,
+                        "cameras": {camera_id},
                     }
                 elif current["room_id"] == room_id:
-                    current["cameras"].add(str(camera_id))
+                    current["cameras"].add(camera_id)
                     if last_seen > current["last_seen"]:
                         current["last_seen"] = last_seen
-                        current["camera_id"] = str(camera_id)
+                        current["camera_id"] = camera_id
         return observations
 
     def _close_locked(self, gid: str, closed_at_monotonic: float) -> None:
@@ -235,5 +239,6 @@ class RoomVisitSessionManager:
                     "room_changes": self._room_changes,
                     "closed": self._closed,
                     "suppressed_observations": self._suppressed_observations,
+                    "camera_rooms": dict(self.camera_rooms),
                 },
             }
