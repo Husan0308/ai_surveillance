@@ -10,7 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from shared.config import camera_config
 
-from .global_reid import GlobalReIdCoordinator
+from .conservative_reid import ConservativeGlobalReIdCoordinator
 from .manager import CameraManager
 from .runtime_metrics import process_metrics
 from .stable_detector import StableYoloDetectorWorker
@@ -65,7 +65,7 @@ publishers = {
 }
 
 reid = (
-    GlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
+    ConservativeGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
     if bool(reid_cfg.get("enabled", False))
     else None
 )
@@ -203,11 +203,12 @@ def tracks():
 def reid_status():
     if reid is None:
         return {"enabled": False, "ready": False, "identities": [], "bindings": []}
+    metrics = reid.metrics()
     payload = reid.snapshot()
     return {
         "enabled": True,
-        "ready": bool(reid.metrics().get("ready")),
-        "metrics": reid.metrics(),
+        "ready": bool(metrics.get("ready")),
+        "metrics": metrics,
         **payload,
     }
 
