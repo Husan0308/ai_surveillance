@@ -137,17 +137,37 @@ core_v1:
       CAM-06:
         - [0.50, 0.00, 0.78, 0.22]
 
-  # Pose is a secondary latest-only path. Keep it disabled until the six-camera
-  # detector baseline is measured so pose cannot silently steal CUDA time.
+  # Pose is deliberately sparse because heatmaps need floor samples, not a
+  # full-rate skeleton stream. The primary detector/tracker never waits for it.
   pose:
-    enabled: false
+    enabled: true
     model: "yolo11n-pose.pt"
     device: "cuda:0"
-    imgsz: 320
-    conf: 0.20
-    every_n: 3
-    max_people: 6
-    max_frame_age_ms: 700
+    imgsz: 256
+    conf: 0.25
+    every_n: 5
+    max_people: 4
+    max_frame_age_ms: 550
+
+  heatmap:
+    enabled: true
+    coordinate_system: "normalized_room_floor"
+    grid_width: 96
+    grid_height: 64
+    poll_interval_ms: 120
+    ankle_conf: 0.35
+    sample_weight: 1.0
+    sigma_cells: 2.2
+    # A sample stays fully hot for one hour. Cooling starts only after that.
+    hot_hold_sec: 3600
+    cool_half_life_sec: 3600
+    bucket_sec: 300
+    max_history_sec: 21600
+    min_bucket_weight: 0.02
+    # Same physical foot seen by both cameras in one room is counted once.
+    dedupe_window_ms: 800
+    dedupe_distance: 0.06
+    fallback_bbox_bottom: false
 
   reid:
     enabled: true
