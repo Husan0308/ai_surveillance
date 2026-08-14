@@ -6,6 +6,7 @@ from fastapi import FastAPI,HTTPException,Query
 from fastapi.responses import StreamingResponse,Response
 from shared.config import camera_config
 from services.ml_service.pose import PoseCoordinator
+from services.ml_service.heatmap import FloorHeatmapCoordinator
 from .manager import CameraManager
 from .jpeg_publisher import LatestJpegPublisher
 from .detector import YoloDetectorWorker
@@ -30,13 +31,15 @@ manager=CameraManager(camera_cfg,core_cfg)
 detector_cfg=dict(core_cfg.get('detector') or {})
 visual_cfg=dict(core_cfg.get('visual_tracker') or {})
 pose_cfg=dict(core_cfg.get('pose') or {})
+heatmap_cfg=dict(core_cfg.get('heatmap') or {})
 reid_cfg=dict(core_cfg.get('reid') or {})
 spatial_mapper=RoomSpatialMapper(ROOT/'config/room_mapping.yaml')
 detector=YoloDetectorWorker(manager.stores,detector_cfg,ROOT) if bool(detector_cfg.get('enabled',False)) else None
 pose=PoseCoordinator(manager.stores,detector.results,pose_cfg) if detector is not None and bool(pose_cfg.get('enabled',False)) else None
+heatmap=FloorHeatmapCoordinator(pose,manager.stores,spatial_mapper,heatmap_cfg) if pose is not None and bool(heatmap_cfg.get('enabled',False)) else None
 reid=ReIDCoordinator(manager.stores,detector.results,reid_cfg,spatial_mapper=spatial_mapper) if detector is not None and bool(reid_cfg.get('enabled',False)) else None
 publishers={cid:LatestJpegPublisher(cid,store,core_cfg.get('display_fps',12),core_cfg.get('jpeg_quality',82),core_cfg.get('max_display_width',960),core_cfg.get('max_display_height',540),detections=(detector.results if detector else None),overlay_max_age_ms=detector_cfg.get('overlay_max_age_ms',350),tracker_config=visual_cfg,identity_provider=reid) for cid,store in manager.stores.items()}
-app=FastAPI(title='AI Surveillance ML Core v1',version='1.6')
+app=FastAPI(title='AI Surveillance ML Core v1',version='1.7')
 
 @app.on_event('startup')
 def startup():
@@ -46,11 +49,13 @@ def startup():
         if stagger and index+1<len(publishers):time.sleep(stagger)
     if detector:detector.start()
     if pose:pose.start()
+    if heatmap:heatmap.start()
     if reid:reid.start()
 
 @app.on_event('shutdown')
 def shutdown():
     if reid:reid.stop();reid.join(6)
+    if heatmap:heatmap.stop();heatmap.join(6)
     if pose:pose.stop();pose.join(6)
     if detector:detector.stop();detector.join(10)
     for publisher in publishers.values():publisher.stop()
@@ -60,7 +65,7 @@ def shutdown():
 @app.get('/health')
 def health():
     metrics=manager.metrics()
-    return {'status':'ok','mode':'camera+yolo+reid' if reid else ('camera+yolo' if detector else 'camera-only'),'cameras':metrics,'online':sum(bool(v.get('online')) for v in metrics.values()),'total':len(metrics),'detector':detector.metrics() if detector else None,'pose':pose.metrics() if pose else {'enabled':False},'reid':reid.metrics() if reid else None,'publishers':{cid:publisher.metrics() for cid,publisher in publishers.items()},'frame_history':{cid:store.history_metrics() for cid,store in manager.stores.items() if hasattr(store,'history_metrics')},'service_resources':process_metrics()}
+    return {'status':'ok','mode':'camera+yolo+reid' if reid else ('camera+yolo' if detector else 'camera-only'),'cameras':metrics,'online':sum(bool(v.get('online')) for v in metrics.values()),'total':len(metrics),'detector':detector.metrics() if detector else None,'pose':pose.metrics() if pose else {'enabled':False},'heatmap':heatmap.snapshot() if heatmap else {'enabled':False},'reid':reid.metrics() if reid else None,'publishers':{cid:publisher.metrics() for cid,publisher in publishers.items()},'frame_history':{cid:store.history_metrics() for cid,store in manager.stores.items() if hasattr(store,'history_metrics')},'service_resources':process_metrics()}
 
 @app.get('/cameras')
 def cameras():
@@ -93,6 +98,25 @@ def poses_state():
         }
     return {'enabled':True,'cameras':results,'metrics':pose.metrics()}
 
+@app.get('/heatmap')
+def heatmap_state():
+    if heatmap is None:return {'enabled':False,'rooms':{}}
+    return heatmap.snapshot()
+
+@app.get('/heatmap/{room_id}.png')
+def heatmap_png(room_id:str):
+    if heatmap is None:raise HTTPException(503,'heatmap is disabled')
+    payload=heatmap.render_png(room_id)
+    if payload is None:raise HTTPException(404,'room not found')
+    return Response(content=payload,media_type='image/png',headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache'})
+
+@app.post('/heatmap/reset/{room_id}')
+def reset_heatmap(room_id:str):
+    if heatmap is None:raise HTTPException(503,'heatmap is disabled')
+    try:heatmap.reset(room_id)
+    except ValueError as exc:raise HTTPException(404,str(exc)) from exc
+    return {'ok':True,'room_id':room_id}
+
 @app.get('/reid')
 def reid_state():
     if reid is None:return {'enabled':False}
@@ -102,6 +126,7 @@ def reid_state():
 def room_mapping():
     payload=spatial_mapper.snapshot()
     payload['people']=reid.room_people() if reid is not None else []
+    payload['heatmap']=heatmap.snapshot().get('rooms',{}) if heatmap is not None else {}
     return payload
 
 @app.post('/room-mapping/calibrate')
