@@ -63,7 +63,11 @@ class FloorHeatmapCoordinator:
 
         mapping = self.spatial_mapper.snapshot() if self.spatial_mapper is not None else {}
         self.room_ids = tuple(sorted(str(room_id) for room_id in (mapping.get("rooms") or {})))
-        self._buckets = {room_id: deque() for room_id in self.room_ids}
+        # Dict-by-bucket avoids ordering assumptions when two camera results around
+        # a bucket boundary arrive slightly out of timestamp order.
+        self._buckets: dict[str, dict[float, _Bucket]] = {
+            room_id: {} for room_id in self.room_ids
+        }
         self._recent_points = {room_id: deque() for room_id in self.room_ids}
         self._last_pose_frame: dict[str, int] = {}
         self._last_update_mono = {room_id: 0.0 for room_id in self.room_ids}
@@ -103,6 +107,12 @@ class FloorHeatmapCoordinator:
         if age <= self.hot_hold_sec:
             return 1.0
         return 0.5 ** ((age - self.hot_hold_sec) / self.cool_half_life_sec)
+
+    def _bucket_age(self, bucket: _Bucket, now: float) -> float:
+        # Weight from the END of the bucket. With 5-minute aggregation this
+        # guarantees no sample starts cooling before it has been hot for 1 hour;
+        # the maximum extra hold is one bucket (5 minutes by default).
+        return max(0.0, float(now) - (float(bucket.started_at) + self.bucket_sec))
 
     @staticmethod
     def _finite_point(point) -> tuple[float, float] | None:
@@ -169,14 +179,14 @@ class FloorHeatmapCoordinator:
 
     def _bucket_for(self, room_id: str, observed_at: float) -> _Bucket:
         bucket_start = math.floor(observed_at / self.bucket_sec) * self.bucket_sec
-        buckets = self._buckets.setdefault(room_id, deque())
-        if buckets and abs(buckets[-1].started_at - bucket_start) < 1e-6:
-            return buckets[-1]
-        bucket = _Bucket(
-            bucket_start,
-            np.zeros((self.grid_height, self.grid_width), dtype=np.float32),
-        )
-        buckets.append(bucket)
+        buckets = self._buckets.setdefault(room_id, {})
+        bucket = buckets.get(bucket_start)
+        if bucket is None:
+            bucket = _Bucket(
+                bucket_start,
+                np.zeros((self.grid_height, self.grid_width), dtype=np.float32),
+            )
+            buckets[bucket_start] = bucket
         return bucket
 
     def _add_gaussian(self, grid: np.ndarray, x: float, y: float, weight: float) -> None:
@@ -194,12 +204,13 @@ class FloorHeatmapCoordinator:
 
     def _prune_locked(self, now: float) -> None:
         for room_id, buckets in self._buckets.items():
-            while buckets:
-                oldest = buckets[0]
-                age = max(0.0, now - oldest.started_at)
-                if age <= self.max_history_sec and self._bucket_weight(age) >= self.min_bucket_weight:
-                    break
-                buckets.popleft()
+            remove = []
+            for bucket_start, bucket in buckets.items():
+                age = self._bucket_age(bucket, now)
+                if age > self.max_history_sec or self._bucket_weight(age) < self.min_bucket_weight:
+                    remove.append(bucket_start)
+            for bucket_start in remove:
+                buckets.pop(bucket_start, None)
             recent = self._recent_points.setdefault(room_id, deque())
             while recent and now - recent[0][0] > self.dedupe_window_sec:
                 recent.popleft()
@@ -266,14 +277,19 @@ class FloorHeatmapCoordinator:
     def room_grid(self, room_id: str, now: float | None = None) -> np.ndarray:
         room_id = str(room_id)
         current = float(time.monotonic() if now is None else now)
+        # Copy under the lock so PNG/JSON readers never race a Gaussian write.
         with self._lock:
-            buckets = tuple(self._buckets.get(room_id, ()))
+            buckets = [
+                (bucket.started_at, bucket.grid.copy())
+                for bucket in self._buckets.get(room_id, {}).values()
+            ]
         total = np.zeros((self.grid_height, self.grid_width), dtype=np.float32)
-        for bucket in buckets:
-            weight = self._bucket_weight(current - bucket.started_at)
+        for started_at, grid in buckets:
+            effective_age = max(0.0, current - (started_at + self.bucket_sec))
+            weight = self._bucket_weight(effective_age)
             if weight < self.min_bucket_weight:
                 continue
-            total += bucket.grid * np.float32(weight)
+            total += grid * np.float32(weight)
         return total
 
     def normalized_grid(self, room_id: str, now: float | None = None) -> np.ndarray:
@@ -286,7 +302,9 @@ class FloorHeatmapCoordinator:
 
     def render_png(self, room_id: str, now: float | None = None) -> bytes | None:
         room_id = str(room_id)
-        if room_id not in self._buckets:
+        with self._lock:
+            exists = room_id in self._buckets
+        if not exists:
             return None
         normalized = self.normalized_grid(room_id, now=now)
         level = np.clip(normalized * 255.0, 0.0, 255.0).astype(np.uint8)
@@ -310,20 +328,32 @@ class FloorHeatmapCoordinator:
     def snapshot(self) -> dict:
         now = time.monotonic()
         mapping = self.spatial_mapper.snapshot() if self.spatial_mapper is not None else {}
-        active_rooms = set(((mapping.get("summary") or {}).get("active_rooms") or []))
+        rooms_cfg = mapping.get("rooms") or {}
+        calibrations = mapping.get("calibrations") or {}
+        usable_cameras = {
+            str(camera_id)
+            for camera_id, item in calibrations.items()
+            if item.get("status") in {"good", "calibrated", "automatic"}
+            and item.get("homography")
+        }
         with self._lock:
             self._prune_locked(now)
             rooms = {}
             for room_id in self.room_ids:
-                buckets = tuple(self._buckets.get(room_id, ()))
+                buckets = tuple(self._buckets.get(room_id, {}).values())
                 raw_samples = sum(bucket.samples for bucket in buckets)
                 weighted_samples = sum(
-                    bucket.samples * self._bucket_weight(now - bucket.started_at)
+                    bucket.samples * self._bucket_weight(self._bucket_age(bucket, now))
                     for bucket in buckets
                 )
                 last = self._last_update_mono.get(room_id, 0.0)
+                cameras = [str(item) for item in ((rooms_cfg.get(room_id) or {}).get("cameras") or [])]
+                calibrated_count = sum(camera_id in usable_cameras for camera_id in cameras)
                 rooms[room_id] = {
-                    "calibrated": room_id in active_rooms,
+                    "calibrated": calibrated_count > 0,
+                    "fused": bool(cameras) and calibrated_count == len(cameras),
+                    "calibrated_cameras": calibrated_count,
+                    "total_cameras": len(cameras),
                     "samples": raw_samples,
                     "weighted_samples": round(float(weighted_samples), 3),
                     "active_buckets": len(buckets),
