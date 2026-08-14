@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from services.ml_service.core_v1.global_reid import GlobalReIdCoordinator
+from services.ml_service.core_v1.conservative_reid import ConservativeGlobalReIdCoordinator
 
 
 class _FakeEmbedder:
@@ -27,6 +27,7 @@ class GlobalReIdTests(unittest.TestCase):
             "same_camera_similarity": 0.72,
             "strong_similarity": 0.86,
             "second_best_margin": 0.06,
+            "strong_second_best_margin": 0.025,
             "prototype_update_similarity": 0.86,
             "active_timeout_sec": 1.6,
             "gallery_ttl_sec": 1000,
@@ -38,7 +39,7 @@ class GlobalReIdTests(unittest.TestCase):
             ],
         }
         config.update(overrides)
-        return GlobalReIdCoordinator(
+        return ConservativeGlobalReIdCoordinator(
             {}, {}, config, Path("."), embedder=_FakeEmbedder()
         )
 
@@ -73,15 +74,22 @@ class GlobalReIdTests(unittest.TestCase):
         gid2 = reid.resolve_tracklet("CAM-02", 20001, vector, now=3.0)
         self.assertEqual(gid2, gid1)
 
-    def test_ambiguous_gallery_match_creates_new_global_id(self):
+    def test_strong_but_ambiguous_lookalike_match_creates_new_global_id(self):
         reid = self._coordinator(active_timeout_sec=0.3)
+
+        # A and B are deliberately similar enough that a later query can score
+        # ~0.95 against both. B is created while A is active in another room,
+        # which forces a distinct gallery identity despite appearance similarity.
         a = np.asarray([1.0, 0.0], dtype=np.float32)
-        b = np.asarray([0.0, 1.0], dtype=np.float32)
+        b = np.asarray([0.8, 0.6], dtype=np.float32)
         gid_a = reid.resolve_tracklet("CAM-01", 10001, a, now=1.0)
-        gid_b = reid.resolve_tracklet("CAM-02", 20001, b, now=2.0)
+        gid_b = reid.resolve_tracklet("CAM-02", 20001, b, now=1.1)
         self.assertNotEqual(gid_a, gid_b)
 
-        ambiguous = np.asarray([1.0, 1.0], dtype=np.float32)
+        # This vector is essentially equidistant from both identities. Absolute
+        # similarity is strong, but the runner-up margin is near zero, so reuse
+        # would be unsafe. Conservative policy must allocate G003.
+        ambiguous = np.asarray([0.9486833, 0.3162278], dtype=np.float32)
         gid_c = reid.resolve_tracklet("CAM-03", 30001, ambiguous, now=4.0)
         self.assertNotIn(gid_c, {gid_a, gid_b})
         self.assertGreaterEqual(reid.metrics()["ambiguous_rejects"], 1)
