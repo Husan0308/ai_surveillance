@@ -1,7 +1,8 @@
 core_v1:
-  # Stable baseline: camera -> YOLO26m -> visual tracker -> JPEG -> UI.
-  # Optional analytics stay off until this path passes real 6-camera acceptance.
-  profile: "stable-detection-ui-baseline"
+  # Full feature profile. The detector remains the only CUDA analytics worker.
+  # ReID and YOLO26m-pose run as bounded CPU side paths so optional analytics
+  # cannot block or crash the primary camera -> detection -> tracker -> UI path.
+  profile: "full-features-safe"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
@@ -37,14 +38,9 @@ core_v1:
 
   detector:
     enabled: true
-
-    # A plain Ultralytics checkpoint name is intentional. The stable worker
-    # uses a project-local file when present and otherwise lets Ultralytics
-    # resolve/download this checkpoint.
     model: "yolo26m.pt"
     model_fallback: "yolo26m.pt"
     device: "cuda:0"
-
     imgsz: [448, 704]
     quantize: 32
     conf: 0.10
@@ -53,17 +49,15 @@ core_v1:
     batch_size: 2
     poll_interval_ms: 5
     start_delay_sec: 2.0
-
     duplicate_iou: 0.58
     fusion_containment: 0.84
     fusion_center_distance: 0.40
-
     max_submit_age_ms: 350
     max_result_age_ms: 950
     overlay_max_age_ms: 950
 
-    # Custom masks/second-pass logic are deliberately disabled in the clean
-    # baseline. Re-enable only after normal full-frame detection is proven.
+    # Keep camera-specific filtering off while the now-working detector is the
+    # production baseline. These tuning features can be reintroduced separately.
     hard_exclusion:
       max_box_height_ratio: 0.30
       overlap_threshold: 0.15
@@ -125,23 +119,25 @@ core_v1:
     exclusion_overlap_threshold: 0.15
     camera_exclusion_zones: {}
 
-  # Phase 2. Kept in the repository, but never allowed to gate detector ready.
+  # YOLO26m-pose is deliberately a sparse CPU side path. The primary detector
+  # remains the only CUDA PyTorch process and does not wait for pose results.
   pose:
-    enabled: false
+    enabled: true
     model: "yolo26m-pose.pt"
-    device: "inherit"
+    device: "cpu"
     imgsz: 256
     conf: 0.25
-    half: true
-    every_n: 8
-    max_people: 2
-    max_cameras_per_batch: 1
-    max_frame_age_ms: 850
-    max_detector_ms_before_pose: 350
+    half: false
+    every_n: 12
+    max_people: 1
+    max_cameras_per_cycle: 1
+    max_frame_age_ms: 1200
+    poll_interval_ms: 25
+    retry_after_sec: 30
+    torch_cpu_threads: 1
 
-  # Phase 3. Requires stable pose + valid camera-to-floor homographies.
   heatmap:
-    enabled: false
+    enabled: true
     coordinate_system: "normalized_room_floor"
     grid_width: 96
     grid_height: 64
@@ -158,16 +154,19 @@ core_v1:
     dedupe_distance: 0.06
     fallback_bbox_bottom: false
 
-  # Phase 2. Re-enable only after detector/UI soak is clean.
+  # ReID stays CPU-only and consumes detector history asynchronously.
   reid:
-    enabled: false
+    enabled: true
     model: "osnet_ain_x1_0"
     model_path: "models/reid/osnet_ain_x1_0_msmt17.pth"
+    model_url: "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth?download=true"
+    model_sha256: "8a07e8da38946f7cee37f4561617bf8b6d2fe8f3a4027852893ea092e46d919f"
     device: "cpu"
     torch_cpu_threads: 1
     input_height: 256
     input_width: 128
     flip_tta: true
+
     poll_interval_ms: 35
     min_track_hits: 2
     local_track_timeout_sec: 3.0
@@ -180,3 +179,63 @@ core_v1:
     batch_wait_ms: 20
     queue_size: 8
     max_job_age_ms: 800
+
+    tracklet:
+      min_samples: 3
+      max_samples: 8
+      topk: 5
+      duplicate_feature_cos: 0.995
+      duplicate_quality_gain: 0.025
+
+    crop:
+      min_width: 30
+      min_height: 64
+      min_area: 3000
+      min_conf: 0.16
+      max_width_height_ratio: 1.10
+      edge_margin: 0.010
+      reject_edge: false
+      min_sharpness: 10.0
+      pad_x: 0.05
+      pad_y: 0.03
+
+    pair_matching:
+      pairs:
+        - [CAM-01, CAM-04]
+        - [CAM-02, CAM-05]
+        - [CAM-03, CAM-06]
+      candidate_threshold: 0.54
+      strong_threshold: 0.66
+      margin: 0.020
+      confirm_hits: 2
+      strong_confirm_hits: 1
+      evidence_ttl_sec: 3.0
+      overrides:
+        "CAM-01:CAM-04":
+          candidate_threshold: 0.54
+          strong_threshold: 0.66
+          margin: 0.020
+        "CAM-02:CAM-05":
+          candidate_threshold: 0.54
+          strong_threshold: 0.66
+          margin: 0.020
+        "CAM-03:CAM-06":
+          candidate_threshold: 0.54
+          strong_threshold: 0.66
+          margin: 0.020
+
+    identity:
+      prototype_alpha: 0.18
+      gallery_size: 12
+      active_timeout_sec: 7.0
+      historical_match_threshold: 0.56
+      historical_strong_threshold: 0.68
+      historical_margin: 0.030
+      camera_rooms:
+        CAM-01: ROOM-1
+        CAM-04: ROOM-1
+        CAM-02: ROOM-2
+        CAM-05: ROOM-2
+        CAM-03: ROOM-3
+        CAM-06: ROOM-3
+      block_concurrent_cross_room: true
