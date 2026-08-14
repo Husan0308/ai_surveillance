@@ -40,6 +40,7 @@ jobs:
             services/ml_service/core_v1/ownership_tracker.py \
             services/ml_service/core_v1/reid_embedder.py \
             services/ml_service/core_v1/global_reid.py \
+            services/ml_service/core_v1/conservative_reid.py \
             services/ml_service/core_v1/jpeg_publisher.py \
             services/ml_service/core_v1/event_publisher.py \
             services/ml_service/core_v1/tracking_publisher.py \
