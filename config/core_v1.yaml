@@ -1,5 +1,5 @@
 core_v1:
-  profile: "detection-tracking-room-consensus-reid-face-v1"
+  profile: "detection-tracking-room-consensus-reid-face-cuda-v2"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
@@ -182,16 +182,22 @@ core_v1:
 
   face:
     enabled: true
-    provider: "CPUExecutionProvider"
-    model_pack: "buffalo_l"
+    provider: "CUDAExecutionProvider"
+    device_id: 0
+    allow_cpu_fallback: true
+    gpu_mem_limit_mb: 768
+    cuda_cudnn_conv_algo_search: "HEURISTIC"
+    # buffalo_m keeps the same ResNet50 recognition accuracy as buffalo_l but
+    # uses the much lighter RetinaFace-2.5GF detector instead of RetinaFace-10GF.
+    model_pack: "buffalo_m"
     model_root: "models/insightface"
     data_dir: "data/faces"
     db_path: "data/face_db.json"
     det_size: 320
     det_thresh: 0.55
-    poll_interval_ms: 180
-    sample_interval_ms: 1100
-    max_people_per_camera: 3
+    poll_interval_ms: 200
+    sample_interval_ms: 1300
+    max_people_per_camera: 2
     upper_body_ratio: 0.60
     horizontal_pad_ratio: 0.16
     min_face_size_px: 28
@@ -199,10 +205,13 @@ core_v1:
     match_similarity: 0.52
     strong_similarity: 0.68
     second_best_margin: 0.06
+    strong_second_best_margin: 0.025
     confirm_hits: 2
     confirm_window_sec: 4.0
     local_binding_ttl_sec: 45
     global_binding_ttl_sec: 21600
     enrollment_samples: 10
     enrollment_min_quality: 0.56
+    enrollment_consistency_similarity: 0.35
+    enrollment_max_outliers: 1
     enrollment_token_ttl_sec: 600
