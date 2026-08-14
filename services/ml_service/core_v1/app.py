@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from shared.config import camera_config
 
-from .face_service import FaceRecognitionService
+from .face_service_safe import SafeFaceRecognitionService
 from .manager import CameraManager
 from .room_consensus_reid import RoomConsensusGlobalReIdCoordinator
 from .runtime_metrics import process_metrics
@@ -81,7 +81,7 @@ reid = (
 )
 
 face = (
-    FaceRecognitionService(
+    SafeFaceRecognitionService(
         manager.stores,
         publishers,
         face_cfg,
