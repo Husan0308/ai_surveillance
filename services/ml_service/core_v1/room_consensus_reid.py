@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 
 import cv2
 import numpy as np
@@ -13,10 +12,10 @@ from .local_tracker import linear_sum_assignment
 class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
     """Cross-camera ReID tuned for fixed paired CCTV cameras.
 
-    Local tracking remains authoritative. Global IDs are reconciled only by
-    one-to-one room-pair consensus using multi-shot OSNet appearance plus a weak
-    illumination-robust colour cue. Short same-camera track fragmentation can be
-    repaired without creating another long-lived Global ID.
+    Local tracking remains authoritative. Global IDs are reconciled by one-to-one
+    room-pair consensus using multi-shot OSNet appearance plus a weak chroma cue.
+    Short same-camera fragmentation is repaired from the real publisher active-set,
+    not from a coarse timeout, so a temporary detector miss does not mint a new ID.
     """
 
     def __init__(self, *args, **kwargs):
@@ -28,7 +27,7 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
         self.room_embedding_weight /= total
         self.room_colour_weight /= total
         self.room_min_embedding_similarity = float(
-            config.get("room_min_embedding_similarity", 0.68)
+            config.get("room_min_embedding_similarity", 0.66)
         )
         self.room_pair_similarity = float(config.get("room_pair_similarity", 0.75))
         self.room_single_similarity = float(config.get("room_single_similarity", 0.71))
@@ -56,6 +55,7 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
         self._room_pair_rejects = 0
         self._room_pair_ambiguous = 0
         self._same_camera_handoffs = 0
+        self._last_room_decisions: list[dict] = []
 
     @staticmethod
     def _bbox_center_distance(a, b) -> float:
@@ -81,7 +81,6 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
         bw, bh = x2 - x1, y2 - y1
         if bw < 8 or bh < 20:
             return None
-        # Torso-only chroma is less sensitive to floor/background and brightness.
         ix1 = max(0, int(x1 + 0.16 * bw))
         ix2 = min(w, int(x2 - 0.16 * bw))
         iy1 = max(0, int(y1 + 0.18 * bh))
@@ -163,6 +162,46 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
         score = self.room_embedding_weight * emb + self.room_colour_weight * colour
         return float(score), float(emb), float(colour)
 
+    def _handoff_merge(self, current, previous, similarity: float, now: float) -> str | None:
+        current_gid = self._canonical_gid(current.global_id)
+        previous_gid = self._canonical_gid(previous.global_id)
+        if not current_gid or not previous_gid:
+            return None
+        if current_gid == previous_gid:
+            return current_gid
+
+        # Publisher active-set is authoritative here. Refuse only if the previous
+        # identity is truly attached to another currently visible track in camera.
+        for key in self._active_track_keys:
+            if key == (current.camera_id, current.track_id):
+                continue
+            state = self._tracks.get(key)
+            if state is not None and self._canonical_gid(state.global_id) == previous_gid:
+                return None
+
+        target = self._globals.get(previous_gid)
+        source = self._globals.get(current_gid)
+        if target is None or source is None:
+            return None
+
+        self._aliases[current_gid] = previous_gid
+        current.global_id = previous_gid
+        current.assignment_similarity = float(similarity)
+        current.assignment_reason = "same_camera_track_handoff"
+        target.last_seen = max(target.last_seen, now)
+        target.last_camera = current.camera_id
+        if similarity >= self.prototype_update_similarity:
+            alpha = min(0.12, self.prototype_update_alpha)
+            target.prototype = (
+                (1.0 - alpha) * target.prototype + alpha * source.prototype
+            )
+            norm = float(np.linalg.norm(target.prototype))
+            if norm > 1e-9:
+                target.prototype = target.prototype / norm
+        self._provisional_globals.discard(current_gid)
+        self._same_camera_handoffs += 1
+        return previous_gid
+
     def _repair_same_camera_fragments(self, now: float) -> None:
         active_states = [
             state
@@ -201,21 +240,11 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
             if best is None:
                 continue
             similarity, _neg_gap, previous = best
-            merged = self._merge_global_ids(
-                current_gid,
-                self._canonical_gid(previous.global_id),
-                now,
-                float(similarity),
-            )
-            if merged is None:
-                continue
-            current.global_id = merged
-            current.assignment_similarity = float(similarity)
-            current.assignment_reason = "same_camera_track_handoff"
-            self._same_camera_handoffs += 1
+            self._handoff_merge(current, previous, float(similarity), now)
 
     def _reconcile_overlap_pairs(self, now: float):
         self._room_assignment_cycles += 1
+        decisions: list[dict] = []
         for group in self.overlap_groups:
             cameras = sorted(group)
             if len(cameras) != 2:
@@ -256,12 +285,32 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
                 a, b = left[row], right[col]
                 score = float(scores[row, col])
                 emb = float(embeddings[row, col])
+                colour = None if np.isnan(colours[row, col]) else float(colours[row, col])
                 gid_a = self._canonical_gid(a.global_id)
                 gid_b = self._canonical_gid(b.global_id)
+                row_values = np.sort(scores[row])[::-1]
+                col_values = np.sort(scores[:, col])[::-1]
+                row_margin = score - float(row_values[1]) if len(row_values) > 1 else 1.0
+                col_margin = score - float(col_values[1]) if len(col_values) > 1 else 1.0
+                margin = min(row_margin, col_margin)
+                decision = {
+                    "pair": f"{cameras[0]}|{cameras[1]}",
+                    "left_track": int(a.track_id),
+                    "right_track": int(b.track_id),
+                    "score": round(score, 4),
+                    "embedding": round(emb, 4),
+                    "colour": round(colour, 4) if colour is not None else None,
+                    "margin": round(margin, 4),
+                    "matched": False,
+                    "reason": "",
+                }
+                decisions.append(decision)
                 if not gid_a or not gid_b or gid_a == gid_b:
+                    decision["reason"] = "already_same_or_missing"
                     continue
                 if emb < self.room_min_embedding_similarity:
                     self._room_pair_rejects += 1
+                    decision["reason"] = "embedding_gate"
                     continue
 
                 threshold = self.room_single_similarity if single else self.room_pair_similarity
@@ -273,19 +322,17 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
                     threshold = max(threshold, self.room_confirmed_merge_similarity)
                 if score < threshold:
                     self._room_pair_rejects += 1
+                    decision["reason"] = "score_gate"
                     continue
-
-                row_values = np.sort(scores[row])[::-1]
-                col_values = np.sort(scores[:, col])[::-1]
-                row_margin = score - float(row_values[1]) if len(row_values) > 1 else 1.0
-                col_margin = score - float(col_values[1]) if len(col_values) > 1 else 1.0
-                if min(row_margin, col_margin) < self.room_pair_margin:
+                if margin < self.room_pair_margin:
                     self._room_pair_ambiguous += 1
+                    decision["reason"] = "assignment_margin"
                     continue
 
                 merged = self._merge_global_ids(gid_a, gid_b, now, score)
                 if merged is None:
                     self._room_pair_rejects += 1
+                    decision["reason"] = "active_conflict"
                     continue
                 a.global_id = merged
                 b.global_id = merged
@@ -295,6 +342,9 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
                 b.assignment_reason = "room_pair_consensus"
                 self._room_pair_matches += 1
                 self._pair_reconciles += 1
+                decision["matched"] = True
+                decision["reason"] = "room_pair_consensus"
+        self._last_room_decisions = decisions[-12:]
 
     def metrics(self):
         payload = super().metrics()
@@ -310,6 +360,7 @@ class RoomConsensusGlobalReIdCoordinator(SafeInstantGlobalReIdCoordinator):
                 "colour_signatures": len(self._colour_signatures),
                 "room_embedding_weight": self.room_embedding_weight,
                 "room_colour_weight": self.room_colour_weight,
+                "last_room_decisions": list(self._last_room_decisions),
             }
         )
         return payload
