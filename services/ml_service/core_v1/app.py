@@ -33,7 +33,7 @@ room_sessions_cfg=dict(core_cfg.get('room_sessions') or {})
 detector=YoloDetectorWorker(manager.stores,detector_cfg,ROOT) if bool(detector_cfg.get('enabled',False)) else None
 reid=ReIDCoordinator(manager.stores,detector.results,reid_cfg) if detector is not None and bool(reid_cfg.get('enabled',False)) else None
 camera_rooms=dict((reid_cfg.get('identity') or {}).get('camera_rooms') or {})
-room_sessions=RoomVisitSessionManager(room_sessions_cfg,camera_rooms=camera_rooms) if reid is not None else None
+room_sessions=RoomVisitSessionManager(room_sessions_cfg,camera_rooms=camera_rooms,state_provider=reid) if reid is not None else None
 publishers={cid:LatestJpegPublisher(cid,store,core_cfg.get('display_fps',12),core_cfg.get('jpeg_quality',82),core_cfg.get('max_display_width',960),core_cfg.get('max_display_height',540),detections=(detector.results if detector else None),overlay_max_age_ms=detector_cfg.get('overlay_max_age_ms',350),tracker_config=visual_cfg,identity_provider=reid) for cid,store in manager.stores.items()}
 app=FastAPI(title='AI Surveillance ML Core v1',version='1.6')
 
@@ -45,9 +45,11 @@ def startup():
         if stagger and index+1<len(publishers):time.sleep(stagger)
     if detector:detector.start()
     if reid:reid.start()
+    if room_sessions:room_sessions.start()
 
 @app.on_event('shutdown')
 def shutdown():
+    if room_sessions:room_sessions.stop();room_sessions.join(3)
     if reid:reid.stop();reid.join(6)
     if detector:detector.stop();detector.join(10)
     for publisher in publishers.values():publisher.stop()
@@ -73,14 +75,11 @@ def detections():
 @app.get('/reid')
 def reid_state():
     if reid is None:return {'enabled':False}
-    state=reid.snapshot()
-    if room_sessions:room_sessions.update(state)
-    return {'enabled':True,'state':state,'metrics':reid.metrics()}
+    return {'enabled':True,'state':reid.snapshot(),'metrics':reid.metrics()}
 
 @app.get('/room-sessions')
 def room_session_state():
     if reid is None or room_sessions is None:return {'enabled':False,'active_sessions':[],'recent_sessions':[],'events':[]}
-    room_sessions.update(reid.snapshot())
     return room_sessions.snapshot()
 
 @app.get('/frame/{camera_id}')
