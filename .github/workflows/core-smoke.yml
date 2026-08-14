@@ -3,7 +3,7 @@ name: Detection + tracking + ReID + CUDA face + MUKAMMAL UI smoke tests
 on:
   push:
     branches:
-      - "agent/face-cuda-v1"
+      - "agent/fix-buffalo-m-pack"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -87,6 +87,9 @@ jobs:
 
       - name: Test CUDA face recognition and enrollment guards
         run: python -m unittest discover -s tests -p "test_face_recognition.py" -v
+
+      - name: Test verified buffalo_m model pack provisioning
+        run: python -m unittest discover -s tests -p "test_face_model_pack.py" -v
 
       - name: Test smooth camera pipeline
         run: python -m unittest discover -s tests -p "test_camera_smoothness.py" -v
