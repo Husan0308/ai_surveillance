@@ -11,4 +11,6 @@ torchreid>=0.2.5
 gdown>=5.2
 psutil>=5.9
 nvidia-ml-py>=11.5
+insightface>=1.0,<1.1
+onnxruntime>=1.20
 # GStreamer/DeepStream Python bindings come from the host installation (python3-gi / Gst), not pip.

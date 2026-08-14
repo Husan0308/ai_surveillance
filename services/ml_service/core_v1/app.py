@@ -7,9 +7,11 @@ from pathlib import Path
 import yaml
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 
 from shared.config import camera_config
 
+from .face_service_safe import SafeFaceRecognitionService
 from .manager import CameraManager
 from .room_consensus_reid import RoomConsensusGlobalReIdCoordinator
 from .runtime_metrics import process_metrics
@@ -34,6 +36,13 @@ def _load_yaml(path: Path):
         return _expand(yaml.safe_load(handle) or {})
 
 
+class FaceEnrollRequest(BaseModel):
+    name: str
+    department: str = ""
+    employee_id: str = ""
+    sample_tokens: list[str]
+
+
 camera_cfg = camera_config().get("cameras", [])
 core_cfg = _load_yaml(ROOT / "config/core_v1.yaml").get("core_v1", {})
 manager = CameraManager(camera_cfg, core_cfg)
@@ -41,6 +50,7 @@ manager = CameraManager(camera_cfg, core_cfg)
 detector_cfg = dict(core_cfg.get("detector") or {})
 visual_cfg = dict(core_cfg.get("visual_tracker") or {})
 reid_cfg = dict(core_cfg.get("reid") or {})
+face_cfg = dict(core_cfg.get("face") or {})
 
 detector = (
     StableYoloDetectorWorker(manager.stores, detector_cfg, ROOT)
@@ -69,22 +79,39 @@ reid = (
     if bool(reid_cfg.get("enabled", False))
     else None
 )
-if reid is not None:
+
+face = (
+    SafeFaceRecognitionService(
+        manager.stores,
+        publishers,
+        face_cfg,
+        ROOT,
+        base_identity=reid,
+    )
+    if bool(face_cfg.get("enabled", False))
+    else None
+)
+
+identity_provider = face or reid
+if identity_provider is not None:
     for publisher in publishers.values():
-        publisher.identity_provider = reid
+        publisher.identity_provider = identity_provider
 
 app = FastAPI(
-    title="AI Surveillance Detection + Tracking + Room Consensus ReID Core",
-    version="1.4-room-consensus-reid",
+    title="AI Surveillance Detection + Tracking + ReID + Face Core",
+    version="1.5-face",
 )
 
 
 def _mode() -> str:
     if detector is None:
         return "camera-only"
+    parts = ["camera", "yolo-detect", "local-track"]
     if reid is not None:
-        return "camera+yolo-detect+local-track+room-consensus-reid"
-    return "camera+yolo-detect+local-track"
+        parts.append("room-consensus-reid")
+    if face is not None:
+        parts.append("face-cpu")
+    return "+".join(parts)
 
 
 @app.on_event("startup")
@@ -104,10 +131,16 @@ def startup():
         detector.start()
     if reid:
         reid.start()
+    if face:
+        face.start()
 
 
 @app.on_event("shutdown")
 def shutdown():
+    if face:
+        face.stop()
+        face.join(5)
+
     if reid:
         reid.stop()
         reid.join(6)
@@ -137,6 +170,7 @@ def health():
         "total": len(camera_metrics),
         "detector": detector_metrics,
         "reid": reid.metrics() if reid else {"enabled": False, "ready": False},
+        "face": face.metrics() if face else {"enabled": False, "ready": False},
         "publishers": {cid: publisher.metrics() for cid, publisher in publishers.items()},
         "service_resources": process_metrics(),
     }
@@ -179,12 +213,27 @@ def tracks():
         enriched = []
         for item in items:
             row = dict(item)
-            if reid is not None:
-                identity = reid.identity_for_track(camera_id, int(row.get("track_id") or 0))
-                row["global_id"] = identity.get("global_id") if identity else None
-                row["reid_similarity"] = identity.get("reid_similarity") if identity else None
-                row["reid_reason"] = identity.get("reid_reason") if identity else None
-                row["reid_provisional"] = identity.get("provisional") if identity else None
+            if identity_provider is not None:
+                identity = identity_provider.identity_for_track(
+                    camera_id,
+                    int(row.get("track_id") or 0),
+                )
+                if identity:
+                    for key in (
+                        "global_id",
+                        "reid_similarity",
+                        "reid_reason",
+                        "reid_provisional",
+                        "known",
+                        "name",
+                        "person_id",
+                        "known_id",
+                        "department",
+                        "face_similarity",
+                        "face_reason",
+                    ):
+                        if key in identity:
+                            row[key] = identity.get(key)
             enriched.append(row)
         cameras_payload[camera_id] = {
             "count": len(enriched),
@@ -194,8 +243,11 @@ def tracks():
         total += len(enriched)
     return {
         "enabled": True,
-        "scope": "camera_local+room_consensus_reid" if reid else "camera_local",
+        "scope": "camera_local+room_consensus_reid+face" if face else (
+            "camera_local+room_consensus_reid" if reid else "camera_local"
+        ),
         "cross_camera_identity": reid is not None,
+        "known_identity": face is not None,
         "total": total,
         "cameras": cameras_payload,
     }
@@ -213,6 +265,60 @@ def reid_status():
         "metrics": metrics,
         **payload,
     }
+
+
+@app.get("/faces")
+def faces_status():
+    if face is None:
+        return {"enabled": False, "ready": False, "people": [], "bindings": []}
+    payload = face.snapshot()
+    return {"enabled": True, "ready": bool(payload["metrics"].get("ready")), **payload}
+
+
+@app.post("/faces/enrollment/sample/{camera_id}/{track_id}")
+def face_enrollment_sample(camera_id: str, track_id: int):
+    if face is None:
+        raise HTTPException(503, "face recognition is disabled")
+    try:
+        return face.capture_enrollment_sample(camera_id, track_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/faces/enrollment/commit")
+def face_enrollment_commit(request: FaceEnrollRequest):
+    if face is None:
+        raise HTTPException(503, "face recognition is disabled")
+    try:
+        return face.commit_enrollment(
+            request.name,
+            request.department,
+            request.employee_id,
+            request.sample_tokens,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/faces/avatar/{person_id}")
+def face_avatar(person_id: str):
+    if face is None:
+        raise HTTPException(404, "face recognition is disabled")
+    payload = face.avatar(person_id)
+    if not payload:
+        raise HTTPException(404, "avatar not found")
+    return Response(content=payload, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.delete("/faces/people/{person_id}")
+def face_delete_person(person_id: str):
+    if face is None:
+        raise HTTPException(404, "face recognition is disabled")
+    if not face.delete_person(person_id):
+        raise HTTPException(404, "person not found")
+    return {"deleted": True, "person_id": person_id}
 
 
 @app.get("/frame/{camera_id}")

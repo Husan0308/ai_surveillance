@@ -10,15 +10,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DetectionTrackingReidBaselineTests(unittest.TestCase):
-    def test_config_keeps_pose_and_heatmap_removed_but_enables_reid_sidepath(self):
+    def test_config_keeps_pose_heatmap_removed_and_face_is_cpu_sidepath(self):
         payload = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))
         core = payload["core_v1"]
-        self.assertEqual(core["profile"], "detection-tracking-room-consensus-reid-v6")
-        self.assertIn("detector", core)
-        self.assertIn("visual_tracker", core)
-        self.assertIn("reid", core)
+        self.assertEqual(core["profile"], "detection-tracking-room-consensus-reid-face-v1")
+        for required in ("detector", "visual_tracker", "reid", "face"):
+            self.assertIn(required, core)
         self.assertTrue(bool(core["reid"]["enabled"]))
         self.assertEqual(str(core["reid"]["device"]), "cpu")
+        self.assertTrue(bool(core["face"]["enabled"]))
+        self.assertEqual(core["face"]["provider"], "CPUExecutionProvider")
         for forbidden in ("pose", "heatmap"):
             self.assertNotIn(forbidden, core)
 
@@ -60,22 +61,28 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
             "services/ml_service/core_v1/reid_embedder.py",
             "services/ml_service/core_v1/instant_reid.py",
             "services/ml_service/core_v1/room_consensus_reid.py",
+            "services/ml_service/core_v1/face_service.py",
         ):
             self.assertTrue((ROOT / required).exists(), required)
 
-    def test_api_surface_keeps_detection_and_adds_only_reid(self):
+    def test_api_surface_keeps_detection_reid_and_adds_face_only(self):
         source = (ROOT / "services/ml_service/core_v1/app.py").read_text(encoding="utf-8")
         for required in (
             '@app.get("/health")',
             '@app.get("/detections")',
             '@app.get("/tracks")',
             '@app.get("/reid")',
+            '@app.get("/faces")',
+            '@app.post("/faces/enrollment/sample/{camera_id}/{track_id}")',
+            '@app.post("/faces/enrollment/commit")',
+            '@app.get("/faces/avatar/{person_id}")',
             '@app.get("/frame/{camera_id}")',
         ):
             self.assertIn(required, source)
         for forbidden in ("/poses", "/heatmap", "/room-mapping", "/overlays"):
             self.assertNotIn(forbidden, source)
         self.assertIn("RoomConsensusGlobalReIdCoordinator", source)
+        self.assertIn("FaceRecognitionService", source)
         self.assertIn("TrackingJpegPublisher", source)
 
     def test_capture_pipeline_is_latest_only(self):
@@ -97,26 +104,23 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
         self.assertLessEqual(float(config["max_result_age_ms"]), 700.0)
         self.assertFalse(bool(config["roi_second_pass"]["enabled"]))
 
-    def test_frontend_uses_mukammal_ui_without_simulation_or_fake_face_data(self):
+    def test_frontend_keeps_mukammal_base_and_adds_face_adapter(self):
         main = (ROOT / "services/frontend/core_v1/main.py").read_text(encoding="utf-8")
-        ui_path = ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py"
-        ui = ui_path.read_text(encoding="utf-8")
-        self.assertIn("operator_dashboard_mukammal", main)
-        self.assertIn('"/health"', ui)
-        self.assertIn('"/tracks"', ui)
-        self.assertIn("SmoothFrameReader", ui)
-        self.assertIn("class Header", ui)
-        self.assertIn("class SideBar", ui)
-        self.assertIn("class RightPanel", ui)
-        self.assertIn("class CameraCard", ui)
-        self.assertIn("index // 3, index % 3", ui)
-        self.assertIn("Face Recognition will be connected next", ui)
-        self.assertNotIn("class CameraSim", ui)
-        self.assertNotIn("class SimPerson", ui)
-        self.assertNotIn("random.uniform", ui)
-        self.assertNotIn("KNOWN =", ui)
-        self.assertNotIn("SplashScreen", ui)
-        self.assertNotIn("LoginScreen", ui)
+        base_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py").read_text(encoding="utf-8")
+        face_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_face.py").read_text(encoding="utf-8")
+        self.assertIn("operator_dashboard_face", main)
+        self.assertIn("class Header", base_ui)
+        self.assertIn("class SideBar", base_ui)
+        self.assertIn("class CameraCard", base_ui)
+        self.assertIn("SmoothFrameReader", base_ui)
+        self.assertNotIn("class CameraSim", base_ui)
+        self.assertNotIn("class SimPerson", base_ui)
+        self.assertNotIn("random.uniform", base_ui)
+        self.assertIn('"/faces"', face_ui)
+        self.assertIn("class PersonManagementPage", face_ui)
+        self.assertIn("class EnrollmentPage", face_ui)
+        self.assertIn("Capture 10 samples", face_ui)
+        self.assertIn("CPUExecutionProvider", face_ui)
 
     def test_frontend_shares_one_mjpeg_reader_per_camera(self):
         ui = (ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py").read_text(encoding="utf-8")
