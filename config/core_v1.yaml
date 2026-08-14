@@ -137,6 +137,18 @@ core_v1:
       CAM-06:
         - [0.50, 0.00, 0.78, 0.22]
 
+  # Pose is a secondary latest-only path. Keep it disabled until the six-camera
+  # detector baseline is measured so pose cannot silently steal CUDA time.
+  pose:
+    enabled: false
+    model: "yolo11n-pose.pt"
+    device: "cuda:0"
+    imgsz: 320
+    conf: 0.20
+    every_n: 3
+    max_people: 6
+    max_frame_age_ms: 700
+
   reid:
     enabled: true
     model: "osnet_ain_x1_0"
