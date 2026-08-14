@@ -1,5 +1,5 @@
 core_v1:
-  profile: "detection-tracking-smooth-v3"
+  profile: "detection-tracking-reid-smooth-v4"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
@@ -78,7 +78,7 @@ core_v1:
     fuse_score: true
 
     # Prefer a short identity hold over assigning an existing ID to a nearby
-    # different person. This is still camera-local tracking, not ReID.
+    # different person. This remains the authoritative per-camera tracker.
     ownership_lock: true
     ownership_min_hits: 3
     ownership_margin: 0.09
@@ -89,8 +89,6 @@ core_v1:
     ownership_distance_advantage: 0.14
     ownership_max_competitor_age_ms: 700
 
-    # IDs are unique across cameras even before ReID. CAM-01 uses the 10000
-    # namespace, CAM-02 the 20000 namespace, etc. UI renders friendly C01-001.
     id_namespace_stride: 10000
 
     hold_ms: 850
@@ -137,3 +135,67 @@ core_v1:
     exclusion_max_box_height: 0.30
     exclusion_overlap_threshold: 0.15
     camera_exclusion_zones: {}
+
+  # Cross-camera identity is deliberately a low-rate CPU side-path. It never
+  # gates camera capture, YOLO detection, local tracking or JPEG publication.
+  reid:
+    enabled: true
+    model_name: "osnet_x0_25"
+    device: "cpu"
+    cpu_threads: 2
+    input_height: 256
+    input_width: 128
+
+    model_path: "models/reid/osnet_x0_25_msmt17_combineall.pth"
+    model_url: "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
+    model_sha256: "cf55163d78fc44c62c82f85ab62d39f10438679b5abe8c698ae08cfa84aa6e18"
+    download_if_missing: true
+
+    poll_interval_ms: 120
+    sample_interval_ms: 650
+    max_batch: 6
+    min_samples: 3
+    max_samples: 6
+
+    # Reject weak, tiny, blurred or overlapping crops before OSNet. This is more
+    # valuable than feeding every frame to ReID and contaminating the gallery.
+    min_crop_height_px: 70
+    min_crop_width_px: 24
+    min_area_ratio: 0.012
+    min_track_confidence: 0.24
+    max_crop_overlap_iou: 0.24
+    min_blur_variance: 20.0
+    tracklet_outlier_similarity: 0.52
+
+    # Conservative identity policy: both absolute similarity and separation from
+    # the runner-up matter. Even a very strong match needs a small margin if a
+    # second viable look-alike identity is present; ambiguity creates a new ID.
+    match_similarity: 0.76
+    same_group_similarity: 0.70
+    same_camera_similarity: 0.73
+    strong_similarity: 0.86
+    second_best_margin: 0.06
+    strong_second_best_margin: 0.025
+
+    # Existing prototypes only learn from very confident assignments, preventing
+    # one bad crop from poisoning a person's future identity.
+    prototype_update_similarity: 0.86
+    prototype_update_alpha: 0.10
+
+    active_timeout_sec: 1.6
+    gallery_ttl_sec: 21600
+    min_cross_group_transition_sec: 1.5
+    global_prefix: "G"
+
+    # The two cameras in each group view the same physical room, so one Global ID
+    # may legitimately be active in both at once. A Global ID cannot be active in
+    # two unrelated groups at the same time.
+    overlap_groups:
+      - ["CAM-01", "CAM-04"]
+      - ["CAM-02", "CAM-05"]
+      - ["CAM-03", "CAM-06"]
+
+    pair_thresholds:
+      "CAM-01|CAM-04": 0.69
+      "CAM-02|CAM-05": 0.69
+      "CAM-03|CAM-06": 0.69

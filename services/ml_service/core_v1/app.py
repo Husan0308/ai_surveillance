@@ -10,6 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from shared.config import camera_config
 
+from .conservative_reid import ConservativeGlobalReIdCoordinator
 from .manager import CameraManager
 from .runtime_metrics import process_metrics
 from .stable_detector import StableYoloDetectorWorker
@@ -39,6 +40,7 @@ manager = CameraManager(camera_cfg, core_cfg)
 
 detector_cfg = dict(core_cfg.get("detector") or {})
 visual_cfg = dict(core_cfg.get("visual_tracker") or {})
+reid_cfg = dict(core_cfg.get("reid") or {})
 
 detector = (
     StableYoloDetectorWorker(manager.stores, detector_cfg, ROOT)
@@ -62,11 +64,27 @@ publishers = {
     for cid, store in manager.stores.items()
 }
 
-app = FastAPI(title="AI Surveillance Detection + Tracking Core", version="1.1-local-tracking")
+reid = (
+    ConservativeGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
+    if bool(reid_cfg.get("enabled", False))
+    else None
+)
+if reid is not None:
+    for publisher in publishers.values():
+        publisher.identity_provider = reid
+
+app = FastAPI(
+    title="AI Surveillance Detection + Tracking + ReID Core",
+    version="1.2-global-reid",
+)
 
 
 def _mode() -> str:
-    return "camera+yolo-detect+local-bytetrack" if detector is not None else "camera-only"
+    if detector is None:
+        return "camera-only"
+    if reid is not None:
+        return "camera+yolo-detect+local-track+global-reid"
+    return "camera+yolo-detect+local-track"
 
 
 @app.on_event("startup")
@@ -84,10 +102,16 @@ def startup():
 
     if detector:
         detector.start()
+    if reid:
+        reid.start()
 
 
 @app.on_event("shutdown")
 def shutdown():
+    if reid:
+        reid.stop()
+        reid.join(6)
+
     if detector:
         detector.stop()
         detector.join(10)
@@ -112,6 +136,7 @@ def health():
         "online": sum(bool(value.get("online")) for value in camera_metrics.values()),
         "total": len(camera_metrics),
         "detector": detector_metrics,
+        "reid": reid.metrics() if reid else {"enabled": False, "ready": False},
         "publishers": {cid: publisher.metrics() for cid, publisher in publishers.items()},
         "service_resources": process_metrics(),
     }
@@ -151,18 +176,40 @@ def tracks():
     total = 0
     for camera_id, publisher in publishers.items():
         items = publisher.track_snapshot()
+        enriched = []
+        for item in items:
+            row = dict(item)
+            if reid is not None:
+                identity = reid.identity_for_track(camera_id, int(row.get("track_id") or 0))
+                row["global_id"] = identity.get("global_id") if identity else None
+                row["reid_similarity"] = identity.get("reid_similarity") if identity else None
+            enriched.append(row)
         cameras_payload[camera_id] = {
-            "count": len(items),
-            "tracks": items,
+            "count": len(enriched),
+            "tracks": enriched,
             "metrics": publisher.visual_tracker.metrics(),
         }
-        total += len(items)
+        total += len(enriched)
     return {
         "enabled": True,
-        "scope": "camera_local",
-        "cross_camera_identity": False,
+        "scope": "camera_local+global_reid" if reid else "camera_local",
+        "cross_camera_identity": reid is not None,
         "total": total,
         "cameras": cameras_payload,
+    }
+
+
+@app.get("/reid")
+def reid_status():
+    if reid is None:
+        return {"enabled": False, "ready": False, "identities": [], "bindings": []}
+    metrics = reid.metrics()
+    payload = reid.snapshot()
+    return {
+        "enabled": True,
+        "ready": bool(metrics.get("ready")),
+        "metrics": metrics,
+        **payload,
     }
 
 

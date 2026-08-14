@@ -71,7 +71,7 @@ def _build_tracker(camera_id: str, config: dict) -> OwnershipLockedTracker:
 
 
 class TrackingJpegPublisher(EventDrivenJpegPublisher):
-    """Event-driven latest-frame publisher with ownership-locked camera IDs."""
+    """Event-driven publisher with local ownership lock and optional Global IDs."""
 
     def __init__(self, *args, tracker_config=None, **kwargs):
         super().__init__(*args, tracker_config=tracker_config, **kwargs)
@@ -79,8 +79,18 @@ class TrackingJpegPublisher(EventDrivenJpegPublisher):
 
     def _identity_for_box(self, box):
         track_id = int(getattr(box, "track_id", 0) or 0)
+        if track_id > 0 and self.identity_provider is not None:
+            try:
+                identity = self.identity_provider.identity_for_track(self.camera_id, track_id)
+            except Exception:
+                identity = None
+            if identity:
+                return identity
         if track_id > 0:
-            return {"global_id": self.visual_tracker.display_label(track_id)}
+            return {
+                "global_id": self.visual_tracker.display_label(track_id),
+                "known": False,
+            }
         return super()._identity_for_box(box)
 
     def track_snapshot(self):
