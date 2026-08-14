@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .jpeg_publisher import LatestJpegPublisher
+from .event_publisher import EventDrivenJpegPublisher
 from .local_tracker import LocalByteTracker
 
 
@@ -59,8 +59,8 @@ def _build_tracker(camera_id: str, config: dict) -> LocalByteTracker:
     )
 
 
-class TrackingJpegPublisher(LatestJpegPublisher):
-    """Latest-frame publisher with stable per-camera local tracking IDs."""
+class TrackingJpegPublisher(EventDrivenJpegPublisher):
+    """Event-driven latest-frame publisher with stable camera-local IDs."""
 
     def __init__(self, *args, tracker_config=None, **kwargs):
         super().__init__(*args, tracker_config=tracker_config, **kwargs)
@@ -69,8 +69,6 @@ class TrackingJpegPublisher(LatestJpegPublisher):
     def _identity_for_box(self, box):
         track_id = int(getattr(box, "track_id", 0) or 0)
         if track_id > 0:
-            # Local IDs are intentionally named Unknown_* so presentation never
-            # implies cross-camera identity or face recognition.
             return {"global_id": f"Unknown_{track_id:03d}"}
         return super()._identity_for_box(box)
 
