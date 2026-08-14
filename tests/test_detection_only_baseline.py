@@ -10,14 +10,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DetectionOnlyBaselineTests(unittest.TestCase):
-    def test_config_contains_only_camera_detector_and_visual_tracker(self):
+    def test_config_contains_only_camera_detector_and_local_tracker(self):
         payload = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))
         core = payload["core_v1"]
-        self.assertEqual(core["profile"], "detection-only-baseline-v1")
+        self.assertEqual(core["profile"], "detection-tracking-v1")
         self.assertIn("detector", core)
         self.assertIn("visual_tracker", core)
         for forbidden in ("pose", "heatmap", "reid"):
             self.assertNotIn(forbidden, core)
+
+        tracker = core["visual_tracker"]
+        detector = core["detector"]
+        self.assertEqual(tracker["assignment_solver"], "hungarian")
+        self.assertTrue(bool(tracker["fuse_score"]))
+        self.assertLessEqual(float(detector["conf"]), float(tracker["byte_low_conf"]))
+        self.assertGreaterEqual(float(tracker["new_track_min_conf"]), float(tracker["byte_high_conf"]))
 
     def test_optional_model_modules_are_removed(self):
         forbidden = [
@@ -36,14 +43,25 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         for relative in forbidden:
             self.assertFalse((ROOT / relative).exists(), relative)
 
-    def test_api_surface_is_detection_only(self):
+    def test_api_surface_is_detection_and_local_tracking_only(self):
         source = (ROOT / "services/ml_service/core_v1/app.py").read_text(encoding="utf-8")
-        for required in ('@app.get("/health")', '@app.get("/detections")', '@app.get("/frame/{camera_id}")'):
+        for required in (
+            '@app.get("/health")',
+            '@app.get("/detections")',
+            '@app.get("/tracks")',
+            '@app.get("/frame/{camera_id}")',
+        ):
             self.assertIn(required, source)
         for forbidden in ("/poses", "/heatmap", "/reid", "/room-mapping", "/overlays"):
             self.assertNotIn(forbidden, source)
-        for forbidden_import in ("reid_service", "spatial_calibration", "services.ml_service.pose", "services.ml_service.heatmap"):
+        for forbidden_import in (
+            "reid_service",
+            "spatial_calibration",
+            "services.ml_service.pose",
+            "services.ml_service.heatmap",
+        ):
             self.assertNotIn(forbidden_import, source)
+        self.assertIn("TrackingJpegPublisher", source)
 
     def test_capture_pipeline_is_latest_only(self):
         deepstream = (ROOT / "services/ml_service/cameras/deepstream.py").read_text(encoding="utf-8")
@@ -65,14 +83,16 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertLessEqual(float(config["max_result_age_ms"]), 700.0)
         self.assertFalse(bool(config["roi_second_pass"]["enabled"]))
 
-    def test_frontend_uses_detection_only_operator_console(self):
+    def test_frontend_reads_tracks_without_optional_analytics(self):
         main = (ROOT / "services/frontend/core_v1/main.py").read_text(encoding="utf-8")
         ui = (ROOT / "services/frontend/core_v1/operator_dashboard_detection.py").read_text(encoding="utf-8")
         self.assertIn("operator_dashboard_detection", main)
         self.assertIn('"/health"', ui)
         self.assertIn('"/detections"', ui)
+        self.assertIn('"/tracks"', ui)
         self.assertIn("self.heat.hide()", ui)
         self.assertIn("self.pose.hide()", ui)
+        self.assertNotIn('"/reid"', ui)
 
 
 if __name__ == "__main__":
