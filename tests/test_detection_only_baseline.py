@@ -13,7 +13,7 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
     def test_config_keeps_pose_and_heatmap_removed_but_enables_reid_sidepath(self):
         payload = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))
         core = payload["core_v1"]
-        self.assertEqual(core["profile"], "detection-tracking-reid-smooth-v4")
+        self.assertEqual(core["profile"], "detection-tracking-instant-reid-smooth-v5")
         self.assertIn("detector", core)
         self.assertIn("visual_tracker", core)
         self.assertIn("reid", core)
@@ -60,6 +60,7 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
             self.assertFalse((ROOT / relative).exists(), relative)
         self.assertTrue((ROOT / "services/ml_service/core_v1/global_reid.py").exists())
         self.assertTrue((ROOT / "services/ml_service/core_v1/reid_embedder.py").exists())
+        self.assertTrue((ROOT / "services/ml_service/core_v1/instant_reid.py").exists())
 
     def test_api_surface_keeps_detection_and_adds_only_reid(self):
         source = (ROOT / "services/ml_service/core_v1/app.py").read_text(encoding="utf-8")
@@ -73,7 +74,7 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
             self.assertIn(required, source)
         for forbidden in ("/poses", "/heatmap", "/room-mapping", "/overlays"):
             self.assertNotIn(forbidden, source)
-        self.assertIn("GlobalReIdCoordinator", source)
+        self.assertIn("InstantGlobalReIdCoordinator", source)
         self.assertIn("TrackingJpegPublisher", source)
 
     def test_capture_pipeline_is_latest_only(self):
@@ -106,13 +107,17 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
         self.assertIn("self.heat.hide()", ui)
         self.assertIn("self.pose.hide()", ui)
 
-    def test_reid_is_cpu_sidepath_and_checkpoint_is_pinned(self):
+    def test_reid_is_cpu_sidepath_and_instant_pair_policy_is_configured(self):
         core = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))["core_v1"]
         reid = core["reid"]
         self.assertEqual(reid["device"], "cpu")
         self.assertEqual(reid["model_name"], "osnet_x0_25")
         self.assertEqual(len(str(reid["model_sha256"])), 64)
         self.assertGreaterEqual(int(reid["min_samples"]), 3)
+        self.assertLessEqual(int(reid["min_crop_height_px"]), 50)
+        self.assertLess(float(reid["min_area_ratio"]), 0.006)
+        self.assertGreater(float(reid["fast_pair_similarity"]), float(reid["same_group_similarity"]))
+        self.assertLessEqual(float(reid["fast_single_similarity"]), float(reid["fast_pair_similarity"]))
         self.assertGreater(float(reid["strong_similarity"]), float(reid["match_similarity"]))
         self.assertGreater(float(reid["prototype_update_similarity"]), float(reid["same_group_similarity"]))
 
