@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QProgressBar, QPushButton, QScrollArea,
@@ -18,11 +18,11 @@ CAMERAS = [f"CAM-{i:02d}" for i in range(1, 7)]
 ML_HOST = "127.0.0.1"
 ML_PORT = 8001
 
-BG = "#000a1c"
-SIDEBAR = "#000f27"
-PANEL = "#001126"
-CARD = "#00162f"
-BORDER = "#073154"
+BG = "#020b18"
+SIDEBAR = "#061426"
+PANEL = "#07192d"
+CARD = "#0a2038"
+BORDER = "#143a60"
 TEXT = "#f6f8fc"
 MUTED = "#a8b5c8"
 BLUE = "#0d63ff"
@@ -250,7 +250,10 @@ class RealtimeState:
                 health = self._json(connection, "/health")
                 detections = self._json(connection, "/detections")
                 reid = self._json(connection, "/reid")
-                room_sessions = self._json(connection, "/room-sessions")
+                try:
+                    room_sessions = self._json(connection, "/room-sessions")
+                except Exception:
+                    room_sessions = {"enabled": False, "active_sessions": [], "recent_sessions": [], "events": []}
                 with self._lock:
                     self.state = {
                         "connected": True,
@@ -273,15 +276,12 @@ class RealtimeState:
 
 
 class CameraViewport(QWidget):
-    """Fill the tile without stretching the camera image.
+    """Render the complete camera image with in-frame surveillance overlays."""
 
-    The source aspect ratio is preserved. Any mismatch is handled by a minimal
-    center crop, so there are no black side bars and no geometric distortion.
-    """
     def __init__(self):
         super().__init__()
         self._image: QImage | None = None
-        self.setMinimumSize(180, 100)
+        self.setMinimumSize(160, 90)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
@@ -291,120 +291,107 @@ class CameraViewport(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#020913"))
-        if self._image is None or self._image.isNull():
-            painter.setPen(QColor(MUTED))
-            painter.setFont(app_font(13))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Connecting...")
-            return
-
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.fillRect(self.rect(), QColor("#030915"))
+
+        if self._image is None or self._image.isNull():
+            painter.setPen(QColor("#8293aa"))
+            painter.setFont(app_font(12))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Connecting…")
+            return
 
         iw = float(self._image.width())
         ih = float(self._image.height())
         tw = float(max(1, self.width()))
         th = float(max(1, self.height()))
 
-        # Ambient background fills spare UI area only.
-        # It does NOT replace/crop the actual camera view.
-        cover_scale = max(tw / iw, th / ih)
-        bg_w = iw * cover_scale
-        bg_h = ih * cover_scale
-
-        bg_rect = QRectF(
-            (tw - bg_w) * 0.5,
-            (th - bg_h) * 0.5,
-            bg_w,
-            bg_h,
-        )
-
-        painter.save()
-        painter.setOpacity(0.08)
-        painter.drawImage(bg_rect, self._image)
-        painter.restore()
-
-        # PRIMARY CAMERA:
-        # contain -> 100% frame visible
-        # no crop
-        # no stretch
-        # original aspect ratio preserved
-        fit_scale = min(tw / iw, th / ih)
-
-        frame_w = iw * fit_scale
-        frame_h = ih * fit_scale
-
-        frame_rect = QRectF(
-            (tw - frame_w) * 0.5,
-            (th - frame_h) * 0.5,
-            frame_w,
-            frame_h,
-        )
-
+        # CONTAIN only: no crop, no stretch, full CCTV frame remains visible.
+        fit = min(tw / iw, th / ih)
+        frame_w = iw * fit
+        frame_h = ih * fit
+        frame_rect = QRectF((tw - frame_w) * 0.5, (th - frame_h) * 0.5, frame_w, frame_h)
         painter.drawImage(frame_rect, self._image)
+
+        overlay_top = min(44.0, frame_rect.height())
+        top_grad = QLinearGradient(0, frame_rect.top(), 0, frame_rect.top() + overlay_top)
+        top_grad.setColorAt(0.0, QColor(2, 12, 27, 215))
+        top_grad.setColorAt(1.0, QColor(2, 12, 27, 20))
+        painter.fillRect(QRectF(frame_rect.left(), frame_rect.top(), frame_rect.width(), overlay_top), top_grad)
+
+        overlay_bottom = min(40.0, frame_rect.height())
+        bottom_top = frame_rect.bottom() - overlay_bottom
+        bottom_grad = QLinearGradient(0, bottom_top, 0, frame_rect.bottom())
+        bottom_grad.setColorAt(0.0, QColor(2, 12, 27, 10))
+        bottom_grad.setColorAt(1.0, QColor(2, 12, 27, 220))
+        painter.fillRect(QRectF(frame_rect.left(), bottom_top, frame_rect.width(), overlay_bottom), bottom_grad)
+
+        tile = self.parentWidget()
+        camera_id = str(getattr(tile, "camera_id", "CAM"))
+        title = CAMERA_TITLES.get(camera_id, camera_id)
+        left = frame_rect.left()
+        top = frame_rect.top()
+        right = frame_rect.right()
+        bottom = frame_rect.bottom()
+
+        painter.setFont(app_font(12, QFont.Weight.DemiBold))
+        painter.setPen(QColor("#f8fafc"))
+        painter.drawText(
+            QRectF(left + 12, top + 7, max(40.0, frame_rect.width() - 100), 24),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            f"{camera_id}  {title}",
+        )
+
+        painter.setPen(QPen(QColor("#16e487"), 1.6))
+        painter.setBrush(QColor("#16e487"))
+        painter.drawEllipse(QRectF(right - 67, top + 14, 7, 7))
+        painter.setPen(QColor("#d8fbe9"))
+        painter.setFont(app_font(10, QFont.Weight.DemiBold))
+        painter.drawText(
+            QRectF(right - 55, top + 7, 46, 22),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            "LIVE",
+        )
+
+        people_text = str(getattr(tile, "_people_text", "0 People"))
+        fps_text = str(getattr(tile, "_fps_text", "-- FPS"))
+        painter.setPen(QColor("#e7edf5"))
+        painter.drawText(
+            QRectF(left + 12, bottom - 30, frame_rect.width() * 0.5, 20),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            people_text,
+        )
+        painter.drawText(
+            QRectF(left + frame_rect.width() * 0.5, bottom - 30, frame_rect.width() * 0.5 - 12, 20),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            fps_text,
+        )
 
 
 class CameraTile(QFrame):
     def __init__(self, camera_id: str, number: int):
         super().__init__()
         self.camera_id = camera_id
+        self.number = number
+        self._people_text = "0 People"
+        self._fps_text = "-- FPS"
         self.setObjectName("cameraTile")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(160, 90)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         root = QVBoxLayout(self)
         root.setContentsMargins(0,0,0,0)
         root.setSpacing(0)
-
-        self.header = QWidget()
-        self.header.setObjectName("cameraHeader")
-        self.header.setFixedHeight(46)
-        h = QHBoxLayout(self.header)
-        h.setContentsMargins(9,0,10,0)
-        h.setSpacing(9)
-        chip = QLabel(f"{number:02d}")
-        chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        chip.setFixedSize(35,32)
-        chip.setFont(app_font(15, QFont.Weight.DemiBold))
-        chip.setStyleSheet(f"background:{BLUE_2};color:white;border-radius:6px;")
-        title = QLabel(CAMERA_TITLES[camera_id])
-        title.setFont(app_font(16, QFont.Weight.Medium))
-        dot = QLabel("●")
-        dot.setStyleSheet(f"color:{GREEN};")
-        live = QLabel("LIVE")
-        live.setFont(app_font(14, QFont.Weight.Medium))
-        h.addWidget(chip)
-        h.addWidget(title)
-        h.addStretch()
-        h.addWidget(dot)
-        h.addWidget(live)
-        root.addWidget(self.header)
-
         self.viewport = CameraViewport()
         root.addWidget(self.viewport, 1)
 
-        self.footer = QWidget()
-        self.footer.setObjectName("cameraFooter")
-        self.footer.setFixedHeight(36)
-        f = QHBoxLayout(self.footer)
-        f.setContentsMargins(10,0,10,0)
-        self.people = QLabel("0 People")
-        self.people.setFont(app_font(13))
-        self.fps = QLabel("-- FPS")
-        self.fps.setFont(app_font(13))
-        bars = QLabel("▂▄▆█")
-        bars.setFont(app_font(13, QFont.Weight.Bold))
-        bars.setStyleSheet(f"color:{GREEN};")
-        f.addWidget(self.people)
-        f.addStretch()
-        f.addWidget(self.fps)
-        f.addWidget(bars)
-        root.addWidget(self.footer)
-
     def update_metrics(self, count: int, fps: float):
-        self.people.setText(f"{count} {'Person' if count == 1 else 'People'}")
-        self.fps.setText(f"{fps:.0f} FPS" if fps > 0 else "-- FPS")
+        self._people_text = f"{count} {'Person' if count == 1 else 'People'}"
+        self._fps_text = f"{fps:.0f} FPS" if fps > 0 else "-- FPS"
+        self.viewport.update()
 
     def cameras_only(self, enabled: bool):
-        self.header.setVisible(not enabled)
-        self.footer.setVisible(not enabled)
+        # Header/footer chrome no longer exists; metadata is always in-frame.
+        return
 
 
 class NavButton(QPushButton):
@@ -657,25 +644,46 @@ class LivePage(QWidget):
         l.addWidget(self.title_row)
         self.grid = QGridLayout()
         self.grid.setContentsMargins(0,0,0,0)
-        self.grid.setHorizontalSpacing(12)
+        self.grid.setHorizontalSpacing(10)
         self.grid.setVerticalSpacing(10)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.tiles = {}
         for index, camera_id in enumerate(CAMERAS):
             tile = CameraTile(camera_id, index+1)
             self.tiles[camera_id] = tile
             self.grid.addWidget(tile, index//2, index%2)
-        for row in range(3):
-            self.grid.setRowStretch(row,1)
-        for col in range(2):
-            self.grid.setColumnStretch(col,1)
         l.addLayout(self.grid,1)
+        QTimer.singleShot(0, self._apply_tile_sizes)
+
+    def _apply_tile_sizes(self):
+        if not self.tiles:
+            return
+        title_height = self.title_row.height() if self.title_row.isVisible() else 0
+        available_w = max(320, self.width())
+        available_h = max(240, self.height() - title_height - 14)
+        h_gap = max(0, self.grid.horizontalSpacing())
+        v_gap = max(0, self.grid.verticalSpacing()) * 2
+        max_tile_w_by_width = max(160.0, (available_w - h_gap) / 2.0)
+        max_tile_h_by_height = max(90.0, (available_h - v_gap) / 3.0)
+        max_tile_w_by_height = max_tile_h_by_height * (16.0 / 9.0)
+        tile_w = int(max(160.0, min(max_tile_w_by_width, max_tile_w_by_height)))
+        tile_h = int(round(tile_w * 9.0 / 16.0))
+        for tile in self.tiles.values():
+            tile.setFixedSize(tile_w, tile_h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_tile_sizes()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_tile_sizes()
 
     def cameras_only(self, enabled: bool):
         self.title_row.setVisible(not enabled)
-        self.grid.setHorizontalSpacing(2 if enabled else 12)
+        self.grid.setHorizontalSpacing(2 if enabled else 10)
         self.grid.setVerticalSpacing(2 if enabled else 10)
-        for tile in self.tiles.values():
-            tile.cameras_only(enabled)
+        QTimer.singleShot(0, self._apply_tile_sizes)
 
 
 def table_item(text):
@@ -800,7 +808,7 @@ class DashboardWindow(QMainWindow):
 
         self.topbar = QWidget()
         self.topbar.setObjectName("topbar")
-        self.topbar.setFixedHeight(70)
+        self.topbar.setFixedHeight(58)
         top = QHBoxLayout(self.topbar)
         top.setContentsMargins(20,0,24,0)
         menu = QPushButton()
@@ -827,8 +835,8 @@ class DashboardWindow(QMainWindow):
 
         self.content = QWidget()
         self.content_layout = QHBoxLayout(self.content)
-        self.content_layout.setContentsMargins(14,10,14,16)
-        self.content_layout.setSpacing(14)
+        self.content_layout.setContentsMargins(12,8,12,12)
+        self.content_layout.setSpacing(12)
         body_layout.addWidget(self.content,1)
         self.stack = QStackedWidget()
         self.live = LivePage()
@@ -876,22 +884,19 @@ class DashboardWindow(QMainWindow):
     def apply_style(self):
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{ background:{BG}; color:{TEXT}; }}
-            #sidebar {{ background:{SIDEBAR}; border-right:1px solid #07243f; }}
+            #sidebar {{ background:{SIDEBAR}; border-right:1px solid #102c48; }}
             #topbar {{ background:{BG}; }}
             QPushButton {{ border:0; color:{TEXT}; outline:none; background:transparent; }}
-            #sidebar QPushButton {{ text-align:left; padding-left:18px; border-radius:7px; }}
-            #sidebar QPushButton:hover {{ background:#061d3a; }}
-            #sidebar QPushButton:checked {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #075ff0,stop:1 #073bc8);
-                border:1px solid #1470ff;
-            }}
+            #sidebar QPushButton {{ color:#e7eef8; text-align:left; padding-left:16px; border-radius:8px; }}
+            #sidebar QPushButton:hover {{ background:#0b223c; }}
+            #sidebar QPushButton:checked {{ background:{BLUE}; border:1px solid #2b7bff; }}
             #statusCard, #rightPanel, #cameraTile, #placeholder {{
-                background:{PANEL}; border:1px solid {BORDER}; border-radius:9px;
+                background:{PANEL}; border:1px solid {BORDER}; border-radius:10px;
             }}
-            #cameraHeader, #cameraFooter {{ background:{CARD}; }}
-            #statCard {{ background:{CARD}; border-radius:8px; min-height:104px; }}
+            #cameraTile {{ background:#030915; border:1px solid #123557; }}
+            #statCard {{ background:{CARD}; border-radius:9px; min-height:104px; }}
             #squareButton, #topButton {{ background:{CARD}; border:1px solid {BORDER}; border-radius:7px; }}
-            #squareButton:hover, #topButton:hover {{ background:#08294c; }}
+            #squareButton:hover, #topButton:hover {{ background:#0b2d4e; }}
             QProgressBar {{ background:#06325b; border:0; border-radius:4px; }}
             QProgressBar::chunk {{ background:{BLUE}; border-radius:4px; }}
             QTableWidget#dataTable {{ background:{PANEL}; border:1px solid {BORDER}; border-radius:8px; color:{TEXT}; }}
@@ -910,14 +915,14 @@ class DashboardWindow(QMainWindow):
     def _apply_responsive_widths(self):
         width = max(1,self.width())
         if width >= 1550:
-            self.sidebar.setFixedWidth(235)
-            self.right.setFixedWidth(350)
+            self.sidebar.setFixedWidth(225)
+            self.right.setFixedWidth(330)
         elif width >= 1300:
-            self.sidebar.setFixedWidth(205)
-            self.right.setFixedWidth(300)
+            self.sidebar.setFixedWidth(200)
+            self.right.setFixedWidth(295)
         else:
-            self.sidebar.setFixedWidth(185)
-            self.right.setFixedWidth(260)
+            self.sidebar.setFixedWidth(180)
+            self.right.setFixedWidth(255)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -927,6 +932,8 @@ class DashboardWindow(QMainWindow):
     def set_page(self, index: int):
         self.stack.setCurrentIndex(index)
         self.sidebar.set_active(index)
+        if not self._camera_fullscreen:
+            self.right.setVisible(index == 0)
 
     def render_frames(self):
         for camera_id, reader in self.readers.items():
@@ -967,8 +974,8 @@ class DashboardWindow(QMainWindow):
         self.sidebar.setVisible(not enabled)
         self.topbar.setVisible(not enabled)
         self.right.setVisible(not enabled)
-        self.content_layout.setContentsMargins(0 if enabled else 14, 0 if enabled else 10, 0 if enabled else 14, 0 if enabled else 16)
-        self.content_layout.setSpacing(0 if enabled else 14)
+        self.content_layout.setContentsMargins(0 if enabled else 12, 0 if enabled else 8, 0 if enabled else 12, 0 if enabled else 12)
+        self.content_layout.setSpacing(0 if enabled else 12)
         if enabled:
             self.showFullScreen()
         else:
