@@ -46,7 +46,12 @@ core_v1:
     model: "yolo26m.pt"
     model_fallback: "yolo26m.pt"
     device: "cuda:0"
-    imgsz: [448, 704]
+
+    # Camera feeds are 16:9. The bridge currently performs a fixed resize before
+    # Ultralytics inference, so use a near-16:9 stride-32 target instead of the
+    # old 704x448 shape that visibly widened people. 736x416 is ~1.769:1 and
+    # uses slightly fewer pixels than 704x448.
+    imgsz: [416, 736]
     quantize: 32
     classes: [0]
 
