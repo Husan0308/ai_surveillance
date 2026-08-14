@@ -1,13 +1,13 @@
 core_v1:
-  profile: "detection-only-baseline-v1"
+  profile: "detection-tracking-v1"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Presentation stays deliberately modest until the six-camera baseline is
-  # measured on the real machine. Latest-frame publication prevents backlog.
+  # Keep JPEG presentation bounded. Smoothness comes from latest-only capture
+  # plus bounded tracker prediction, not from buffering old camera frames.
   display_fps: 15
   jpeg_quality: 72
   max_display_width: 640
@@ -36,8 +36,8 @@ core_v1:
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
-  # Kill/rebuild a camera pipe only when it has genuinely drifted far behind.
-  # This prevents old decoded frames from becoming a growing latency queue.
+  # Rebuild only a genuinely stale camera pipe. All normal queues remain
+  # newest-frame-only so a slow consumer never creates a replay backlog.
   max_pipeline_lag_ms: 650
   max_pipeline_lag_samples: 8
 
@@ -49,17 +49,20 @@ core_v1:
     imgsz: [448, 704]
     quantize: 32
     classes: [0]
-    conf: 0.10
+
+    # Preserve low-score person boxes for ByteTrack stage-2 recovery. They can
+    # continue an existing track but are not allowed to create a new ID below
+    # the tracker birth threshold.
+    conf: 0.08
     iou: 0.50
     max_det: 30
 
-    # Two-frame CUDA batches are intentionally conservative for the first
-    # six-camera baseline. We will raise this only after VRAM/latency telemetry.
+    # One CUDA worker, one in-flight latest-only batch. Batch=2 is deliberately
+    # conservative until real six-camera latency/VRAM telemetry says otherwise.
     batch_size: 2
     poll_interval_ms: 4
     start_delay_sec: 1.0
 
-    # Real-time freshness beats completeness: stale inputs/results are dropped.
     max_submit_age_ms: 260
     max_result_age_ms: 700
     overlay_max_age_ms: 700
@@ -73,27 +76,36 @@ core_v1:
       overlap_threshold: 0.15
       cameras: {}
 
-    # No secondary passes in the baseline. One detector, one full-frame pass.
     roi_second_pass:
       enabled: false
       cameras: {}
 
-  # This is presentation tracking only, not another AI model. It keeps boxes
-  # visually smooth between sparse detector updates without feeding evidence
-  # back into detection.
+  # Camera-local tracking only. No ReID model and no cross-camera identity.
+  # ByteTrack-style two-stage association is combined with our bounded adaptive
+  # Kalman presentation model and Hungarian global min-cost assignment.
   visual_tracker:
-    hold_ms: 700
-    memory_ms: 2200
+    tracker_type: "bytetrack-hungarian"
+    assignment_solver: "hungarian"
+    fuse_score: true
+
+    hold_ms: 800
+    memory_ms: 2500
     prediction_ms: 320
+
     match_iou: 0.12
-    reacquire_distance: 0.80
-    byte_match_center: 0.68
+    reacquire_distance: 0.82
+    byte_match_center: 0.70
     byte_second_match_iou: 0.04
-    byte_second_match_center: 0.48
-    low_match_max_age_ms: 550
-    byte_high_conf: 0.24
+    byte_second_match_center: 0.50
+    low_match_max_age_ms: 600
+
+    byte_high_conf: 0.25
     byte_low_conf: 0.08
     low_conf_confirm: 0.08
+    start_conf: 0.25
+    new_track_min_conf: 0.25
+    strong_confirm_hits: 2
+    weak_confirm_hits: 3
 
     process_noise: 0.85
     measurement_noise: 0.90
@@ -114,10 +126,6 @@ core_v1:
     duplicate_center_distance: 0.20
     fragment_duplicate_cameras: []
 
-    start_conf: 0.24
-    new_track_min_conf: 0.18
-    strong_confirm_hits: 2
-    weak_confirm_hits: 3
     camera_start_conf: {}
     camera_low_conf_confirm: {}
     camera_new_track_zones: {}
