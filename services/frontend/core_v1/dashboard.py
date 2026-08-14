@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 import http.client
 import json
 import threading
@@ -40,6 +39,12 @@ CAMERA_TITLES = {
     "CAM-04": "Office 1 (B)",
     "CAM-05": "Office 2 (B)",
     "CAM-06": "Office 3 (B)",
+}
+
+ROOM_TITLES = {
+    "ROOM-1": "Office 1",
+    "ROOM-2": "Office 2",
+    "ROOM-3": "Office 3",
 }
 
 
@@ -203,10 +208,13 @@ class RealtimeState:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread = None
-        self.state = {"connected": False, "health": {}, "detections": {}, "reid": {}}
-        self.recent = deque(maxlen=30)
-        self.events = deque(maxlen=100)
-        self._seen = {}
+        self.state = {
+            "connected": False,
+            "health": {},
+            "detections": {},
+            "reid": {},
+            "room_sessions": {},
+        }
 
     def start(self):
         self._thread = threading.Thread(target=self._run, name="ui-state", daemon=True)
@@ -217,7 +225,12 @@ class RealtimeState:
 
     def snapshot(self):
         with self._lock:
-            return dict(self.state), list(self.recent), list(self.events)
+            state = dict(self.state)
+            sessions = dict(state.get("room_sessions") or {})
+        recent = list(sessions.get("active_sessions") or []) + list(sessions.get("recent_sessions") or [])
+        recent.sort(key=lambda item: int(item.get("session_id") or 0), reverse=True)
+        events = list(sessions.get("events") or [])
+        return state, recent, events
 
     @staticmethod
     def _json(connection, path):
@@ -228,30 +241,6 @@ class RealtimeState:
             raise RuntimeError(response.status)
         return json.loads(payload.decode("utf-8"))
 
-    def _observe(self, reid_payload):
-        cameras = ((reid_payload.get("state") or {}).get("cameras") or {})
-        now = datetime.now()
-        for camera_id, tracks in cameras.items():
-            for track in tracks or []:
-                gid = str(track.get("global_id") or "")
-                if not gid:
-                    continue
-                local_id = int(track.get("local_id") or 0)
-                key = (camera_id, local_id)
-                old = self._seen.get(key)
-                self._seen[key] = gid
-                if old == gid:
-                    continue
-                entry = {
-                    "time": now.strftime("%H:%M:%S"),
-                    "camera": camera_id,
-                    "global_id": gid,
-                    "similarity": track.get("similarity"),
-                    "reason": str(track.get("reason") or "detected"),
-                }
-                self.recent.appendleft(entry)
-                self.events.appendleft(entry)
-
     def _run(self):
         connection = None
         while not self._stop.is_set():
@@ -261,9 +250,15 @@ class RealtimeState:
                 health = self._json(connection, "/health")
                 detections = self._json(connection, "/detections")
                 reid = self._json(connection, "/reid")
-                self._observe(reid)
+                room_sessions = self._json(connection, "/room-sessions")
                 with self._lock:
-                    self.state = {"connected": True, "health": health, "detections": detections, "reid": reid}
+                    self.state = {
+                        "connected": True,
+                        "health": health,
+                        "detections": detections,
+                        "reid": reid,
+                        "room_sessions": room_sessions,
+                    }
                 self._stop.wait(0.35)
             except Exception:
                 if connection is not None:
@@ -608,7 +603,7 @@ class RightRail(QWidget):
             if widget:
                 widget.deleteLater()
         if not recent:
-            empty = QLabel("No recent detections yet")
+            empty = QLabel("No room visits yet")
             empty.setStyleSheet(f"color:{MUTED};")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setMinimumHeight(70)
@@ -624,13 +619,16 @@ class RightRail(QWidget):
                 avatar.setPixmap(icon_pixmap("person", MUTED, 25))
                 avatar.setStyleSheet("background:#243345;border-radius:6px;")
                 texts = QVBoxLayout()
-                gid = QLabel(entry["global_id"])
+                gid = QLabel(str(entry.get("global_id") or "Unknown"))
                 gid.setFont(app_font(13, QFont.Weight.Medium))
-                cam = QLabel(f"{entry['camera']} · {entry['time']}")
-                cam.setFont(app_font(12))
-                cam.setStyleSheet(f"color:{MUTED};")
+                room_id = str(entry.get("room_id") or "")
+                room = ROOM_TITLES.get(room_id, room_id or "Room")
+                time_text = str(entry.get("time") or entry.get("entered_time") or "")
+                place = QLabel(f"{room} · {time_text}" if time_text else room)
+                place.setFont(app_font(12))
+                place.setStyleSheet(f"color:{MUTED};")
                 texts.addWidget(gid)
-                texts.addWidget(cam)
+                texts.addWidget(place)
                 r.addWidget(avatar)
                 r.addLayout(texts,1)
                 self.recent_layout.addWidget(row)
@@ -728,12 +726,12 @@ class EventsPage(QWidget):
         l.setContentsMargins(0,0,0,0)
         header = QLabel("Events")
         header.setFont(app_font(27, QFont.Weight.DemiBold))
-        subtitle = QLabel("Realtime identity events generated by the current pipeline.")
+        subtitle = QLabel("Room entry events generated from global identity visit sessions.")
         subtitle.setStyleSheet(f"color:{MUTED};")
         l.addWidget(header)
         l.addWidget(subtitle)
         self.table = QTableWidget(0,5)
-        self.table.setHorizontalHeaderLabels(["TIME","EVENT","CAMERA","IDENTITY","DETAILS"])
+        self.table.setHorizontalHeaderLabels(["TIME","EVENT","ROOM","IDENTITY","DETAILS"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().hide()
         self.table.setShowGrid(False)
@@ -744,11 +742,19 @@ class EventsPage(QWidget):
     def update_live(self, events):
         self.table.setRowCount(len(events))
         for r, entry in enumerate(events):
-            sim = entry.get("similarity")
-            detail = entry.get("reason","detected")
-            if isinstance(sim,(float,int)):
-                detail += f" · {sim:.3f}"
-            row = [entry["time"],"Person detected",entry["camera"],entry["global_id"],detail]
+            room_id = str(entry.get("room_id") or "")
+            room = ROOM_TITLES.get(room_id, room_id or "Room")
+            cameras = entry.get("cameras") or []
+            detail = " / ".join(str(camera) for camera in cameras)
+            if not detail:
+                detail = str(entry.get("camera") or "")
+            row = [
+                str(entry.get("time") or ""),
+                "Entered",
+                room,
+                str(entry.get("global_id") or "Unknown"),
+                detail,
+            ]
             self.table.setRowHeight(r,48)
             for c, value in enumerate(row):
                 self.table.setItem(r,c,table_item(value))
