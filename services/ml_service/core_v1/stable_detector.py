@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import time
 
 from .detector import YoloDetectorWorker, _detector_process_main
 
@@ -9,13 +10,7 @@ log = logging.getLogger(__name__)
 
 
 class StableYoloDetectorWorker(YoloDetectorWorker):
-    """Detector-only worker with safe Ultralytics checkpoint fallback.
-
-    A project-local model path is used when it exists. If it does not exist,
-    the worker passes a plain Ultralytics checkpoint name (for example
-    ``yolo26m.pt``) to YOLO so Ultralytics can resolve/download it. Pose is not
-    part of this hot path.
-    """
+    """Detector-only worker with safe checkpoint fallback and zero redundant resize."""
 
     def __init__(self, frame_stores, config: dict, project_root: Path):
         super().__init__(frame_stores, config, project_root)
@@ -35,6 +30,7 @@ class StableYoloDetectorWorker(YoloDetectorWorker):
                 local_path,
                 self.model_source,
             )
+        self._same_size_prepare_skips = 0
 
     def _spawn_process(self):
         self._input_queue = self._ctx.Queue(maxsize=1)
@@ -57,6 +53,40 @@ class StableYoloDetectorWorker(YoloDetectorWorker):
             self.model_source,
         )
 
+    def _prepare_payload(self, selected):
+        """Do not resize again when capture already matches the network canvas."""
+        import cv2
+
+        started = time.perf_counter()
+        entries = []
+        for cid, frame, _version, age_ms in selected:
+            if int(frame.width) == self.input_w and int(frame.height) == self.input_h:
+                full = frame.image
+                self._same_size_prepare_skips += 1
+            else:
+                full = cv2.resize(
+                    frame.image,
+                    (self.input_w, self.input_h),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            entries.append(
+                {
+                    "camera_id": cid,
+                    "frame_id": int(frame.frame_id),
+                    "captured_mono": float(frame.captured_monotonic),
+                    "source_w": int(frame.width),
+                    "source_h": int(frame.height),
+                    "full_shape": (self.input_h, self.input_w),
+                    "full_image": full,
+                    "roi": self._prepare_roi(cid, frame),
+                }
+            )
+            self._last_submit_age_ms = age_ms
+            self._submit_age_ms.append(age_ms)
+        with self._lock:
+            self._last_prepare_ms = (time.perf_counter() - started) * 1000.0
+        return entries
+
     def metrics(self):
         payload = super().metrics()
         payload.update(
@@ -66,6 +96,7 @@ class StableYoloDetectorWorker(YoloDetectorWorker):
                 "model_local_exists": self.model_local_exists,
                 "cuda_topology": "detector_only_spawned_process",
                 "pose_in_hot_path": False,
+                "same_size_prepare_skips": self._same_size_prepare_skips,
             }
         )
         return payload

@@ -1,9 +1,9 @@
-name: Detection + local tracking smoke tests
+name: Detection + tracking + smooth camera smoke tests
 
 on:
   push:
     branches:
-      - "agent/local-tracking-byte-hungarian"
+      - "agent/camera-smoothness-gpu"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -25,7 +25,7 @@ jobs:
       - name: Install smoke-test dependencies
         run: python -m pip install --upgrade pip numpy opencv-python-headless psutil pyyaml
 
-      - name: Compile detection + tracking runtime modules
+      - name: Compile detection + tracking + camera runtime modules
         run: |
           python -m py_compile \
             services/ml_service/core_v1/__init__.py \
@@ -42,8 +42,10 @@ jobs:
             services/ml_service/core_v1/runtime_metrics.py \
             services/ml_service/cameras/deepstream.py \
             services/ml_service/cameras/gstreamer.py \
+            services/ml_service/cameras/smooth_gstreamer.py \
             services/frontend/core_v1/main.py \
             services/frontend/core_v1/dashboard.py \
+            services/frontend/core_v1/smooth_frame_reader.py \
             services/frontend/core_v1/operator_dashboard.py \
             services/frontend/core_v1/operator_dashboard_v2.py \
             services/frontend/core_v1/operator_dashboard_detection.py
@@ -59,6 +61,9 @@ jobs:
 
       - name: Test Hungarian local tracking
         run: python -m unittest discover -s tests -p "test_local_tracking.py" -v
+
+      - name: Test smooth camera pipeline
+        run: python -m unittest discover -s tests -p "test_camera_smoothness.py" -v
 
       - name: Test detection + tracking baseline guards
         run: python -m unittest discover -s tests -p "test_detection_only_baseline.py" -v
