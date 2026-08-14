@@ -10,7 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from shared.config import camera_config
 
-from .conservative_reid import ConservativeGlobalReIdCoordinator
+from .instant_reid_safe import SafeInstantGlobalReIdCoordinator
 from .manager import CameraManager
 from .runtime_metrics import process_metrics
 from .stable_detector import StableYoloDetectorWorker
@@ -65,7 +65,7 @@ publishers = {
 }
 
 reid = (
-    ConservativeGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
+    SafeInstantGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
     if bool(reid_cfg.get("enabled", False))
     else None
 )
@@ -74,8 +74,8 @@ if reid is not None:
         publisher.identity_provider = reid
 
 app = FastAPI(
-    title="AI Surveillance Detection + Tracking + ReID Core",
-    version="1.2-global-reid",
+    title="AI Surveillance Detection + Tracking + Instant Global ReID Core",
+    version="1.3-instant-global-reid",
 )
 
 
@@ -83,7 +83,7 @@ def _mode() -> str:
     if detector is None:
         return "camera-only"
     if reid is not None:
-        return "camera+yolo-detect+local-track+global-reid"
+        return "camera+yolo-detect+local-track+instant-global-reid"
     return "camera+yolo-detect+local-track"
 
 
@@ -183,6 +183,8 @@ def tracks():
                 identity = reid.identity_for_track(camera_id, int(row.get("track_id") or 0))
                 row["global_id"] = identity.get("global_id") if identity else None
                 row["reid_similarity"] = identity.get("reid_similarity") if identity else None
+                row["reid_reason"] = identity.get("reid_reason") if identity else None
+                row["reid_provisional"] = identity.get("provisional") if identity else None
             enriched.append(row)
         cameras_payload[camera_id] = {
             "count": len(enriched),
@@ -192,7 +194,7 @@ def tracks():
         total += len(enriched)
     return {
         "enabled": True,
-        "scope": "camera_local+global_reid" if reid else "camera_local",
+        "scope": "camera_local+instant_global_reid" if reid else "camera_local",
         "cross_camera_identity": reid is not None,
         "total": total,
         "cameras": cameras_payload,
