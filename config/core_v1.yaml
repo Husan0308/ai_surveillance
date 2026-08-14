@@ -167,14 +167,15 @@ core_v1:
     min_blur_variance: 20.0
     tracklet_outlier_similarity: 0.52
 
-    # Conservative identity policy: a match needs both absolute similarity and
-    # separation from the second-best candidate. Strong matches can bypass the
-    # margin, while ambiguous matches always receive a new Global ID.
+    # Conservative identity policy: both absolute similarity and separation from
+    # the runner-up matter. Even a very strong match needs a small margin if a
+    # second viable look-alike identity is present; ambiguity creates a new ID.
     match_similarity: 0.76
     same_group_similarity: 0.70
     same_camera_similarity: 0.73
     strong_similarity: 0.86
     second_best_margin: 0.06
+    strong_second_best_margin: 0.025
 
     # Existing prototypes only learn from very confident assignments, preventing
     # one bad crop from poisoning a person's future identity.
