@@ -150,7 +150,7 @@ class FaceRecognitionTests(unittest.TestCase):
         self.assertIn('CUDAExecutionProvider', source)
         self.assertIn('CPUExecutionProvider', source)
         self.assertIn('ort.get_available_providers()', source)
-        self.assertIn('session.get_providers', source)
+        self.assertIn('getattr(session, "get_providers", None)', source)
         self.assertIn('gpu_mem_limit', source)
         self.assertIn('cudnn_conv_algo_search', source)
         self.assertIn('import torch', source)
