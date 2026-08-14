@@ -1,5 +1,5 @@
 core_v1:
-  profile: "detection-tracking-instant-reid-smooth-v5"
+  profile: "detection-tracking-room-consensus-reid-v6"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
@@ -34,7 +34,6 @@ core_v1:
   capture_output_width: 736
   capture_output_height: 416
   capture_metrics_interval_sec: 5.0
-
   max_pipeline_lag_ms: 900
   max_pipeline_lag_samples: 20
 
@@ -46,28 +45,22 @@ core_v1:
     imgsz: [416, 736]
     quantize: 32
     classes: [0]
-
     conf: 0.08
     iou: 0.50
     max_det: 30
-
     batch_size: 2
     poll_interval_ms: 4
     start_delay_sec: 1.0
-
     max_submit_age_ms: 260
     max_result_age_ms: 700
     overlay_max_age_ms: 700
-
     duplicate_iou: 0.58
     fusion_containment: 0.84
     fusion_center_distance: 0.40
-
     hard_exclusion:
       max_box_height_ratio: 0.30
       overlap_threshold: 0.15
       cameras: {}
-
     roi_second_pass:
       enabled: false
       cameras: {}
@@ -76,7 +69,6 @@ core_v1:
     tracker_type: "bytetrack-hungarian-ownership"
     assignment_solver: "hungarian"
     fuse_score: true
-
     ownership_lock: true
     ownership_min_hits: 3
     ownership_margin: 0.09
@@ -86,20 +78,16 @@ core_v1:
     ownership_iou_advantage: 0.14
     ownership_distance_advantage: 0.14
     ownership_max_competitor_age_ms: 700
-
     id_namespace_stride: 10000
-
     hold_ms: 850
     memory_ms: 2800
     prediction_ms: 340
-
     match_iou: 0.12
     reacquire_distance: 0.78
     byte_match_center: 0.66
     byte_second_match_iou: 0.05
     byte_second_match_center: 0.46
     low_match_max_age_ms: 600
-
     byte_high_conf: 0.25
     byte_low_conf: 0.08
     low_conf_confirm: 0.08
@@ -107,7 +95,6 @@ core_v1:
     new_track_min_conf: 0.25
     strong_confirm_hits: 2
     weak_confirm_hits: 3
-
     process_noise: 0.82
     measurement_noise: 0.88
     velocity_damping: 0.95
@@ -121,12 +108,10 @@ core_v1:
     size_response: 0.30
     snap_distance_boxes: 0.62
     reversal_damping: 0.15
-
     duplicate_iou: 0.68
     duplicate_containment: 0.90
     duplicate_center_distance: 0.20
     fragment_duplicate_cameras: []
-
     camera_start_conf: {}
     camera_low_conf_confirm: {}
     camera_new_track_zones: {}
@@ -136,55 +121,68 @@ core_v1:
 
   reid:
     enabled: true
-    model_name: "osnet_x0_25"
+    # OSNet-AIN x1.0 is intentionally CPU-only. The official Torchreid model zoo
+    # reports much stronger cross-domain generalisation than OSNet x0.25.
+    model_name: "osnet_ain_x1_0"
     device: "cpu"
     cpu_threads: 2
     input_height: 256
     input_width: 128
-
-    model_path: "models/reid/osnet_x0_25_msmt17_combineall.pth"
-    model_url: "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
-    model_sha256: "cf55163d78fc44c62c82f85ab62d39f10438679b5abe8c698ae08cfa84aa6e18"
+    model_path: "models/reid/osnet_ain_x1_0_msmt17.pth"
+    model_url: "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth"
+    model_sha256: "8a07e8da38946f7cee37f4561617bf8b6d2fe8f3a4027852893ea092e46d919f"
     download_if_missing: true
 
-    # A track receives a visible G-ID immediately. OSNet samples arrive shortly
-    # afterwards and either merge it to the paired-camera owner or confirm it.
-    poll_interval_ms: 90
-    sample_interval_ms: 350
-    max_batch: 6
+    poll_interval_ms: 100
+    sample_interval_ms: 420
+    max_batch: 4
     min_samples: 3
     confirm_min_samples: 3
-    max_samples: 6
+    max_samples: 7
 
-    # 736x416 CCTV people are often much smaller than 70 px. Use a permissive
-    # sampling floor, then let quality score + multi-shot confirmation protect IDs.
-    min_crop_height_px: 46
-    min_crop_width_px: 16
-    min_area_ratio: 0.0045
+    # Distant 736x416 CCTV people are accepted, but quality/outlier gates still
+    # prevent tiny/blurred crops from poisoning a long-lived identity prototype.
+    min_crop_height_px: 42
+    min_crop_width_px: 14
+    min_area_ratio: 0.0035
     min_track_confidence: 0.20
     max_crop_overlap_iou: 0.30
-    min_blur_variance: 10.0
-    tracklet_outlier_similarity: 0.52
+    min_blur_variance: 9.0
+    tracklet_outlier_similarity: 0.50
 
-    # One-shot reconciliation is only for simultaneously active paired cameras.
-    # If each side sees one person, topology supplies extra evidence and permits a
-    # slightly lower threshold. Crowded scenes require stronger appearance + margin.
-    fast_single_similarity: 0.79
-    fast_pair_similarity: 0.84
-    fast_pair_margin: 0.045
-    fast_confirm_similarity: 0.73
-    confirmed_pair_merge_similarity: 0.88
-
-    # Multi-shot gallery matching stays conservative, especially across rooms.
+    # Conservative historical/global gallery matching.
     match_similarity: 0.78
     same_group_similarity: 0.74
     same_camera_similarity: 0.76
-    strong_similarity: 0.87
-    second_best_margin: 0.06
+    strong_similarity: 0.88
+    second_best_margin: 0.055
     strong_second_best_margin: 0.025
+    prototype_update_similarity: 0.88
+    prototype_update_alpha: 0.07
 
-    prototype_update_similarity: 0.87
-    prototype_update_alpha: 0.08
+    # Room-pair consensus is the authoritative cross-camera decision for cameras
+    # that see the same physical room. Assignment is one-to-one Hungarian.
+    room_embedding_weight: 0.90
+    room_colour_weight: 0.10
+    room_min_embedding_similarity: 0.66
+    room_single_similarity: 0.71
+    room_pair_similarity: 0.75
+    room_pair_margin: 0.035
+    room_confirmed_merge_similarity: 0.90
+    colour_ema_alpha: 0.28
+
+    # Repair a short local-ID fragmentation in the same camera instead of
+    # permanently allocating another Global ID to the same physical person.
+    same_camera_handoff_sec: 2.6
+    same_camera_handoff_similarity: 0.84
+    same_camera_handoff_distance: 0.85
+
+    # Existing instant policy remains as a fallback around room consensus.
+    fast_single_similarity: 0.80
+    fast_pair_similarity: 0.85
+    fast_pair_margin: 0.045
+    fast_confirm_similarity: 0.74
+    confirmed_pair_merge_similarity: 0.90
 
     active_timeout_sec: 1.8
     gallery_ttl_sec: 21600
