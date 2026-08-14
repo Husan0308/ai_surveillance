@@ -10,7 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from shared.config import camera_config
 
-from .instant_reid import InstantGlobalReIdCoordinator
+from .instant_reid_safe import SafeInstantGlobalReIdCoordinator
 from .manager import CameraManager
 from .runtime_metrics import process_metrics
 from .stable_detector import StableYoloDetectorWorker
@@ -65,7 +65,7 @@ publishers = {
 }
 
 reid = (
-    InstantGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
+    SafeInstantGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
     if bool(reid_cfg.get("enabled", False))
     else None
 )
