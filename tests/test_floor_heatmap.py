@@ -22,6 +22,10 @@ class _Mapper:
     def snapshot(self):
         return {
             "rooms": {"ROOM-1": {"cameras": ["CAM-01", "CAM-04"]}},
+            "calibrations": {
+                "CAM-01": {"status": "good", "homography": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+                "CAM-04": {"status": "good", "homography": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+            },
             "summary": {"active_rooms": ["ROOM-1"]},
         }
 
@@ -83,6 +87,16 @@ class FloorHeatmapTests(unittest.TestCase):
         self.assertAlmostEqual(self.heatmap._bucket_weight(3600.0), 1.0)
         self.assertAlmostEqual(self.heatmap._bucket_weight(7200.0), 0.5, places=6)
         self.assertAlmostEqual(self.heatmap._bucket_weight(10800.0), 0.25, places=6)
+
+    def test_bucket_aggregation_never_starts_cooling_before_one_hour(self):
+        bucket = self.heatmap._bucket_for("ROOM-1", 1.0)
+        bucket.grid[0, 0] = 1.0
+        # Bucket 0 covers t=[0,300). We conservatively age from bucket end,
+        # so even the earliest sample remains fully hot for >= 3600 seconds.
+        self.assertAlmostEqual(float(self.heatmap.room_grid("ROOM-1", now=3899.0)[0, 0]), 1.0)
+        # At t=7500, effective age from bucket end is 7200 s: one hour of
+        # full heat plus one half-life, so the contribution is exactly 0.5.
+        self.assertAlmostEqual(float(self.heatmap.room_grid("ROOM-1", now=7500.0)[0, 0]), 0.5, places=6)
 
     def test_same_room_overlap_duplicate_is_not_double_counted(self):
         self.assertFalse(self.heatmap._is_duplicate("ROOM-1", 100.0, 0.50, 0.50))
