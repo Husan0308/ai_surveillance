@@ -13,7 +13,7 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
     def test_config_contains_only_camera_detector_and_local_tracker(self):
         payload = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))
         core = payload["core_v1"]
-        self.assertEqual(core["profile"], "detection-tracking-v1")
+        self.assertEqual(core["profile"], "detection-tracking-smooth-v2")
         self.assertIn("detector", core)
         self.assertIn("visual_tracker", core)
         for forbidden in ("pose", "heatmap", "reid"):
@@ -27,14 +27,15 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertGreaterEqual(float(tracker["new_track_min_conf"]), float(tracker["byte_high_conf"]))
 
     def test_detector_shape_is_stride_aligned_and_near_16_by_9(self):
-        detector = yaml.safe_load(
-            (ROOT / "config/core_v1.yaml").read_text(encoding="utf-8")
-        )["core_v1"]["detector"]
+        core = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))["core_v1"]
+        detector = core["detector"]
         height, width = [int(value) for value in detector["imgsz"]]
         self.assertEqual(height % 32, 0)
         self.assertEqual(width % 32, 0)
         self.assertLess(abs((width / height) - (16.0 / 9.0)), 0.02)
         self.assertLessEqual(height * width, 448 * 704)
+        self.assertEqual(int(core["capture_output_width"]), width)
+        self.assertEqual(int(core["capture_output_height"]), height)
 
     def test_optional_model_modules_are_removed(self):
         forbidden = [
@@ -60,6 +61,7 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
             '@app.get("/detections")',
             '@app.get("/tracks")',
             '@app.get("/frame/{camera_id}")',
+            '@app.get("/video/{camera_id}")',
         ):
             self.assertIn(required, source)
         for forbidden in ("/poses", "/heatmap", "/reid", "/room-mapping", "/overlays"):
@@ -103,6 +105,7 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertIn("self.heat.hide()", ui)
         self.assertIn("self.pose.hide()", ui)
         self.assertNotIn('"/reid"', ui)
+        self.assertIn("base.FrameReader = SmoothFrameReader", ui)
 
 
 if __name__ == "__main__":
