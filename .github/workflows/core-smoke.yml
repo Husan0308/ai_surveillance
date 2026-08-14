@@ -1,9 +1,9 @@
-name: Camera heatmap crash-isolation smoke tests
+name: Heatmap controls and ReID hardening smoke tests
 
 on:
   push:
     branches:
-      - "agent/camera-ankle-heatmap-crash-isolation"
+      - "agent/heatmap-controls-reid-hardening"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -28,9 +28,12 @@ jobs:
       - name: Compile runtime modules
         run: |
           python -m py_compile \
+            services/ml_service/core_v1/__init__.py \
             services/ml_service/core_v1/detector.py \
             services/ml_service/core_v1/stable_detector.py \
             services/ml_service/core_v1/reid_service.py \
+            services/ml_service/core_v1/reid_hardening.py \
+            services/ml_service/core_v1/global_identity.py \
             services/ml_service/core_v1/jpeg_publisher.py \
             services/ml_service/core_v1/heatmap_publisher.py \
             services/ml_service/core_v1/app.py \
@@ -39,6 +42,7 @@ jobs:
             services/ml_service/heatmap/coordinator.py \
             services/ml_service/heatmap/camera_overlay.py \
             services/frontend/core_v1/main.py \
+            services/frontend/core_v1/overlay_controls_ui.py \
             services/frontend/core_v1/dashboard.py
 
       - name: Test detector model resolution
@@ -59,5 +63,8 @@ jobs:
       - name: Test camera ankle heatmap and process isolation
         run: python -m unittest discover -s tests -p "test_camera_ankle_heatmap.py" -v
 
-      - name: Test full feature isolation profile
+      - name: Test overlay and ReID hardening
+        run: python -m unittest discover -s tests -p "test_overlay_and_reid_hardening.py" -v
+
+      - name: Test full feature profile
         run: python -m unittest discover -s tests -p "test_full_feature_profile.py" -v
