@@ -1,15 +1,9 @@
-"""Core-v1 surveillance runtime bootstrap.
+"""Detection-only Core v1 runtime.
 
-The detector hot path stays untouched. ReID and presentation-only wrappers are
-installed through package-level aliases before app.py imports their classes.
+Only camera ingest, YOLO person detection, visual tracking, JPEG publication and
+runtime telemetry belong to this baseline. Optional analytics are intentionally
+absent and will be reintroduced one subsystem at a time after the baseline is
+stable.
 """
 
-from . import reid_service as _reid_service
-from . import heatmap_publisher as _heatmap_publisher
-from .reid_hardening import HardenedReIDCoordinator
-from .heatmap_publisher_v3 import HeatmapJpegPublisher as StableHeatmapJpegPublisher
-
-_reid_service.ReIDCoordinator = HardenedReIDCoordinator
-_heatmap_publisher.HeatmapJpegPublisher = StableHeatmapJpegPublisher
-
-__all__ = ["HardenedReIDCoordinator", "StableHeatmapJpegPublisher"]
+__all__ = []

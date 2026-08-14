@@ -1,18 +1,22 @@
 core_v1:
-  profile: "camera-heatmap-reid-hardened"
+  profile: "detection-only-baseline-v1"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
   api_host: "0.0.0.0"
   api_port: 8000
 
+  # Presentation stays deliberately modest until the six-camera baseline is
+  # measured on the real machine. Latest-frame publication prevents backlog.
   display_fps: 15
   jpeg_quality: 72
   max_display_width: 640
   max_display_height: 360
   publisher_start_stagger_ms: 15
-  optional_start_timeout_sec: 45
 
+  # Six independent RTSP capture loops. DeepStream/NVDEC is preferred when it
+  # is available; GStreamer remains the fallback so one backend failure does
+  # not take the service down.
   startup_grace_sec: 8.0
   startup_stagger_sec: 0.20
   capture_timeout_ms: 1000
@@ -20,8 +24,6 @@ core_v1:
   reconnect_delay_sec: 1.0
 
   capture_backend: "auto"
-  max_pipeline_lag_ms: 0
-  max_pipeline_lag_samples: 8
   rtsp_transport: "auto"
   rtsp_latency_ms: 150
   rtsp_buffer_mode: "auto"
@@ -34,6 +36,11 @@ core_v1:
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
+  # Kill/rebuild a camera pipe only when it has genuinely drifted far behind.
+  # This prevents old decoded frames from becoming a growing latency queue.
+  max_pipeline_lag_ms: 650
+  max_pipeline_lag_samples: 8
+
   detector:
     enabled: true
     model: "yolo26m.pt"
@@ -41,51 +48,59 @@ core_v1:
     device: "cuda:0"
     imgsz: [448, 704]
     quantize: 32
+    classes: [0]
     conf: 0.10
     iou: 0.50
-    max_det: 50
+    max_det: 30
+
+    # Two-frame CUDA batches are intentionally conservative for the first
+    # six-camera baseline. We will raise this only after VRAM/latency telemetry.
     batch_size: 2
-    poll_interval_ms: 5
-    start_delay_sec: 2.0
+    poll_interval_ms: 4
+    start_delay_sec: 1.0
+
+    # Real-time freshness beats completeness: stale inputs/results are dropped.
+    max_submit_age_ms: 260
+    max_result_age_ms: 700
+    overlay_max_age_ms: 700
+
     duplicate_iou: 0.58
     fusion_containment: 0.84
     fusion_center_distance: 0.40
-    max_submit_age_ms: 350
-    max_result_age_ms: 950
-    overlay_max_age_ms: 950
+
     hard_exclusion:
       max_box_height_ratio: 0.30
       overlap_threshold: 0.15
       cameras: {}
+
+    # No secondary passes in the baseline. One detector, one full-frame pass.
     roi_second_pass:
       enabled: false
-      imgsz: [512, 640]
-      conf: 0.08
-      iou: 0.50
-      max_det: 20
-      every_n: 2
-      trigger_max_full_roi_persons: 1
       cameras: {}
 
+  # This is presentation tracking only, not another AI model. It keeps boxes
+  # visually smooth between sparse detector updates without feeding evidence
+  # back into detection.
   visual_tracker:
-    hold_ms: 800
-    memory_ms: 3000
-    prediction_ms: 420
+    hold_ms: 700
+    memory_ms: 2200
+    prediction_ms: 320
     match_iou: 0.12
-    reacquire_distance: 0.85
-    byte_match_center: 0.70
+    reacquire_distance: 0.80
+    byte_match_center: 0.68
     byte_second_match_iou: 0.04
-    byte_second_match_center: 0.50
-    low_match_max_age_ms: 650
+    byte_second_match_center: 0.48
+    low_match_max_age_ms: 550
     byte_high_conf: 0.24
     byte_low_conf: 0.08
     low_conf_confirm: 0.08
+
     process_noise: 0.85
     measurement_noise: 0.90
-    velocity_damping: 0.96
+    velocity_damping: 0.95
     size_velocity_damping: 0.60
-    max_prediction_shift_boxes: 0.68
-    max_prediction_size_ratio: 0.08
+    max_prediction_shift_boxes: 0.60
+    max_prediction_size_ratio: 0.06
     adaptive_error_low: 0.08
     adaptive_error_high: 0.25
     center_response_slow: 0.42
@@ -93,15 +108,12 @@ core_v1:
     size_response: 0.30
     snap_distance_boxes: 0.65
     reversal_damping: 0.15
+
     duplicate_iou: 0.68
     duplicate_containment: 0.90
     duplicate_center_distance: 0.20
     fragment_duplicate_cameras: []
-    fragment_horizontal_overlap: 0.78
-    fragment_x_center: 0.18
-    fragment_max_area_ratio: 0.55
-    fragment_min_vertical_overlap: 0.20
-    fragment_max_vertical_gap: 0.06
+
     start_conf: 0.24
     new_track_min_conf: 0.18
     strong_confirm_hits: 2
@@ -112,131 +124,3 @@ core_v1:
     exclusion_max_box_height: 0.30
     exclusion_overlap_threshold: 0.15
     camera_exclusion_zones: {}
-
-  pose:
-    enabled: true
-    model: "yolo26m-pose.pt"
-    device: "cpu"
-    imgsz: 256
-    conf: 0.25
-    every_n: 10
-    max_people: 1
-    max_frame_age_ms: 1000
-    restart_backoff_sec: 5
-    torch_cpu_threads: 1
-    overlay_default: false
-    overlay_conf: 0.30
-    overlay_max_age_ms: 1600
-
-  heatmap:
-    enabled: true
-    display_default: true
-    coordinate_system: "camera_pixels"
-    poll_interval_ms: 100
-    ankle_conf: 0.30
-    pose_weight: 1.0
-    bbox_fallback_weight: 0.38
-    bbox_fallback_every_n: 4
-    max_fallback_people: 6
-    sigma_cells: 3.0
-    camera_grid_width: 160
-    camera_grid_height: 90
-    camera_half_life_sec: 3600
-    overlay_alpha: 0.28
-    overlay_threshold: 0.025
-    dedupe_window_ms: 450
-    dedupe_distance_norm: 0.025
-    smoothing_alpha: 0.55
-
-  reid:
-    enabled: true
-    model: "osnet_ain_x1_0"
-    model_path: "models/reid/osnet_ain_x1_0_msmt17.pth"
-    model_url: "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth?download=true"
-    model_sha256: "8a07e8da38946f7cee37f4561617bf8b6d2fe8f3a4027852893ea092e46d919f"
-    device: "cpu"
-    torch_cpu_threads: 1
-    input_height: 256
-    input_width: 128
-    flip_tta: true
-    poll_interval_ms: 35
-    min_track_hits: 3
-    local_track_timeout_sec: 3.0
-    local_match_iou: 0.10
-    local_match_center: 0.82
-    embed_cooldown_sec: 0.45
-    refresh_sec: 1.6
-    quality_improvement: 0.04
-    batch_size: 4
-    batch_wait_ms: 20
-    queue_size: 8
-    max_job_age_ms: 800
-
-    tracklet:
-      min_samples: 4
-      max_samples: 10
-      topk: 6
-      pair_min_samples: 4
-      pair_min_quality: 0.30
-      duplicate_feature_cos: 0.995
-      duplicate_quality_gain: 0.025
-      seed_outlier_min_cos: 0.35
-      mature_outlier_min_cos: 0.52
-      outlier_quality_override: 0.10
-
-    crop:
-      min_width: 36
-      min_height: 72
-      min_area: 4200
-      min_conf: 0.20
-      max_width_height_ratio: 1.10
-      edge_margin: 0.015
-      reject_edge: false
-      min_sharpness: 14.0
-      pad_x: 0.04
-      pad_y: 0.02
-
-    pair_matching:
-      pairs:
-        - [CAM-01, CAM-04]
-        - [CAM-02, CAM-05]
-        - [CAM-03, CAM-06]
-      candidate_threshold: 0.58
-      strong_threshold: 0.68
-      margin: 0.035
-      confirm_hits: 2
-      strong_confirm_hits: 2
-      evidence_ttl_sec: 3.0
-      max_time_gap_sec: 3.0
-      overrides:
-        "CAM-01:CAM-04":
-          candidate_threshold: 0.58
-          strong_threshold: 0.68
-          margin: 0.035
-        "CAM-02:CAM-05":
-          candidate_threshold: 0.58
-          strong_threshold: 0.68
-          margin: 0.035
-        "CAM-03:CAM-06":
-          candidate_threshold: 0.58
-          strong_threshold: 0.68
-          margin: 0.035
-
-    identity:
-      prototype_alpha: 0.08
-      prototype_update_min_similarity: 0.66
-      gallery_update_min_similarity: 0.70
-      merge_min_score: 0.58
-      gallery_size: 16
-      active_timeout_sec: 7.0
-      historical_match_threshold: 0.60
-      historical_strong_threshold: 0.70
-      historical_margin: 0.035
-      camera_rooms:
-        CAM-01: ROOM-1
-        CAM-04: ROOM-1
-        CAM-02: ROOM-2
-        CAM-05: ROOM-2
-        CAM-03: ROOM-3
-        CAM-06: ROOM-3
-      block_concurrent_cross_room: true

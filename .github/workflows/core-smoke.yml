@@ -1,9 +1,9 @@
-name: Operator UI pose heatmap smoke tests
+name: Detection-only baseline smoke tests
 
 on:
   push:
     branches:
-      - "agent/restore-operator-ui-stable-pose-heatmap"
+      - "agent/detection-only-baseline"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -25,29 +25,26 @@ jobs:
       - name: Install smoke-test dependencies
         run: python -m pip install --upgrade pip numpy opencv-python-headless psutil pyyaml
 
-      - name: Compile runtime modules
+      - name: Compile detection-only runtime modules
         run: |
           python -m py_compile \
             services/ml_service/core_v1/__init__.py \
+            services/ml_service/core_v1/app.py \
+            services/ml_service/core_v1/camera_worker.py \
+            services/ml_service/core_v1/latest_frame.py \
+            services/ml_service/core_v1/manager.py \
             services/ml_service/core_v1/detector.py \
             services/ml_service/core_v1/stable_detector.py \
-            services/ml_service/core_v1/reid_service.py \
-            services/ml_service/core_v1/reid_hardening.py \
-            services/ml_service/core_v1/global_identity.py \
+            services/ml_service/core_v1/visual_tracker.py \
             services/ml_service/core_v1/jpeg_publisher.py \
-            services/ml_service/core_v1/heatmap_publisher.py \
-            services/ml_service/core_v1/heatmap_publisher_v2.py \
-            services/ml_service/core_v1/heatmap_publisher_v3.py \
-            services/ml_service/core_v1/app.py \
-            services/ml_service/pose/coordinator.py \
-            services/ml_service/pose/process_coordinator.py \
-            services/ml_service/heatmap/coordinator.py \
-            services/ml_service/heatmap/camera_overlay.py \
-            services/ml_service/heatmap/camera_overlay_v2.py \
+            services/ml_service/core_v1/runtime_metrics.py \
+            services/ml_service/cameras/deepstream.py \
+            services/ml_service/cameras/gstreamer.py \
             services/frontend/core_v1/main.py \
+            services/frontend/core_v1/dashboard.py \
             services/frontend/core_v1/operator_dashboard.py \
             services/frontend/core_v1/operator_dashboard_v2.py \
-            services/frontend/core_v1/dashboard.py
+            services/frontend/core_v1/operator_dashboard_detection.py
 
       - name: Test detector model resolution
         run: python -m unittest discover -s tests -p "test_stable_detector.py" -v
@@ -58,20 +55,5 @@ jobs:
       - name: Test JPEG publisher
         run: python -m unittest discover -s tests -p "test_core_v1_jpeg_publisher.py" -v
 
-      - name: Test pose data helpers
-        run: python -m unittest discover -s tests -p "test_core_v1_pose.py" -v
-
-      - name: Test floor heatmap compatibility
-        run: python -m unittest discover -s tests -p "test_floor_heatmap.py" -v
-
-      - name: Test camera ankle heatmap and process isolation
-        run: python -m unittest discover -s tests -p "test_camera_ankle_heatmap.py" -v
-
-      - name: Test overlay and ReID hardening
-        run: python -m unittest discover -s tests -p "test_overlay_and_reid_hardening.py" -v
-
-      - name: Test restored operator UI and persistent pose heatmap
-        run: python -m unittest discover -s tests -p "test_operator_ui_pose_heatmap_v2.py" -v
-
-      - name: Test full feature profile
-        run: python -m unittest discover -s tests -p "test_full_feature_profile.py" -v
+      - name: Test detection-only baseline guards
+        run: python -m unittest discover -s tests -p "test_detection_only_baseline.py" -v

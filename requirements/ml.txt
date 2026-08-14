@@ -7,9 +7,6 @@ opencv-python>=4.8
 torch>=2.1
 torchvision>=0.16
 ultralytics>=8.4.0
-lap>=0.5.12
-torchreid>=0.2.5
-gdown>=6.1
 psutil>=5.9
 nvidia-ml-py>=11.5
 # GStreamer/DeepStream Python bindings come from the host installation (python3-gi / Gst), not pip.
