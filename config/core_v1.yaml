@@ -135,6 +135,16 @@ core_v1:
       CAM-06:
         - [0.50, 0.00, 0.78, 0.22]
 
+  # Events and Recent Views are room-level visits, not per-camera detections.
+  # The short confirmation window lets same-room ReID pair matching settle first.
+  room_sessions:
+    enabled: true
+    enter_confirm_sec: 0.8
+    inactive_timeout_sec: 4.0
+    pending_timeout_sec: 2.0
+    max_events: 100
+    max_recent_sessions: 100
+
   reid:
     enabled: true
     model: "osnet_ain_x1_0"
