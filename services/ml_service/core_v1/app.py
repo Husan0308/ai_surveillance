@@ -10,8 +10,8 @@ from fastapi.responses import Response, StreamingResponse
 
 from shared.config import camera_config
 
-from .instant_reid_safe import SafeInstantGlobalReIdCoordinator
 from .manager import CameraManager
+from .room_consensus_reid import RoomConsensusGlobalReIdCoordinator
 from .runtime_metrics import process_metrics
 from .stable_detector import StableYoloDetectorWorker
 from .tracking_publisher import TrackingJpegPublisher
@@ -65,7 +65,7 @@ publishers = {
 }
 
 reid = (
-    SafeInstantGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
+    RoomConsensusGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
     if bool(reid_cfg.get("enabled", False))
     else None
 )
@@ -74,8 +74,8 @@ if reid is not None:
         publisher.identity_provider = reid
 
 app = FastAPI(
-    title="AI Surveillance Detection + Tracking + Instant Global ReID Core",
-    version="1.3-instant-global-reid",
+    title="AI Surveillance Detection + Tracking + Room Consensus ReID Core",
+    version="1.4-room-consensus-reid",
 )
 
 
@@ -83,7 +83,7 @@ def _mode() -> str:
     if detector is None:
         return "camera-only"
     if reid is not None:
-        return "camera+yolo-detect+local-track+instant-global-reid"
+        return "camera+yolo-detect+local-track+room-consensus-reid"
     return "camera+yolo-detect+local-track"
 
 
@@ -194,7 +194,7 @@ def tracks():
         total += len(enriched)
     return {
         "enabled": True,
-        "scope": "camera_local+instant_global_reid" if reid else "camera_local",
+        "scope": "camera_local+room_consensus_reid" if reid else "camera_local",
         "cross_camera_identity": reid is not None,
         "total": total,
         "cameras": cameras_payload,
