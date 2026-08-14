@@ -32,8 +32,10 @@ class PoseCoordinator:
     """Optional latest-only top-down pose side path.
 
     The primary detector/tracker remains authoritative. Pose only consumes exact
-    detector frames from the bounded frame history, runs at a configurable
-    cadence, and never queues old work.
+    detector frames from bounded frame history, runs at a sparse configurable
+    cadence, and never queues old work. In the full-safe profile this worker is
+    intentionally CPU-only so it cannot create a second CUDA context beside the
+    detector process.
     """
 
     def __init__(self, frame_stores, detections, config: dict | None = None):
@@ -41,17 +43,24 @@ class PoseCoordinator:
         self.detections = detections
         self.config = dict(config or {})
         self.enabled = bool(self.config.get("enabled", False))
-        self.model_name = str(self.config.get("model", "yolo11n-pose.pt"))
-        self.device = str(self.config.get("device", "cuda:0"))
-        self.imgsz = int(self.config.get("imgsz", 320))
-        self.conf = float(self.config.get("conf", 0.20))
-        self.every_n = max(1, int(self.config.get("every_n", 3)))
-        self.max_people = max(1, int(self.config.get("max_people", 6)))
-        self.max_frame_age_ms = max(0.0, float(self.config.get("max_frame_age_ms", 700)))
+        self.model_name = str(self.config.get("model", "yolo26m-pose.pt"))
+        self.device = str(self.config.get("device", "cpu"))
+        self.imgsz = int(self.config.get("imgsz", 256))
+        self.conf = float(self.config.get("conf", 0.25))
+        self.half = bool(self.config.get("half", False)) and self.device.startswith("cuda")
+        self.every_n = max(1, int(self.config.get("every_n", 12)))
+        self.max_people = max(1, int(self.config.get("max_people", 1)))
+        self.max_cameras_per_cycle = max(1, int(self.config.get("max_cameras_per_cycle", 1)))
+        self.max_frame_age_ms = max(0.0, float(self.config.get("max_frame_age_ms", 1200)))
+        self.poll_sec = max(0.01, float(self.config.get("poll_interval_ms", 25)) / 1000.0)
+        self.retry_after_sec = max(1.0, float(self.config.get("retry_after_sec", 30.0)))
+        self.torch_cpu_threads = max(1, int(self.config.get("torch_cpu_threads", 1)))
+
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
         self._model = None
+        self._last_model_error_at = 0.0
         self._last_frame = {cid: -1 for cid in self.frame_stores}
         self._seen = {cid: 0 for cid in self.frame_stores}
         self._results: dict[str, PoseResult] = {}
@@ -59,6 +68,7 @@ class PoseCoordinator:
         self._frame_misses = 0
         self._stale_skips = 0
         self._errors = 0
+        self._budget_skips = 0
         self._last_inference_ms = 0.0
         self._last_error = ""
 
@@ -88,19 +98,41 @@ class PoseCoordinator:
                 "processed": self._processed,
                 "frame_misses": self._frame_misses,
                 "stale_skips": self._stale_skips,
+                "budget_skips": self._budget_skips,
                 "errors": self._errors,
                 "last_inference_ms": self._last_inference_ms,
                 "last_error": self._last_error,
                 "model": self.model_name,
                 "device": self.device,
+                "half": self.half,
+                "every_n": self.every_n,
+                "max_people": self.max_people,
+                "max_cameras_per_cycle": self.max_cameras_per_cycle,
+                "isolation": "detector_independent_sidepath",
+                "cuda_context": "none" if not self.device.startswith("cuda") else "separate",
             }
 
     def _ensure_model(self):
         if self._model is not None:
             return self._model
-        from ultralytics import YOLO
-        self._model = YOLO(self.model_name)
-        return self._model
+        if self._last_model_error_at and time.monotonic() - self._last_model_error_at < self.retry_after_sec:
+            raise RuntimeError(self._last_error or "pose model retry backoff")
+
+        try:
+            if not self.device.startswith("cuda"):
+                import torch
+
+                try:
+                    torch.set_num_threads(self.torch_cpu_threads)
+                except Exception:
+                    pass
+            from ultralytics import YOLO
+
+            self._model = YOLO(self.model_name)
+            return self._model
+        except Exception:
+            self._last_model_error_at = time.monotonic()
+            raise
 
     @staticmethod
     def _crop(frame, box):
@@ -125,40 +157,74 @@ class PoseCoordinator:
             source_boxes.append(box)
         if not crops:
             return ()
+
         started = time.perf_counter()
         predictions = model.predict(
             source=crops,
             imgsz=self.imgsz,
             conf=self.conf,
             device=self.device,
+            half=self.half,
+            max_det=1,
             verbose=False,
         )
         self._last_inference_ms = (time.perf_counter() - started) * 1000.0
+
         people = []
         for source_box, offset, pred in zip(source_boxes, offsets, predictions):
             keypoints = getattr(pred, "keypoints", None)
             if keypoints is None or getattr(keypoints, "xy", None) is None or len(keypoints.xy) == 0:
                 continue
-            xy = keypoints.xy[0].detach().cpu().tolist()
+
+            index = 0
+            pred_boxes = getattr(pred, "boxes", None)
+            if pred_boxes is not None and getattr(pred_boxes, "conf", None) is not None and len(pred_boxes.conf):
+                try:
+                    index = int(pred_boxes.conf.argmax().item())
+                except Exception:
+                    index = 0
+            if index >= len(keypoints.xy):
+                index = 0
+
+            xy = keypoints.xy[index].detach().cpu().tolist()
             conf_tensor = getattr(keypoints, "conf", None)
-            confs = conf_tensor[0].detach().cpu().tolist() if conf_tensor is not None else [1.0] * len(xy)
+            confs = (
+                conf_tensor[index].detach().cpu().tolist()
+                if conf_tensor is not None and len(conf_tensor) > index
+                else [1.0] * len(xy)
+            )
             ox, oy = offset
             points = tuple(
-                PoseKeypoint(float(p[0]) + ox, float(p[1]) + oy, float(c))
-                for p, c in zip(xy, confs)
+                PoseKeypoint(float(point[0]) + ox, float(point[1]) + oy, float(confidence))
+                for point, confidence in zip(xy, confs)
             )
-            people.append(PosePerson(
-                (float(source_box.x1), float(source_box.y1), float(source_box.x2), float(source_box.y2)),
-                float(source_box.confidence),
-                points,
-            ))
+            pose_confidence = float(source_box.confidence)
+            if pred_boxes is not None and getattr(pred_boxes, "conf", None) is not None and len(pred_boxes.conf) > index:
+                try:
+                    pose_confidence = float(pred_boxes.conf[index].detach().cpu().item())
+                except Exception:
+                    pass
+            people.append(
+                PosePerson(
+                    (
+                        float(source_box.x1),
+                        float(source_box.y1),
+                        float(source_box.x2),
+                        float(source_box.y2),
+                    ),
+                    pose_confidence,
+                    points,
+                )
+            )
         return tuple(people)
 
     def _run(self):
         while not self._stop.is_set():
             snapshot = self.detections.snapshot() if self.detections is not None else {}
-            did_work = False
-            for camera_id, detection in snapshot.items():
+            work_count = 0
+
+            for camera_id in sorted(snapshot):
+                detection = snapshot[camera_id]
                 frame_id = int(detection.frame_id)
                 if frame_id <= self._last_frame.get(camera_id, -1):
                     continue
@@ -166,15 +232,24 @@ class PoseCoordinator:
                 self._seen[camera_id] = self._seen.get(camera_id, 0) + 1
                 if self._seen[camera_id] % self.every_n:
                     continue
-                age_ms = max(0.0, (time.monotonic() - float(detection.frame_captured_monotonic)) * 1000.0)
+                if work_count >= self.max_cameras_per_cycle:
+                    self._budget_skips += 1
+                    continue
+
+                age_ms = max(
+                    0.0,
+                    (time.monotonic() - float(detection.frame_captured_monotonic)) * 1000.0,
+                )
                 if self.max_frame_age_ms and age_ms > self.max_frame_age_ms:
                     self._stale_skips += 1
                     continue
+
                 store = self.frame_stores.get(camera_id)
                 frame = store.get_frame(frame_id) if store and hasattr(store, "get_frame") else None
                 if frame is None:
                     self._frame_misses += 1
                     continue
+
                 try:
                     people = self._infer(frame, detection.boxes)
                     result = PoseResult(
@@ -188,10 +263,11 @@ class PoseCoordinator:
                         self._results[camera_id] = result
                         self._processed += 1
                         self._last_error = ""
-                    did_work = True
+                    work_count += 1
                 except Exception as exc:
                     with self._lock:
                         self._errors += 1
                         self._last_error = f"{type(exc).__name__}: {exc}"
-            if not did_work:
-                self._stop.wait(0.02)
+                        self._last_model_error_at = time.monotonic()
+
+            self._stop.wait(self.poll_sec)
