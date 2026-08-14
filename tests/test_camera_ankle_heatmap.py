@@ -10,6 +10,8 @@ from services.ml_service.pose.process_coordinator import PoseProcessCoordinator
 
 
 class _Pose:
+    enabled = True
+
     def snapshot(self):
         return {}
 
@@ -30,8 +32,10 @@ class CameraAnkleHeatmapTests(unittest.TestCase):
         points = [SimpleNamespace(x=0.0, y=0.0, confidence=0.0) for _ in range(17)]
         points[15] = SimpleNamespace(x=100.0, y=150.0, confidence=0.9)
         points[16] = SimpleNamespace(x=120.0, y=154.0, confidence=0.8)
-        person = SimpleNamespace(keypoints=tuple(points))
-        self.assertEqual(coordinator._ankle(person), (110.0, 152.0))
+        person = SimpleNamespace(keypoints=tuple(points), bbox=(90.0, 20.0, 130.0, 160.0))
+        contact = coordinator._contact_from_pose(person)
+        self.assertEqual(contact[:2], (110.0, 152.0))
+        self.assertEqual(contact[3], "ankles")
 
     def test_single_visible_ankle_is_accepted(self):
         coordinator = CameraAnkleHeatmapCoordinator(
@@ -42,8 +46,23 @@ class CameraAnkleHeatmapTests(unittest.TestCase):
         points = [SimpleNamespace(x=0.0, y=0.0, confidence=0.0) for _ in range(17)]
         points[15] = SimpleNamespace(x=80.0, y=140.0, confidence=0.95)
         points[16] = SimpleNamespace(x=90.0, y=142.0, confidence=0.10)
-        person = SimpleNamespace(keypoints=tuple(points))
-        self.assertEqual(coordinator._ankle(person), (80.0, 140.0))
+        person = SimpleNamespace(keypoints=tuple(points), bbox=(70.0, 20.0, 100.0, 150.0))
+        contact = coordinator._contact_from_pose(person)
+        self.assertEqual(contact[:2], (80.0, 140.0))
+        self.assertEqual(contact[3], "ankle")
+
+    def test_pose_missing_uses_bbox_bottom_center(self):
+        coordinator = CameraAnkleHeatmapCoordinator(
+            _Pose(),
+            {"CAM-01": _Store()},
+            {"enabled": True, "ankle_conf": 0.30, "bbox_fallback_weight": 0.38},
+        )
+        points = [SimpleNamespace(x=0.0, y=0.0, confidence=0.0) for _ in range(17)]
+        person = SimpleNamespace(keypoints=tuple(points), bbox=(60.0, 20.0, 100.0, 160.0))
+        contact = coordinator._contact_from_pose(person)
+        self.assertEqual(contact[:2], (80.0, 160.0))
+        self.assertEqual(contact[3], "pose_bbox")
+        self.assertLess(contact[2], coordinator.pose_weight)
 
     def test_overlay_changes_pixels_when_heat_exists(self):
         coordinator = CameraAnkleHeatmapCoordinator(
@@ -53,7 +72,7 @@ class CameraAnkleHeatmapTests(unittest.TestCase):
                 "enabled": True,
                 "camera_grid_width": 80,
                 "camera_grid_height": 45,
-                "overlay_alpha": 0.5,
+                "overlay_alpha": 0.28,
                 "overlay_threshold": 0.01,
             },
         )

@@ -30,8 +30,14 @@ if _enabled("AI_SURVEILLANCE_UI_POLISH", True):
 
     _install_optional("ui_polish", install_polish)
 
-# Camera heatmap is now blended directly into the live camera JPEG stream.
-# The old room-floor heatmap page is off by default so it cannot break the UI.
+# Heatmap/Pose controls are presentation-only. They do not stop analytics.
+if _enabled("AI_SURVEILLANCE_UI_OVERLAY_CONTROLS", True):
+    from .overlay_controls_ui import install as install_overlay_controls
+
+    _install_optional("overlay_controls", install_overlay_controls)
+
+# Legacy room-floor Heatmap page remains opt-in; live camera heat is rendered
+# directly into the monitoring stream.
 if _enabled("AI_SURVEILLANCE_UI_HEATMAP", False):
     from .heatmap_ui import install as install_heatmap
 

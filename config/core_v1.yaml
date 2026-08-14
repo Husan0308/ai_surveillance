@@ -1,7 +1,5 @@
 core_v1:
-  # Production profile: detector hot path stays isolated; Pose runs in a spawned
-  # CPU process and Heatmap is rendered directly on each camera frame.
-  profile: "camera-ankle-heatmap-crash-isolated"
+  profile: "camera-heatmap-reid-hardened"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
@@ -115,8 +113,6 @@ core_v1:
     exclusion_overlap_threshold: 0.15
     camera_exclusion_zones: {}
 
-  # YOLO26m-pose runs in its own spawned CPU process. If native code aborts,
-  # only this child exits; detection/API/frame publication continue running.
   pose:
     enabled: true
     model: "yolo26m-pose.pt"
@@ -128,21 +124,29 @@ core_v1:
     max_frame_age_ms: 1000
     restart_backoff_sec: 5
     torch_cpu_threads: 1
+    overlay_default: false
+    overlay_conf: 0.30
+    overlay_max_age_ms: 1600
 
-  # Heatmap is camera-space: COCO ankles 15/16 are accumulated directly in the
-  # source camera coordinate system and blended into /frame and /video output.
   heatmap:
     enabled: true
+    display_default: true
     coordinate_system: "camera_pixels"
     poll_interval_ms: 100
     ankle_conf: 0.30
-    sample_weight: 1.0
-    sigma_cells: 2.4
+    pose_weight: 1.0
+    bbox_fallback_weight: 0.38
+    bbox_fallback_every_n: 4
+    max_fallback_people: 6
+    sigma_cells: 3.0
     camera_grid_width: 160
     camera_grid_height: 90
     camera_half_life_sec: 3600
-    overlay_alpha: 0.42
-    overlay_threshold: 0.08
+    overlay_alpha: 0.28
+    overlay_threshold: 0.025
+    dedupe_window_ms: 450
+    dedupe_distance_norm: 0.025
+    smoothing_alpha: 0.55
 
   reid:
     enabled: true
@@ -156,65 +160,78 @@ core_v1:
     input_width: 128
     flip_tta: true
     poll_interval_ms: 35
-    min_track_hits: 2
+    min_track_hits: 3
     local_track_timeout_sec: 3.0
     local_match_iou: 0.10
     local_match_center: 0.82
-    embed_cooldown_sec: 0.60
-    refresh_sec: 2.0
-    quality_improvement: 0.03
+    embed_cooldown_sec: 0.45
+    refresh_sec: 1.6
+    quality_improvement: 0.04
     batch_size: 4
     batch_wait_ms: 20
     queue_size: 8
     max_job_age_ms: 800
+
     tracklet:
-      min_samples: 3
-      max_samples: 8
-      topk: 5
+      min_samples: 4
+      max_samples: 10
+      topk: 6
+      pair_min_samples: 4
+      pair_min_quality: 0.30
       duplicate_feature_cos: 0.995
       duplicate_quality_gain: 0.025
+      seed_outlier_min_cos: 0.35
+      mature_outlier_min_cos: 0.52
+      outlier_quality_override: 0.10
+
     crop:
-      min_width: 30
-      min_height: 64
-      min_area: 3000
-      min_conf: 0.16
+      min_width: 36
+      min_height: 72
+      min_area: 4200
+      min_conf: 0.20
       max_width_height_ratio: 1.10
-      edge_margin: 0.010
+      edge_margin: 0.015
       reject_edge: false
-      min_sharpness: 10.0
-      pad_x: 0.05
-      pad_y: 0.03
+      min_sharpness: 14.0
+      pad_x: 0.04
+      pad_y: 0.02
+
     pair_matching:
       pairs:
         - [CAM-01, CAM-04]
         - [CAM-02, CAM-05]
         - [CAM-03, CAM-06]
-      candidate_threshold: 0.54
-      strong_threshold: 0.66
-      margin: 0.020
+      candidate_threshold: 0.58
+      strong_threshold: 0.68
+      margin: 0.035
       confirm_hits: 2
-      strong_confirm_hits: 1
+      strong_confirm_hits: 2
       evidence_ttl_sec: 3.0
+      max_time_gap_sec: 3.0
       overrides:
         "CAM-01:CAM-04":
-          candidate_threshold: 0.54
-          strong_threshold: 0.66
-          margin: 0.020
+          candidate_threshold: 0.58
+          strong_threshold: 0.68
+          margin: 0.035
         "CAM-02:CAM-05":
-          candidate_threshold: 0.54
-          strong_threshold: 0.66
-          margin: 0.020
+          candidate_threshold: 0.58
+          strong_threshold: 0.68
+          margin: 0.035
         "CAM-03:CAM-06":
-          candidate_threshold: 0.54
-          strong_threshold: 0.66
-          margin: 0.020
+          candidate_threshold: 0.58
+          strong_threshold: 0.68
+          margin: 0.035
+
     identity:
-      prototype_alpha: 0.18
-      gallery_size: 12
+      prototype_alpha: 0.08
+      prototype_update_min_similarity: 0.66
+      gallery_update_min_similarity: 0.70
+      merge_min_score: 0.58
+      gallery_size: 16
       active_timeout_sec: 7.0
-      historical_match_threshold: 0.56
-      historical_strong_threshold: 0.68
-      historical_margin: 0.030
+      historical_match_threshold: 0.60
+      historical_strong_threshold: 0.70
+      historical_margin: 0.035
       camera_rooms:
         CAM-01: ROOM-1
         CAM-04: ROOM-1

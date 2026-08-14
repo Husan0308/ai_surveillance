@@ -67,19 +67,20 @@ reid = (
     else None
 )
 
-# Pose is isolated in a spawned CPU process. A fatal native signal in
-# Ultralytics/PyTorch therefore cannot abort this Uvicorn/camera process.
 pose = (
     PoseCoordinator(manager.stores, detector.results, pose_cfg)
     if detector is not None and bool(pose_cfg.get("enabled", False))
     else None
 )
 
-# Camera-space heatmap consumes the pose result stream directly. It does not
-# require room-floor homography and is rendered on the camera JPEG itself.
 heatmap = (
-    CameraAnkleHeatmapCoordinator(pose, manager.stores, heatmap_cfg)
-    if pose is not None and bool(heatmap_cfg.get("enabled", False))
+    CameraAnkleHeatmapCoordinator(
+        pose,
+        manager.stores,
+        heatmap_cfg,
+        detections=(detector.results if detector is not None else None),
+    )
+    if detector is not None and bool(heatmap_cfg.get("enabled", False))
     else None
 )
 
@@ -96,11 +97,16 @@ publishers = {
         tracker_config=visual_cfg,
         identity_provider=reid,
         heatmap_provider=heatmap,
+        pose_provider=pose,
+        heatmap_visible=bool(heatmap_cfg.get("display_default", True)),
+        pose_visible=bool(pose_cfg.get("overlay_default", False)),
+        pose_overlay_conf=float(pose_cfg.get("overlay_conf", pose_cfg.get("conf", 0.25))),
+        pose_overlay_max_age_ms=float(pose_cfg.get("overlay_max_age_ms", 1600)),
     )
     for cid, store in manager.stores.items()
 }
 
-app = FastAPI(title="AI Surveillance ML Core v1", version="2.1-camera-heatmap")
+app = FastAPI(title="AI Surveillance ML Core v1", version="2.2-overlay-controls")
 _optional_stop = threading.Event()
 _optional_thread = None
 
@@ -118,9 +124,19 @@ def _mode() -> str:
     return "+".join(parts)
 
 
+def _overlay_payload():
+    states = {cid: publisher.overlay_state() for cid, publisher in publishers.items()}
+    first = next(iter(states.values()), {"heatmap_visible": False, "pose_visible": False})
+    return {
+        "heatmap_visible": bool(first.get("heatmap_visible")),
+        "pose_visible": bool(first.get("pose_visible")),
+        "heatmap_accumulating": bool(heatmap is not None and heatmap.enabled),
+        "pose_inference_running": bool(pose is not None and pose.enabled),
+        "cameras": states,
+    }
+
+
 def _start_optional_after_detector():
-    # Avoid simultaneous model initialization. Detection gets the machine first;
-    # optional analytics start only after detector ready, and remain non-gating.
     deadline = time.monotonic() + max(
         5.0, float(core_cfg.get("optional_start_timeout_sec", 45.0))
     )
@@ -204,17 +220,16 @@ def health():
     return {
         "status": "ok" if detector_ready or detector is None else "degraded",
         "mode": _mode(),
-        "profile": "camera-ankle-heatmap-crash-isolated",
+        "profile": str(core_cfg.get("profile", "camera-heatmap-reid-hardened")),
         "cameras": metrics,
         "online": sum(bool(value.get("online")) for value in metrics.values()),
         "total": len(metrics),
         "detector": detector_metrics,
         "pose": pose.metrics() if pose else {"enabled": False},
         "heatmap": heatmap.snapshot() if heatmap else {"enabled": False},
+        "overlays": _overlay_payload(),
         "reid": reid.metrics() if reid else {"enabled": False},
-        "publishers": {
-            cid: publisher.metrics() for cid, publisher in publishers.items()
-        },
+        "publishers": {cid: publisher.metrics() for cid, publisher in publishers.items()},
         "frame_history": {
             cid: store.history_metrics()
             for cid, store in manager.stores.items()
@@ -239,17 +254,10 @@ def detections():
     for cid, result in detector.results.snapshot().items():
         results[cid] = {
             "frame_id": result.frame_id,
-            "result_age_ms": max(
-                0.0, (now - result.produced_monotonic) * 1000.0
-            ),
-            "capture_age_ms": max(
-                0.0, (now - result.frame_captured_monotonic) * 1000.0
-            ),
+            "result_age_ms": max(0.0, (now - result.produced_monotonic) * 1000.0),
+            "capture_age_ms": max(0.0, (now - result.frame_captured_monotonic) * 1000.0),
             "boxes": [
-                {
-                    "bbox": [box.x1, box.y1, box.x2, box.y2],
-                    "confidence": box.confidence,
-                }
+                {"bbox": [box.x1, box.y1, box.x2, box.y2], "confidence": box.confidence}
                 for box in result.boxes
             ],
         }
@@ -265,22 +273,14 @@ def poses_state():
     for cid, result in pose.snapshot().items():
         results[cid] = {
             "frame_id": result.frame_id,
-            "result_age_ms": max(
-                0.0, (now - result.produced_monotonic) * 1000.0
-            ),
-            "capture_age_ms": max(
-                0.0, (now - result.frame_captured_monotonic) * 1000.0
-            ),
+            "result_age_ms": max(0.0, (now - result.produced_monotonic) * 1000.0),
+            "capture_age_ms": max(0.0, (now - result.frame_captured_monotonic) * 1000.0),
             "people": [
                 {
                     "bbox": list(person.bbox),
                     "confidence": person.confidence,
                     "keypoints": [
-                        {
-                            "x": point.x,
-                            "y": point.y,
-                            "confidence": point.confidence,
-                        }
+                        {"x": point.x, "y": point.y, "confidence": point.confidence}
                         for point in person.keypoints
                     ],
                 }
@@ -290,11 +290,40 @@ def poses_state():
     return {"enabled": True, "cameras": results, "metrics": pose.metrics()}
 
 
+@app.get("/overlays")
+def overlay_state():
+    return _overlay_payload()
+
+
+@app.post("/overlays/{kind}/{state}")
+def set_overlay(kind: str, state: str, camera_id: str | None = Query(None)):
+    kind = str(kind).strip().lower()
+    state = str(state).strip().lower()
+    if kind not in {"heatmap", "pose"}:
+        raise HTTPException(400, "overlay kind must be heatmap or pose")
+    if state not in {"on", "off", "true", "false", "1", "0"}:
+        raise HTTPException(400, "overlay state must be on/off")
+    enabled = state in {"on", "true", "1"}
+    targets = publishers
+    if camera_id is not None:
+        camera_id = str(camera_id)
+        if camera_id not in publishers:
+            raise HTTPException(404, "camera not found")
+        targets = {camera_id: publishers[camera_id]}
+    for publisher in targets.values():
+        publisher.set_overlay_state(**{kind: enabled})
+    payload = _overlay_payload()
+    payload["changed"] = {"kind": kind, "enabled": enabled, "camera_id": camera_id}
+    return payload
+
+
 @app.get("/heatmap")
 def heatmap_state():
     if heatmap is None:
         return {"enabled": False, "cameras": {}}
-    return heatmap.snapshot()
+    payload = heatmap.snapshot()
+    payload["display"] = _overlay_payload()
+    return payload
 
 
 @app.post("/heatmap/reset/{camera_id}")
@@ -329,7 +358,7 @@ def room_mapping():
     payload["people"] = reid.room_people() if reid is not None else []
     payload["heatmap"] = {
         "mode": "camera_pixels",
-        "note": "heatmap is rendered directly on each camera frame from ankle keypoints",
+        "note": "camera heat accumulates continuously; display can be toggled independently",
     }
     return payload
 
@@ -363,10 +392,7 @@ def reset_room_camera(camera_id: str):
 def automatic_room_pair(payload: dict):
     left = str(payload.get("left_camera") or "")
     right = str(payload.get("right_camera") or "")
-    if (left, right) not in spatial_mapper.camera_pairs() and (
-        right,
-        left,
-    ) not in spatial_mapper.camera_pairs():
+    if (left, right) not in spatial_mapper.camera_pairs() and (right, left) not in spatial_mapper.camera_pairs():
         raise HTTPException(400, "camera pair is not a verified same-room pair")
 
     left_frame = manager.stores[left].get()[0] if left in manager.stores else None
@@ -394,10 +420,7 @@ def latest_frame(
     if camera_id not in publishers:
         raise HTTPException(404, "camera not found")
     publisher = publishers[camera_id]
-    jpeg, version, published, source_frame_id = publisher.wait_newer(
-        after,
-        wait_ms / 1000.0,
-    )
+    jpeg, version, published, source_frame_id = publisher.wait_newer(after, wait_ms / 1000.0)
     if jpeg is None:
         raise HTTPException(503, "frame not ready")
     headers = {

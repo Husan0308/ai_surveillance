@@ -20,29 +20,37 @@ class FullFeatureProfileTests(unittest.TestCase):
         self.assertEqual(detector.get("device"), "cuda:0")
         self.assertFalse((detector.get("roi_second_pass") or {}).get("enabled"))
 
-    def test_pose_is_spawned_cpu_side_path(self):
+    def test_pose_is_spawned_cpu_side_path_with_hidden_overlay_default(self):
         pose = dict(self.cfg.get("pose") or {})
         self.assertTrue(pose.get("enabled"))
         self.assertEqual(pose.get("model"), "yolo26m-pose.pt")
         self.assertEqual(pose.get("device"), "cpu")
         self.assertEqual(int(pose.get("max_people", 0)), 1)
+        self.assertFalse(bool(pose.get("overlay_default")))
         self.assertGreaterEqual(float(pose.get("restart_backoff_sec", 0)), 1.0)
 
-    def test_reid_and_camera_heatmap_are_enabled(self):
-        reid = dict(self.cfg.get("reid") or {})
+    def test_heatmap_is_lightweight_and_has_bbox_fallback(self):
         heatmap = dict(self.cfg.get("heatmap") or {})
+        self.assertTrue(heatmap.get("enabled"))
+        self.assertTrue(heatmap.get("display_default"))
+        self.assertEqual(heatmap.get("coordinate_system"), "camera_pixels")
+        self.assertLess(float(heatmap.get("bbox_fallback_weight", 1)), float(heatmap.get("pose_weight", 0)))
+        self.assertLessEqual(int(heatmap.get("camera_grid_width", 999)), 160)
+        self.assertLess(float(heatmap.get("overlay_alpha", 1)), 0.40)
+
+    def test_reid_is_cpu_hardened_tracklet_profile(self):
+        reid = dict(self.cfg.get("reid") or {})
+        tracklet = dict(reid.get("tracklet") or {})
+        identity = dict(reid.get("identity") or {})
         self.assertTrue(reid.get("enabled"))
         self.assertEqual(reid.get("device"), "cpu")
-        self.assertTrue(reid.get("model_url"))
-        self.assertTrue(heatmap.get("enabled"))
-        self.assertEqual(heatmap.get("coordinate_system"), "camera_pixels")
-        self.assertGreater(float(heatmap.get("overlay_alpha", 0)), 0.0)
+        self.assertGreaterEqual(int(tracklet.get("pair_min_samples", 0)), 4)
+        self.assertGreater(float(tracklet.get("mature_outlier_min_cos", 0)), 0.0)
+        self.assertGreater(float(identity.get("historical_match_threshold", 0)), 0.0)
+        self.assertGreater(float(identity.get("prototype_update_min_similarity", 0)), 0.0)
 
-    def test_profile_declares_camera_heatmap_isolation(self):
-        self.assertEqual(
-            self.cfg.get("profile"),
-            "camera-ankle-heatmap-crash-isolated",
-        )
+    def test_profile_declares_hardened_mode(self):
+        self.assertEqual(self.cfg.get("profile"), "camera-heatmap-reid-hardened")
 
 
 if __name__ == "__main__":
