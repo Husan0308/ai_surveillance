@@ -137,17 +137,20 @@ core_v1:
       CAM-06:
         - [0.50, 0.00, 0.78, 0.22]
 
-  # Pose is deliberately sparse because heatmaps need floor samples, not a
-  # full-rate skeleton stream. The primary detector/tracker never waits for it.
+  # Pose shares the detector's spawned CUDA process/context. YOLO26m-pose is
+  # intentionally sparse and crop-based so tracking/detection stays authoritative.
   pose:
     enabled: true
-    model: "yolo11n-pose.pt"
-    device: "cuda:0"
+    model: "yolo26m-pose.pt"
+    device: "inherit"
     imgsz: 256
     conf: 0.25
-    every_n: 5
-    max_people: 4
-    max_frame_age_ms: 550
+    half: true
+    every_n: 8
+    max_people: 2
+    max_cameras_per_batch: 1
+    max_frame_age_ms: 850
+    max_detector_ms_before_pose: 350
 
   heatmap:
     enabled: true

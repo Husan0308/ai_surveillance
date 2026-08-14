@@ -20,7 +20,8 @@ class HeatmapReader:
         self._stop = threading.Event()
         self._thread = None
         self._room_id = str(room_id)
-        self._image: QImage | None = None
+        self._image_bytes: bytes | None = None
+        self._connection = None
         self._summary = {"enabled": False, "rooms": {}}
         self._version = 0
 
@@ -28,27 +29,36 @@ class HeatmapReader:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="ui-floor-heatmap", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="ui-floor-heatmap", daemon=False)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
+        with self._lock:
+            connection = self._connection
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
-    def join(self, timeout=2.0):
+    def join(self, timeout=3.0):
         if self._thread:
             self._thread.join(timeout)
+            return not self._thread.is_alive()
+        return True
 
     def set_room(self, room_id: str):
         with self._lock:
             room_id = str(room_id)
             if room_id != self._room_id:
                 self._room_id = room_id
-                self._image = None
+                self._image_bytes = None
                 self._version += 1
 
     def latest(self):
         with self._lock:
-            return self._image, self._version, dict(self._summary), self._room_id
+            return self._image_bytes, self._version, dict(self._summary), self._room_id
 
     @staticmethod
     def _read_json(connection, path):
@@ -64,7 +74,9 @@ class HeatmapReader:
         while not self._stop.is_set():
             try:
                 if connection is None:
-                    connection = http.client.HTTPConnection(self.host, self.port, timeout=2.0)
+                    connection = http.client.HTTPConnection(self.host, self.port, timeout=0.75)
+                    with self._lock:
+                        self._connection = connection
                 summary = self._read_json(connection, "/heatmap")
                 with self._lock:
                     room_id = self._room_id
@@ -77,12 +89,11 @@ class HeatmapReader:
                 payload = response.read()
                 if response.status != 200:
                     raise RuntimeError(response.status)
-                image = QImage.fromData(payload, "PNG")
-                if image.isNull():
+                if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
                     raise RuntimeError("invalid heatmap PNG")
                 with self._lock:
                     self._summary = summary
-                    self._image = image
+                    self._image_bytes = bytes(payload)
                     self._version += 1
                 self._stop.wait(0.75)
             except Exception:
@@ -93,8 +104,16 @@ class HeatmapReader:
                         pass
                 connection = None
                 with self._lock:
+                    self._connection = None
                     self._summary = {**self._summary, "connected": False}
                 self._stop.wait(0.8)
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        with self._lock:
+            self._connection = None
 
 
 class FloorHeatmapCanvas(QWidget):
@@ -239,9 +258,14 @@ def install(dashboard_module):
     original_close_event = dashboard_module.DashboardWindow.closeEvent
 
     def refresh_heatmap(self):
-        image, version, summary, room_id = self.heatmap_reader.latest()
+        payload, version, summary, room_id = self.heatmap_reader.latest()
         if version != getattr(self, "_heatmap_seen_version", -1):
             self._heatmap_seen_version = version
+            image = None
+            if payload:
+                decoded = QImage.fromData(payload, "PNG")
+                if not decoded.isNull():
+                    image = decoded
             self.heatmap_page.update_live(image, summary, room_id)
 
     def window_init(self):
@@ -282,7 +306,7 @@ def install(dashboard_module):
             self.heatmap_timer.stop()
         if hasattr(self, "heatmap_reader"):
             self.heatmap_reader.stop()
-            self.heatmap_reader.join(1.5)
+            self.heatmap_reader.join(3.0)
         original_close_event(self, event)
 
     dashboard_module.DashboardWindow.__init__ = window_init
