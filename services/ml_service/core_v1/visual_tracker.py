@@ -170,7 +170,7 @@ class VisualTracker:
         measurement_noise=0.90,
         velocity_damping=0.96,
         size_velocity_damping=0.60,
-        max_prediction_shift_boxes=0.55,
+        max_prediction_shift_boxes=0.68,
         max_prediction_size_ratio=0.08,
         adaptive_error_low=0.08,
         adaptive_error_high=0.25,
@@ -271,6 +271,7 @@ class VisualTracker:
         self._low_matches = 0
         self._births = 0
         self._prediction_renders = 0
+        self._prediction_shift_clamps = 0
         self._pruned = 0
         self._corrections = 0
         self._snaps = 0
@@ -475,6 +476,7 @@ class VisualTracker:
         max_dy = max(12.0, float(base_h) * self.max_prediction_shift_boxes)
         normalized = math.hypot(dx / max_dx, dy / max_dy)
         if normalized > 1.0:
+            self._prediction_shift_clamps += 1
             mean[0] = base_cx + dx / normalized
             mean[1] = base_cy + dy / normalized
 
@@ -1307,6 +1309,7 @@ class VisualTracker:
                 'births': self._births,
                 'prediction_renders': self._prediction_renders,
                 'predicted_visible': self._prediction_renders,
+                'prediction_shift_clamps': self._prediction_shift_clamps,
                 'average_observation_age_ms': average_age,
                 'average_prediction_horizon_ms': average_horizon,
                 'corrections': self._corrections,
