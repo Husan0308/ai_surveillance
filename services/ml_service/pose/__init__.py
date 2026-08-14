@@ -1,5 +1,5 @@
 """Optional 2D human-pose side path for the surveillance ML service."""
 
-from .coordinator import PoseCoordinator
+from .process_coordinator import PoseCoordinator, PoseProcessCoordinator
 
-__all__ = ["PoseCoordinator"]
+__all__ = ["PoseCoordinator", "PoseProcessCoordinator"]

@@ -18,9 +18,10 @@ def _install_optional(name: str, installer) -> None:
     try:
         installer(dashboard)
     except Exception as exc:
-        # Presentation extensions must never stop the live camera dashboard from
-        # launching. Print diagnostics and continue with the plain dashboard.
-        print(f"[frontend] optional {name} disabled after install error: {exc}", file=sys.stderr)
+        print(
+            f"[frontend] optional {name} disabled after install error: {exc}",
+            file=sys.stderr,
+        )
         traceback.print_exc()
 
 
@@ -29,10 +30,12 @@ if _enabled("AI_SURVEILLANCE_UI_POLISH", True):
 
     _install_optional("ui_polish", install_polish)
 
-if _enabled("AI_SURVEILLANCE_UI_HEATMAP", True):
+# Camera heatmap is now blended directly into the live camera JPEG stream.
+# The old room-floor heatmap page is off by default so it cannot break the UI.
+if _enabled("AI_SURVEILLANCE_UI_HEATMAP", False):
     from .heatmap_ui import install as install_heatmap
 
-    _install_optional("heatmap_ui", install_heatmap)
+    _install_optional("legacy_floor_heatmap_ui", install_heatmap)
 
 
 if __name__ == "__main__":
