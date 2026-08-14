@@ -1,5 +1,6 @@
-"""Floor heatmap side path driven by pose ankle contacts."""
+"""Heatmap side paths driven by pose ankle contacts."""
 
+from .camera_overlay import CameraAnkleHeatmapCoordinator
 from .coordinator import FloorHeatmapCoordinator
 
-__all__ = ["FloorHeatmapCoordinator"]
+__all__ = ["CameraAnkleHeatmapCoordinator", "FloorHeatmapCoordinator"]

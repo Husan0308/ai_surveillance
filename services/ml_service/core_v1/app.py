@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -9,10 +10,10 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 
 from shared.config import camera_config
-from services.ml_service.heatmap import FloorHeatmapCoordinator
+from services.ml_service.heatmap import CameraAnkleHeatmapCoordinator
 from services.ml_service.pose import PoseCoordinator
 
-from .jpeg_publisher import LatestJpegPublisher
+from .heatmap_publisher import HeatmapJpegPublisher
 from .manager import CameraManager
 from .reid_service import ReIDCoordinator
 from .runtime_metrics import process_metrics
@@ -26,9 +27,9 @@ def _expand(value):
     if isinstance(value, str):
         return os.path.expandvars(value)
     if isinstance(value, list):
-        return [_expand(v) for v in value]
+        return [_expand(item) for item in value]
     if isinstance(value, dict):
-        return {k: _expand(v) for k, v in value.items()}
+        return {key: _expand(item) for key, item in value.items()}
     return value
 
 
@@ -55,8 +56,6 @@ detector = (
     else None
 )
 
-# Optional analytics consume detector outputs asynchronously. They are never
-# prerequisites for detector startup or frame publication.
 reid = (
     ReIDCoordinator(
         manager.stores,
@@ -68,25 +67,24 @@ reid = (
     else None
 )
 
+# Pose is isolated in a spawned CPU process. A fatal native signal in
+# Ultralytics/PyTorch therefore cannot abort this Uvicorn/camera process.
 pose = (
     PoseCoordinator(manager.stores, detector.results, pose_cfg)
     if detector is not None and bool(pose_cfg.get("enabled", False))
     else None
 )
 
+# Camera-space heatmap consumes the pose result stream directly. It does not
+# require room-floor homography and is rendered on the camera JPEG itself.
 heatmap = (
-    FloorHeatmapCoordinator(
-        pose,
-        manager.stores,
-        spatial_mapper,
-        heatmap_cfg,
-    )
+    CameraAnkleHeatmapCoordinator(pose, manager.stores, heatmap_cfg)
     if pose is not None and bool(heatmap_cfg.get("enabled", False))
     else None
 )
 
 publishers = {
-    cid: LatestJpegPublisher(
+    cid: HeatmapJpegPublisher(
         cid,
         store,
         core_cfg.get("display_fps", 12),
@@ -97,11 +95,14 @@ publishers = {
         overlay_max_age_ms=detector_cfg.get("overlay_max_age_ms", 350),
         tracker_config=visual_cfg,
         identity_provider=reid,
+        heatmap_provider=heatmap,
     )
     for cid, store in manager.stores.items()
 }
 
-app = FastAPI(title="AI Surveillance ML Core v1", version="2.0-full-safe")
+app = FastAPI(title="AI Surveillance ML Core v1", version="2.1-camera-heatmap")
+_optional_stop = threading.Event()
+_optional_thread = None
 
 
 def _mode() -> str:
@@ -111,14 +112,43 @@ def _mode() -> str:
     if reid:
         parts.append("reid")
     if pose:
-        parts.append("pose")
+        parts.append("pose-process")
     if heatmap:
-        parts.append("heatmap")
+        parts.append("camera-heatmap")
     return "+".join(parts)
+
+
+def _start_optional_after_detector():
+    # Avoid simultaneous model initialization. Detection gets the machine first;
+    # optional analytics start only after detector ready, and remain non-gating.
+    deadline = time.monotonic() + max(
+        5.0, float(core_cfg.get("optional_start_timeout_sec", 45.0))
+    )
+    while not _optional_stop.is_set():
+        if detector is None:
+            break
+        try:
+            if bool(detector.metrics().get("ready")):
+                break
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return
+        _optional_stop.wait(0.10)
+    if _optional_stop.is_set():
+        return
+    if reid:
+        reid.start()
+    if pose:
+        pose.start()
+    if heatmap:
+        heatmap.start()
 
 
 @app.on_event("startup")
 def startup():
+    global _optional_thread
+    _optional_stop.clear()
     manager.start()
 
     stagger = max(
@@ -130,23 +160,25 @@ def startup():
         if stagger and index + 1 < len(publishers):
             time.sleep(stagger)
 
-    # The detector owns the production hot path. All other components can fail
-    # independently without blocking camera frames or detections.
     if detector:
         detector.start()
-    if reid:
-        reid.start()
-    if pose:
-        pose.start()
-    if heatmap:
-        heatmap.start()
+
+    _optional_thread = threading.Thread(
+        target=_start_optional_after_detector,
+        name="optional-analytics-starter",
+        daemon=False,
+    )
+    _optional_thread.start()
 
 
 @app.on_event("shutdown")
 def shutdown():
+    _optional_stop.set()
+    if _optional_thread:
+        _optional_thread.join(2)
     if heatmap:
         heatmap.stop()
-        heatmap.join(6)
+        heatmap.join(4)
     if pose:
         pose.stop()
         pose.join(6)
@@ -170,11 +202,9 @@ def health():
     detector_metrics = detector.metrics() if detector else None
     detector_ready = bool(detector_metrics and detector_metrics.get("ready"))
     return {
-        # Optional analytics are deliberately non-gating. Health is degraded only
-        # when the primary detector is configured but unavailable.
         "status": "ok" if detector_ready or detector is None else "degraded",
         "mode": _mode(),
-        "profile": str(core_cfg.get("profile", "full-features-safe")),
+        "profile": "camera-ankle-heatmap-crash-isolated",
         "cameras": metrics,
         "online": sum(bool(value.get("online")) for value in metrics.values()),
         "total": len(metrics),
@@ -182,7 +212,9 @@ def health():
         "pose": pose.metrics() if pose else {"enabled": False},
         "heatmap": heatmap.snapshot() if heatmap else {"enabled": False},
         "reid": reid.metrics() if reid else {"enabled": False},
-        "publishers": {cid: publisher.metrics() for cid, publisher in publishers.items()},
+        "publishers": {
+            cid: publisher.metrics() for cid, publisher in publishers.items()
+        },
         "frame_history": {
             cid: store.history_metrics()
             for cid, store in manager.stores.items()
@@ -202,16 +234,16 @@ def cameras():
 def detections():
     if detector is None:
         return {"enabled": False, "cameras": {}}
-
     now = time.monotonic()
     results = {}
     for cid, result in detector.results.snapshot().items():
         results[cid] = {
             "frame_id": result.frame_id,
-            "result_age_ms": max(0.0, (now - result.produced_monotonic) * 1000.0),
+            "result_age_ms": max(
+                0.0, (now - result.produced_monotonic) * 1000.0
+            ),
             "capture_age_ms": max(
-                0.0,
-                (now - result.frame_captured_monotonic) * 1000.0,
+                0.0, (now - result.frame_captured_monotonic) * 1000.0
             ),
             "boxes": [
                 {
@@ -228,16 +260,16 @@ def detections():
 def poses_state():
     if pose is None:
         return {"enabled": False, "cameras": {}}
-
     now = time.monotonic()
     results = {}
     for cid, result in pose.snapshot().items():
         results[cid] = {
             "frame_id": result.frame_id,
-            "result_age_ms": max(0.0, (now - result.produced_monotonic) * 1000.0),
+            "result_age_ms": max(
+                0.0, (now - result.produced_monotonic) * 1000.0
+            ),
             "capture_age_ms": max(
-                0.0,
-                (now - result.frame_captured_monotonic) * 1000.0,
+                0.0, (now - result.frame_captured_monotonic) * 1000.0
             ),
             "people": [
                 {
@@ -261,36 +293,27 @@ def poses_state():
 @app.get("/heatmap")
 def heatmap_state():
     if heatmap is None:
-        return {"enabled": False, "rooms": {}}
+        return {"enabled": False, "cameras": {}}
     return heatmap.snapshot()
 
 
-@app.get("/heatmap/{room_id}.png")
-def heatmap_png(room_id: str):
+@app.post("/heatmap/reset/{camera_id}")
+def reset_heatmap(camera_id: str):
     if heatmap is None:
-        raise HTTPException(503, "heatmap is disabled")
-    payload = heatmap.render_png(room_id)
-    if payload is None:
-        raise HTTPException(404, "room not found")
-    return Response(
-        content=payload,
-        media_type="image/png",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-        },
-    )
-
-
-@app.post("/heatmap/reset/{room_id}")
-def reset_heatmap(room_id: str):
-    if heatmap is None:
-        raise HTTPException(503, "heatmap is disabled")
+        raise HTTPException(503, "camera heatmap is disabled")
     try:
-        heatmap.reset(room_id)
+        heatmap.reset(camera_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return {"ok": True, "room_id": room_id}
+    return {"ok": True, "camera_id": camera_id}
+
+
+@app.post("/heatmap/reset")
+def reset_all_heatmaps():
+    if heatmap is None:
+        raise HTTPException(503, "camera heatmap is disabled")
+    heatmap.reset()
+    return {"ok": True}
 
 
 @app.get("/reid")
@@ -304,7 +327,10 @@ def reid_state():
 def room_mapping():
     payload = spatial_mapper.snapshot()
     payload["people"] = reid.room_people() if reid is not None else []
-    payload["heatmap"] = heatmap.snapshot().get("rooms", {}) if heatmap is not None else {}
+    payload["heatmap"] = {
+        "mode": "camera_pixels",
+        "note": "heatmap is rendered directly on each camera frame from ankle keypoints",
+    }
     return payload
 
 
@@ -367,7 +393,6 @@ def latest_frame(
 ):
     if camera_id not in publishers:
         raise HTTPException(404, "camera not found")
-
     publisher = publishers[camera_id]
     jpeg, version, published, source_frame_id = publisher.wait_newer(
         after,
@@ -375,7 +400,6 @@ def latest_frame(
     )
     if jpeg is None:
         raise HTTPException(503, "frame not ready")
-
     headers = {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",

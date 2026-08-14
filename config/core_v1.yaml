@@ -1,8 +1,7 @@
 core_v1:
-  # Full feature profile. The detector remains the only CUDA analytics worker.
-  # ReID and YOLO26m-pose run as bounded CPU side paths so optional analytics
-  # cannot block or crash the primary camera -> detection -> tracker -> UI path.
-  profile: "full-features-safe"
+  # Production profile: detector hot path stays isolated; Pose runs in a spawned
+  # CPU process and Heatmap is rendered directly on each camera frame.
+  profile: "camera-ankle-heatmap-crash-isolated"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
@@ -14,6 +13,7 @@ core_v1:
   max_display_width: 640
   max_display_height: 360
   publisher_start_stagger_ms: 15
+  optional_start_timeout_sec: 45
 
   startup_grace_sec: 8.0
   startup_stagger_sec: 0.20
@@ -55,14 +55,10 @@ core_v1:
     max_submit_age_ms: 350
     max_result_age_ms: 950
     overlay_max_age_ms: 950
-
-    # Keep camera-specific filtering off while the now-working detector is the
-    # production baseline. These tuning features can be reintroduced separately.
     hard_exclusion:
       max_box_height_ratio: 0.30
       overlap_threshold: 0.15
       cameras: {}
-
     roi_second_pass:
       enabled: false
       imgsz: [512, 640]
@@ -119,42 +115,35 @@ core_v1:
     exclusion_overlap_threshold: 0.15
     camera_exclusion_zones: {}
 
-  # YOLO26m-pose is deliberately a sparse CPU side path. The primary detector
-  # remains the only CUDA PyTorch process and does not wait for pose results.
+  # YOLO26m-pose runs in its own spawned CPU process. If native code aborts,
+  # only this child exits; detection/API/frame publication continue running.
   pose:
     enabled: true
     model: "yolo26m-pose.pt"
     device: "cpu"
     imgsz: 256
     conf: 0.25
-    half: false
-    every_n: 12
+    every_n: 10
     max_people: 1
-    max_cameras_per_cycle: 1
-    max_frame_age_ms: 1200
-    poll_interval_ms: 25
-    retry_after_sec: 30
+    max_frame_age_ms: 1000
+    restart_backoff_sec: 5
     torch_cpu_threads: 1
 
+  # Heatmap is camera-space: COCO ankles 15/16 are accumulated directly in the
+  # source camera coordinate system and blended into /frame and /video output.
   heatmap:
     enabled: true
-    coordinate_system: "normalized_room_floor"
-    grid_width: 96
-    grid_height: 64
-    poll_interval_ms: 120
-    ankle_conf: 0.35
+    coordinate_system: "camera_pixels"
+    poll_interval_ms: 100
+    ankle_conf: 0.30
     sample_weight: 1.0
-    sigma_cells: 2.2
-    hot_hold_sec: 3600
-    cool_half_life_sec: 3600
-    bucket_sec: 300
-    max_history_sec: 21600
-    min_bucket_weight: 0.02
-    dedupe_window_ms: 800
-    dedupe_distance: 0.06
-    fallback_bbox_bottom: false
+    sigma_cells: 2.4
+    camera_grid_width: 160
+    camera_grid_height: 90
+    camera_half_life_sec: 3600
+    overlay_alpha: 0.42
+    overlay_threshold: 0.08
 
-  # ReID stays CPU-only and consumes detector history asynchronously.
   reid:
     enabled: true
     model: "osnet_ain_x1_0"
@@ -166,7 +155,6 @@ core_v1:
     input_height: 256
     input_width: 128
     flip_tta: true
-
     poll_interval_ms: 35
     min_track_hits: 2
     local_track_timeout_sec: 3.0
@@ -179,14 +167,12 @@ core_v1:
     batch_wait_ms: 20
     queue_size: 8
     max_job_age_ms: 800
-
     tracklet:
       min_samples: 3
       max_samples: 8
       topk: 5
       duplicate_feature_cos: 0.995
       duplicate_quality_gain: 0.025
-
     crop:
       min_width: 30
       min_height: 64
@@ -198,7 +184,6 @@ core_v1:
       min_sharpness: 10.0
       pad_x: 0.05
       pad_y: 0.03
-
     pair_matching:
       pairs:
         - [CAM-01, CAM-04]
@@ -223,7 +208,6 @@ core_v1:
           candidate_threshold: 0.54
           strong_threshold: 0.66
           margin: 0.020
-
     identity:
       prototype_alpha: 0.18
       gallery_size: 12
