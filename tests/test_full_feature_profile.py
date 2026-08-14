@@ -20,25 +20,29 @@ class FullFeatureProfileTests(unittest.TestCase):
         self.assertEqual(detector.get("device"), "cuda:0")
         self.assertFalse((detector.get("roi_second_pass") or {}).get("enabled"))
 
-    def test_pose_is_enabled_but_has_no_cuda_context(self):
+    def test_pose_is_spawned_cpu_side_path(self):
         pose = dict(self.cfg.get("pose") or {})
         self.assertTrue(pose.get("enabled"))
         self.assertEqual(pose.get("model"), "yolo26m-pose.pt")
         self.assertEqual(pose.get("device"), "cpu")
-        self.assertFalse(pose.get("half"))
-        self.assertEqual(int(pose.get("max_cameras_per_cycle", 0)), 1)
+        self.assertEqual(int(pose.get("max_people", 0)), 1)
+        self.assertGreaterEqual(float(pose.get("restart_backoff_sec", 0)), 1.0)
 
-    def test_reid_and_heatmap_are_enabled_as_side_paths(self):
+    def test_reid_and_camera_heatmap_are_enabled(self):
         reid = dict(self.cfg.get("reid") or {})
         heatmap = dict(self.cfg.get("heatmap") or {})
         self.assertTrue(reid.get("enabled"))
         self.assertEqual(reid.get("device"), "cpu")
         self.assertTrue(reid.get("model_url"))
         self.assertTrue(heatmap.get("enabled"))
-        self.assertFalse(heatmap.get("fallback_bbox_bottom"))
+        self.assertEqual(heatmap.get("coordinate_system"), "camera_pixels")
+        self.assertGreater(float(heatmap.get("overlay_alpha", 0)), 0.0)
 
-    def test_profile_declares_full_safe_mode(self):
-        self.assertEqual(self.cfg.get("profile"), "full-features-safe")
+    def test_profile_declares_camera_heatmap_isolation(self):
+        self.assertEqual(
+            self.cfg.get("profile"),
+            "camera-ankle-heatmap-crash-isolated",
+        )
 
 
 if __name__ == "__main__":
