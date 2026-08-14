@@ -12,5 +12,7 @@ gdown>=5.2
 psutil>=5.9
 nvidia-ml-py>=11.5
 insightface>=1.0,<1.1
-onnxruntime>=1.20
+# Keep ORT on CUDA 12.x to match this project's cu121 PyTorch stack. ORT 1.27+
+# PyPI GPU wheels default to CUDA 13, so stay below 1.27 on this environment.
+onnxruntime-gpu>=1.21,<1.27
 # GStreamer/DeepStream Python bindings come from the host installation (python3-gi / Gst), not pip.
