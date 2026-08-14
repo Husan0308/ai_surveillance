@@ -1,12 +1,12 @@
-name: Stable core smoke tests
+name: Full safe core smoke tests
 
 on:
   push:
     branches:
-      - "agent/stable-detection-ui-baseline"
+      - "agent/enable-all-safe"
   pull_request:
     paths:
-      - "services/ml_service/core_v1/**"
+      - "services/ml_service/**"
       - "services/frontend/core_v1/**"
       - "config/core_v1.yaml"
       - "requirements/ml.txt"
@@ -25,14 +25,18 @@ jobs:
       - name: Install smoke-test dependencies
         run: python -m pip install --upgrade pip numpy opencv-python-headless psutil pyyaml
 
-      - name: Compile stable runtime modules
+      - name: Compile runtime modules
         run: |
           python -m py_compile \
             services/ml_service/core_v1/detector.py \
             services/ml_service/core_v1/stable_detector.py \
+            services/ml_service/core_v1/reid_service.py \
             services/ml_service/core_v1/app.py \
+            services/ml_service/pose/coordinator.py \
+            services/ml_service/heatmap/coordinator.py \
             services/frontend/core_v1/main.py \
-            services/frontend/core_v1/dashboard.py
+            services/frontend/core_v1/dashboard.py \
+            services/frontend/core_v1/heatmap_ui.py
 
       - name: Test detector model resolution
         run: python -m unittest discover -s tests -p "test_stable_detector.py" -v
@@ -42,3 +46,12 @@ jobs:
 
       - name: Test JPEG publisher
         run: python -m unittest discover -s tests -p "test_core_v1_jpeg_publisher.py" -v
+
+      - name: Test pose side path
+        run: python -m unittest discover -s tests -p "test_core_v1_pose.py" -v
+
+      - name: Test floor heatmap
+        run: python -m unittest discover -s tests -p "test_floor_heatmap.py" -v
+
+      - name: Test full feature isolation profile
+        run: python -m unittest discover -s tests -p "test_full_feature_profile.py" -v

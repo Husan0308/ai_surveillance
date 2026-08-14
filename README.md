@@ -1,6 +1,6 @@
-# AI Surveillance — Stable Detection/UI Baseline
+# AI Surveillance — Full Features Safe Profile
 
-This branch intentionally reduces the runtime to the smallest production path that must work first:
+The production hot path stays simple and authoritative:
 
 ```text
 6 x RTSP cameras
@@ -9,26 +9,22 @@ This branch intentionally reduces the runtime to the smallest production path th
   -> detector-only spawned YOLO26m CUDA process
   -> visual tracker
   -> JPEG publishers
-  -> plain PySide6 dashboard
+  -> PySide6 dashboard
 ```
 
-Optional analytics are kept in the repository but are disabled by default until the baseline passes real-machine acceptance:
+All analytics are enabled again, but they are isolated from detection:
 
-- ReID: disabled
-- YOLO26m-pose: disabled
-- floor heatmap: disabled
-- custom ROI second pass: disabled
-- camera exclusion masks: disabled
-- UI polish monkey-patch: opt-in
-- Heatmap UI monkey-patch: opt-in
+```text
+YOLO26m detections
+  ├─> CPU ReID side path -> OSNet -> Global ID / room fusion
+  └─> sparse CPU YOLO26m-pose side path -> ankle keypoints -> floor heatmap
+```
 
-The backup branch `backup/local-43c0763` preserves the previous local experiment that embedded YOLO26 pose keypoints directly into the detector/tracker path. It is not merged into this baseline because it duplicates the newer pose path and can destabilize detection.
+The detector is still the only PyTorch CUDA analytics process. `yolo26m-pose.pt` intentionally runs sparsely on CPU so Pose cannot create a second CUDA context or gate person detection. ReID is also CPU-only. If either optional side path fails, camera frames and YOLO26m detections keep running.
 
-## Why this baseline exists
+UI polish and Heatmap UI are enabled by default, but their installers are fail-safe: an extension import/install error falls back to the plain dashboard instead of preventing startup.
 
-Detection must not depend on Pose, Heatmap, ReID, or UI extensions. A failure in any optional analytics feature must never prevent camera frames or YOLO person detections from being published.
-
-The stable detector also fixes model startup behavior. If a configured project-local model file is missing, the worker falls back to a plain Ultralytics checkpoint name such as `yolo26m.pt` instead of failing before the CUDA process starts.
+Custom ROI second-pass detection and camera exclusion masks remain off because the current full-frame detector is the verified baseline. They are tuning features, not required system features.
 
 ## Install
 
@@ -39,91 +35,74 @@ pip install -r requirements/ml.txt
 pip install -r requirements/frontend.txt
 ```
 
-## 1. Run tests
+## Tests
 
-Use unittest discovery so an unrelated installed Python package named `tests` cannot shadow this repository's `tests/` directory.
+Use unittest discovery so an unrelated installed package named `tests` cannot shadow this repository's tests.
 
 ```bash
 python -m unittest discover -s tests -p "test_stable_detector.py" -v
 python -m unittest discover -s tests -p "test_core_v1_visual_tracker.py" -v
 python -m unittest discover -s tests -p "test_core_v1_jpeg_publisher.py" -v
+python -m unittest discover -s tests -p "test_core_v1_pose.py" -v
+python -m unittest discover -s tests -p "test_floor_heatmap.py" -v
+python -m unittest discover -s tests -p "test_full_feature_profile.py" -v
 ```
 
-## 2. Run ML only
+## Run ML
 
 ```bash
 PYTHONFAULTHANDLER=1 python -m services.ml_service.core_v1.main
 ```
 
-The detector may download `yolo26m.pt` on first run if no local checkpoint exists.
+On first use, Ultralytics may download `yolo26m.pt` and `yolo26m-pose.pt`. ReID may also download its configured OSNet checkpoint if it is not present locally.
 
-## 3. Verify camera and detector health
-
-In a second terminal:
+## Verify health
 
 ```bash
 curl -s http://127.0.0.1:8001/health | python -m json.tool
 ```
 
-Acceptance requirements:
+Primary acceptance requirements:
 
-- `online` should reach the expected camera count.
-- `detector.ready` must become `true`.
-- `detector.process_alive` must be `true`.
-- `detector.cuda_topology` must be `detector_only_spawned_process`.
-- `detector.pose_in_hot_path` must be `false`.
-- `detector.last_error` must be empty.
-- camera input counters must increase.
+- `status` is `ok`.
+- `online` reaches the expected camera count.
+- `detector.ready` is `true`.
+- `detector.process_alive` is `true`.
+- `detector.cuda_topology` is `detector_only_spawned_process`.
+- `detector.pose_in_hot_path` is `false`.
+- `detector.last_error` is empty.
 
-Then verify actual person results:
+Optional feature checks are non-gating:
+
+- `reid.enabled` should be true and `reid.ready` should become true after its checkpoint is available.
+- `pose.enabled` should be true, `pose.model` should be `yolo26m-pose.pt`, and `pose.device` should be `cpu`.
+- `pose.isolation` should be `detector_independent_sidepath`.
+- `heatmap.enabled` should be true. Heat samples require valid room homography calibration.
+
+## Verify endpoints
 
 ```bash
 curl -s http://127.0.0.1:8001/detections | python -m json.tool
+curl -s http://127.0.0.1:8001/reid | python -m json.tool
+curl -s http://127.0.0.1:8001/poses | python -m json.tool
+curl -s http://127.0.0.1:8001/heatmap | python -m json.tool
+curl -s http://127.0.0.1:8001/room-mapping | python -m json.tool
 ```
 
-At least cameras currently seeing people should contain non-empty `boxes`.
+For Heatmap to accumulate real ankle samples, each camera used for room-floor projection needs a valid camera-to-floor homography in `config/room_mapping.yaml` or through the Room Map calibration UI.
 
-## 4. Verify frames before opening the UI
-
-```bash
-curl -o /tmp/cam01.jpg http://127.0.0.1:8001/frame/CAM-01
-file /tmp/cam01.jpg
-```
-
-Repeat for any camera that appears offline or stale.
-
-## 5. Run the plain frontend
+## Frontend
 
 ```bash
 python -m services.frontend.core_v1.main
 ```
 
-The baseline does not install UI monkey-patches by default.
-
-Optional presentation polish can be tested later with:
+UI polish and Heatmap UI are on by default. Either can be disabled for isolation without editing code:
 
 ```bash
-AI_SURVEILLANCE_UI_POLISH=1 python -m services.frontend.core_v1.main
+AI_SURVEILLANCE_UI_POLISH=0 python -m services.frontend.core_v1.main
+AI_SURVEILLANCE_UI_HEATMAP=0 python -m services.frontend.core_v1.main
 ```
-
-Heatmap UI is intentionally not part of baseline acceptance. It can only be tested later with:
-
-```bash
-AI_SURVEILLANCE_UI_HEATMAP=1 python -m services.frontend.core_v1.main
-```
-
-## Recovery order
-
-Do not enable features out of order.
-
-1. Six camera capture must be stable.
-2. YOLO26m detection must be stable.
-3. Visual tracker and overlays must be stable.
-4. Plain UI must be stable.
-5. Re-enable ReID and soak-test it.
-6. Add YOLO26m-pose as a truly optional side path.
-7. Add floor heatmap only after Pose and homography calibration are verified.
-8. Re-enable UI polish/heatmap extensions last.
 
 ## Run commands
 
@@ -145,4 +124,4 @@ Frontend:
 python -m services.frontend.core_v1.main
 ```
 
-Machine-local models, databases, captures, `.runtime/`, logs and `cameras.local.yaml` must not be committed.
+Machine-local models, databases, captures, `.runtime/`, logs and `cameras.local.yaml` must not be committed. The backup branch `backup/local-43c0763` remains available for the earlier experimental detector-pose changes.
