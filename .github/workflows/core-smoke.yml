@@ -1,9 +1,9 @@
-name: Heatmap controls and ReID hardening smoke tests
+name: Operator UI pose heatmap smoke tests
 
 on:
   push:
     branches:
-      - "agent/heatmap-controls-reid-hardening"
+      - "agent/restore-operator-ui-stable-pose-heatmap"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -36,13 +36,17 @@ jobs:
             services/ml_service/core_v1/global_identity.py \
             services/ml_service/core_v1/jpeg_publisher.py \
             services/ml_service/core_v1/heatmap_publisher.py \
+            services/ml_service/core_v1/heatmap_publisher_v2.py \
+            services/ml_service/core_v1/heatmap_publisher_v3.py \
             services/ml_service/core_v1/app.py \
             services/ml_service/pose/coordinator.py \
             services/ml_service/pose/process_coordinator.py \
             services/ml_service/heatmap/coordinator.py \
             services/ml_service/heatmap/camera_overlay.py \
+            services/ml_service/heatmap/camera_overlay_v2.py \
             services/frontend/core_v1/main.py \
-            services/frontend/core_v1/overlay_controls_ui.py \
+            services/frontend/core_v1/operator_dashboard.py \
+            services/frontend/core_v1/operator_dashboard_v2.py \
             services/frontend/core_v1/dashboard.py
 
       - name: Test detector model resolution
@@ -54,7 +58,7 @@ jobs:
       - name: Test JPEG publisher
         run: python -m unittest discover -s tests -p "test_core_v1_jpeg_publisher.py" -v
 
-      - name: Test legacy pose data helpers
+      - name: Test pose data helpers
         run: python -m unittest discover -s tests -p "test_core_v1_pose.py" -v
 
       - name: Test floor heatmap compatibility
@@ -65,6 +69,9 @@ jobs:
 
       - name: Test overlay and ReID hardening
         run: python -m unittest discover -s tests -p "test_overlay_and_reid_hardening.py" -v
+
+      - name: Test restored operator UI and persistent pose heatmap
+        run: python -m unittest discover -s tests -p "test_operator_ui_pose_heatmap_v2.py" -v
 
       - name: Test full feature profile
         run: python -m unittest discover -s tests -p "test_full_feature_profile.py" -v
