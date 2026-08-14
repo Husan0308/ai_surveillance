@@ -3,13 +3,15 @@ from __future__ import annotations
 import sys
 
 from . import dashboard
-from .ui_polish import install
+from .ui_polish import install as install_polish
+from .heatmap_ui import install as install_heatmap
 
 
-# Install the production UI layer before any DashboardWindow/LivePage instances
-# are created. This keeps the existing realtime backend wiring intact while
-# replacing only the presentation/layout behavior.
-install(dashboard)
+# Presentation layers are installed before DashboardWindow/LivePage instances
+# are created. The heatmap extension adds a separate low-rate floor page and
+# never changes the realtime camera rendering hot path.
+install_polish(dashboard)
+install_heatmap(dashboard)
 
 
 if __name__ == "__main__":
