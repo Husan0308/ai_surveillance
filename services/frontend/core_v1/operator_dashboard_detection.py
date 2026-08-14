@@ -7,6 +7,7 @@ import threading
 from datetime import datetime
 
 from . import operator_dashboard_v2 as v2
+from .smooth_frame_reader import SmoothFrameReader
 
 base = v2.base
 
@@ -114,7 +115,7 @@ class DetectionRealtimeState:
 
 
 class DashboardPage(v2.DashboardPage):
-    """Keep the old 3x2 visual layout with detection + local tracking."""
+    """Keep the old visual layout with detection + local tracking."""
 
     def __init__(self, toggle_callback):
         super().__init__(toggle_callback)
@@ -135,13 +136,14 @@ class RightRail(v2.RightRail):
         health = state.get("health") or {}
         resources = health.get("service_resources") or {}
         gpu = float(resources.get("gpu_utilization_percent") or 0.0)
+        decoder = float(resources.get("gpu_decoder_utilization_percent") or 0.0)
         cpu = float(resources.get("cpu_percent") or 0.0)
         publishers = health.get("publishers") or {}
         rates = [float(value.get("publish_rate") or 0.0) for value in publishers.values()]
         fps = sum(rates) / len(rates) if rates else 0.0
 
-        self.gpu[0].setText(f"{gpu:.0f}%")
-        self.gpu[1].setValue(max(0, min(100, int(round(gpu)))))
+        self.gpu[0].setText(f"{gpu:.0f}% · DEC {decoder:.0f}%")
+        self.gpu[1].setValue(max(0, min(100, int(round(max(gpu, decoder))))))
         self.cpu[0].setText(f"{cpu:.0f}%")
         self.cpu[1].setValue(max(0, min(100, int(round(cpu)))))
         self.fps[0].setText(f"{fps:.1f}")
@@ -181,13 +183,11 @@ BaseOperatorWindow = base.OperatorWindow
 class OperatorWindow(BaseOperatorWindow):
     def __init__(self):
         super().__init__()
-        # Future analytics remain disabled until detection + local tracking are
-        # proven stable on all six real cameras.
         for index in (1, 2, 3, 4):
             button = self.sidebar.buttons[index]
             button.setEnabled(False)
             button.setToolTip("Disabled until detection + tracking baseline is stable")
-        self.setWindowTitle("AI Surveillance — Detection + Local Tracking")
+        self.setWindowTitle("AI Surveillance — Smooth Detection + Local Tracking")
 
     def refresh_state(self):
         super().refresh_state()
@@ -202,7 +202,10 @@ class OperatorWindow(BaseOperatorWindow):
         return
 
 
-# OperatorWindow resolves these names from operator_dashboard globals at runtime.
+# These globals are resolved by OperatorWindow.__init__ at runtime. Replacing
+# FrameReader here switches the six camera cards to persistent MJPEG without
+# touching the old UI layout code.
+base.FrameReader = SmoothFrameReader
 base.DashboardPage = DashboardPage
 base.RightRail = RightRail
 base.RealtimeState = DetectionRealtimeState

@@ -1,22 +1,20 @@
 core_v1:
-  profile: "detection-tracking-v1"
+  profile: "detection-tracking-smooth-v2"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Keep JPEG presentation bounded. Smoothness comes from latest-only capture
-  # plus bounded tracker prediction, not from buffering old camera frames.
-  display_fps: 15
-  jpeg_quality: 72
-  max_display_width: 640
-  max_display_height: 360
-  publisher_start_stagger_ms: 15
+  # Keep one presentation cadence close to the actual CCTV cadence. Frames are
+  # never queued to reach this rate: if work falls behind, the newest frame wins.
+  display_fps: 20
+  jpeg_quality: 70
+  max_display_width: 736
+  max_display_height: 416
+  publisher_start_stagger_ms: 10
 
-  # Six independent RTSP capture loops. DeepStream/NVDEC is preferred when it
-  # is available; GStreamer remains the fallback so one backend failure does
-  # not take the service down.
+  # Six independent RTSP capture loops. DeepStream/NVDEC is preferred.
   startup_grace_sec: 8.0
   startup_stagger_sec: 0.20
   capture_timeout_ms: 1000
@@ -36,34 +34,34 @@ core_v1:
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
-  # Rebuild only a genuinely stale camera pipe. All normal queues remain
-  # newest-frame-only so a slow consumer never creates a replay backlog.
-  max_pipeline_lag_ms: 650
-  max_pipeline_lag_samples: 8
+  # Critical smoothness optimization: decode can remain at the camera's native
+  # resolution, but nvvideoconvert scales on the NVIDIA path before the RAW BGR
+  # frame is copied into Python. This removes the six-camera full-HD host-copy
+  # bottleneck and also matches the detector input exactly.
+  capture_output_width: 736
+  capture_output_height: 416
+  capture_metrics_interval_sec: 5.0
+
+  # Do not rebuild a healthy RTSP pipe for a brief jitter spike. A sustained
+  # stale stream is still reconnected, but short LAN jitter is allowed to heal.
+  max_pipeline_lag_ms: 900
+  max_pipeline_lag_samples: 20
 
   detector:
     enabled: true
     model: "yolo26m.pt"
     model_fallback: "yolo26m.pt"
     device: "cuda:0"
-
-    # Camera feeds are 16:9. The bridge currently performs a fixed resize before
-    # Ultralytics inference, so use a near-16:9 stride-32 target instead of the
-    # old 704x448 shape that visibly widened people. 736x416 is ~1.769:1 and
-    # uses slightly fewer pixels than 704x448.
     imgsz: [416, 736]
     quantize: 32
     classes: [0]
 
-    # Preserve low-score person boxes for ByteTrack stage-2 recovery. They can
-    # continue an existing track but are not allowed to create a new ID below
-    # the tracker birth threshold.
     conf: 0.08
     iou: 0.50
     max_det: 30
 
-    # One CUDA worker, one in-flight latest-only batch. Batch=2 is deliberately
-    # conservative until real six-camera latency/VRAM telemetry says otherwise.
+    # Keep conservative latency until real six-camera telemetry proves a larger
+    # batch helps. Camera smoothness is intentionally independent of this batch.
     batch_size: 2
     poll_interval_ms: 4
     start_delay_sec: 1.0
@@ -85,9 +83,6 @@ core_v1:
       enabled: false
       cameras: {}
 
-  # Camera-local tracking only. No ReID model and no cross-camera identity.
-  # ByteTrack-style two-stage association is combined with our bounded adaptive
-  # Kalman presentation model and Hungarian global min-cost assignment.
   visual_tracker:
     tracker_type: "bytetrack-hungarian"
     assignment_solver: "hungarian"
