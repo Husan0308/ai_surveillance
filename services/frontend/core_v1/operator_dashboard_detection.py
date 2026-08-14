@@ -4,7 +4,6 @@ from collections import deque
 import http.client
 import json
 import threading
-import time
 from datetime import datetime
 
 from . import operator_dashboard_v2 as v2
@@ -13,7 +12,7 @@ base = v2.base
 
 
 class DetectionRealtimeState:
-    """Frontend state reader for the detection-only API surface."""
+    """Frontend state reader for camera, detection and local tracking only."""
 
     def __init__(self):
         self._stop = threading.Event()
@@ -23,6 +22,7 @@ class DetectionRealtimeState:
             "connected": False,
             "health": {},
             "detections": {},
+            "tracks": {},
             "reid": {},
             "room_mapping": {},
         }
@@ -33,7 +33,7 @@ class DetectionRealtimeState:
     def start(self):
         self._thread = threading.Thread(
             target=self._run,
-            name="ui-detection-state",
+            name="ui-detection-tracking-state",
             daemon=True,
         )
         self._thread.start()
@@ -88,12 +88,14 @@ class DetectionRealtimeState:
                     )
                 health = self._get_json(connection, "/health")
                 detections = self._get_json(connection, "/detections")
+                tracks = self._get_json(connection, "/tracks")
                 with self._lock:
                     self._record_camera_edges(health)
                     self.state = {
                         "connected": True,
                         "health": health,
                         "detections": detections,
+                        "tracks": tracks,
                         "reid": {},
                         "room_mapping": {},
                     }
@@ -105,17 +107,14 @@ class DetectionRealtimeState:
                         pass
                 connection = None
                 with self._lock:
-                    self.state = {
-                        **self.state,
-                        "connected": False,
-                    }
+                    self.state = {**self.state, "connected": False}
                 self._stop.wait(0.15)
                 continue
             self._stop.wait(0.25)
 
 
 class DashboardPage(v2.DashboardPage):
-    """Keep the old 3x2 visual layout, but expose detection only."""
+    """Keep the old 3x2 visual layout with detection + local tracking."""
 
     def __init__(self, toggle_callback):
         super().__init__(toggle_callback)
@@ -123,16 +122,15 @@ class DashboardPage(v2.DashboardPage):
         self.pose.hide()
 
     def set_overlay_state(self, heatmap: bool, pose: bool):
-        # Overlay features do not exist in this baseline.
         return
 
 
 class RightRail(v2.RightRail):
     def update_state(self, state, events):
-        detections = (state.get("detections") or {}).get("cameras") or {}
-        detected = sum(len(value.get("boxes") or []) for value in detections.values())
+        tracks = state.get("tracks") or {}
+        tracked = int(tracks.get("total") or 0)
         self.known[1].setText("0")
-        self.unknown[1].setText(str(detected))
+        self.unknown[1].setText(str(tracked))
 
         health = state.get("health") or {}
         resources = health.get("service_resources") or {}
@@ -183,13 +181,22 @@ BaseOperatorWindow = base.OperatorWindow
 class OperatorWindow(BaseOperatorWindow):
     def __init__(self):
         super().__init__()
-        # Detection-only baseline: future feature pages remain visible in the old
-        # console design but cannot be opened accidentally.
+        # Future analytics remain disabled until detection + local tracking are
+        # proven stable on all six real cameras.
         for index in (1, 2, 3, 4):
             button = self.sidebar.buttons[index]
             button.setEnabled(False)
-            button.setToolTip("Disabled in detection-only baseline")
-        self.setWindowTitle("AI Surveillance — Detection Baseline")
+            button.setToolTip("Disabled until detection + tracking baseline is stable")
+        self.setWindowTitle("AI Surveillance — Detection + Local Tracking")
+
+    def refresh_state(self):
+        super().refresh_state()
+        state, _recent, _events = self.state_reader.snapshot()
+        tracks = (state.get("tracks") or {}).get("cameras") or {}
+        for camera_id, card in self.dashboard.cards.items():
+            item = tracks.get(camera_id) or {}
+            count = int(item.get("count") or len(item.get("tracks") or []))
+            card.people.setText(f"👥 {count}")
 
     def set_overlay(self, kind, enabled):
         return
