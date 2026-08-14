@@ -1,5 +1,5 @@
 core_v1:
-  profile: "detection-tracking-room-consensus-reid-v6"
+  profile: "detection-tracking-room-consensus-reid-face-v1"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
@@ -121,8 +121,6 @@ core_v1:
 
   reid:
     enabled: true
-    # OSNet-AIN x1.0 is intentionally CPU-only. The official Torchreid model zoo
-    # reports much stronger cross-domain generalisation than OSNet x0.25.
     model_name: "osnet_ain_x1_0"
     device: "cpu"
     cpu_threads: 2
@@ -132,16 +130,12 @@ core_v1:
     model_url: "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth"
     model_sha256: "8a07e8da38946f7cee37f4561617bf8b6d2fe8f3a4027852893ea092e46d919f"
     download_if_missing: true
-
     poll_interval_ms: 100
     sample_interval_ms: 420
     max_batch: 4
     min_samples: 3
     confirm_min_samples: 3
     max_samples: 7
-
-    # Distant 736x416 CCTV people are accepted, but quality/outlier gates still
-    # prevent tiny/blurred crops from poisoning a long-lived identity prototype.
     min_crop_height_px: 42
     min_crop_width_px: 14
     min_area_ratio: 0.0035
@@ -149,8 +143,6 @@ core_v1:
     max_crop_overlap_iou: 0.30
     min_blur_variance: 9.0
     tracklet_outlier_similarity: 0.50
-
-    # Conservative historical/global gallery matching.
     match_similarity: 0.78
     same_group_similarity: 0.74
     same_camera_similarity: 0.76
@@ -159,9 +151,6 @@ core_v1:
     strong_second_best_margin: 0.025
     prototype_update_similarity: 0.88
     prototype_update_alpha: 0.07
-
-    # Room-pair consensus is the authoritative cross-camera decision for cameras
-    # that see the same physical room. Assignment is one-to-one Hungarian.
     room_embedding_weight: 0.90
     room_colour_weight: 0.10
     room_min_embedding_similarity: 0.66
@@ -170,31 +159,50 @@ core_v1:
     room_pair_margin: 0.035
     room_confirmed_merge_similarity: 0.90
     colour_ema_alpha: 0.28
-
-    # Repair a short local-ID fragmentation in the same camera instead of
-    # permanently allocating another Global ID to the same physical person.
     same_camera_handoff_sec: 2.6
     same_camera_handoff_similarity: 0.84
     same_camera_handoff_distance: 0.85
-
-    # Existing instant policy remains as a fallback around room consensus.
     fast_single_similarity: 0.80
     fast_pair_similarity: 0.85
     fast_pair_margin: 0.045
     fast_confirm_similarity: 0.74
     confirmed_pair_merge_similarity: 0.90
-
     active_timeout_sec: 1.8
     gallery_ttl_sec: 21600
     min_cross_group_transition_sec: 1.5
     global_prefix: "G"
-
     overlap_groups:
       - ["CAM-01", "CAM-04"]
       - ["CAM-02", "CAM-05"]
       - ["CAM-03", "CAM-06"]
-
     pair_thresholds:
       "CAM-01|CAM-04": 0.74
       "CAM-02|CAM-05": 0.74
       "CAM-03|CAM-06": 0.74
+
+  face:
+    enabled: true
+    provider: "CPUExecutionProvider"
+    model_pack: "buffalo_l"
+    model_root: "models/insightface"
+    data_dir: "data/faces"
+    db_path: "data/face_db.json"
+    det_size: 320
+    det_thresh: 0.55
+    poll_interval_ms: 180
+    sample_interval_ms: 1100
+    max_people_per_camera: 3
+    upper_body_ratio: 0.60
+    horizontal_pad_ratio: 0.16
+    min_face_size_px: 28
+    min_blur_variance: 18.0
+    match_similarity: 0.52
+    strong_similarity: 0.68
+    second_best_margin: 0.06
+    confirm_hits: 2
+    confirm_window_sec: 4.0
+    local_binding_ttl_sec: 45
+    global_binding_ttl_sec: 21600
+    enrollment_samples: 10
+    enrollment_min_quality: 0.56
+    enrollment_token_ttl_sec: 600
