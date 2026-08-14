@@ -97,14 +97,34 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
         self.assertLessEqual(float(config["max_result_age_ms"]), 700.0)
         self.assertFalse(bool(config["roi_second_pass"]["enabled"]))
 
-    def test_frontend_remains_free_of_pose_and_heatmap_dependencies(self):
+    def test_frontend_uses_mukammal_ui_without_simulation_or_fake_face_data(self):
         main = (ROOT / "services/frontend/core_v1/main.py").read_text(encoding="utf-8")
-        ui = (ROOT / "services/frontend/core_v1/operator_dashboard_detection.py").read_text(encoding="utf-8")
-        self.assertIn("operator_dashboard_detection", main)
+        ui_path = ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py"
+        ui = ui_path.read_text(encoding="utf-8")
+        self.assertIn("operator_dashboard_mukammal", main)
         self.assertIn('"/health"', ui)
         self.assertIn('"/tracks"', ui)
-        self.assertIn("self.heat.hide()", ui)
-        self.assertIn("self.pose.hide()", ui)
+        self.assertIn("SmoothFrameReader", ui)
+        self.assertIn("class Header", ui)
+        self.assertIn("class SideBar", ui)
+        self.assertIn("class RightPanel", ui)
+        self.assertIn("class CameraCard", ui)
+        self.assertIn("index // 3, index % 3", ui)
+        self.assertIn("Face Recognition will be connected next", ui)
+        self.assertNotIn("class CameraSim", ui)
+        self.assertNotIn("class SimPerson", ui)
+        self.assertNotIn("random.uniform", ui)
+        self.assertNotIn("KNOWN =", ui)
+        self.assertNotIn("SplashScreen", ui)
+        self.assertNotIn("LoginScreen", ui)
+
+    def test_frontend_shares_one_mjpeg_reader_per_camera(self):
+        ui = (ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py").read_text(encoding="utf-8")
+        self.assertIn("class CameraFeed", ui)
+        self.assertIn("One persistent MJPEG connection shared", ui)
+        self.assertIn("hub.feeds[camera_id]", ui)
+        self.assertIn("feed.surfaces", ui)
+        self.assertNotIn("SmoothFrameReader(self.camera_id)", ui)
 
     def test_reid_uses_cross_domain_ain_and_room_consensus(self):
         reid = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))["core_v1"]["reid"]
