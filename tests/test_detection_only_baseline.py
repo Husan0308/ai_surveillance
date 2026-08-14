@@ -53,7 +53,9 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertIn("drop=true max-buffers=1", deepstream)
         self.assertIn("postdecode_queue_buffers", deepstream)
         self.assertIn("LatestFrameStore is one slot only", camera_worker)
-        self.assertIn("self._latest", latest_frame)
+        self.assertIn("self._frame", latest_frame)
+        self.assertNotIn("self._history", latest_frame)
+        self.assertNotIn("def get_frame", latest_frame)
 
     def test_detector_is_person_only_and_freshness_gated(self):
         detector = (ROOT / "services/ml_service/core_v1/detector.py").read_text(encoding="utf-8")
