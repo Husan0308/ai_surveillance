@@ -140,17 +140,28 @@ class FaceRecognitionTests(unittest.TestCase):
             self.assertEqual(person["samples"], 3)
             self.assertEqual(len(service.gallery.list_people()), 1)
 
-    def test_runtime_is_cpu_only_and_insightface_is_lazy_imported(self):
-        source = (
-            Path(__file__).resolve().parents[1]
-            / "services/ml_service/core_v1/face_service.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn('providers=["CPUExecutionProvider"]', source)
-        self.assertIn("ctx_id=-1", source)
+    def test_cuda_runtime_is_lazy_verified_and_keeps_cpu_fallback(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "services/ml_service/core_v1/face_service_cuda.py").read_text(encoding="utf-8")
+        base_source = (root / "services/ml_service/core_v1/face_service.py").read_text(encoding="utf-8")
+
+        self.assertIn("SafeFaceRecognitionService", source)
+        self.assertIn('requested_provider', source)
+        self.assertIn('CUDAExecutionProvider', source)
+        self.assertIn('CPUExecutionProvider', source)
+        self.assertIn('ort.get_available_providers()', source)
+        self.assertIn('session.get_providers', source)
+        self.assertIn('gpu_mem_limit', source)
+        self.assertIn('cudnn_conv_algo_search', source)
+        self.assertIn('import torch', source)
         self.assertIn("def _load_engine(self):", source)
         load_index = source.index("def _load_engine(self):")
-        import_index = source.index("from insightface.app import FaceAnalysis")
-        self.assertGreater(import_index, load_index)
+        ort_index = source.index("import onnxruntime as ort")
+        insightface_index = source.index("from insightface.app import FaceAnalysis")
+        self.assertGreater(ort_index, load_index)
+        self.assertGreater(insightface_index, load_index)
+        # The reusable base remains free of top-level InsightFace imports.
+        self.assertNotIn("from insightface.app import FaceAnalysis\n", base_source.split("class FaceRecognitionService", 1)[0])
 
 
 if __name__ == "__main__":
