@@ -6,7 +6,8 @@ import unittest
 
 import numpy as np
 
-from services.ml_service.core_v1.instant_reid import InstantGlobalReIdCoordinator
+from services.ml_service.core_v1.global_reid import TrackletState
+from services.ml_service.core_v1.instant_reid_safe import SafeInstantGlobalReIdCoordinator
 
 
 class _FakeEmbedder:
@@ -41,7 +42,7 @@ class InstantGlobalReIdTests(unittest.TestCase):
             ],
         }
         config.update(overrides)
-        return InstantGlobalReIdCoordinator(
+        return SafeInstantGlobalReIdCoordinator(
             {}, {}, config, Path("."), embedder=_FakeEmbedder()
         )
 
@@ -105,6 +106,29 @@ class InstantGlobalReIdTests(unittest.TestCase):
             reid.identity_for_track("CAM-06", 60001)["global_id"],
             reid.identity_for_track("CAM-06", 60002)["global_id"],
         )
+
+    def test_conflicting_camera_ownership_refuses_canonical_merge(self):
+        reid = self._coordinator()
+        now = time.monotonic()
+        reid.identity_for_track("CAM-03", 30001)
+        reid.identity_for_track("CAM-06", 60001)
+        a = reid._tracks[("CAM-03", 30001)]
+        b = reid._tracks[("CAM-06", 60001)]
+        reid._accept_embedding(a, np.asarray([1.0, 0.0], dtype=np.float32), 0.9, now)
+        reid._accept_embedding(b, np.asarray([0.0, 1.0], dtype=np.float32), 0.9, now + 0.05)
+        gid_a = reid._canonical_gid(a.global_id)
+        gid_b = reid._canonical_gid(b.global_id)
+        self.assertNotEqual(gid_a, gid_b)
+
+        # Simulate a second active CAM-03 track already owning gid_b. A merge of
+        # gid_a and gid_b must be rejected because CAM-03 would then have two
+        # people with the same Global ID.
+        conflict = TrackletState("CAM-03", 30002, last_seen=now + 0.05, global_id=gid_b)
+        reid._tracks[("CAM-03", 30002)] = conflict
+        merged = reid._merge_global_ids(gid_a, gid_b, now + 0.06, 0.99)
+        self.assertIsNone(merged)
+        self.assertEqual(reid._canonical_gid(a.global_id), gid_a)
+        self.assertEqual(reid._canonical_gid(b.global_id), gid_b)
 
     def test_metrics_expose_instant_and_pair_reconcile_counters(self):
         metrics = self._coordinator().metrics()
