@@ -1,9 +1,9 @@
-name: Detection + tracking + instant ReID + smooth camera smoke tests
+name: Detection + tracking + room-consensus ReID + smooth camera smoke tests
 
 on:
   push:
     branches:
-      - "agent/instant-global-id-pair-reconcile"
+      - "agent/reid-room-consensus-v2"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -25,7 +25,7 @@ jobs:
       - name: Install smoke-test dependencies
         run: python -m pip install --upgrade pip numpy opencv-python-headless psutil pyyaml
 
-      - name: Compile detection + tracking + instant ReID + camera runtime modules
+      - name: Compile detection + tracking + ReID + camera runtime modules
         run: |
           python -m py_compile \
             services/ml_service/core_v1/__init__.py \
@@ -43,6 +43,7 @@ jobs:
             services/ml_service/core_v1/conservative_reid.py \
             services/ml_service/core_v1/instant_reid.py \
             services/ml_service/core_v1/instant_reid_safe.py \
+            services/ml_service/core_v1/room_consensus_reid.py \
             services/ml_service/core_v1/jpeg_publisher.py \
             services/ml_service/core_v1/event_publisher.py \
             services/ml_service/core_v1/tracking_publisher.py \
@@ -75,8 +76,11 @@ jobs:
       - name: Test conservative Global ID rules
         run: python -m unittest discover -s tests -p "test_global_reid.py" -v
 
-      - name: Test instant paired-camera Global IDs
+      - name: Test instant Global ID fallback rules
         run: python -m unittest discover -s tests -p "test_instant_global_reid.py" -v
+
+      - name: Test room-pair Global ID consensus
+        run: python -m unittest discover -s tests -p "test_room_consensus_reid.py" -v
 
       - name: Test smooth camera pipeline
         run: python -m unittest discover -s tests -p "test_camera_smoothness.py" -v
