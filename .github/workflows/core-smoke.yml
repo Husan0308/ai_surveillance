@@ -1,9 +1,9 @@
-name: Detection + tracking + ReID + CPU face + MUKAMMAL UI smoke tests
+name: Detection + tracking + ReID + CUDA face + MUKAMMAL UI smoke tests
 
 on:
   push:
     branches:
-      - "agent/face-recognition-v1"
+      - "agent/face-cuda-v1"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -25,7 +25,7 @@ jobs:
       - name: Install smoke-test dependencies
         run: python -m pip install --upgrade pip numpy opencv-python-headless psutil pyyaml
 
-      - name: Compile detection + tracking + ReID + face + camera runtime modules
+      - name: Compile detection + tracking + ReID + CUDA face + camera runtime modules
         run: |
           python -m py_compile \
             services/ml_service/core_v1/__init__.py \
@@ -46,6 +46,7 @@ jobs:
             services/ml_service/core_v1/room_consensus_reid.py \
             services/ml_service/core_v1/face_service.py \
             services/ml_service/core_v1/face_service_safe.py \
+            services/ml_service/core_v1/face_service_cuda.py \
             services/ml_service/core_v1/jpeg_publisher.py \
             services/ml_service/core_v1/event_publisher.py \
             services/ml_service/core_v1/tracking_publisher.py \
@@ -57,7 +58,8 @@ jobs:
             services/frontend/core_v1/dashboard.py \
             services/frontend/core_v1/smooth_frame_reader.py \
             services/frontend/core_v1/operator_dashboard_mukammal.py \
-            services/frontend/core_v1/operator_dashboard_face.py
+            services/frontend/core_v1/operator_dashboard_face.py \
+            services/frontend/core_v1/operator_dashboard_face_cuda.py
 
       - name: Test detector model resolution
         run: python -m unittest discover -s tests -p "test_stable_detector.py" -v
@@ -83,7 +85,7 @@ jobs:
       - name: Test room-pair Global ID consensus
         run: python -m unittest discover -s tests -p "test_room_consensus_reid.py" -v
 
-      - name: Test CPU face recognition and enrollment
+      - name: Test CUDA face recognition and enrollment guards
         run: python -m unittest discover -s tests -p "test_face_recognition.py" -v
 
       - name: Test smooth camera pipeline
@@ -92,5 +94,5 @@ jobs:
       - name: Test event-driven publisher
         run: python -m unittest discover -s tests -p "test_event_driven_publisher.py" -v
 
-      - name: Test runtime architecture and MUKAMMAL face UI guards
+      - name: Test runtime architecture and MUKAMMAL CUDA face UI guards
         run: python -m unittest discover -s tests -p "test_detection_only_baseline.py" -v
