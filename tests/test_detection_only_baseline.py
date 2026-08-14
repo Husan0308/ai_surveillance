@@ -9,14 +9,17 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class DetectionOnlyBaselineTests(unittest.TestCase):
-    def test_config_contains_only_camera_detector_and_local_tracker(self):
+class DetectionTrackingReidBaselineTests(unittest.TestCase):
+    def test_config_keeps_pose_and_heatmap_removed_but_enables_reid_sidepath(self):
         payload = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))
         core = payload["core_v1"]
-        self.assertEqual(core["profile"], "detection-tracking-smooth-v3")
+        self.assertEqual(core["profile"], "detection-tracking-reid-smooth-v4")
         self.assertIn("detector", core)
         self.assertIn("visual_tracker", core)
-        for forbidden in ("pose", "heatmap", "reid"):
+        self.assertIn("reid", core)
+        self.assertTrue(bool(core["reid"]["enabled"]))
+        self.assertEqual(str(core["reid"]["device"]), "cpu")
+        for forbidden in ("pose", "heatmap"):
             self.assertNotIn(forbidden, core)
 
         tracker = core["visual_tracker"]
@@ -39,7 +42,7 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertEqual(int(core["capture_output_width"]), width)
         self.assertEqual(int(core["capture_output_height"]), height)
 
-    def test_optional_model_modules_are_removed(self):
+    def test_pose_heatmap_and_legacy_reid_modules_stay_removed(self):
         forbidden = [
             "services/ml_service/core_v1/global_identity.py",
             "services/ml_service/core_v1/reid_service.py",
@@ -55,25 +58,22 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         ]
         for relative in forbidden:
             self.assertFalse((ROOT / relative).exists(), relative)
+        self.assertTrue((ROOT / "services/ml_service/core_v1/global_reid.py").exists())
+        self.assertTrue((ROOT / "services/ml_service/core_v1/reid_embedder.py").exists())
 
-    def test_api_surface_is_detection_and_local_tracking_only(self):
+    def test_api_surface_keeps_detection_and_adds_only_reid(self):
         source = (ROOT / "services/ml_service/core_v1/app.py").read_text(encoding="utf-8")
         for required in (
             '@app.get("/health")',
             '@app.get("/detections")',
             '@app.get("/tracks")',
+            '@app.get("/reid")',
             '@app.get("/frame/{camera_id}")',
         ):
             self.assertIn(required, source)
-        for forbidden in ("/poses", "/heatmap", "/reid", "/room-mapping", "/overlays"):
+        for forbidden in ("/poses", "/heatmap", "/room-mapping", "/overlays"):
             self.assertNotIn(forbidden, source)
-        for forbidden_import in (
-            "reid_service",
-            "spatial_calibration",
-            "services.ml_service.pose",
-            "services.ml_service.heatmap",
-        ):
-            self.assertNotIn(forbidden_import, source)
+        self.assertIn("GlobalReIdCoordinator", source)
         self.assertIn("TrackingJpegPublisher", source)
 
     def test_capture_pipeline_is_latest_only(self):
@@ -96,7 +96,7 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertLessEqual(float(config["max_result_age_ms"]), 700.0)
         self.assertFalse(bool(config["roi_second_pass"]["enabled"]))
 
-    def test_frontend_reads_tracks_without_optional_analytics(self):
+    def test_frontend_remains_free_of_pose_and_heatmap_dependencies(self):
         main = (ROOT / "services/frontend/core_v1/main.py").read_text(encoding="utf-8")
         ui = (ROOT / "services/frontend/core_v1/operator_dashboard_detection.py").read_text(encoding="utf-8")
         self.assertIn("operator_dashboard_detection", main)
@@ -105,12 +105,22 @@ class DetectionOnlyBaselineTests(unittest.TestCase):
         self.assertIn('"/tracks"', ui)
         self.assertIn("self.heat.hide()", ui)
         self.assertIn("self.pose.hide()", ui)
-        self.assertNotIn('"/reid"', ui)
 
-    def test_tracking_publisher_uses_ownership_lock(self):
+    def test_reid_is_cpu_sidepath_and_checkpoint_is_pinned(self):
+        core = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))["core_v1"]
+        reid = core["reid"]
+        self.assertEqual(reid["device"], "cpu")
+        self.assertEqual(reid["model_name"], "osnet_x0_25")
+        self.assertEqual(len(str(reid["model_sha256"])), 64)
+        self.assertGreaterEqual(int(reid["min_samples"]), 3)
+        self.assertGreater(float(reid["strong_similarity"]), float(reid["match_similarity"]))
+        self.assertGreater(float(reid["prototype_update_similarity"]), float(reid["same_group_similarity"]))
+
+    def test_tracking_publisher_keeps_local_ownership_lock(self):
         source = (ROOT / "services/ml_service/core_v1/tracking_publisher.py").read_text(encoding="utf-8")
         ownership = (ROOT / "services/ml_service/core_v1/ownership_tracker.py").read_text(encoding="utf-8")
         self.assertIn("OwnershipLockedTracker", source)
+        self.assertIn("identity_provider.identity_for_track", source)
         self.assertIn("ownership_quarantine", ownership)
         self.assertIn("id_namespace_base", ownership)
 
