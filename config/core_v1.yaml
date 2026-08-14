@@ -188,9 +188,13 @@ core_v1:
     gpu_mem_limit_mb: 768
     cuda_cudnn_conv_algo_search: "HEURISTIC"
     # buffalo_m keeps the same ResNet50 recognition accuracy as buffalo_l but
-    # uses the much lighter RetinaFace-2.5GF detector instead of RetinaFace-10GF.
+    # uses the much lighter SCRFD-2.5GF detector. InsightFace does not mark this
+    # pack Auto=Y, so provision the official v0.7 release asset ourselves.
     model_pack: "buffalo_m"
     model_root: "models/insightface"
+    model_url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_m.zip"
+    model_sha256: "d98264bd8f2dc75cbc2ddce2a14e636e02bb857b3051c234b737bf3b614edca9"
+    download_if_missing: true
     data_dir: "data/faces"
     db_path: "data/face_db.json"
     det_size: 320
