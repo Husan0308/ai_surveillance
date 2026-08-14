@@ -36,6 +36,8 @@ def _gpu_process_metrics(pid: int):
         "gpu_device_memory_used_mb": None,
         "gpu_device_memory_total_mb": None,
         "gpu_utilization_percent": None,
+        "gpu_decoder_utilization_percent": None,
+        "gpu_encoder_utilization_percent": None,
         "gpu_temperature_c": None,
     }
     if not _ensure_nvml():
@@ -73,8 +75,22 @@ def _gpu_process_metrics(pid: int):
                 "gpu_device_memory_total_mb": int(memory.total) / (1024.0 * 1024.0),
                 "gpu_utilization_percent": int(utilization.gpu),
             })
+            for getter_name, key in (
+                ("nvmlDeviceGetDecoderUtilization", "gpu_decoder_utilization_percent"),
+                ("nvmlDeviceGetEncoderUtilization", "gpu_encoder_utilization_percent"),
+            ):
+                getter = getattr(pynvml, getter_name, None)
+                if getter is None:
+                    continue
+                try:
+                    value = getter(handle)
+                    result[key] = int(value[0] if isinstance(value, tuple) else value)
+                except Exception:
+                    pass
             try:
-                result["gpu_temperature_c"] = int(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+                result["gpu_temperature_c"] = int(
+                    pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                )
             except Exception:
                 pass
             return result
