@@ -97,7 +97,9 @@ core_v1:
     measurement_noise: 0.90
     velocity_damping: 0.96
     size_velocity_damping: 0.60
-    max_prediction_shift_boxes: 0.55
+    # Measured detector-to-display age is about 0.30–0.34 s. 0.68 keeps a
+    # walking box current without removing the hard stop/reversal bound.
+    max_prediction_shift_boxes: 0.68
     max_prediction_size_ratio: 0.08
     adaptive_error_low: 0.08
     adaptive_error_high: 0.25
