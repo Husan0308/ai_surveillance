@@ -1,9 +1,9 @@
-name: Detection + tracking + room-consensus ReID + MUKAMMAL UI smoke tests
+name: Detection + tracking + ReID + CPU face + MUKAMMAL UI smoke tests
 
 on:
   push:
     branches:
-      - "agent/mukammal-ui-only"
+      - "agent/face-recognition-v1"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -25,7 +25,7 @@ jobs:
       - name: Install smoke-test dependencies
         run: python -m pip install --upgrade pip numpy opencv-python-headless psutil pyyaml
 
-      - name: Compile detection + tracking + ReID + camera runtime modules
+      - name: Compile detection + tracking + ReID + face + camera runtime modules
         run: |
           python -m py_compile \
             services/ml_service/core_v1/__init__.py \
@@ -44,6 +44,8 @@ jobs:
             services/ml_service/core_v1/instant_reid.py \
             services/ml_service/core_v1/instant_reid_safe.py \
             services/ml_service/core_v1/room_consensus_reid.py \
+            services/ml_service/core_v1/face_service.py \
+            services/ml_service/core_v1/face_service_safe.py \
             services/ml_service/core_v1/jpeg_publisher.py \
             services/ml_service/core_v1/event_publisher.py \
             services/ml_service/core_v1/tracking_publisher.py \
@@ -54,7 +56,8 @@ jobs:
             services/frontend/core_v1/main.py \
             services/frontend/core_v1/dashboard.py \
             services/frontend/core_v1/smooth_frame_reader.py \
-            services/frontend/core_v1/operator_dashboard_mukammal.py
+            services/frontend/core_v1/operator_dashboard_mukammal.py \
+            services/frontend/core_v1/operator_dashboard_face.py
 
       - name: Test detector model resolution
         run: python -m unittest discover -s tests -p "test_stable_detector.py" -v
@@ -80,11 +83,14 @@ jobs:
       - name: Test room-pair Global ID consensus
         run: python -m unittest discover -s tests -p "test_room_consensus_reid.py" -v
 
+      - name: Test CPU face recognition and enrollment
+        run: python -m unittest discover -s tests -p "test_face_recognition.py" -v
+
       - name: Test smooth camera pipeline
         run: python -m unittest discover -s tests -p "test_camera_smoothness.py" -v
 
       - name: Test event-driven publisher
         run: python -m unittest discover -s tests -p "test_event_driven_publisher.py" -v
 
-      - name: Test runtime architecture and MUKAMMAL UI guards
+      - name: Test runtime architecture and MUKAMMAL face UI guards
         run: python -m unittest discover -s tests -p "test_detection_only_baseline.py" -v
