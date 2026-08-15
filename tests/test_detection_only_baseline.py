@@ -49,7 +49,7 @@ class SimpleDetectionArchitectureTests(unittest.TestCase):
         self.assertIn('"source_h":int(frame.height)', detector)
         self.assertIn("_map_full_boxes", detector)
 
-    def test_default_frontend_is_changed-frame_only_mmap_wall(self):
+    def test_default_frontend_is_changed_frame_only_mmap_wall(self):
         main = (ROOT / "services/frontend/core_v1/main.py").read_text(encoding="utf-8")
         wall = (ROOT / "services/frontend/core_v1/simple_detection_wall.py").read_text(encoding="utf-8")
         reader = (ROOT / "services/frontend/core_v1/mmap_frame_reader.py").read_text(encoding="utf-8")
