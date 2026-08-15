@@ -107,6 +107,9 @@ class NativeMetaBridge:
 
         self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_count_tracked.restype = ctypes.c_int
+
+        self.lib.camera_v2_shadow_promoted_total.argtypes = []
+        self.lib.camera_v2_shadow_promoted_total.restype = ctypes.c_uint64
         self.path = path
 
     @staticmethod
@@ -159,6 +162,9 @@ class NativeMetaBridge:
                 ctypes.c_uint64(hash(gst_buffer))
             )
         )
+
+    def shadow_promoted_total(self) -> int:
+        return int(self.lib.camera_v2_shadow_promoted_total())
 
     def count_tracked(self, gst_buffer) -> int:
         return int(self.lib.camera_v2_count_tracked(ctypes.c_uint64(hash(gst_buffer))))
