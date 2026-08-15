@@ -127,12 +127,13 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
         self.assertLessEqual(float(config["max_result_age_ms"]), 700.0)
         self.assertFalse(bool(config["roi_second_pass"]["enabled"]))
 
-    def test_frontend_keeps_mukammal_face_ui_and_adds_cuda_runtime_adapter(self):
+    def test_frontend_keeps_mukammal_cuda_face_and_adds_worker_roster_adapter(self):
         main = (ROOT / "services/frontend/core_v1/main.py").read_text(encoding="utf-8")
         base_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py").read_text(encoding="utf-8")
         face_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_face.py").read_text(encoding="utf-8")
         cuda_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_face_cuda.py").read_text(encoding="utf-8")
-        self.assertIn("operator_dashboard_face_cuda", main)
+        roster_ui = (ROOT / "services/frontend/core_v1/operator_dashboard_people_roster.py").read_text(encoding="utf-8")
+        self.assertIn("operator_dashboard_people_roster", main)
         self.assertIn("class Header", base_ui)
         self.assertIn("class SideBar", base_ui)
         self.assertIn("class CameraCard", base_ui)
@@ -141,12 +142,13 @@ class DetectionTrackingReidBaselineTests(unittest.TestCase):
         self.assertNotIn("class SimPerson", base_ui)
         self.assertNotIn("random.uniform", base_ui)
         self.assertIn('"/faces"', face_ui)
-        self.assertIn("class PersonManagementPage", face_ui)
-        self.assertIn("class EnrollmentPage", face_ui)
-        self.assertIn("Capture 10 samples", face_ui)
         self.assertIn("InsightFace buffalo_m", cuda_ui)
         self.assertIn("CUDAExecutionProvider", cuda_ui)
         self.assertIn("768 MB ORT arena cap", cuda_ui)
+        self.assertIn("class WorkerRosterPage", roster_ui)
+        self.assertIn("class WorkerEnrollmentDialog", roster_ui)
+        self.assertIn("MAX_WORKERS = 10", roster_ui)
+        self.assertIn("return cuda.run()", roster_ui)
 
     def test_frontend_shares_one_mjpeg_reader_per_camera(self):
         ui = (ROOT / "services/frontend/core_v1/operator_dashboard_mukammal.py").read_text(encoding="utf-8")
