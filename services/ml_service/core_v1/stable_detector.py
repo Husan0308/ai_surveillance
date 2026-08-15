@@ -31,6 +31,9 @@ class StableYoloDetectorWorker(YoloDetectorWorker):
                 self.model_source,
             )
         self._same_size_prepare_skips = 0
+        self._min_submit_interval = max(0.0, float(config.get("min_submit_interval_ms", 0.0)) / 1000.0)
+        self._next_submit_monotonic = 0.0
+        self._submit_throttle_skips = 0
 
     def _spawn_process(self):
         self._input_queue = self._ctx.Queue(maxsize=1)
@@ -87,6 +90,17 @@ class StableYoloDetectorWorker(YoloDetectorWorker):
             self._last_prepare_ms = (time.perf_counter() - started) * 1000.0
         return entries
 
+    def _submit_if_idle(self):
+        if self._min_submit_interval > 0.0:
+            now = time.monotonic()
+            if now < self._next_submit_monotonic:
+                self._submit_throttle_skips += 1
+                return
+        before = self._inflight_batch_id
+        super()._submit_if_idle()
+        if before is None and self._inflight_batch_id is not None and self._min_submit_interval > 0.0:
+            self._next_submit_monotonic = time.monotonic() + self._min_submit_interval
+
     def metrics(self):
         payload = super().metrics()
         payload.update(
@@ -97,6 +111,8 @@ class StableYoloDetectorWorker(YoloDetectorWorker):
                 "cuda_topology": "detector_only_spawned_process",
                 "pose_in_hot_path": False,
                 "same_size_prepare_skips": self._same_size_prepare_skips,
+                "min_submit_interval_ms": self._min_submit_interval * 1000.0,
+                "submit_throttle_skips": self._submit_throttle_skips,
             }
         )
         return payload
