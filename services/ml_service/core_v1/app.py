@@ -11,12 +11,9 @@ from pydantic import BaseModel
 
 from shared.config import camera_config
 
-from .face_service_cuda import CudaFaceRecognitionService
+from .camera_only_publisher import CameraOnlyJpegPublisher
 from .manager import CameraManager
-from .room_consensus_reid import RoomConsensusGlobalReIdCoordinator
 from .runtime_metrics import process_metrics
-from .stable_detector import StableYoloDetectorWorker
-from .tracking_publisher import TrackingJpegPublisher
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -52,45 +49,60 @@ visual_cfg = dict(core_cfg.get("visual_tracker") or {})
 reid_cfg = dict(core_cfg.get("reid") or {})
 face_cfg = dict(core_cfg.get("face") or {})
 
-detector = (
-    StableYoloDetectorWorker(manager.stores, detector_cfg, ROOT)
-    if bool(detector_cfg.get("enabled", True))
-    else None
-)
+# AI modules are imported only when explicitly enabled. Camera-only mode must
+# not initialize PyTorch, ReID or InsightFace/CUDA runtimes as a side effect.
+detector = None
+if bool(detector_cfg.get("enabled", False)):
+    from .stable_detector import StableYoloDetectorWorker
 
-publishers = {
-    cid: TrackingJpegPublisher(
-        cid,
-        store,
-        core_cfg.get("display_fps", 15),
-        core_cfg.get("jpeg_quality", 72),
-        core_cfg.get("max_display_width", 640),
-        core_cfg.get("max_display_height", 360),
-        detections=(detector.results if detector else None),
-        overlay_max_age_ms=detector_cfg.get("overlay_max_age_ms", 700),
-        tracker_config=visual_cfg,
-        identity_provider=None,
-    )
-    for cid, store in manager.stores.items()
-}
+    detector = StableYoloDetectorWorker(manager.stores, detector_cfg, ROOT)
 
-reid = (
-    RoomConsensusGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
-    if bool(reid_cfg.get("enabled", False))
-    else None
-)
+if detector is None:
+    publishers = {
+        cid: CameraOnlyJpegPublisher(
+            cid,
+            store,
+            core_cfg.get("display_fps", 20),
+            core_cfg.get("jpeg_quality", 70),
+        )
+        for cid, store in manager.stores.items()
+    }
+else:
+    from .tracking_publisher import TrackingJpegPublisher
 
-face = (
-    CudaFaceRecognitionService(
+    publishers = {
+        cid: TrackingJpegPublisher(
+            cid,
+            store,
+            core_cfg.get("display_fps", 15),
+            core_cfg.get("jpeg_quality", 72),
+            core_cfg.get("max_display_width", 640),
+            core_cfg.get("max_display_height", 360),
+            detections=detector.results,
+            overlay_max_age_ms=detector_cfg.get("overlay_max_age_ms", 700),
+            tracker_config=visual_cfg,
+            identity_provider=None,
+        )
+        for cid, store in manager.stores.items()
+    }
+
+reid = None
+if detector is not None and bool(reid_cfg.get("enabled", False)):
+    from .room_consensus_reid import RoomConsensusGlobalReIdCoordinator
+
+    reid = RoomConsensusGlobalReIdCoordinator(manager.stores, publishers, reid_cfg, ROOT)
+
+face = None
+if detector is not None and bool(face_cfg.get("enabled", False)):
+    from .face_service_cuda import CudaFaceRecognitionService
+
+    face = CudaFaceRecognitionService(
         manager.stores,
         publishers,
         face_cfg,
         ROOT,
         base_identity=reid,
     )
-    if bool(face_cfg.get("enabled", False))
-    else None
-)
 
 identity_provider = face or reid
 if identity_provider is not None:
@@ -98,14 +110,14 @@ if identity_provider is not None:
         publisher.identity_provider = identity_provider
 
 app = FastAPI(
-    title="AI Surveillance Detection + Tracking + ReID + CUDA Face Core",
-    version="1.6-face-cuda",
+    title="AI Surveillance Core",
+    version="1.7-camera-deepstream-baseline",
 )
 
 
 def _mode() -> str:
     if detector is None:
-        return "camera-only"
+        return "camera-only-deepstream"
     parts = ["camera", "yolo-detect", "local-track"]
     if reid is not None:
         parts.append("room-consensus-reid")
@@ -164,7 +176,7 @@ def health():
     return {
         "status": "ok" if detector_ready or detector is None else "degraded",
         "mode": _mode(),
-        "profile": str(core_cfg.get("profile", "detection-tracking-v1")),
+        "profile": str(core_cfg.get("profile", "camera-deepstream-baseline-v1")),
         "cameras": camera_metrics,
         "online": sum(bool(value.get("online")) for value in camera_metrics.values()),
         "total": len(camera_metrics),
@@ -206,6 +218,16 @@ def detections():
 
 @app.get("/tracks")
 def tracks():
+    if detector is None:
+        return {
+            "enabled": False,
+            "scope": "camera-only",
+            "cross_camera_identity": False,
+            "known_identity": False,
+            "total": 0,
+            "cameras": {cid: {"count": 0, "tracks": []} for cid in publishers},
+        }
+
     cameras_payload = {}
     total = 0
     for camera_id, publisher in publishers.items():
