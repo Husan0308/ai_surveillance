@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
 import sys
 import time
+
+# When this file is executed as `python scripts/probe_cameras.py`, Python puts
+# the scripts/ directory on sys.path, not the repository root. Add the project
+# root explicitly so `services.*` imports work from a fresh clone without
+# requiring a global PYTHONPATH setting.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from services.ml_service.app.config import load_settings
 from services.ml_service.app.deepstream.capture import DeepStreamCapture
@@ -12,6 +21,7 @@ def main() -> int:
     failures = 0
 
     print("=== RTSP/NVDEC one-frame probe ===", flush=True)
+    print(f"project_root={PROJECT_ROOT}", flush=True)
     print("Each camera is tested sequentially so the NVR is not connection-stormed.\n", flush=True)
 
     for camera in settings.cameras:
