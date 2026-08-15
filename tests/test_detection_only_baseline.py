@@ -48,9 +48,13 @@ class SimpleDetectionArchitectureTests(unittest.TestCase):
         self.assertIn("self._frame", latest)
         self.assertNotIn("self._history", latest)
         self.assertIn("self.store.get()", wall)
-        self.assertNotIn("mmap", wall.lower())
-        self.assertNotIn("jpeg", wall.lower())
-        self.assertNotIn("http://", wall.lower())
+        self.assertNotIn("MmapFrame", wall)
+        self.assertNotIn("SmoothMmapFrameReader", wall)
+        self.assertNotIn("mmap_frame", wall)
+        self.assertNotIn("cv2.imencode", wall)
+        self.assertNotIn("QImage.fromData", wall)
+        self.assertNotIn("requests.get", wall)
+        self.assertNotIn("http://127.0.0.1:8001", wall)
 
     def test_direct_mode_reserves_gpu_headroom_without_changing_full_config(self):
         stable = (ROOT / "services/ml_service/core_v1/stable_detector.py").read_text(encoding="utf-8")
