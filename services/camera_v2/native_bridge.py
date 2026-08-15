@@ -45,11 +45,13 @@ def ensure_bridge() -> Path:
     if not gcc or not pkg:
         raise RuntimeError("gcc and pkg-config are required to build the DeepStream metadata bridge")
 
-    pkg_flags = subprocess.check_output(
-        [pkg, "--cflags", "--libs", "gstreamer-1.0", "glib-2.0"],
-        text=True,
-    ).strip()
-    cmd = [
+    pkg_flags = shlex.split(
+        subprocess.check_output(
+            [pkg, "--cflags", "--libs", "gstreamer-1.0", "glib-2.0"],
+            text=True,
+        ).strip()
+    )
+    common = [
         gcc,
         "-shared",
         "-fPIC",
@@ -60,16 +62,23 @@ def ensure_bridge() -> Path:
         str(LIB_PATH),
         f"-I{include_dir}",
         f"-L{lib_dir}",
-        "-lnvds_meta",
-        "-lnvdsgst_meta",
         f"-Wl,-rpath,{lib_dir}",
-        *shlex.split(pkg_flags),
+        *pkg_flags,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "unknown compiler error").strip()
-        raise RuntimeError(f"metadata bridge compile failed: {detail}")
-    return LIB_PATH
+
+    attempts = [
+        ["-lnvds_meta", "-lnvdsgst_meta"],
+        ["-lnvds_meta"],
+        ["-lnvdsgst_meta", "-lnvds_meta"],
+    ]
+    errors: list[str] = []
+    for libs in attempts:
+        result = subprocess.run([*common, *libs], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and LIB_PATH.exists():
+            return LIB_PATH
+        errors.append((result.stderr or result.stdout or "unknown compiler error").strip())
+
+    raise RuntimeError("metadata bridge compile failed: " + " | ".join(errors[-2:]))
 
 
 class NativeMetaBridge:
