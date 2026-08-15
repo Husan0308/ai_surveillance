@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("native_meta_bridge.c")
+SMOOTHER_SOURCE = Path(__file__).with_name("native_display_smoother.c")
 BUILD_DIR = ROOT / ".runtime" / "camera_v2"
 LIB_PATH = BUILD_DIR / "libcamera_v2_meta.so"
 
@@ -29,14 +30,17 @@ def _deepstream_root() -> Path:
 
 
 def ensure_bridge() -> Path:
-    if not SOURCE.exists():
-        raise RuntimeError(f"metadata bridge source missing: {SOURCE}")
+    for src in (SOURCE, SMOOTHER_SOURCE):
+        if not src.exists():
+            raise RuntimeError(f"metadata bridge source missing: {src}")
+
     ds = _deepstream_root()
     include_dir = ds / "sources/includes"
     lib_dir = ds / "lib"
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
-    rebuild = not LIB_PATH.exists() or LIB_PATH.stat().st_mtime < SOURCE.stat().st_mtime
+    newest_source_mtime = max(SOURCE.stat().st_mtime, SMOOTHER_SOURCE.stat().st_mtime)
+    rebuild = not LIB_PATH.exists() or LIB_PATH.stat().st_mtime < newest_source_mtime
     if not rebuild:
         return LIB_PATH
 
@@ -58,6 +62,7 @@ def ensure_bridge() -> Path:
         "-O2",
         "-std=c11",
         str(SOURCE),
+        str(SMOOTHER_SOURCE),
         "-o",
         str(LIB_PATH),
         f"-I{include_dir}",
@@ -104,6 +109,9 @@ class NativeMetaBridge:
 
         self.lib.camera_v2_style_and_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_style_and_count_tracked.restype = ctypes.c_int
+
+        self.lib.camera_v2_smooth_display_boxes.argtypes = [ctypes.c_uint64]
+        self.lib.camera_v2_smooth_display_boxes.restype = ctypes.c_int
 
         self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_count_tracked.restype = ctypes.c_int
@@ -157,11 +165,13 @@ class NativeMetaBridge:
         )
 
     def style_and_count_tracked(self, gst_buffer) -> int:
-        return int(
-            self.lib.camera_v2_style_and_count_tracked(
-                ctypes.c_uint64(hash(gst_buffer))
-            )
-        )
+        buffer_ptr = ctypes.c_uint64(hash(gst_buffer))
+        count = int(self.lib.camera_v2_style_and_count_tracked(buffer_ptr))
+        if count >= 0:
+            # Final display-only pass: interpolate active/shadow/fallback rectangles.
+            # It never feeds modified coordinates back into NvDCF.
+            self.lib.camera_v2_smooth_display_boxes(buffer_ptr)
+        return count
 
     def shadow_promoted_total(self) -> int:
         return int(self.lib.camera_v2_shadow_promoted_total())
