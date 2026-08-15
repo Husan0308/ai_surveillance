@@ -3,28 +3,39 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import Qt, QTimer, QRect
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtWidgets import QApplication, QGridLayout, QMainWindow, QWidget
 
-from .smooth_frame_reader import SmoothFrameReader
+from .mmap_frame_reader import SmoothMmapFrameReader
 
 
 CAMERA_IDS = [f"CAM-{index:02d}" for index in range(1, 7)]
 
 
 class CameraTile(QWidget):
-    def __init__(self, camera_id: str, reader: SmoothFrameReader):
+    def __init__(self, camera_id: str, reader: SmoothMmapFrameReader):
         super().__init__()
         self.camera_id = camera_id
         self.reader = reader
+        self._image: QImage | None = None
+        self._last_version = -1
         self.setMinimumSize(320, 180)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+
+    def refresh_if_new(self):
+        image, version = self.reader.latest()
+        if version == self._last_version or image is None or image.isNull():
+            return
+        self._last_version = version
+        self._image = image
+        self.update()
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#000000"))
 
-        image, _version = self.reader.latest()
+        image = self._image
         if image is not None and not image.isNull():
             source_w = max(1, image.width())
             source_h = max(1, image.height())
@@ -35,11 +46,10 @@ class CameraTile(QWidget):
             draw_h = max(1, round(source_h * scale))
             x = (target_w - draw_w) // 2
             y = (target_h - draw_h) // 2
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            # Deliberately keep SmoothPixmapTransform OFF. Simple QPainter
+            # scaling is materially cheaper for six continuously changing feeds.
             painter.drawImage(QRect(x, y, draw_w, draw_h), image)
 
-        # Only a tiny camera label; detection boxes/text are already baked into
-        # the MJPEG frame by the ML publisher. No dashboard chrome is drawn.
         painter.fillRect(8, 8, 74, 24, QColor(0, 0, 0, 150))
         painter.setPen(QColor("#ffffff"))
         font = QFont()
@@ -53,9 +63,9 @@ class CameraTile(QWidget):
 class SimpleDetectionWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AI Surveillance — Cameras + Detection")
+        self.setWindowTitle("AI Surveillance — Smooth Cameras + Detection")
         self.setStyleSheet("background:#000;")
-        self.readers = {camera_id: SmoothFrameReader(camera_id) for camera_id in CAMERA_IDS}
+        self.readers = {camera_id: SmoothMmapFrameReader(camera_id) for camera_id in CAMERA_IDS}
         for reader in self.readers.values():
             reader.start()
 
@@ -78,12 +88,15 @@ class SimpleDetectionWindow(QMainWindow):
 
         self.setCentralWidget(body)
         self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._render)
-        self.timer.start(33)
+        # Poll faster than the 20 FPS source so a newly committed mmap frame is
+        # picked up within one short UI tick, but repaint only changed cameras.
+        self.timer.start(12)
 
     def _render(self):
         for tile in self.tiles:
-            tile.update()
+            tile.refresh_if_new()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and self.isFullScreen():
@@ -103,7 +116,7 @@ class SimpleDetectionWindow(QMainWindow):
 
 def run():
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("AI Surveillance Simple Detection")
+    app.setApplicationName("AI Surveillance Smooth Detection")
     window = SimpleDetectionWindow()
     window.showMaximized()
     return app.exec()

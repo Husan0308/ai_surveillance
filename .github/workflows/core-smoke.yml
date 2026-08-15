@@ -1,12 +1,14 @@
-name: Detection + tracking + ReID + CUDA face + MUKAMMAL UI smoke tests
+name: Detection + tracking + ReID + CUDA face + camera runtime smoke tests
 
 on:
   push:
     branches:
       - "main"
       - "agent/people-roster-v1"
+      - "agent/smooth-camera-mmap"
   pull_request:
     paths:
+      - "shared/**"
       - "services/ml_service/**"
       - "services/frontend/core_v1/**"
       - "config/core_v1.yaml"
@@ -26,11 +28,13 @@ jobs:
       - name: Install smoke-test dependencies
         run: python -m pip install --upgrade pip numpy opencv-python-headless psutil pyyaml
 
-      - name: Compile detection + tracking + ReID + CUDA face + camera runtime modules
+      - name: Compile camera, detection, identity and UI runtime modules
         run: |
           python -m py_compile \
+            shared/mmap_frame.py \
             services/ml_service/core_v1/__init__.py \
             services/ml_service/core_v1/app.py \
+            services/ml_service/core_v1/simple_app.py \
             services/ml_service/core_v1/camera_worker.py \
             services/ml_service/core_v1/latest_frame.py \
             services/ml_service/core_v1/manager.py \
@@ -50,6 +54,7 @@ jobs:
             services/ml_service/core_v1/face_service_cuda.py \
             services/ml_service/core_v1/jpeg_publisher.py \
             services/ml_service/core_v1/event_publisher.py \
+            services/ml_service/core_v1/mmap_publisher.py \
             services/ml_service/core_v1/tracking_publisher.py \
             services/ml_service/core_v1/runtime_metrics.py \
             services/ml_service/cameras/deepstream.py \
@@ -58,6 +63,8 @@ jobs:
             services/frontend/core_v1/main.py \
             services/frontend/core_v1/dashboard.py \
             services/frontend/core_v1/smooth_frame_reader.py \
+            services/frontend/core_v1/mmap_frame_reader.py \
+            services/frontend/core_v1/simple_detection_wall.py \
             services/frontend/core_v1/operator_dashboard_mukammal.py \
             services/frontend/core_v1/operator_dashboard_face.py \
             services/frontend/core_v1/operator_dashboard_face_cuda.py \
@@ -96,11 +103,14 @@ jobs:
       - name: Test ten-slot worker roster UI
         run: python -m unittest discover -s tests -p "test_people_roster_ui.py" -v
 
+      - name: Test mmap latest-only frame transport
+        run: python -m unittest discover -s tests -p "test_mmap_frame_transport.py" -v
+
       - name: Test smooth camera pipeline
         run: python -m unittest discover -s tests -p "test_camera_smoothness.py" -v
 
       - name: Test event-driven publisher
         run: python -m unittest discover -s tests -p "test_event_driven_publisher.py" -v
 
-      - name: Test runtime architecture and MUKAMMAL CUDA face UI guards
+      - name: Test default simple smooth architecture
         run: python -m unittest discover -s tests -p "test_detection_only_baseline.py" -v
