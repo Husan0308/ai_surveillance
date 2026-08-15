@@ -36,6 +36,9 @@ def main() -> int:
         print("Cancelled: username is empty.")
         return 1
     password = getpass("NVR/RTSP password: ")
+    if not password:
+        print("Cancelled: password is empty.")
+        return 1
 
     existing = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
     lines = _upsert(existing, "SURVEILLANCE_RTSP_USERNAME", username)
@@ -43,7 +46,8 @@ def main() -> int:
     ENV_PATH.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     os.chmod(ENV_PATH, 0o600)
     print(f"Saved credentials to {ENV_PATH} with mode 600. Password was not printed.")
-    print("Now run: python scripts/probe_cameras.py")
+    print("Next: python scripts/preflight_camera_v2.py")
+    print("Then: python -m services.camera_v2")
     return 0
 
 
