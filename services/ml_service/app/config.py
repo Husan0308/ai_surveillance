@@ -64,19 +64,22 @@ def _as_bool(value: Any) -> bool:
 
 
 def _inject_rtsp_auth(uri: str, row: dict[str, Any]) -> str:
-    """Inject RTSP credentials from environment without storing secrets in git.
+    """Optionally inject per-camera RTSP credentials from environment.
 
-    Per-camera env names may be supplied with username_env/password_env. If they
-    are absent, the global SURVEILLANCE_RTSP_USERNAME/PASSWORD variables are used.
-    A URI that already contains userinfo is left unchanged.
+    Authentication is opt-in: unless username_env is explicitly configured for a
+    camera, the URI is left exactly as written in cameras.yaml. This avoids
+    silently changing camera URLs that already work without URI credentials.
     """
+    username_env = str(row.get("username_env", "")).strip()
+    if not username_env:
+        return uri
+
     parts = urlsplit(uri)
     if parts.scheme.lower() != "rtsp" or "@" in parts.netloc:
         return uri
 
-    username_env = str(row.get("username_env", "SURVEILLANCE_RTSP_USERNAME")).strip()
-    password_env = str(row.get("password_env", "SURVEILLANCE_RTSP_PASSWORD")).strip()
-    username = os.getenv(username_env, "").strip() if username_env else ""
+    password_env = str(row.get("password_env", "")).strip()
+    username = os.getenv(username_env, "").strip()
     password = os.getenv(password_env, "") if password_env else ""
     if not username:
         return uri
@@ -84,7 +87,15 @@ def _inject_rtsp_auth(uri: str, row: dict[str, Any]) -> str:
     userinfo = quote(username, safe="")
     if password:
         userinfo += ":" + quote(password, safe="")
-    return urlunsplit((parts.scheme, f"{userinfo}@{parts.netloc}", parts.path, parts.query, parts.fragment))
+    return urlunsplit(
+        (
+            parts.scheme,
+            f"{userinfo}@{parts.netloc}",
+            parts.path,
+            parts.query,
+            parts.fragment,
+        )
+    )
 
 
 def load_settings(path: str | Path | None = None) -> Settings:
@@ -108,7 +119,11 @@ def load_settings(path: str | Path | None = None) -> Settings:
         seen_ids.add(camera_id)
 
         env_uri = str(row.get("env_uri", "")).strip()
-        uri = os.getenv(env_uri, str(row["uri"]).strip()) if env_uri else str(row["uri"]).strip()
+        uri = (
+            os.getenv(env_uri, str(row["uri"]).strip())
+            if env_uri
+            else str(row["uri"]).strip()
+        )
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: only rtsp:// sources are allowed")
         uri = _inject_rtsp_auth(uri, row)
@@ -121,7 +136,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
 
     batch_size = int(mux.get("batch_size", len(cameras)))
     if batch_size != len(cameras):
-        raise ValueError(f"streammux.batch_size must equal camera count ({len(cameras)}), got {batch_size}")
+        raise ValueError(
+            f"streammux.batch_size must equal camera count ({len(cameras)}), got {batch_size}"
+        )
 
     frame_width = int(frame_transport.get("width", 640))
     frame_height = int(frame_transport.get("height", 360))
@@ -137,12 +154,12 @@ def load_settings(path: str | Path | None = None) -> Settings:
             gpu_id=int(ds.get("gpu_id", 0)),
             latency_ms=int(ds.get("latency_ms", 150)),
             drop_on_latency=_as_bool(ds.get("drop_on_latency", True)),
-            reconnect_interval_sec=int(ds.get("reconnect_interval_sec", 2)),
+            reconnect_interval_sec=int(ds.get("reconnect_interval_sec", 10)),
             reconnect_attempts=int(ds.get("reconnect_attempts", -1)),
             decoder_extra_surfaces=int(ds.get("decoder_extra_surfaces", 4)),
             cudadec_memtype=int(ds.get("cudadec_memtype", 0)),
             udp_buffer_size=int(ds.get("udp_buffer_size", 1_048_576)),
-            rtp_protocol=int(ds.get("rtp_protocol", 0)),
+            rtp_protocol=int(ds.get("rtp_protocol", 4)),
             batch_size=batch_size,
             mux_width=int(mux.get("width", 1280)),
             mux_height=int(mux.get("height", 720)),
@@ -156,7 +173,10 @@ def load_settings(path: str | Path | None = None) -> Settings:
             display_height=int(display.get("height", 1080)),
             frame_transport=FrameTransportConfig(
                 enabled=_as_bool(frame_transport.get("enabled", True)),
-                directory=os.getenv("FRAME_BUS_DIR", str(frame_transport.get("directory", "/dev/shm/ai_surveillance"))),
+                directory=os.getenv(
+                    "FRAME_BUS_DIR",
+                    str(frame_transport.get("directory", "/dev/shm/ai_surveillance")),
+                ),
                 width=frame_width,
                 height=frame_height,
                 max_fps=frame_max_fps,
