@@ -26,7 +26,7 @@ CAM-06 RTSP -> rtspsrc -> depay -> parser -> nvv4l2decoder -> latest queue(1) ->
                                                        PySide6 3x2 wall
 ```
 
-`nvurisrcbin` is not used in the display hot path. Explicit `rtspsrc` gives the application direct RTSP errors, while NVIDIA `nvv4l2decoder` and `nvvideoconvert` keep decode/scale accelerated. The worker owns reconnection, so there is only one reconnect controller instead of an internal reconnect loop plus an external restart loop.
+Each camera owns an independent capture pipeline. A bad/reconnecting camera cannot block the other five. The one-frame leaky queue and one-frame appsink keep the path latest-only.
 
 ## Display sources
 
@@ -37,7 +37,31 @@ CAM-06 RTSP -> rtspsrc -> depay -> parser -> nvv4l2decoder -> latest queue(1) ->
 - CAM-05: `.../501`, H.265
 - CAM-06: `.../401`, H.265
 
-The default RTSP transport is TCP. Optional camera credentials are environment-only, for example `CAM_01_RTSP_USERNAME` and `CAM_01_RTSP_PASSWORD`.
+RTSP transport defaults to `auto`, matching the earlier working project. GStreamer can negotiate UDP/TCP automatically.
+
+## RTSP authentication
+
+The RTSP URL stays clean in `config/cameras.yaml`. Credentials are stored only in the gitignored `.env` file and are passed to GStreamer through the native `rtspsrc user-id/user-pw` properties.
+
+When all six channels use one NVR account:
+
+```bash
+python scripts/setup_rtsp_auth.py
+```
+
+This creates/updates `.env` with mode `600`:
+
+```text
+SURVEILLANCE_RTSP_USERNAME=...
+SURVEILLANCE_RTSP_PASSWORD=...
+```
+
+Optional per-camera overrides are also supported:
+
+```text
+CAM_01_RTSP_USERNAME=...
+CAM_01_RTSP_PASSWORD=...
+```
 
 ## ML setup
 
@@ -45,12 +69,37 @@ The default RTSP transport is TCP. Optional camera credentials are environment-o
 sudo apt update
 sudo apt install -y python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0 python3-venv
 
-rm -rf .venv-ml
 python3 -m venv --system-site-packages .venv-ml
 source .venv-ml/bin/activate
 pip install -r services/ml_service/requirements.txt
 
 ./scripts/check_deepstream.sh
+```
+
+Before starting ML, diagnose the RTSP server itself:
+
+```bash
+python scripts/probe_rtsp_server.py
+```
+
+Important outcomes:
+
+```text
+DESCRIBE RTSP/1.0 200 OK        -> path reachable without auth challenge
+DESCRIBE RTSP/1.0 401 ...       -> configure RTSP credentials
+DESCRIBE RTSP/1.0 404 ...       -> wrong camera/channel path
+connection refused/timeout      -> network/NVR/RTSP-port problem
+```
+
+Then test actual NVIDIA decoding sequentially:
+
+```bash
+python scripts/probe_cameras.py
+```
+
+Only after the probe reaches `6/6` start ML:
+
+```bash
 python -m services.ml_service.app.main
 ```
 
