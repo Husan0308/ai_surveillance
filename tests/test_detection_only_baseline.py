@@ -18,24 +18,28 @@ class SimpleDetectionArchitectureTests(unittest.TestCase):
         self.assertEqual(core["face"]["provider"], "CUDAExecutionProvider")
         self.assertEqual(core["reid"]["model_name"], "osnet_ain_x1_0")
 
-    def test_default_ml_entrypoint_uses_simple_app(self):
+    def test_default_ml_entrypoint_uses_decode_free_mmap_app(self):
         main = (ROOT / "services/ml_service/core_v1/main.py").read_text(encoding="utf-8")
         simple = (ROOT / "services/ml_service/core_v1/simple_app.py").read_text(encoding="utf-8")
+        mmap_publisher = (ROOT / "services/ml_service/core_v1/mmap_publisher.py").read_text(encoding="utf-8")
         compile(simple, "simple_app.py", "exec")
+        compile(mmap_publisher, "mmap_publisher.py", "exec")
         self.assertIn("from .simple_app import app, core_cfg", main)
-        self.assertIn('"profile": "simple-clear-detection-v1"', simple)
+        self.assertIn('"profile": "simple-smooth-detection-mmap-v2"', simple)
         self.assertIn('"capture_output_width": 960', simple)
         self.assertIn('"capture_output_height": 540', simple)
-        self.assertIn('"max_display_width": 960', simple)
-        self.assertIn('"max_display_height": 540', simple)
-        self.assertIn('"jpeg_quality": 88', simple)
-        self.assertIn("EventDrivenJpegPublisher", simple)
+        self.assertIn("core_cfg.pop(\"rtsp_latency_ms\", None)", simple)
+        self.assertIn("MmapFramePublisher", simple)
+        self.assertNotIn("EventDrivenJpegPublisher", simple)
+        self.assertNotIn("StreamingResponse", simple)
+        self.assertNotIn("cv2.imencode", mmap_publisher)
+        self.assertIn("mmap-bgr-double-buffer", mmap_publisher)
         self.assertNotIn("RoomConsensusGlobalReIdCoordinator", simple)
         self.assertNotIn("CudaFaceRecognitionService", simple)
         self.assertIn('"reid": {"enabled": False', simple)
         self.assertIn('"face": {"enabled": False', simple)
 
-    def test_detector_input_stays_small_even_when_display_is_clearer(self):
+    def test_detector_input_stays_small_even_when_display_is_960x540(self):
         core = yaml.safe_load((ROOT / "config/core_v1.yaml").read_text(encoding="utf-8"))["core_v1"]
         height, width = [int(value) for value in core["detector"]["imgsz"]]
         self.assertEqual((height, width), (416, 736))
@@ -45,22 +49,27 @@ class SimpleDetectionArchitectureTests(unittest.TestCase):
         self.assertIn('"source_h":int(frame.height)', detector)
         self.assertIn("_map_full_boxes", detector)
 
-    def test_default_frontend_is_only_six_camera_wall(self):
+    def test_default_frontend_is_changed-frame_only_mmap_wall(self):
         main = (ROOT / "services/frontend/core_v1/main.py").read_text(encoding="utf-8")
         wall = (ROOT / "services/frontend/core_v1/simple_detection_wall.py").read_text(encoding="utf-8")
+        reader = (ROOT / "services/frontend/core_v1/mmap_frame_reader.py").read_text(encoding="utf-8")
         compile(wall, "simple_detection_wall.py", "exec")
+        compile(reader, "mmap_frame_reader.py", "exec")
         self.assertIn("simple_detection_wall", main)
         self.assertNotIn("operator_dashboard_people_roster", main)
         self.assertIn('CAMERA_IDS = [f"CAM-{index:02d}" for index in range(1, 7)]', wall)
-        self.assertIn("QGridLayout", wall)
-        self.assertIn("index // 3, index % 3", wall)
-        self.assertIn("SmoothFrameReader", wall)
+        self.assertIn("SmoothMmapFrameReader", wall)
+        self.assertIn("refresh_if_new", wall)
+        self.assertIn("PreciseTimer", wall)
+        self.assertNotIn("SmoothPixmapTransform", wall)
+        self.assertNotIn("SmoothFrameReader", wall)
+        self.assertNotIn("QImage.fromData", reader)
+        self.assertIn("Format_BGR888", reader)
         self.assertNotIn("SideBar", wall)
         self.assertNotIn("RightPanel", wall)
-        self.assertNotIn("PersonManagementPage", wall)
         self.assertNotIn("Enrollment", wall)
 
-    def test_full_ui_and_face_stack_remain_available_but_not_default(self):
+    def test_full_ui_face_and_reid_stack_remain_available_but_not_default(self):
         for relative in (
             "services/ml_service/core_v1/app.py",
             "services/ml_service/core_v1/room_consensus_reid.py",
