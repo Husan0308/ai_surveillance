@@ -22,6 +22,7 @@ class CameraMetrics:
     queue_buffers: int | None = None
     transport: str = ""
     backend: str = ""
+    auth_configured: bool = False
 
 
 class CameraWorker:
@@ -33,7 +34,7 @@ class CameraWorker:
         self._thread: threading.Thread | None = None
         self._capture: DeepStreamCapture | None = None
         self._lock = threading.Lock()
-        self._metrics = CameraMetrics()
+        self._metrics = CameraMetrics(auth_configured=bool(camera.username))
         self._last_frame_mono = 0.0
         self._fps_started = time.monotonic()
         self._fps_frames = 0
@@ -81,7 +82,8 @@ class CameraWorker:
             try:
                 print(
                     f"[CAMERA] {self.camera.camera_id} opening {self.camera.uri} "
-                    f"codec={self.camera.codec} transport={transport}",
+                    f"codec={self.camera.codec} transport={transport} "
+                    f"auth={'yes' if self.camera.username else 'no'}",
                     flush=True,
                 )
                 cap = DeepStreamCapture(
@@ -90,6 +92,8 @@ class CameraWorker:
                     self.camera.codec,
                     self.ds,
                     transport=transport,
+                    username=self.camera.username,
+                    password=self.camera.password,
                 )
                 self._capture = cap
                 opened_at = time.monotonic()
@@ -99,6 +103,7 @@ class CameraWorker:
                 with self._lock:
                     self._metrics.backend = cap.backend
                     self._metrics.transport = transport
+                    self._metrics.auth_configured = bool(self.camera.username)
 
                 while not self._stop.is_set():
                     ok, image = cap.read()
