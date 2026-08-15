@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-plugins=(nvurisrcbin nvstreammux nvmultistreamtiler nveglglessink)
+plugins=(nvurisrcbin nvstreammux nvstreamdemux nvvideoconvert nvmultistreamtiler nveglglessink appsink)
 
 for plugin in "${plugins[@]}"; do
   if gst-inspect-1.0 "$plugin" >/dev/null 2>&1; then
@@ -12,26 +12,13 @@ for plugin in "${plugins[@]}"; do
   fi
 done
 
-if ! python3 - <<'PY'
-import gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
+python3 - <<'PY'
+try:
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+except ModuleNotFoundError as exc:
+    raise SystemExit("[MISSING] Python gi bindings. Install python3-gi and create the ML venv with --system-site-packages.") from exc
 Gst.init(None)
-print("[OK] Python GStreamer bindings:", Gst.version_string())
+print(f"[OK] Python GStreamer bindings: {Gst.version_string()}")
 PY
-then
-  cat <<'MSG'
-[ERROR] Python cannot import gi/GStreamer bindings.
-
-Ubuntu/Kubuntu fix:
-  sudo apt update
-  sudo apt install -y python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0 python3-venv
-
-If you use the ML virtualenv, recreate it so it can see system packages:
-  deactivate 2>/dev/null || true
-  rm -rf .venv-ml
-  python3 -m venv --system-site-packages .venv-ml
-  source .venv-ml/bin/activate
-MSG
-  exit 1
-fi

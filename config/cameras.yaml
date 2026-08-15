@@ -37,8 +37,15 @@ deepstream:
     batched_push_timeout_us: 50000
     sync_inputs: false
 
-  display:
+  frame_transport:
     enabled: true
+    directory: /dev/shm/ai_surveillance
+    width: 640
+    height: 360
+    max_fps: 15
+
+  display:
+    enabled: false
     rows: 2
     columns: 3
     width: 1920
