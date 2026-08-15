@@ -3,27 +3,6 @@
 #include <gst/gst.h>
 #include "gstnvdsmeta.h"
 #include "nvdsmeta.h"
-#include "nvds_tracker_meta.h"
-
-#define MAX_VISUAL_STATES 512
-#define MAX_REAL_BOXES_PER_FRAME 64
-#define DISPLAY_HOLD_FRAMES 5
-
-typedef struct {
-    int valid;
-    unsigned int source_id;
-    uint64_t object_id;
-    uint64_t last_frame_num;
-    float cx;
-    float cy;
-    float vx;
-    float vy;
-    float display_w;
-    float display_h;
-} VisualTrackState;
-
-static VisualTrackState g_visual_states[MAX_VISUAL_STATES];
-static uint64_t g_shadow_promoted_total = 0;
 
 static NvDsFrameMeta *find_frame(NvDsBatchMeta *batch_meta, unsigned int source_id) {
     if (!batch_meta) return NULL;
@@ -35,6 +14,21 @@ static NvDsFrameMeta *find_frame(NvDsBatchMeta *batch_meta, unsigned int source_
         }
     }
     return NULL;
+}
+
+static void style_green(NvDsObjectMeta *obj) {
+    obj->rect_params.border_width = 3;
+    obj->rect_params.border_color.red = 0.10;
+    obj->rect_params.border_color.green = 1.00;
+    obj->rect_params.border_color.blue = 0.15;
+    obj->rect_params.border_color.alpha = 1.00;
+    obj->rect_params.has_bg_color = 0;
+}
+
+static float clampf_local(float value, float low, float high) {
+    if (value < low) return low;
+    if (value > high) return high;
+    return value;
 }
 
 static int add_boxes_to_frame(NvDsBatchMeta *batch_meta,
@@ -77,12 +71,7 @@ static int add_boxes_to_frame(NvDsBatchMeta *batch_meta,
         obj->rect_params.top = y1;
         obj->rect_params.width = width;
         obj->rect_params.height = height;
-        obj->rect_params.border_width = 3;
-        obj->rect_params.border_color.red = 0.10;
-        obj->rect_params.border_color.green = 1.00;
-        obj->rect_params.border_color.blue = 0.15;
-        obj->rect_params.border_color.alpha = 1.00;
-        obj->rect_params.has_bg_color = 0;
+        style_green(obj);
 
         nvds_add_obj_meta_to_frame(frame_meta, obj, NULL);
         ++added;
@@ -103,7 +92,9 @@ int camera_v2_add_boxes(uintptr_t buffer_ptr,
     return add_boxes_to_frame(batch_meta, frame_meta, boxes, count);
 }
 
-/* Emulate a primary detector's per-frame metadata contract for nvtracker. */
+/* Emulate a primary detector result on exactly the live source frame where the
+ * asynchronous YOLO observation is attached. Empty detector results are valid:
+ * bInferDone is TRUE with zero object meta, matching nvinfer interval semantics. */
 int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
                                     unsigned int source_id,
                                     const float *boxes,
@@ -119,211 +110,16 @@ int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
     return add_boxes_to_frame(batch_meta, frame_meta, boxes, count);
 }
 
-static float clampf_local(float value, float low, float high) {
-    if (value < low) return low;
-    if (value > high) return high;
-    return value;
-}
-
-static float rect_iou(float ax1, float ay1, float ax2, float ay2,
-                      float bx1, float by1, float bx2, float by2) {
-    float x1 = ax1 > bx1 ? ax1 : bx1;
-    float y1 = ay1 > by1 ? ay1 : by1;
-    float x2 = ax2 < bx2 ? ax2 : bx2;
-    float y2 = ay2 < by2 ? ay2 : by2;
-    float iw = x2 - x1;
-    float ih = y2 - y1;
-    if (iw <= 0.0f || ih <= 0.0f) return 0.0f;
-    float inter = iw * ih;
-    float aa = (ax2 - ax1) * (ay2 - ay1);
-    float bb = (bx2 - bx1) * (by2 - by1);
-    float uni = aa + bb - inter;
-    return uni > 0.0f ? inter / uni : 0.0f;
-}
-
-static int find_visual_state(unsigned int source_id, uint64_t object_id) {
-    int free_index = -1;
-    int oldest_index = 0;
-    uint64_t oldest_frame = UINT64_MAX;
-    for (int i = 0; i < MAX_VISUAL_STATES; ++i) {
-        VisualTrackState *s = &g_visual_states[i];
-        if (s->valid && s->source_id == source_id && s->object_id == object_id) {
-            return i;
-        }
-        if (!s->valid && free_index < 0) free_index = i;
-        if (s->valid && s->last_frame_num < oldest_frame) {
-            oldest_frame = s->last_frame_num;
-            oldest_index = i;
-        }
-    }
-    return free_index >= 0 ? free_index : oldest_index;
-}
-
-static int visual_state_exists(unsigned int source_id, uint64_t object_id) {
-    for (int i = 0; i < MAX_VISUAL_STATES; ++i) {
-        VisualTrackState *s = &g_visual_states[i];
-        if (s->valid && s->source_id == source_id && s->object_id == object_id) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int frame_has_track_id(NvDsFrameMeta *frame_meta, uint64_t object_id) {
-    if (!frame_meta) return 0;
-    for (NvDsMetaList *node = frame_meta->obj_meta_list; node != NULL; node = node->next) {
-        NvDsObjectMeta *obj = (NvDsObjectMeta *) node->data;
-        if (obj && obj->class_id == 0 && obj->object_id == object_id) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static void style_green(NvDsObjectMeta *obj) {
-    obj->rect_params.border_width = 3;
-    obj->rect_params.border_color.red = 0.10;
-    obj->rect_params.border_color.green = 1.00;
-    obj->rect_params.border_color.blue = 0.15;
-    obj->rect_params.border_color.alpha = 1.00;
-    obj->rect_params.has_bg_color = 0;
-}
-
-static void set_display_rect(NvDsObjectMeta *obj,
-                             float cx,
-                             float cy,
-                             float width,
-                             float height,
-                             float frame_w,
-                             float frame_h) {
-    float left = cx - width * 0.5f;
-    float top = cy - height * 0.5f;
-    float right = cx + width * 0.5f;
-    float bottom = cy + height * 0.5f;
-
-    if (left < 0.0f) {
-        right -= left;
-        left = 0.0f;
-    }
-    if (right > frame_w) {
-        float shift = right - frame_w;
-        left -= shift;
-        right -= shift;
-    }
-    if (top < 0.0f) {
-        bottom -= top;
-        top = 0.0f;
-    }
-    if (bottom > frame_h) {
-        float shift = bottom - frame_h;
-        top -= shift;
-        bottom -= shift;
-    }
-
-    left = clampf_local(left, 0.0f, frame_w - 1.0f);
-    top = clampf_local(top, 0.0f, frame_h - 1.0f);
-    right = clampf_local(right, left + 1.0f, frame_w);
-    bottom = clampf_local(bottom, top + 1.0f, frame_h);
-
-    obj->rect_params.left = left;
-    obj->rect_params.top = top;
-    obj->rect_params.width = right - left;
-    obj->rect_params.height = bottom - top;
-    style_green(obj);
-}
-
 /*
- * DeepStream intentionally suppresses normal NvDsObjectMeta while a target is in
- * Shadow Tracking mode. With outputShadowTracks=1, nvtracker attaches the actual
- * current shadow state as NVDS_TRACKER_SHADOW_LIST_META / NvDsTargetMiscDataBatch.
+ * Live OSD helper AFTER nvtracker.
  *
- * Promote only CURRENT (or at most one source-frame-old) shadow bboxes to display
- * object metadata after nvtracker. This preserves the same tracker ID and the DCF
- * localization instead of inventing a timer-only box. We only promote IDs that
- * were previously ACTIVE on screen, satisfying "once detected, keep it boxed".
- */
-static int promote_current_shadow_tracks(NvDsBatchMeta *batch_meta,
-                                         NvDsFrameMeta *frame_meta,
-                                         float frame_w,
-                                         float frame_h) {
-    if (!batch_meta || !frame_meta) return 0;
-    int added = 0;
-    unsigned int source_id = frame_meta->source_id;
-    uint32_t current_frame = frame_meta->frame_num;
-
-    for (NvDsMetaList *unode = batch_meta->batch_user_meta_list; unode != NULL; unode = unode->next) {
-        NvDsUserMeta *user_meta = (NvDsUserMeta *) unode->data;
-        if (!user_meta || !user_meta->user_meta_data) continue;
-        if (user_meta->base_meta.meta_type != NVDS_TRACKER_SHADOW_LIST_META) continue;
-
-        NvDsTargetMiscDataBatch *shadow_batch =
-            (NvDsTargetMiscDataBatch *) user_meta->user_meta_data;
-        if (!shadow_batch || !shadow_batch->list) continue;
-
-        for (uint32_t si = 0; si < shadow_batch->numFilled; ++si) {
-            NvDsTargetMiscDataStream *stream = &shadow_batch->list[si];
-            if (!stream || !stream->list) continue;
-            if (stream->streamID != frame_meta->pad_index && stream->streamID != source_id) continue;
-
-            for (uint32_t oi = 0; oi < stream->numFilled; ++oi) {
-                NvDsTargetMiscDataObject *target = &stream->list[oi];
-                if (!target || !target->list || target->numObj == 0) continue;
-                if (target->classId != 0) continue;
-                if (frame_has_track_id(frame_meta, target->uniqueId)) continue;
-                if (!visual_state_exists(source_id, target->uniqueId)) continue;
-
-                NvDsTargetMiscDataFrame *best = NULL;
-                uint32_t best_delta = UINT32_MAX;
-                for (uint32_t fi = 0; fi < target->numObj; ++fi) {
-                    NvDsTargetMiscDataFrame *candidate = &target->list[fi];
-                    if (candidate->trackerState == EMPTY) continue;
-                    if (candidate->frameNum > current_frame) continue;
-                    uint32_t delta = current_frame - candidate->frameNum;
-                    if (delta <= 1 && delta < best_delta) {
-                        best = candidate;
-                        best_delta = delta;
-                    }
-                }
-                if (!best) continue;
-
-                float left = best->tBbox.left;
-                float top = best->tBbox.top;
-                float width = best->tBbox.width;
-                float height = best->tBbox.height;
-                if (width <= 1.0f || height <= 1.0f) continue;
-                float right = left + width;
-                float bottom = top + height;
-                if (right <= 0.0f || bottom <= 0.0f || left >= frame_w || top >= frame_h) continue;
-
-                NvDsObjectMeta *obj = nvds_acquire_obj_meta_from_pool(batch_meta);
-                if (!obj) continue;
-                obj->unique_component_id = 93;
-                obj->class_id = 0;
-                obj->object_id = target->uniqueId;
-                obj->confidence = -0.1f;
-                obj->tracker_confidence = best->confidence;
-                strncpy(obj->obj_label, "Person", MAX_LABEL_SIZE - 1);
-                obj->obj_label[MAX_LABEL_SIZE - 1] = '\0';
-                obj->rect_params = best->tBbox;
-                style_green(obj);
-                nvds_add_obj_meta_to_frame(frame_meta, obj, NULL);
-                ++added;
-                ++g_shadow_promoted_total;
-            }
-        }
-    }
-    return added;
-}
-
-/*
- * Post-tracker visualization continuity layer.
+ * Strict rule: never invent an object here. No timer hold, no stale shadow-history
+ * promotion, no synthetic prediction metadata. Only current-frame NvDsObjectMeta
+ * produced by NvDCF is styled for display. This removes lingering giant rectangles
+ * when a person has already left the camera view.
  *
- * Priority order:
- *   1. ACTIVE NvDCF object metadata.
- *   2. Real NvDCF current-frame SHADOW metadata promoted above.
- *   3. Tiny 5-frame display-only fallback only if tracker misc metadata is skipped.
- *
- * None of the display modifications are fed back into NvDCF.
+ * NvDCF keeps its tight bbox internally. We enlarge rect_params only for display so
+ * hands/head/feet have a small safety margin without contaminating DCF features.
  */
 int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
@@ -331,33 +127,20 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
     if (!batch_meta) return -1;
 
-    const float side_margin = 0.10f;
-    const float top_margin = 0.08f;
-    const float bottom_margin = 0.14f;
-    const float lead_frames = 1.10f;
-    const float velocity_alpha = 0.45f;
-    const float shrink_per_frame = 0.965f;
-
+    const float side_margin = 0.07f;
+    const float top_margin = 0.05f;
+    const float bottom_margin = 0.10f;
     int count = 0;
+
     for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) fnode->data;
         if (!frame_meta) continue;
 
-        unsigned int source_id = frame_meta->source_id;
-        uint64_t frame_num = (uint64_t) frame_meta->frame_num;
         float frame_w = (float) frame_meta->source_frame_width;
         float frame_h = (float) frame_meta->source_frame_height;
         if (frame_w <= 1.0f) frame_w = (float) frame_meta->pipeline_width;
         if (frame_h <= 1.0f) frame_h = (float) frame_meta->pipeline_height;
         if (frame_w <= 1.0f || frame_h <= 1.0f) continue;
-
-        /* Add real tracker shadow boxes before normal styling/lead compensation. */
-        promote_current_shadow_tracks(batch_meta, frame_meta, frame_w, frame_h);
-
-        unsigned char seen[MAX_VISUAL_STATES];
-        memset(seen, 0, sizeof(seen));
-        float real_boxes[MAX_REAL_BOXES_PER_FRAME][4];
-        int real_count = 0;
 
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *) onode->data;
@@ -369,120 +152,30 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
             float height = obj->rect_params.height;
             if (width <= 1.0f || height <= 1.0f) continue;
 
-            float raw_cx = left + width * 0.5f;
-            float raw_cy = top + height * 0.5f;
-            int idx = find_visual_state(source_id, (uint64_t) obj->object_id);
-            VisualTrackState *s = &g_visual_states[idx];
+            float new_left = left - width * side_margin;
+            float new_top = top - height * top_margin;
+            float new_right = left + width + width * side_margin;
+            float new_bottom = top + height + height * bottom_margin;
 
-            float vx = 0.0f;
-            float vy = 0.0f;
-            float base_w = width * (1.0f + side_margin * 2.0f);
-            float base_h = height * (1.0f + top_margin + bottom_margin);
-            float display_w = base_w;
-            float display_h = base_h;
+            new_left = clampf_local(new_left, 0.0f, frame_w - 1.0f);
+            new_top = clampf_local(new_top, 0.0f, frame_h - 1.0f);
+            new_right = clampf_local(new_right, new_left + 1.0f, frame_w);
+            new_bottom = clampf_local(new_bottom, new_top + 1.0f, frame_h);
 
-            if (s->valid && s->source_id == source_id && s->object_id == (uint64_t) obj->object_id) {
-                uint64_t delta_frames = frame_num > s->last_frame_num ? frame_num - s->last_frame_num : 1;
-                if (delta_frames > 8) delta_frames = 8;
-                float measured_vx = (raw_cx - s->cx) / (float) delta_frames;
-                float measured_vy = (raw_cy - s->cy) / (float) delta_frames;
-                float max_vx = width * 0.45f;
-                float max_vy = height * 0.45f;
-                measured_vx = clampf_local(measured_vx, -max_vx, max_vx);
-                measured_vy = clampf_local(measured_vy, -max_vy, max_vy);
-                vx = s->vx * (1.0f - velocity_alpha) + measured_vx * velocity_alpha;
-                vy = s->vy * (1.0f - velocity_alpha) + measured_vy * velocity_alpha;
-
-                float retained_w = s->display_w;
-                float retained_h = s->display_h;
-                for (uint64_t k = 0; k < delta_frames; ++k) {
-                    retained_w *= shrink_per_frame;
-                    retained_h *= shrink_per_frame;
-                }
-                if (retained_w > display_w) display_w = retained_w;
-                if (retained_h > display_h) display_h = retained_h;
-            }
-
-            float display_cx = raw_cx + vx * lead_frames;
-            float display_cy = raw_cy + vy * lead_frames;
-            set_display_rect(obj, display_cx, display_cy, display_w, display_h, frame_w, frame_h);
-
-            s->valid = 1;
-            s->source_id = source_id;
-            s->object_id = (uint64_t) obj->object_id;
-            s->last_frame_num = frame_num;
-            s->cx = raw_cx;
-            s->cy = raw_cy;
-            s->vx = vx;
-            s->vy = vy;
-            s->display_w = display_w;
-            s->display_h = display_h;
-            seen[idx] = 1;
-
-            if (real_count < MAX_REAL_BOXES_PER_FRAME) {
-                real_boxes[real_count][0] = obj->rect_params.left;
-                real_boxes[real_count][1] = obj->rect_params.top;
-                real_boxes[real_count][2] = obj->rect_params.left + obj->rect_params.width;
-                real_boxes[real_count][3] = obj->rect_params.top + obj->rect_params.height;
-                ++real_count;
-            }
-            ++count;
-        }
-
-        /* Fallback only for a short misc-meta delivery gap. Real shadow data wins. */
-        for (int i = 0; i < MAX_VISUAL_STATES; ++i) {
-            VisualTrackState *s = &g_visual_states[i];
-            if (!s->valid || s->source_id != source_id || seen[i]) continue;
-            if (frame_num <= s->last_frame_num) continue;
-
-            uint64_t age = frame_num - s->last_frame_num;
-            if (age > 60) {
-                s->valid = 0;
-                continue;
-            }
-            if (age > DISPLAY_HOLD_FRAMES) continue;
-
-            float decay = 1.0f - 0.025f * (float) age;
-            if (decay < 0.86f) decay = 0.86f;
-            float cx = s->cx + s->vx * (float) age * 0.92f;
-            float cy = s->cy + s->vy * (float) age * 0.92f;
-            float width = s->display_w * decay;
-            float height = s->display_h * decay;
-            float left = cx - width * 0.5f;
-            float top = cy - height * 0.5f;
-            float right = cx + width * 0.5f;
-            float bottom = cy + height * 0.5f;
-
-            int overlaps_real = 0;
-            for (int r = 0; r < real_count; ++r) {
-                if (rect_iou(left, top, right, bottom,
-                             real_boxes[r][0], real_boxes[r][1],
-                             real_boxes[r][2], real_boxes[r][3]) >= 0.32f) {
-                    overlaps_real = 1;
-                    break;
-                }
-            }
-            if (overlaps_real) continue;
-
-            NvDsObjectMeta *obj = nvds_acquire_obj_meta_from_pool(batch_meta);
-            if (!obj) continue;
-            obj->unique_component_id = 92;
-            obj->class_id = 0;
-            obj->object_id = s->object_id;
-            obj->confidence = -0.1f;
-            obj->tracker_confidence = -0.1f;
-            strncpy(obj->obj_label, "Person", MAX_LABEL_SIZE - 1);
-            obj->obj_label[MAX_LABEL_SIZE - 1] = '\0';
-            set_display_rect(obj, cx, cy, width, height, frame_w, frame_h);
-            nvds_add_obj_meta_to_frame(frame_meta, obj, NULL);
+            obj->rect_params.left = new_left;
+            obj->rect_params.top = new_top;
+            obj->rect_params.width = new_right - new_left;
+            obj->rect_params.height = new_bottom - new_top;
+            style_green(obj);
             ++count;
         }
     }
     return count;
 }
 
+/* Kept for Python ABI compatibility with the previous diagnostic build. */
 uint64_t camera_v2_shadow_promoted_total(void) {
-    return g_shadow_promoted_total;
+    return 0;
 }
 
 int camera_v2_count_tracked(uintptr_t buffer_ptr) {
