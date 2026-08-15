@@ -9,27 +9,21 @@ SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
 # Fixed-CCTV pedestrian tracking profile for sparse external YOLO26m detections.
 #
-# NVIDIA documents two behaviors that matter for our office cameras:
-# 1) NvDCF can suppress downstream current-frame output when tracker confidence
-#    falls below minTrackerConfidence and a target goes to shadow mode;
-# 2) dynamic / abrupt motion needs state-estimator measurements to be trusted more,
-#    otherwise the fused bbox can visibly lag behind the actual target.
+# The critical continuity setting is outputShadowTracks=1. DeepStream normally
+# keeps a low-confidence NvDCF target alive internally in Shadow Tracking mode but
+# suppresses its current-frame NvDsObjectMeta downstream. We consume the official
+# NVDS_TRACKER_SHADOW_LIST_META in the native bridge and render that current-frame
+# shadow bbox, so a person does not blink merely because tracker confidence dips.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.06",
     "enableBboxUnClipping": "1",
     "minIouDiff4NewTarget": "0.15",
-    # Do not hide a valid DCF target merely because correlation confidence dips for
-    # a few frames while a person walks, raises an arm, turns, or is half occluded.
     "minTrackerConfidence": "0.00",
     "probationAge": "0",
     "maxShadowTrackingAge": "70",
     "earlyTerminationAge": "5",
 }
 
-# These parameters exist in the DeepStream NvDCF perf/accuracy sample profiles.
-# They are intentionally optional so slightly different DeepStream 7.x configs
-# remain usable. Lower measurement noise = react faster to measured motion; larger
-# search region helps a fast walker remain inside the DCF crop on the next frame.
 _OPTIONAL_PATCHES: dict[str, str] = {
     "useColorNames": "1",
     "useHog": "1",
@@ -41,6 +35,31 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "measurementNoiseVar4Detector": "1.5",
     "measurementNoiseVar4Tracker": "3.0",
 }
+
+
+def _insert_target_management_key(lines: list[str], key: str, value: str) -> bool:
+    """Insert a DeepStream TargetManagement key if the stock sample omits it."""
+    section = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "TargetManagement:":
+            section = index
+            break
+    if section is None:
+        return False
+
+    # DeepStream sample YAML uses two-space indentation inside sections.
+    insert_at = len(lines)
+    for index in range(section + 1, len(lines)):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")) and stripped.endswith(":"):
+            insert_at = index
+            break
+    lines.insert(insert_at, f"  {key}: {value}")
+    return True
 
 
 def prepare_sparse_tracker_config(stock: Path) -> Path:
@@ -77,12 +96,25 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing_required)
         )
 
+    # outputShadowTracks is not present in every NVIDIA sample config, so insert it
+    # under TargetManagement when absent instead of treating absence as an error.
+    shadow_present = any(line.lstrip().startswith("outputShadowTracks:") for line in output)
+    if shadow_present:
+        output = [
+            (line[: len(line) - len(line.lstrip())] + "outputShadowTracks: 1")
+            if line.lstrip().startswith("outputShadowTracks:")
+            else line
+            for line in output
+        ]
+    elif not _insert_target_management_key(output, "outputShadowTracks", "1"):
+        raise RuntimeError("NvDCF config has no TargetManagement section for outputShadowTracks")
+
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     optional_applied = sorted(set(_OPTIONAL_PATCHES) & patched)
     header = [
         f"# Auto-generated from {stock.name}.",
-        "# Camera V2 fast-pedestrian NvDCF tuning.",
-        "# Goal: less shadow-output blink and less state-estimator lag.",
+        "# Camera V2 continuous-person NvDCF profile.",
+        "# outputShadowTracks=1 is consumed by native_meta_bridge for no-blink OSD.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
