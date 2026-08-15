@@ -41,7 +41,7 @@ def main() -> int:
     except Exception as exc:
         failures.append(f"camera config: {type(exc).__name__}: {exc}")
 
-    for module in ("numpy", "torch", "ultralytics"):
+    for module in ("numpy", "torch", "torchvision", "ultralytics"):
         ok = importlib.util.find_spec(module) is not None
         print(f"python_module {module}={'OK' if ok else 'MISSING'}")
         if not ok:
@@ -54,7 +54,45 @@ def main() -> int:
             if not torch.cuda.is_available():
                 failures.append("torch.cuda.is_available() is False")
             else:
-                print(f"cuda_device={torch.cuda.get_device_name(0)} capability={torch.cuda.get_device_capability(0)}")
+                device = torch.cuda.get_device_name(0)
+                capability = torch.cuda.get_device_capability(0)
+                target_arch = f"sm_{capability[0]}{capability[1]}"
+                arch_list = list(torch.cuda.get_arch_list())
+                print(f"cuda_device={device} capability={capability} target_arch={target_arch}")
+                print(f"torch_cuda_arch_list={arch_list}")
+                if target_arch not in arch_list:
+                    failures.append(
+                        f"installed PyTorch wheel does not contain {target_arch}; "
+                        "GTX 1050 Ti/Pascal needs an official CUDA 12.6 wheel that includes sm_61"
+                    )
+                else:
+                    try:
+                        x = torch.ones((32, 32), device="cuda")
+                        y = x @ x
+                        torch.cuda.synchronize()
+                        print(f"torch_cuda_smoke=OK value={float(y[0, 0].item()):.1f}")
+                    except Exception as exc:
+                        failures.append(f"PyTorch CUDA kernel smoke test failed: {type(exc).__name__}: {exc}")
+
+                    if importlib.util.find_spec("torchvision") is not None:
+                        try:
+                            import torchvision
+                            from torchvision.ops import nms
+
+                            print(f"torchvision={torchvision.__version__}")
+                            boxes = torch.tensor(
+                                [[0.0, 0.0, 20.0, 20.0], [2.0, 2.0, 19.0, 19.0]],
+                                device="cuda",
+                            )
+                            scores = torch.tensor([0.9, 0.8], device="cuda")
+                            keep = nms(boxes, scores, 0.5)
+                            torch.cuda.synchronize()
+                            print(f"torchvision_cuda_nms=OK keep={keep.detach().cpu().tolist()}")
+                        except Exception as exc:
+                            failures.append(
+                                "torchvision CUDA NMS failed; torch/torchvision wheel pair is not usable "
+                                f"for this Pascal GPU: {type(exc).__name__}: {exc}"
+                            )
         except Exception as exc:
             failures.append(f"torch CUDA check: {type(exc).__name__}: {exc}")
 
