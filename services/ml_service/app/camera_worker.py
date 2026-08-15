@@ -20,6 +20,8 @@ class CameraMetrics:
     last_frame_age_ms: float | None = None
     last_error: str = ""
     queue_buffers: int | None = None
+    transport: str = ""
+    backend: str = ""
 
 
 class CameraWorker:
@@ -71,15 +73,32 @@ class CameraWorker:
             return data
 
     def _run(self) -> None:
+        backoff = max(0.5, self.ds.reconnect_delay_sec)
+        transport = self.ds.rtsp_transport
+
         while not self._stop.is_set():
             cap = None
             try:
-                print(f"[CAMERA] {self.camera.camera_id} opening {self.camera.uri}", flush=True)
-                cap = DeepStreamCapture(self.camera.camera_id, self.camera.uri, self.ds)
+                print(
+                    f"[CAMERA] {self.camera.camera_id} opening {self.camera.uri} "
+                    f"codec={self.camera.codec} transport={transport}",
+                    flush=True,
+                )
+                cap = DeepStreamCapture(
+                    self.camera.camera_id,
+                    self.camera.uri,
+                    self.camera.codec,
+                    self.ds,
+                    transport=transport,
+                )
                 self._capture = cap
                 opened_at = time.monotonic()
                 had_frame = False
                 consecutive_timeouts = 0
+
+                with self._lock:
+                    self._metrics.backend = cap.backend
+                    self._metrics.transport = transport
 
                 while not self._stop.is_set():
                     ok, image = cap.read()
@@ -89,23 +108,25 @@ class CameraWorker:
                         consecutive_timeouts += 1
                         with self._lock:
                             self._metrics.read_timeouts += 1
+
                         if not had_frame and time.monotonic() - opened_at < self.ds.startup_grace_sec:
                             continue
                         if had_frame and consecutive_timeouts < 3:
                             continue
                         if not cap.is_opened():
                             raise RuntimeError(cap.last_error() or "capture closed")
-                        reason = (
+                        raise RuntimeError(
                             "startup grace expired without first frame"
                             if not had_frame
                             else f"{consecutive_timeouts} consecutive frame timeouts"
                         )
-                        raise RuntimeError(reason)
 
                     had_frame = True
                     consecutive_timeouts = 0
+                    backoff = max(0.5, self.ds.reconnect_delay_sec)
                     mono = time.monotonic()
                     height, width = image.shape[:2]
+
                     with self._lock:
                         self._metrics.online = True
                         self._metrics.last_error = ""
@@ -124,22 +145,36 @@ class CameraWorker:
 
                     self.store.put(Frame(self.camera.camera_id, frame_id, mono, image, width, height))
                     if frame_id == 1:
-                        print(f"[CAMERA] {self.camera.camera_id} first frame {width}x{height}", flush=True)
+                        print(
+                            f"[CAMERA] {self.camera.camera_id} first frame {width}x{height} "
+                            f"backend={cap.backend} transport={transport}",
+                            flush=True,
+                        )
 
             except Exception as exc:
                 with self._lock:
                     self._metrics.online = False
                     self._metrics.reconnects += 1
                     self._metrics.last_error = f"{type(exc).__name__}: {exc}"
+
                 debug = {}
                 if cap is not None:
                     try:
                         debug = cap.debug_info()
                     except Exception:
                         pass
-                print(f"[CAMERA] {self.camera.camera_id} reconnect: {exc} debug={debug}", flush=True)
+
+                print(
+                    f"[CAMERA] {self.camera.camera_id} reconnect in {backoff:.1f}s: "
+                    f"{exc} debug={debug}",
+                    flush=True,
+                )
                 if not self._stop.is_set():
-                    self._stop.wait(self.ds.reconnect_delay_sec)
+                    self._stop.wait(backoff)
+                backoff = min(
+                    self.ds.reconnect_delay_max_sec,
+                    max(self.ds.reconnect_delay_sec, backoff * 2.0),
+                )
             finally:
                 if cap is not None:
                     try:
