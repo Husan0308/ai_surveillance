@@ -6,59 +6,70 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
-
-# Fixed-CCTV pedestrian tracking profile for sparse external YOLO26m detections.
+# Production fixed-CCTV pedestrian profile.
 #
-# The critical continuity setting is outputShadowTracks=1. DeepStream normally
-# keeps a low-confidence NvDCF target alive internally in Shadow Tracking mode but
-# suppresses its current-frame NvDsObjectMeta downstream. We consume the official
-# NVDS_TRACKER_SHADOW_LIST_META in the native bridge and render that current-frame
-# shadow bbox, so a person does not blink merely because tracker confidence dips.
+# Important design choice: shadow tracks are kept INTERNAL to NvDCF for recovery,
+# but are not promoted to live OSD. NVIDIA explicitly warns that overly permissive
+# inactive/shadow output can create lingering ghost bboxes after a person leaves.
+# Continuity is instead improved at the real detector/association/tracker levels.
 _REQUIRED_PATCHES: dict[str, str] = {
-    "minDetectorConfidence": "0.06",
+    # Keep low-score pedestrian detections available for association. New false
+    # targets are controlled by probation + early termination below.
+    "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "1",
-    "minIouDiff4NewTarget": "0.15",
-    "minTrackerConfidence": "0.00",
-    "probationAge": "0",
-    "maxShadowTrackingAge": "70",
-    "earlyTerminationAge": "5",
+    # Reject near-duplicate new targets around an existing target.
+    "minIouDiff4NewTarget": "0.14",
+    # NVIDIA's optimized PeopleNet+NvDCF example is around 0.21. Use a slightly
+    # more permissive value for our sparse external YOLO corrections.
+    "minTrackerConfidence": "0.18",
+    "probationAge": "1",
+    "maxShadowTrackingAge": "40",
+    "earlyTerminationAge": "2",
 }
 
+# Apply only when the selected DeepStream sample config exposes the key.
+# Cascaded association is the key improvement: low-confidence detections are used
+# to recover existing ACTIVE targets instead of being discarded, similar in spirit
+# to ByteTrack's second-stage low-score association.
 _OPTIONAL_PATCHES: dict[str, str] = {
     "useColorNames": "1",
     "useHog": "1",
-    "featureImgSizeLevel": "4",
-    "searchRegionPaddingScale": "2",
-    "minTrackingConfidenceDuringInactive": "0.00",
-    "processNoiseVar4Loc": "4.0",
-    "processNoiseVar4Vel": "1.0",
-    "measurementNoiseVar4Detector": "1.5",
-    "measurementNoiseVar4Tracker": "3.0",
+    "featureImgSizeLevel": "5",
+    # At 20 FPS a walking person moves only a small distance per video frame.
+    # NVIDIA notes that too-large search regions reduce effective target feature
+    # resolution, so keep padding at 1 while using level-5 (48x48) features.
+    "searchRegionPaddingScale": "1",
+    "associationMatcherType": "1",
+    "tentativeDetectorConfidence": "0.22",
+    "minMatchingScore4TentativeIou": "0.10",
+    "minMatchingScore4Overall": "0.06",
+    "minMatchingScore4SizeSimilarity": "0.05",
+    "minMatchingScore4Iou": "0.02",
+    "minMatchingScore4VisualSimilarity": "0.05",
+    "usePrediction4Assoc": "1",
+    # If an older NvDCF profile exposes this legacy parameter, do not set it near
+    # zero; NVIDIA warns that very low inactive-output thresholds cause ghosts.
+    "minTrackingConfidenceDuringInactive": "0.35",
 }
 
 
-def _insert_target_management_key(lines: list[str], key: str, value: str) -> bool:
-    """Insert a DeepStream TargetManagement key if the stock sample omits it."""
+def _set_or_insert_target_management(lines: list[str], key: str, value: str) -> bool:
     section = None
     for index, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped == "TargetManagement:":
+        if line.strip() == "TargetManagement:":
             section = index
             break
     if section is None:
         return False
 
-    # DeepStream sample YAML uses two-space indentation inside sections.
-    insert_at = len(lines)
     for index in range(section + 1, len(lines)):
-        line = lines[index]
-        stripped = line.strip()
+        stripped = lines[index].strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if not line.startswith((" ", "\t")) and stripped.endswith(":"):
-            insert_at = index
-            break
-    lines.insert(insert_at, f"  {key}: {value}")
+        if not lines[index].startswith((" ", "\t")) and stripped.endswith(":"):
+            lines.insert(index, f"  {key}: {value}")
+            return True
+    lines.append(f"  {key}: {value}")
     return True
 
 
@@ -77,8 +88,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
         indent = line[: len(line) - len(stripped)]
         replaced = False
         for key, value in patches.items():
-            prefix = key + ":"
-            if stripped.startswith(prefix):
+            if stripped.startswith(key + ":"):
                 comment = ""
                 if "#" in stripped:
                     comment = "  #" + stripped.split("#", 1)[1]
@@ -96,25 +106,25 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing_required)
         )
 
-    # outputShadowTracks is not present in every NVIDIA sample config, so insert it
-    # under TargetManagement when absent instead of treating absence as an error.
-    shadow_present = any(line.lstrip().startswith("outputShadowTracks:") for line in output)
-    if shadow_present:
-        output = [
-            (line[: len(line) - len(line.lstrip())] + "outputShadowTracks: 1")
-            if line.lstrip().startswith("outputShadowTracks:")
-            else line
-            for line in output
-        ]
-    elif not _insert_target_management_key(output, "outputShadowTracks", "1"):
-        raise RuntimeError("NvDCF config has no TargetManagement section for outputShadowTracks")
+    # Shadow history may still be useful internally to NvDCF, but live rendering of
+    # its misc history is intentionally disabled. This is the direct fix for stale
+    # giant rectangles / ghost bboxes seen in the previous build.
+    shadow_found = False
+    for i, line in enumerate(output):
+        if line.lstrip().startswith("outputShadowTracks:"):
+            indent = line[: len(line) - len(line.lstrip())]
+            output[i] = f"{indent}outputShadowTracks: 0"
+            shadow_found = True
+            break
+    if not shadow_found:
+        _set_or_insert_target_management(output, "outputShadowTracks", "0")
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     optional_applied = sorted(set(_OPTIONAL_PATCHES) & patched)
     header = [
         f"# Auto-generated from {stock.name}.",
-        "# Camera V2 continuous-person NvDCF profile.",
-        "# outputShadowTracks=1 is consumed by native_meta_bridge for no-blink OSD.",
+        "# Camera V2 production pedestrian tracking profile.",
+        "# No synthetic/shadow OSD boxes: detector + cascaded NvDCF association only.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
