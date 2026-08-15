@@ -17,6 +17,7 @@ class ApiClient(QObject):
         self.base_url = base_url.rstrip("/")
         self.manager = QNetworkAccessManager(self)
         self.manager.setTransferTimeout(2500)
+        self._inflight: set[str] = set()
 
     def refresh_all(self) -> None:
         self._get("api_health", "/health")
@@ -24,6 +25,10 @@ class ApiClient(QObject):
         self._get("cameras", "/api/v1/cameras")
 
     def _get(self, request_name: str, path: str) -> None:
+        if request_name in self._inflight:
+            return
+
+        self._inflight.add(request_name)
         request = QNetworkRequest(QUrl(f"{self.base_url}{path}"))
         request.setRawHeader(b"Accept", b"application/json")
         reply = self.manager.get(request)
@@ -51,4 +56,5 @@ class ApiClient(QObject):
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             self.request_failed.emit(request_name, str(exc))
         finally:
+            self._inflight.discard(request_name)
             reply.deleteLater()
