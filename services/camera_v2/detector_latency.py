@@ -46,24 +46,25 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
 
 
 class DetectorLatencyCompensator:
-    """Compensate only detector-result age before feeding NvDCF.
+    """Project only stale detector observations to the live injection timestamp.
 
-    Production MOT pipelines (ByteTrack/OC-SORT/DeepStream PGIE+tracker) associate
-    detections with the same video frame that produced them. Camera V2 runs YOLO in
-    a side process, so by the time a result is injected the live mux frame is newer.
-    Feeding the old coordinates directly to NvDCF makes a walking person's detector
-    correction start behind the person. This helper estimates velocity between two
-    detector observations and shifts only the *new detector observation* to the
-    current injection time. It does not create/hold tracks and therefore cannot
-    produce duplicate boxes by itself; NvDCF remains the only temporal tracker.
+    External YOLO runs asynchronously from the live DeepStream wall. The bbox was
+    measured on the captured frame, while nvtracker receives it roughly 100-220ms
+    later. For a walking target, injecting the old coordinates makes the detector
+    correction pull NvDCF behind the person. We estimate center velocity from two
+    detector observations and project only by the measured result age. NvDCF remains
+    the sole temporal tracker.
     """
 
     def __init__(self, frame_width: int, frame_height: int) -> None:
         self.frame_width = float(frame_width)
         self.frame_height = float(frame_height)
         self.history: dict[str, list[_HistoryDetection]] = {}
-        self.max_projection_s = 0.22
-        self.projection_gain = 0.88
+        # Logs on the GTX 1050 Ti show detector result age commonly around
+        # 160-200ms. Allow the whole observed age to be compensated, with a slight
+        # >1 gain because the previous 0.88 gain still visibly trailed walkers.
+        self.max_projection_s = 0.28
+        self.projection_gain = 1.08
         self.max_speed_x = self.frame_width * 1.25
         self.max_speed_y = self.frame_height * 1.25
 
@@ -86,8 +87,6 @@ class DetectorLatencyCompensator:
                 pcx, pcy = _center(old.box)
                 dist = math.hypot(ccx - pcx, ccy - pcy) / max(_diag(box), _diag(old.box))
                 iou = _iou(box, old.box)
-                # Allow a fast walker to move outside direct IoU, but reject a
-                # distant person in the same camera.
                 if iou < 0.02 and dist > 0.72:
                     continue
                 score = iou * 0.68 + max(0.0, 1.0 - dist) * 0.32
@@ -142,8 +141,6 @@ class DetectorLatencyCompensator:
             right = det.x2 + dx
             bottom = det.y2 + dy
 
-            # Shift the whole rectangle back into frame instead of clipping only
-            # one edge and changing its shape.
             if left < 0.0:
                 right -= left
                 left = 0.0
