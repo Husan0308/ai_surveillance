@@ -32,9 +32,18 @@ def main() -> int:
         print(f"cameras={len(settings.cameras)} ids={[c.camera_id for c in settings.cameras]}")
         if len(settings.cameras) != 6:
             failures.append(f"expected 6 cameras, found {len(settings.cameras)}")
-        missing_creds = [c.camera_id for c in settings.cameras if not c.username or not c.password]
-        if missing_creds:
-            warnings.append("RTSP credentials missing for: " + ", ".join(missing_creds))
+
+        missing_user = [c.camera_id for c in settings.cameras if not c.username]
+        missing_password = [c.camera_id for c in settings.cameras if not c.password]
+        if missing_user or missing_password:
+            missing = sorted(set(missing_user + missing_password))
+            failures.append(
+                "RTSP credentials are not configured for: "
+                + ", ".join(missing)
+                + ". Run: python scripts/setup_rtsp_auth.py"
+            )
+        else:
+            print("rtsp_auth=CONFIGURED (secrets hidden)")
     except Exception as exc:
         failures.append(f"config: {type(exc).__name__}: {exc}")
 
