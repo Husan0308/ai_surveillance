@@ -6,6 +6,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Allow direct execution with:
+#   python scripts/preflight_camera_v2.py
+# Python otherwise puts only scripts/ on sys.path and cannot import the
+# repository-level `services` package.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from services.ml_service.app.config import load_settings
 
 
@@ -23,12 +31,13 @@ def main() -> int:
     warnings: list[str] = []
 
     print("CAMERA_V2 PREFLIGHT")
+    print(f"repo_root={ROOT}")
     print(f"python={sys.version.split()[0]}")
     print(f"display={os.environ.get('DISPLAY', '-')}")
     print(f"session={os.environ.get('XDG_SESSION_TYPE', '-')}")
 
     try:
-        settings = load_settings()
+        settings = load_settings(ROOT / "config/cameras.yaml")
         print(f"cameras={len(settings.cameras)} ids={[c.camera_id for c in settings.cameras]}")
         if len(settings.cameras) != 6:
             failures.append(f"expected 6 cameras, found {len(settings.cameras)}")
