@@ -13,40 +13,29 @@ cameras:
     uri: rtsp://192.168.1.210:554/Streaming/Channels/601
   - id: CAM-05
     env_uri: CAM_05_URI
-    uri: rtsp://192.168.1.210:554/Streaming/Channels/502
+    uri: rtsp://192.168.1.210:554/Streaming/Channels/501
   - id: CAM-06
     env_uri: CAM_06_URI
     uri: rtsp://192.168.1.210:554/Streaming/Channels/401
 
 deepstream:
   gpu_id: 0
+  rtsp_transport: auto
   latency_ms: 150
   drop_on_latency: true
-  reconnect_interval_sec: 10
-  reconnect_attempts: -1
   decoder_extra_surfaces: 4
   cudadec_memtype: 0
   udp_buffer_size: 1048576
-  rtp_protocol: 4
+  reconnect_interval_sec: 2
+  reconnect_attempts: -1
+  postdecode_queue_buffers: 1
+  capture_timeout_ms: 1000
+  startup_grace_sec: 8.0
+  reconnect_delay_sec: 1.0
+  startup_stagger_sec: 0.20
 
-  streammux:
-    batch_size: 6
-    width: 1280
-    height: 720
-    live_source: true
-    batched_push_timeout_us: 50000
-    sync_inputs: false
-
-  frame_transport:
-    enabled: true
-    directory: /dev/shm/ai_surveillance
-    width: 640
-    height: 360
-    max_fps: 15
-
-  display:
-    enabled: false
-    rows: 2
-    columns: 3
-    width: 1920
-    height: 1080
+display:
+  width: 736
+  height: 416
+  fps: 20
+  jpeg_quality: 70
