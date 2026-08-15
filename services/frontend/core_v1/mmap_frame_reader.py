@@ -16,6 +16,7 @@ class SmoothMmapFrameReader:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._image: QImage | None = None
+        self._payload: bytes | None = None
         self._version = -1
         self._thread = None
         self.frames = 0
@@ -40,8 +41,14 @@ class SmoothMmapFrameReader:
             self._thread.join(1.0)
 
     def latest(self):
+        """Backward-compatible image accessor."""
         with self._lock:
             return self._image, self._version
+
+    def latest_frame(self):
+        """Return image plus its backing bytes so callers can keep both alive."""
+        with self._lock:
+            return self._image, self._version, self._payload
 
     def _run(self):
         reader = MmapFrameReader(self.camera_id)
@@ -72,14 +79,18 @@ class SmoothMmapFrameReader:
                     self.copy_failures += 1
                     continue
 
+                # MmapFrameReader.snapshot() already returns an owned bytes copy.
+                # Do not immediately copy the whole frame a second time with
+                # QImage.copy(). Keep the payload alive next to the QImage.
+                payload = packet.payload
                 try:
                     image = QImage(
-                        packet.payload,
+                        payload,
                         packet.width,
                         packet.height,
                         packet.width * packet.channels,
                         QImage.Format.Format_BGR888,
-                    ).copy()
+                    )
                 except Exception:
                     self.copy_failures += 1
                     continue
@@ -88,6 +99,7 @@ class SmoothMmapFrameReader:
                     continue
 
                 with self._lock:
+                    self._payload = payload
                     self._image = image
                     self._version = packet.sequence
                     self.frames += 1
