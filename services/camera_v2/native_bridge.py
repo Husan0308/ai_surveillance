@@ -92,6 +92,8 @@ class NativeMetaBridge:
             ctypes.c_int,
         ]
         self.lib.camera_v2_add_boxes.restype = ctypes.c_int
+        self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
+        self.lib.camera_v2_count_tracked.restype = ctypes.c_int
         self.path = path
 
     def add_boxes(self, gst_buffer, source_id: int, boxes: list[tuple[float, float, float, float, float]]) -> int:
@@ -102,7 +104,6 @@ class NativeMetaBridge:
             flat.extend((float(x1), float(y1), float(x2), float(y2), float(conf)))
         array_type = ctypes.c_float * len(flat)
         payload = array_type(*flat)
-        # PyGObject's Gst.Buffer hash is the wrapped GstBuffer pointer.
         return int(
             self.lib.camera_v2_add_boxes(
                 ctypes.c_uint64(hash(gst_buffer)),
@@ -111,3 +112,6 @@ class NativeMetaBridge:
                 ctypes.c_int(len(boxes)),
             )
         )
+
+    def count_tracked(self, gst_buffer) -> int:
+        return int(self.lib.camera_v2_count_tracked(ctypes.c_uint64(hash(gst_buffer))))
