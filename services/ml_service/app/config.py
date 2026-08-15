@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 
 @dataclass(frozen=True)
@@ -12,6 +16,8 @@ class CameraConfig:
     camera_id: str
     uri: str
     codec: str
+    username: str
+    password: str
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,14 @@ def _as_bool(value) -> bool:
     return bool(value)
 
 
+def _credential(camera_id: str, suffix: str, global_name: str) -> str:
+    per_camera_name = f"{camera_id.replace('-', '_')}_RTSP_{suffix}"
+    per_camera = os.getenv(per_camera_name)
+    if per_camera is not None and per_camera != "":
+        return per_camera
+    return os.getenv(global_name, "")
+
+
 def load_settings(path: str | Path | None = None) -> Settings:
     config_path = Path(path or os.getenv("CAMERA_CONFIG", "config/cameras.yaml"))
     if not config_path.is_absolute():
@@ -67,18 +81,29 @@ def load_settings(path: str | Path | None = None) -> Settings:
         if camera_id in seen:
             raise ValueError(f"Duplicate camera id: {camera_id}")
         seen.add(camera_id)
+
         env_uri = str(row.get("env_uri", "")).strip()
         uri = os.getenv(env_uri, str(row["uri"]).strip()) if env_uri else str(row["uri"]).strip()
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
+
         codec = str(row.get("codec", "")).strip().lower()
         if codec not in {"h264", "h265"}:
             raise ValueError(f"{camera_id}: codec must be h264 or h265")
-        cameras.append(CameraConfig(camera_id=camera_id, uri=uri, codec=codec))
+
+        cameras.append(
+            CameraConfig(
+                camera_id=camera_id,
+                uri=uri,
+                codec=codec,
+                username=_credential(camera_id, "USERNAME", "SURVEILLANCE_RTSP_USERNAME"),
+                password=_credential(camera_id, "PASSWORD", "SURVEILLANCE_RTSP_PASSWORD"),
+            )
+        )
 
     ds = raw.get("deepstream") or {}
     display = raw.get("display") or {}
-    transport = str(ds.get("rtsp_transport", "tcp")).strip().lower()
+    transport = str(ds.get("rtsp_transport", "auto")).strip().lower()
     if transport not in {"auto", "tcp", "udp"}:
         raise ValueError("deepstream.rtsp_transport must be auto, tcp, or udp")
 
