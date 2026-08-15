@@ -1,127 +1,133 @@
-# AI Surveillance — Full Features Safe Profile
+# AI Surveillance — Fresh Foundation
 
-The production hot path stays simple and authoritative:
+Fresh three-service foundation. Phase 1 is deliberately limited to **six RTSP cameras + NVIDIA DeepStream**.
 
-```text
-6 x RTSP cameras
-  -> DeepStream / GStreamer capture
-  -> LatestFrameStore per camera
-  -> detector-only spawned YOLO26m CUDA process
-  -> visual tracker
-  -> JPEG publishers
-  -> PySide6 dashboard
-```
-
-All analytics are enabled again, but they are isolated from detection:
+## Architecture
 
 ```text
-YOLO26m detections
-  ├─> CPU ReID side path -> OSNet -> Global ID / room fusion
-  └─> sparse CPU YOLO26m-pose side path -> ankle keypoints -> floor heatmap
+6 RTSP cameras
+      |
+      v
++---------------------------+
+| ml_service :8001          |
+|                           |
+| nvurisrcbin x6            |
+|      |                    |
+|      v                    |
+| nvstreammux batch=6       |
+|      |                    |
+|      v                    |
+| nvmultistreamtiler 3x2    |
+|      |                    |
+|      v                    |
+| nveglglessink             |
++---------------------------+
+
++---------------------------+       +---------------------------+
+| api_service :8000         |       | frontend                  |
+| FastAPI boundary only     |       | PySide6 client shell      |
++---------------------------+       +---------------------------+
 ```
 
-The detector is still the only PyTorch CUDA analytics process. `yolo26m-pose.pt` intentionally runs sparsely on CPU so Pose cannot create a second CUDA context or gate person detection. ReID is also CPU-only. If either optional side path fails, camera frames and YOLO26m detections keep running.
+The three services do not import each other's application code. Camera ingest/decode belongs only to `ml_service`.
 
-UI polish and Heatmap UI are enabled by default, but their installers are fail-safe: an extension import/install error falls back to the plain dashboard instead of preventing startup.
+## Phase 1 intentionally excludes
 
-Custom ROI second-pass detection and camera exclusion masks remain off because the current full-frame detector is the verified baseline. They are tuning features, not required system features.
+- YOLO / inference
+- tracking
+- ReID
+- face recognition
+- database
+- heatmap
+- recording
+- alerts
+- business UI
 
-## Install
+## Requirements
+
+DeepStream and GStreamer are system dependencies, not pip dependencies.
 
 ```bash
-cd ~/ai_surveillance
-source venv/bin/activate
-pip install -r requirements/ml.txt
-pip install -r requirements/frontend.txt
+sudo apt update
+sudo apt install -y python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0
+./scripts/check_deepstream.sh
 ```
 
-## Tests
+The expected DeepStream plugins are:
 
-Use unittest discovery so an unrelated installed package named `tests` cannot shadow this repository's tests.
+- `nvurisrcbin`
+- `nvstreammux`
+- `nvmultistreamtiler`
+- `nveglglessink`
+
+## Run each service independently
+
+From the repository root, create a separate environment for each service if desired.
+
+### ML service
 
 ```bash
-python -m unittest discover -s tests -p "test_stable_detector.py" -v
-python -m unittest discover -s tests -p "test_core_v1_visual_tracker.py" -v
-python -m unittest discover -s tests -p "test_core_v1_jpeg_publisher.py" -v
-python -m unittest discover -s tests -p "test_core_v1_pose.py" -v
-python -m unittest discover -s tests -p "test_floor_heatmap.py" -v
-python -m unittest discover -s tests -p "test_full_feature_profile.py" -v
+python3 -m venv .venv-ml
+source .venv-ml/bin/activate
+pip install -r services/ml_service/requirements.txt
+python -m services.ml_service.app.main
 ```
 
-## Run ML
+Health:
 
 ```bash
-PYTHONFAULTHANDLER=1 python -m services.ml_service.core_v1.main
+curl http://127.0.0.1:8001/health
 ```
 
-On first use, Ultralytics may download `yolo26m.pt` and `yolo26m-pose.pt`. ReID may also download its configured OSNet checkpoint if it is not present locally.
+The ML process starts the DeepStream six-camera graph and, with `display.enabled: true`, opens the 3x2 DeepStream view.
 
-## Verify health
+### API service
 
 ```bash
-curl -s http://127.0.0.1:8001/health | python -m json.tool
+python3 -m venv .venv-api
+source .venv-api/bin/activate
+pip install -r services/api_service/requirements.txt
+python -m services.api_service.app.main
 ```
 
-Primary acceptance requirements:
-
-- `status` is `ok`.
-- `online` reaches the expected camera count.
-- `detector.ready` is `true`.
-- `detector.process_alive` is `true`.
-- `detector.cuda_topology` is `detector_only_spawned_process`.
-- `detector.pose_in_hot_path` is `false`.
-- `detector.last_error` is empty.
-
-Optional feature checks are non-gating:
-
-- `reid.enabled` should be true and `reid.ready` should become true after its checkpoint is available.
-- `pose.enabled` should be true, `pose.model` should be `yolo26m-pose.pt`, and `pose.device` should be `cpu`.
-- `pose.isolation` should be `detector_independent_sidepath`.
-- `heatmap.enabled` should be true. Heat samples require valid room homography calibration.
-
-## Verify endpoints
+Health:
 
 ```bash
-curl -s http://127.0.0.1:8001/detections | python -m json.tool
-curl -s http://127.0.0.1:8001/reid | python -m json.tool
-curl -s http://127.0.0.1:8001/poses | python -m json.tool
-curl -s http://127.0.0.1:8001/heatmap | python -m json.tool
-curl -s http://127.0.0.1:8001/room-mapping | python -m json.tool
+curl http://127.0.0.1:8000/health
 ```
 
-For Heatmap to accumulate real ankle samples, each camera used for room-floor projection needs a valid camera-to-floor homography in `config/room_mapping.yaml` or through the Room Map calibration UI.
-
-## Frontend
+### Frontend
 
 ```bash
-python -m services.frontend.core_v1.main
+python3 -m venv .venv-frontend
+source .venv-frontend/bin/activate
+pip install -r services/frontend/requirements.txt
+python -m services.frontend.app.main
 ```
 
-UI polish and Heatmap UI are on by default. Either can be disabled for isolation without editing code:
+The frontend is intentionally only a shell in phase 1.
+
+## Camera config
+
+Edit `config/cameras.yaml`, or override a camera URI without changing Git history:
 
 ```bash
-AI_SURVEILLANCE_UI_POLISH=0 python -m services.frontend.core_v1.main
-AI_SURVEILLANCE_UI_HEATMAP=0 python -m services.frontend.core_v1.main
+export CAM_01_URI='rtsp://...'
 ```
 
-## Run commands
+Equivalent variables exist through `CAM_06_URI`.
 
-ML:
+## DeepStream baseline
 
-```bash
-python -m services.ml_service.core_v1.main
-```
+The baseline uses:
 
-API:
+- `nvurisrcbin` for each RTSP source and NVIDIA decoder path
+- `rtsp-reconnect-interval` with unlimited reconnect attempts
+- `drop-on-latency=true`
+- GPU decoder memory (`cudadec-memtype=0`)
+- `nvstreammux batch-size=6`
+- `live-source=true`
+- `sync-inputs=false` so a slow camera does not intentionally synchronize all six feeds
+- 3x2 `nvmultistreamtiler`
 
-```bash
-python -m services.api_service.core_v1.main
-```
-
-Frontend:
-
-```bash
-python -m services.frontend.core_v1.main
-```
-
-Machine-local models, databases, captures, `.runtime/`, logs and `cameras.local.yaml` must not be committed. The backup branch `backup/local-43c0763` remains available for the earlier experimental detector-pose changes.
+No AI element is inserted until this camera-only baseline is stable.
