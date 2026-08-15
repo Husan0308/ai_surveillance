@@ -4,10 +4,6 @@ from pathlib import Path
 import sys
 import time
 
-# When this file is executed as `python scripts/probe_cameras.py`, Python puts
-# the scripts/ directory on sys.path, not the repository root. Add the project
-# root explicitly so `services.*` imports work from a fresh clone without
-# requiring a global PYTHONPATH setting.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -30,7 +26,8 @@ def main() -> int:
         try:
             print(
                 f"[PROBE] {camera.camera_id} {camera.uri} "
-                f"codec={camera.codec} transport={settings.deepstream.rtsp_transport}",
+                f"codec={camera.codec} transport={settings.deepstream.rtsp_transport} "
+                f"auth={'yes' if camera.username else 'no'}",
                 flush=True,
             )
             cap = DeepStreamCapture(
@@ -39,6 +36,8 @@ def main() -> int:
                 camera.codec,
                 settings.deepstream,
                 transport=settings.deepstream.rtsp_transport,
+                username=camera.username,
+                password=camera.password,
             )
             deadline = time.monotonic() + settings.deepstream.startup_grace_sec
             frame = None
@@ -73,6 +72,12 @@ def main() -> int:
 
     passed = len(settings.cameras) - failures
     print(f"\nRESULT: {passed}/{len(settings.cameras)} cameras passed", flush=True)
+    if failures and not any(camera.username for camera in settings.cameras):
+        print(
+            "NOTE: no RTSP credentials are configured. Run scripts/probe_rtsp_server.py; "
+            "if DESCRIBE returns 401, create .env with the NVR username/password.",
+            flush=True,
+        )
     return 0 if failures == 0 else 1
 
 
