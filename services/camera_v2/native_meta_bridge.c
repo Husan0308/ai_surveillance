@@ -3,6 +3,7 @@
 #include <gst/gst.h>
 #include "gstnvdsmeta.h"
 #include "nvdsmeta.h"
+#include "nvds_tracker_meta.h"
 
 #define MAX_VISUAL_STATES 512
 #define MAX_REAL_BOXES_PER_FRAME 64
@@ -22,6 +23,7 @@ typedef struct {
 } VisualTrackState;
 
 static VisualTrackState g_visual_states[MAX_VISUAL_STATES];
+static uint64_t g_shadow_promoted_total = 0;
 
 static NvDsFrameMeta *find_frame(NvDsBatchMeta *batch_meta, unsigned int source_id) {
     if (!batch_meta) return NULL;
@@ -157,6 +159,27 @@ static int find_visual_state(unsigned int source_id, uint64_t object_id) {
     return free_index >= 0 ? free_index : oldest_index;
 }
 
+static int visual_state_exists(unsigned int source_id, uint64_t object_id) {
+    for (int i = 0; i < MAX_VISUAL_STATES; ++i) {
+        VisualTrackState *s = &g_visual_states[i];
+        if (s->valid && s->source_id == source_id && s->object_id == object_id) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int frame_has_track_id(NvDsFrameMeta *frame_meta, uint64_t object_id) {
+    if (!frame_meta) return 0;
+    for (NvDsMetaList *node = frame_meta->obj_meta_list; node != NULL; node = node->next) {
+        NvDsObjectMeta *obj = (NvDsObjectMeta *) node->data;
+        if (obj && obj->class_id == 0 && obj->object_id == object_id) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void style_green(NvDsObjectMeta *obj) {
     obj->rect_params.border_width = 3;
     obj->rect_params.border_color.red = 0.10;
@@ -210,20 +233,97 @@ static void set_display_rect(NvDsObjectMeta *obj,
 }
 
 /*
+ * DeepStream intentionally suppresses normal NvDsObjectMeta while a target is in
+ * Shadow Tracking mode. With outputShadowTracks=1, nvtracker attaches the actual
+ * current shadow state as NVDS_TRACKER_SHADOW_LIST_META / NvDsTargetMiscDataBatch.
+ *
+ * Promote only CURRENT (or at most one source-frame-old) shadow bboxes to display
+ * object metadata after nvtracker. This preserves the same tracker ID and the DCF
+ * localization instead of inventing a timer-only box. We only promote IDs that
+ * were previously ACTIVE on screen, satisfying "once detected, keep it boxed".
+ */
+static int promote_current_shadow_tracks(NvDsBatchMeta *batch_meta,
+                                         NvDsFrameMeta *frame_meta,
+                                         float frame_w,
+                                         float frame_h) {
+    if (!batch_meta || !frame_meta) return 0;
+    int added = 0;
+    unsigned int source_id = frame_meta->source_id;
+    uint32_t current_frame = frame_meta->frame_num;
+
+    for (NvDsMetaList *unode = batch_meta->batch_user_meta_list; unode != NULL; unode = unode->next) {
+        NvDsUserMeta *user_meta = (NvDsUserMeta *) unode->data;
+        if (!user_meta || !user_meta->user_meta_data) continue;
+        if (user_meta->base_meta.meta_type != NVDS_TRACKER_SHADOW_LIST_META) continue;
+
+        NvDsTargetMiscDataBatch *shadow_batch =
+            (NvDsTargetMiscDataBatch *) user_meta->user_meta_data;
+        if (!shadow_batch || !shadow_batch->list) continue;
+
+        for (uint32_t si = 0; si < shadow_batch->numFilled; ++si) {
+            NvDsTargetMiscDataStream *stream = &shadow_batch->list[si];
+            if (!stream || !stream->list) continue;
+            if (stream->streamID != frame_meta->pad_index && stream->streamID != source_id) continue;
+
+            for (uint32_t oi = 0; oi < stream->numFilled; ++oi) {
+                NvDsTargetMiscDataObject *target = &stream->list[oi];
+                if (!target || !target->list || target->numObj == 0) continue;
+                if (target->classId != 0) continue;
+                if (frame_has_track_id(frame_meta, target->uniqueId)) continue;
+                if (!visual_state_exists(source_id, target->uniqueId)) continue;
+
+                NvDsTargetMiscDataFrame *best = NULL;
+                uint32_t best_delta = UINT32_MAX;
+                for (uint32_t fi = 0; fi < target->numObj; ++fi) {
+                    NvDsTargetMiscDataFrame *candidate = &target->list[fi];
+                    if (candidate->trackerState == EMPTY) continue;
+                    if (candidate->frameNum > current_frame) continue;
+                    uint32_t delta = current_frame - candidate->frameNum;
+                    if (delta <= 1 && delta < best_delta) {
+                        best = candidate;
+                        best_delta = delta;
+                    }
+                }
+                if (!best) continue;
+
+                float left = best->tBbox.left;
+                float top = best->tBbox.top;
+                float width = best->tBbox.width;
+                float height = best->tBbox.height;
+                if (width <= 1.0f || height <= 1.0f) continue;
+                float right = left + width;
+                float bottom = top + height;
+                if (right <= 0.0f || bottom <= 0.0f || left >= frame_w || top >= frame_h) continue;
+
+                NvDsObjectMeta *obj = nvds_acquire_obj_meta_from_pool(batch_meta);
+                if (!obj) continue;
+                obj->unique_component_id = 93;
+                obj->class_id = 0;
+                obj->object_id = target->uniqueId;
+                obj->confidence = -0.1f;
+                obj->tracker_confidence = best->confidence;
+                strncpy(obj->obj_label, "Person", MAX_LABEL_SIZE - 1);
+                obj->obj_label[MAX_LABEL_SIZE - 1] = '\0';
+                obj->rect_params = best->tBbox;
+                style_green(obj);
+                nvds_add_obj_meta_to_frame(frame_meta, obj, NULL);
+                ++added;
+                ++g_shadow_promoted_total;
+            }
+        }
+    }
+    return added;
+}
+
+/*
  * Post-tracker visualization continuity layer.
  *
- * NvDCF remains the only real tracker. This function runs AFTER nvtracker and only
- * changes rect_params used by downstream OSD. It never feeds the adjusted boxes
- * back into NvDCF.
+ * Priority order:
+ *   1. ACTIVE NvDCF object metadata.
+ *   2. Real NvDCF current-frame SHADOW metadata promoted above.
+ *   3. Tiny 5-frame display-only fallback only if tracker misc metadata is skipped.
  *
- * 1) Position gets a small velocity lead (~1 video frame) so the rendered box does
- *    not visibly trail a walking person.
- * 2) Display width/height shrink slowly but expand immediately, so a raised arm or
- *    changing pose does not make the box collapse around the torso.
- * 3) If NvDCF suppresses current-frame output for a very short confidence dip, the
- *    last tracked ID is rendered for at most DISPLAY_HOLD_FRAMES with motion
- *    prediction. This mirrors the short lost-track buffer used by mature MOT
- *    systems, but is display-only and cannot create a tracker target.
+ * None of the display modifications are fed back into NvDCF.
  */
 int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
@@ -250,6 +350,9 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
         if (frame_w <= 1.0f) frame_w = (float) frame_meta->pipeline_width;
         if (frame_h <= 1.0f) frame_h = (float) frame_meta->pipeline_height;
         if (frame_w <= 1.0f || frame_h <= 1.0f) continue;
+
+        /* Add real tracker shadow boxes before normal styling/lead compensation. */
+        promote_current_shadow_tracks(batch_meta, frame_meta, frame_w, frame_h);
 
         unsigned char seen[MAX_VISUAL_STATES];
         memset(seen, 0, sizeof(seen));
@@ -326,7 +429,7 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
             ++count;
         }
 
-        /* Short display-only hold for tracker output gaps / brief shadow state. */
+        /* Fallback only for a short misc-meta delivery gap. Real shadow data wins. */
         for (int i = 0; i < MAX_VISUAL_STATES; ++i) {
             VisualTrackState *s = &g_visual_states[i];
             if (!s->valid || s->source_id != source_id || seen[i]) continue;
@@ -376,6 +479,10 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
         }
     }
     return count;
+}
+
+uint64_t camera_v2_shadow_promoted_total(void) {
+    return g_shadow_promoted_total;
 }
 
 int camera_v2_count_tracked(uintptr_t buffer_ptr) {
