@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sys
 
-from . import simple_detection_wall
+from . import direct_detection_wall
 
 
 if __name__ == "__main__":
-    sys.exit(simple_detection_wall.run())
+    sys.exit(direct_detection_wall.run())
