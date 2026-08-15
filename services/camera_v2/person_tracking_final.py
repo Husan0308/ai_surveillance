@@ -5,23 +5,21 @@ import queue as pyqueue
 import time
 from collections import deque
 
-# Production person-tracking defaults for GTX 1050 Ti + six fixed CCTV streams.
-# Keep detector input large enough for distant people, but pass lower-confidence
-# person candidates into NvDCF's cascaded association instead of throwing them away.
+# Production person tracking for GTX 1050 Ti 4 GB + six fixed CCTV streams.
+# Keep the detector at 640x384 for distant/small pedestrians, but make NvDCF much
+# lighter. NVIDIA recommends max_perf + a reduced tracker resolution for peak
+# performance/resource efficiency.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "640")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.08")
 os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.50")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
-os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "640")
-os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "384")
-# Keep NvDCF's visual crop tight. Hands/head/feet margins are display-only later.
+os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "480")
+os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
-# Ultralytics already performs NMS. This pass should reject only truly nested /
-# near-identical boxes, not two nearby people.
 os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.62")
 os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.88")
 
@@ -32,11 +30,12 @@ from .tracker_profile import prepare_sparse_tracker_config
 
 
 class CameraPersonTrackingFinal(_BaseTracking):
-    """YOLO26m low-score recovery + continuous NvDCF pedestrian tracking.
+    """YOLO26m low-score recovery + low-memory NvDCF pedestrian tracking.
 
-    Live OSD contains only real current-frame NvDCF object metadata. There is no
-    synthetic timer hold and no shadow-history promotion, so a box cannot remain in
-    an empty part of the room after the person leaves.
+    The detector keeps the higher resolution needed by distant office pedestrians.
+    NvDCF is deliberately kept small enough to coexist with six NVDEC streams and
+    YOLO26m on a 4 GB Pascal GPU. Live OSD contains only real current-frame tracker
+    objects; there are no synthetic timer/shadow-history boxes.
     """
 
     def __init__(self) -> None:
@@ -54,10 +53,10 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
     def _resolve_tracker_files(self):
         lib, stock_max_perf = super()._resolve_tracker_files()
-        # Balanced profile + stronger visual features patched in tracker_profile.py.
-        perf = stock_max_perf.with_name("config_tracker_NvDCF_perf.yml")
-        stock = perf if perf.exists() else stock_max_perf
-        return lib, prepare_sparse_tracker_config(stock)
+        # GTX 1050 Ti has only 4 GB. Use NVIDIA's lowest-resource NvDCF reference
+        # profile; tracker_profile.py then applies only the pedestrian association
+        # and realistic target-pool tuning we need.
+        return lib, prepare_sparse_tracker_config(stock_max_perf)
 
     def _publish_prepared(
         self,
@@ -65,9 +64,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         captured_t: float,
         prepared: list[PreparedDetection],
     ) -> None:
-        # Publish every detector result, including an empty result. This exactly
-        # distinguishes an inference frame with zero detections from a non-inference
-        # frame and matches DeepStream primary-detector interval semantics.
         with self.pending_lock:
             self.pending_seq += 1
             self.pending[cid] = (self.pending_seq, float(captured_t), list(prepared))
@@ -94,7 +90,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
             boxes, age_ms = self.latency_compensator.project(prepared, captured_t, now)
             result = self.bridge.apply_detector_result(buffer, source_id, boxes)
-            if result == -2:  # source is not in this partial mux batch yet
+            if result == -2:
                 continue
             if result < 0:
                 continue
@@ -114,8 +110,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
     def _tracker_probe(self, _pad, info):
         buffer = info.get_buffer()
         if buffer is not None:
-            # Native bridge styles ONLY real current-frame NvDCF objects. The second
-            # native pass smooths those existing rectangles but never creates one.
             count = self.bridge.style_and_count_tracked(buffer)
             if count >= 0:
                 with self.det_lock:
@@ -146,6 +140,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"range={self.detector_min_hz:.1f}-{self.detector_max_hz:.1f}Hz/cam "
             f"NvDCF={self.tracker_width}x{self.tracker_height} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
+            "profile=max_perf memory_profile=4gb max_targets=24 "
             "cascaded_assoc=1 low_score_recovery=1 synthetic_boxes=0",
             flush=True,
         )
@@ -162,8 +157,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
             group_index += 1
             group_key = tuple(group)
 
-            # If this group was already ticketed while the previous CUDA call was
-            # running, its frame is likely ready now. Otherwise request it normally.
             if prefetched_group != group_key:
                 self._request_group(group)
             rows = self.mailbox.wait_group(group, versions, timeout=0.8)
@@ -184,9 +177,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 frames.append(frame)
             self._clear_requests()
 
-            # Pipeline capture with inference: request the NEXT pair before the
-            # current pair enters CUDA. This hides one camera-frame wait (~50 ms)
-            # without increasing YOLO GPU work or adding a backlog.
             next_group = groups[group_index % len(groups)]
             self._request_group(next_group)
             prefetched_group = tuple(next_group)
@@ -237,8 +227,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 self.det_error = ""
                 target_hz = self.detector_target_hz
 
-            # Rate limit remains camera-wall aware. Prefetching removes capture wait;
-            # this idle is the only deliberate throttle on CUDA correction cadence.
             desired_call_interval = 1.0 / max(0.1, target_hz * len(groups))
             elapsed = time.monotonic() - cycle_started
             idle = max(self.detector_min_idle, desired_call_interval - elapsed)
@@ -285,7 +273,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"target_hz={target_hz:.1f}/cam approx_skip={expected_skip:.1f}frames "
             f"actual_hz=[{rate_text}] result_age={age_ms:.0f}ms "
             f"tracker={self.tracker_width}x{self.tracker_height} "
-            f"config={self.tracker_config} cascaded_assoc=1 synthetic_boxes=0",
+            f"config={self.tracker_config} profile=max_perf max_targets=24 "
+            "cascaded_assoc=1 synthetic_boxes=0",
             flush=True,
         )
         return keep
