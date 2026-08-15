@@ -1,74 +1,81 @@
 from __future__ import annotations
 
-import time
-
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
-from shared.frame_bus import LatestFrameReader
+from services.frontend.app.mjpeg_reader import SmoothMjpegReader
 
 
 class CameraTile(QFrame):
-    def __init__(self, camera_id: str, frame_bus_dir: str, stale_after_ms: int, parent: QWidget | None = None) -> None:
+    def __init__(self, camera_id: str, ml_video_base_url: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.camera_id = camera_id
-        self.reader = LatestFrameReader(frame_bus_dir, camera_id)
-        self.last_sequence: int | None = None
-        self.last_received_ns = 0
-        self.stale_after_ns = int(stale_after_ms * 1_000_000)
+        self.reader = SmoothMjpegReader(camera_id, ml_video_base_url)
+        self.last_version = 0
+
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.title = QLabel(camera_id)
-        self.status = QLabel("WAITING")
-        self.video = QLabel("Waiting for frame...")
+        self.status = QLabel("CONNECTING")
+        self.video = QLabel("Connecting...")
         self.video.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video.setMinimumSize(320, 180)
         self.video.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video.setStyleSheet("background: black; color: white;")
+
         header = QGridLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(self.title, 0, 0)
         header.addWidget(self.status, 0, 1, alignment=Qt.AlignmentFlag.AlignRight)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         layout.addLayout(header)
         layout.addWidget(self.video, 1)
 
+        self.reader.start()
+
     def refresh(self) -> None:
-        packet = self.reader.read_latest(self.last_sequence)
-        now = time.monotonic_ns()
-        if packet is not None:
-            minimum_bytes = packet.stride * packet.height
-            if packet.width > 0 and packet.height > 0 and packet.stride >= packet.width * 4 and minimum_bytes <= len(packet.data):
-                image = QImage(packet.data, packet.width, packet.height, packet.stride, QImage.Format.Format_RGBA8888)
-                pixmap = QPixmap.fromImage(image)
-                target = self.video.size()
-                if target.width() > 0 and target.height() > 0:
-                    pixmap = pixmap.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
-                self.video.setPixmap(pixmap)
-                self.last_sequence = packet.sequence
-                self.last_received_ns = now
-                self.status.setText("LIVE")
-                return
-        if self.last_received_ns == 0 or now - self.last_received_ns > self.stale_after_ns:
-            self.status.setText("WAITING")
+        image, version = self.reader.latest()
+        if image is not None and version > self.last_version:
+            self.last_version = version
+            pixmap = QPixmap.fromImage(image)
+            target = self.video.size()
+            if target.width() > 0 and target.height() > 0:
+                pixmap = pixmap.scaled(
+                    target,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+            self.video.setPixmap(pixmap)
+            self.status.setText(f"LIVE {self.reader.frames}")
+            return
+
+        if self.reader.last_error:
+            self.status.setText("RECONNECTING")
             if self.video.pixmap() is None:
-                self.video.setText("Waiting for frame...")
+                self.video.setText(self.reader.last_error)
+        elif self.last_version == 0:
+            self.status.setText("CONNECTING")
 
     def close_reader(self) -> None:
-        self.reader.close()
+        self.reader.stop()
+        self.reader.join()
 
 
 class CameraWall(QWidget):
-    def __init__(self, frame_bus_dir: str, stale_after_ms: int, parent: QWidget | None = None) -> None:
+    def __init__(self, ml_video_base_url: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.frame_bus_dir = frame_bus_dir
-        self.stale_after_ms = stale_after_ms
+        self.ml_video_base_url = ml_video_base_url
         self.tiles: dict[str, CameraTile] = {}
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(6)
+        for row in range(2):
+            self.grid.setRowStretch(row, 1)
+        for column in range(3):
+            self.grid.setColumnStretch(column, 1)
 
     def set_cameras(self, camera_ids: list[str]) -> None:
         if list(self.tiles) == camera_ids:
@@ -79,7 +86,7 @@ class CameraWall(QWidget):
             tile.deleteLater()
         self.tiles.clear()
         for index, camera_id in enumerate(camera_ids):
-            tile = CameraTile(camera_id, self.frame_bus_dir, self.stale_after_ms, self)
+            tile = CameraTile(camera_id, self.ml_video_base_url, self)
             self.tiles[camera_id] = tile
             row, column = divmod(index, 3)
             self.grid.addWidget(tile, row, column)
