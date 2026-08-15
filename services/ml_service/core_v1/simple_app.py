@@ -32,21 +32,59 @@ def _load_yaml(path: Path):
         return _expand(yaml.safe_load(handle) or {})
 
 
+def _tune_cameras(items: list[dict]) -> list[dict]:
+    """Keep RTSP latency small but large enough to absorb normal LAN jitter."""
+    tuned: list[dict] = []
+    for raw in items:
+        camera = dict(raw)
+        if not camera.get("online", True):
+            continue
+        codec = str(camera.get("display_codec") or camera.get("codec") or "").lower()
+        # 20 ms proved too aggressive for a six-stream wall. H.265 generally
+        # benefits from a slightly larger jitter window than H.264.
+        latency_floor = 80 if codec in {"h265", "hevc"} else 60
+        camera["latency_ms"] = max(latency_floor, int(camera.get("latency_ms", latency_floor)))
+        camera["rtsp_transport"] = "tcp"
+        camera["drop_on_latency"] = True
+        tuned.append(camera)
+    return tuned
+
+
 # Phase 1 invariant:
-#   RTSP -> DeepStream/NVDEC -> latest frame -> mmap -> frontend
+#   RTSP -> DeepStream nvurisrcbin/NVDEC -> newest frame -> mmap -> frontend
 # There is no detector, tracker, ReID, face recognition or JPEG encoder here.
 core_cfg = dict(_load_yaml(ROOT / "config/core_v1.yaml").get("core_v1", {}))
-core_cfg["profile"] = "camera-deepstream-mmap-baseline-v1"
-core_cfg["capture_backend"] = "deepstream"
-core_cfg["drop_on_latency"] = True
-core_cfg["postdecode_queue_buffers"] = 1
+core_cfg.update(
+    {
+        "profile": "camera-deepstream-mmap-720p-low-latency-v2",
+        "capture_backend": "deepstream",
+        "capture_output_width": 1280,
+        "capture_output_height": 720,
+        "display_fps": 20,
+        "rtsp_transport": "tcp",
+        "drop_on_latency": True,
+        "decoder_extra_surfaces": 6,
+        "postdecode_queue_buffers": 1,
+        "capture_timeout_ms": 400,
+        "max_read_timeouts": 4,
+        "startup_grace_sec": 10.0,
+        "startup_stagger_sec": 0.25,
+        "reconnect_delay_sec": 0.50,
+        "capture_metrics_interval_sec": 5.0,
+        "max_pipeline_lag_ms": 600,
+        "max_pipeline_lag_samples": 20,
+    }
+)
+# The old global 150 ms value hid each camera's own codec-specific latency.
+# CameraWorker falls back to camera["latency_ms"] when this key is absent.
+core_cfg.pop("rtsp_latency_ms", None)
 
-camera_cfg = camera_config().get("cameras", [])
+camera_cfg = _tune_cameras(camera_config().get("cameras", []))
 manager = CameraManager(camera_cfg, core_cfg)
 
-capture_width = int(core_cfg.get("capture_output_width", 736) or 736)
-capture_height = int(core_cfg.get("capture_output_height", 416) or 416)
-display_fps = float(core_cfg.get("display_fps", 20) or 20)
+capture_width = int(core_cfg["capture_output_width"])
+capture_height = int(core_cfg["capture_output_height"])
+display_fps = float(core_cfg["display_fps"])
 
 publishers = {
     cid: CameraOnlyMmapPublisher(
@@ -59,7 +97,7 @@ publishers = {
     for cid, store in manager.stores.items()
 }
 
-app = FastAPI(title="AI Surveillance Camera Baseline", version="1.0-deepstream-mmap")
+app = FastAPI(title="AI Surveillance Camera Baseline", version="2.0-deepstream-720p")
 
 
 @app.on_event("startup")
@@ -103,6 +141,7 @@ def health():
             "transport": "mmap-bgr-double-buffer",
             "codec": "none",
             "http_mjpeg": False,
+            "rtsp_transport": core_cfg["rtsp_transport"],
         },
     }
 
