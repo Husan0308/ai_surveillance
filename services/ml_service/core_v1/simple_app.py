@@ -33,50 +33,57 @@ def _load_yaml(path: Path):
 
 
 def _tune_cameras(items: list[dict]) -> list[dict]:
-    """Keep RTSP latency small but large enough to absorb normal LAN jitter."""
+    """Stable RTSP settings for the legacy mmap diagnostic path."""
     tuned: list[dict] = []
     for raw in items:
         camera = dict(raw)
         if not camera.get("online", True):
             continue
         codec = str(camera.get("display_codec") or camera.get("codec") or "").lower()
-        # 20 ms proved too aggressive for a six-stream wall. H.265 generally
-        # benefits from a slightly larger jitter window than H.264.
-        latency_floor = 80 if codec in {"h265", "hevc"} else 60
-        camera["latency_ms"] = max(latency_floor, int(camera.get("latency_ms", latency_floor)))
-        camera["rtsp_transport"] = "tcp"
+        # Ultra-small jitter windows can look 'low latency' while actually
+        # producing visible cadence drops. Keep a bounded but realistic LAN
+        # window; the zero-host-copy GPU wall is the primary low-latency path.
+        latency_floor = 100 if codec in {"h265", "hevc"} else 80
+        camera["latency_ms"] = max(
+            latency_floor,
+            int(camera.get("latency_ms", latency_floor)),
+        )
+        # rtp-multi = UDP/UDP multicast/TCP. Do not force TCP head-of-line
+        # blocking for the local camera LAN unless diagnostics prove UDP loss.
+        camera["rtsp_transport"] = "auto"
         camera["drop_on_latency"] = True
         tuned.append(camera)
     return tuned
 
 
-# Phase 1 invariant:
-#   RTSP -> DeepStream nvurisrcbin/NVDEC -> newest frame -> mmap -> frontend
-# There is no detector, tracker, ReID, face recognition or JPEG encoder here.
+# Diagnostic compatibility path:
+#   RTSP -> DeepStream/NVDEC -> CPU BGR copy -> mmap -> Qt
+# It deliberately has no AI, but it is NOT the preferred smooth display path.
+# For the true GPU baseline use services.frontend.core_v1.deepstream_gpu_wall.
 core_cfg = dict(_load_yaml(ROOT / "config/core_v1.yaml").get("core_v1", {}))
 core_cfg.update(
     {
-        "profile": "camera-deepstream-mmap-720p-low-latency-v2",
+        "profile": "camera-deepstream-mmap-diagnostic-v3",
         "capture_backend": "deepstream",
         "capture_output_width": 1280,
         "capture_output_height": 720,
         "display_fps": 20,
-        "rtsp_transport": "tcp",
+        "rtsp_transport": "auto",
         "drop_on_latency": True,
         "decoder_extra_surfaces": 6,
         "postdecode_queue_buffers": 1,
-        "capture_timeout_ms": 400,
-        "max_read_timeouts": 4,
-        "startup_grace_sec": 10.0,
-        "startup_stagger_sec": 0.25,
-        "reconnect_delay_sec": 0.50,
+        "capture_timeout_ms": 800,
+        "max_read_timeouts": 5,
+        "startup_grace_sec": 12.0,
+        "startup_stagger_sec": 0.30,
+        "reconnect_delay_sec": 1.0,
         "capture_metrics_interval_sec": 5.0,
-        "max_pipeline_lag_ms": 600,
+        # Disable the PTS-based reconnect watchdog while diagnosing. It can turn
+        # a temporary timestamp excursion into repeated reconnect/stutter loops.
+        "max_pipeline_lag_ms": 0,
         "max_pipeline_lag_samples": 20,
     }
 )
-# The old global 150 ms value hid each camera's own codec-specific latency.
-# CameraWorker falls back to camera["latency_ms"] when this key is absent.
 core_cfg.pop("rtsp_latency_ms", None)
 
 camera_cfg = _tune_cameras(camera_config().get("cameras", []))
@@ -97,13 +104,16 @@ publishers = {
     for cid, store in manager.stores.items()
 }
 
-app = FastAPI(title="AI Surveillance Camera Baseline", version="2.0-deepstream-720p")
+app = FastAPI(title="AI Surveillance Camera Diagnostic", version="3.0-deepstream-mmap")
 
 
 @app.on_event("startup")
 def startup():
     manager.start()
-    stagger = max(0.0, float(core_cfg.get("publisher_start_stagger_ms", 0.0)) / 1000.0)
+    stagger = max(
+        0.0,
+        float(core_cfg.get("publisher_start_stagger_ms", 0.0)) / 1000.0,
+    )
     for index, publisher in enumerate(publishers.values()):
         publisher.start()
         if stagger and index + 1 < len(publishers):
@@ -124,7 +134,7 @@ def health():
     camera_metrics = manager.metrics()
     return {
         "status": "ok",
-        "mode": "camera-only-deepstream+mmap",
+        "mode": "camera-only-deepstream+mmap-diagnostic",
         "profile": core_cfg["profile"],
         "cameras": camera_metrics,
         "online": sum(bool(value.get("online")) for value in camera_metrics.values()),
@@ -142,6 +152,7 @@ def health():
             "codec": "none",
             "http_mjpeg": False,
             "rtsp_transport": core_cfg["rtsp_transport"],
+            "preferred_display": "deepstream_gpu_wall",
         },
     }
 
