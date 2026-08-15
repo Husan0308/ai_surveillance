@@ -20,9 +20,10 @@ os.environ.setdefault("AI_YOLO_CONF", "0.18")
 os.environ.setdefault("AI_CAMERA_FPS_FLOOR", "19.3")
 os.environ.setdefault("AI_CAMERA_FPS_GOOD", "19.8")
 
-# Smooth motion wins over absolute minimum renderer latency. The mux below is
-# also paced to the measured 20 FPS source cadence.
-os.environ.setdefault("AI_WALL_SINK_SYNC", "1")
+# Live RTSP rendering must not use the EGL sink clock as a second frame-drop
+# authority. nvstreammux already regulates the six inputs; the final sink should
+# present the newest tiled frame immediately instead of declaring it "too late".
+os.environ.setdefault("AI_WALL_SINK_SYNC", "0")
 
 from . import deepstream_yolo26m_batch6_wall as base
 from .dsmeta_bridge import DeepStreamMetaBridge
@@ -32,8 +33,9 @@ class NativeCameraYolo26mDetectionOnly(base.NativeCameraYolo26mBatch6Wall):
     """Only six-camera display + YOLO26m person detection + visible rectangles.
 
     Display:
-        RTSP -> NVDEC -> tee -> latest-only queue -> nvstreammux (paced 20 FPS)
-             -> tiler 1920x720 -> latest-only OSD queue -> nvdsosd GPU -> EGL
+        RTSP -> NVDEC -> tee -> latest-only queue -> nvstreammux (20 FPS input sync)
+             -> tiler 1920x720 -> latest-only OSD queue -> nvdsosd GPU
+             -> latest-only wall queue -> EGL (sync=0, no late-frame drops)
 
     Detector:
         tee -> ticket gate -> one fresh frame/camera -> 576x320 BGRx
@@ -71,10 +73,9 @@ class NativeCameraYolo26mDetectionOnly(base.NativeCameraYolo26mBatch6Wall):
 
         super().__init__()
 
-        # The six RTSP streams in the measured baseline are all ~20 FPS with
-        # ~50 ms PTS spacing. Force one coherent wall cadence instead of pushing
-        # partial batches whenever any camera arrives. Latest-only source queues
-        # still prevent unbounded latency.
+        # The six measured RTSP streams are ~20 FPS with ~50 ms PTS spacing.
+        # Synchronize them at the mux, where we still have per-source context,
+        # rather than at the final renderer where late PTS caused frame drops.
         self._set_if(self.mux, "batched-push-timeout", 50000)
         self._set_if(self.mux, "sync-inputs", True)
         self._set_if(self.mux, "max-latency", 120_000_000)  # 120 ms in ns
@@ -83,17 +84,24 @@ class NativeCameraYolo26mDetectionOnly(base.NativeCameraYolo26mBatch6Wall):
 
         # Do not render a 3840x1440 offscreen wall only to downscale it again in
         # the desktop/AnyDesk. 1920x720 is 75% fewer output pixels. The source
-        # mux remains 1280x720, so camera source/detail before tiling is unchanged.
+        # mux remains 1280x720, so source detail before tiling is unchanged.
         self._set_if(self.tiler, "width", self.display_wall_width)
         self._set_if(self.tiler, "height", self.display_wall_height)
         self.wall_width = self.display_wall_width
         self.wall_height = self.display_wall_height
 
-        # PTS-clocked sink gives visually even motion. QoS stays disabled so a
-        # temporary renderer hiccup does not ask upstream decoders to drop frames.
-        self._set_if(self.sink, "sync", True)
+        # DeepStream's RTSP troubleshooting guidance recommends sync=0 on display
+        # sinks. GstBaseSink also disables clock-lateness dropping when sync is
+        # false. Keep QoS off and explicitly remove every additional sink timing
+        # constraint that could turn a small GPU/desktop hiccup into visible loss.
+        self._set_if(self.sink, "sync", False)
         self._set_if(self.sink, "qos", False)
-        self.sink_sync = True
+        self._set_if(self.sink, "max-lateness", -1)
+        self._set_if(self.sink, "processing-deadline", 0)
+        self._set_if(self.sink, "render-delay", 0)
+        self._set_if(self.sink, "throttle-time", 0)
+        self._set_if(self.sink, "enable-last-sample", False)
+        self.sink_sync = False
 
         self._setup_native_bbox_osd()
 
@@ -176,7 +184,7 @@ class NativeCameraYolo26mDetectionOnly(base.NativeCameraYolo26mBatch6Wall):
             "DETECTION_ONLY path ready: camera+YOLO26m only; "
             "native-meta=1 osd=1 tracker=0 reid=0 face=0 heatmap=0; "
             f"wall={self.display_wall_width}x{self.display_wall_height} "
-            "mux=20fps-paced sink_sync=1",
+            "mux=20fps-synced sink_sync=0 late_drop=off",
             flush=True,
         )
 
