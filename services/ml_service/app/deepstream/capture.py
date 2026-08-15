@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
+import os
 import re
 import time
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import gi
 import numpy as np
@@ -11,6 +13,11 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: E402
 
 Gst.init(None)
+
+_CODEC = {
+    "h264": ("H264", "rtph264depay", "h264parse"),
+    "h265": ("H265", "rtph265depay", "h265parse"),
+}
 
 
 def _gst_quote(value: str) -> str:
@@ -21,34 +28,53 @@ def _redact(value: str) -> str:
     return re.sub(r"(?i)(rtsps?://)[^@/\s]+@", r"\1***:***@", value)
 
 
+def _with_optional_auth(uri: str, camera_id: str) -> str:
+    prefix = camera_id.replace("-", "_")
+    username = os.getenv(f"{prefix}_RTSP_USERNAME", "").strip()
+    password = os.getenv(f"{prefix}_RTSP_PASSWORD", "")
+    if not username:
+        return uri
+    parts = urlsplit(uri)
+    if "@" in parts.netloc:
+        return uri
+    userinfo = quote(username, safe="")
+    if password:
+        userinfo += ":" + quote(password, safe="")
+    return urlunsplit((parts.scheme, f"{userinfo}@{parts.netloc}", parts.path, parts.query, parts.fragment))
+
+
 def _owned_bgr(mapped_data, width: int, height: int) -> np.ndarray:
     array = np.frombuffer(mapped_data, dtype=np.uint8).reshape((height, width, 4))
     return array[..., :3].copy()
 
 
 class DeepStreamCapture:
-    """One independent DeepStream/NVDEC pipeline for one RTSP camera.
+    """Explicit RTSP + NVIDIA NVDEC capture for one camera.
 
-    No nvstreammux is used in the display path. A slow camera therefore cannot
-    stall the other five camera pipelines.
+    The previous nvurisrcbin path could swallow RTSP failures inside its own
+    reconnect loop. Here rtspsrc owns RTSP negotiation and posts failures to the
+    bus; nvv4l2decoder/nvvideoconvert keep decode and scale on NVIDIA hardware.
     """
 
-    backend = "deepstream-nvurisrcbin"
+    backend = "rtspsrc-nvv4l2decoder"
 
-    def __init__(self, camera_id: str, uri: str, config) -> None:
+    def __init__(self, camera_id: str, uri: str, codec: str, config, transport: str | None = None) -> None:
         self.camera_id = camera_id
-        self.uri = uri
+        self.uri = _with_optional_auth(uri, camera_id)
+        self.codec = codec.lower()
         self.config = config
+        self.transport = (transport or config.rtsp_transport).lower()
         self._opened = False
         self._last_error = ""
         self._last_warning = ""
         self._frame_intervals_ms = deque(maxlen=300)
         self._last_frame_mono: float | None = None
 
-        if Gst.ElementFactory.find("nvurisrcbin") is None:
-            raise RuntimeError("DeepStream plugin nvurisrcbin is not available")
-        if Gst.ElementFactory.find("nvvideoconvert") is None:
-            raise RuntimeError("DeepStream plugin nvvideoconvert is not available")
+        if self.codec not in _CODEC:
+            raise ValueError(f"{camera_id}: unsupported codec {codec}")
+        for plugin in ("rtspsrc", "nvv4l2decoder", "nvvideoconvert", "appsink"):
+            if Gst.ElementFactory.find(plugin) is None:
+                raise RuntimeError(f"required GStreamer/NVIDIA plugin missing: {plugin}")
 
         self.pipeline_text = self._build_pipeline()
         self.pipeline = Gst.parse_launch(self.pipeline_text)
@@ -64,48 +90,38 @@ class DeepStreamCapture:
         if not self._opened:
             detail = self._consume_bus()
             self.pipeline.set_state(Gst.State.NULL)
-            raise RuntimeError(f"{camera_id}: DeepStream PLAYING failed: {detail or 'no detail'}")
+            raise RuntimeError(f"{camera_id}: PLAYING failed: {detail or 'no detail'}")
 
     def _build_pipeline(self) -> str:
         c = self.config
-        select_protocol = 4 if c.rtsp_transport == "tcp" else 0
+        encoding, depay, parser = _CODEC[self.codec]
         queue_buffers = max(1, int(c.postdecode_queue_buffers))
+        source_options = [
+            f"location={_gst_quote(self.uri)}",
+            f"latency={max(1, c.latency_ms)}",
+            f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
+            "buffer-mode=auto",
+        ]
+        if self.transport in {"tcp", "udp"}:
+            source_options.append(f"protocols={self.transport}")
+        if self.transport in {"udp", "auto"} and c.udp_buffer_size > 0:
+            source_options.append(f"udp-buffer-size={c.udp_buffer_size}")
+
         return " ".join(
             [
-                "nvurisrcbin",
-                "name=source",
-                f"uri={_gst_quote(self.uri)}",
-                f"gpu-id={c.gpu_id}",
-                "disable-audio=true",
-                f"select-rtp-protocol={select_protocol}",
-                f"latency={max(1, c.latency_ms)}",
-                f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
+                "rtspsrc", "name=source", *source_options,
+                "!", f"application/x-rtp,media=video,encoding-name={encoding}",
+                "!", depay, "name=depay",
+                "!", parser, "name=parser",
+                "!", "nvv4l2decoder", "name=decoder",
                 f"num-extra-surfaces={max(1, c.decoder_extra_surfaces)}",
-                f"cudadec-memtype={c.cudadec_memtype}",
-                f"udp-buffer-size={max(65536, c.udp_buffer_size)}",
-                f"rtsp-reconnect-interval={max(1, c.reconnect_interval_sec)}",
-                f"rtsp-reconnect-attempts={c.reconnect_attempts}",
-                "!",
-                "queue",
-                "name=latest_queue",
+                "!", "queue", "name=latest_queue",
                 f"max-size-buffers={queue_buffers}",
-                "max-size-bytes=0",
-                "max-size-time=0",
-                "leaky=downstream",
-                "silent=true",
-                "!",
-                "nvvideoconvert",
-                f"gpu-id={c.gpu_id}",
-                "!",
-                f"video/x-raw,width={c.display_width},height={c.display_height},format=BGRx",
-                "!",
-                "appsink",
-                "name=sink",
-                "drop=true",
-                "max-buffers=1",
-                "sync=false",
-                "wait-on-eos=false",
-                "enable-last-sample=false",
+                "max-size-bytes=0", "max-size-time=0", "leaky=downstream", "silent=true",
+                "!", "nvvideoconvert", "name=converter", f"gpu-id={c.gpu_id}",
+                "!", f"video/x-raw,width={c.display_width},height={c.display_height},format=BGRx",
+                "!", "appsink", "name=sink", "drop=true", "max-buffers=1", "sync=false",
+                "wait-on-eos=false", "enable-last-sample=false",
             ]
         )
 
@@ -147,7 +163,6 @@ class DeepStreamCapture:
     def read(self):
         if not self._opened:
             return False, None
-
         timeout_ns = max(100, int(self.config.capture_timeout_ms)) * Gst.MSECOND
         sample = self.sink.emit("try-pull-sample", timeout_ns)
         if sample is None:
@@ -161,14 +176,16 @@ class DeepStreamCapture:
         buffer = sample.get_buffer()
         if caps is None or buffer is None or caps.get_size() == 0:
             return False, None
-
         structure = caps.get_structure(0)
         width = int(structure.get_value("width"))
         height = int(structure.get_value("height"))
+        pixel_format = str(structure.get_value("format"))
+        if pixel_format != "BGRx":
+            raise RuntimeError(f"{self.camera_id}: unexpected appsink format {pixel_format}")
+
         ok, mapped = buffer.map(Gst.MapFlags.READ)
         if not ok:
             return False, None
-
         try:
             image = _owned_bgr(mapped.data, width, height)
         finally:
@@ -184,6 +201,8 @@ class DeepStreamCapture:
         self._consume_bus()
         return {
             "backend": self.backend,
+            "transport": self.transport,
+            "codec": self.codec,
             "pipeline": _redact(self.pipeline_text),
             "last_error": self._last_error,
             "last_warning": self._last_warning,
