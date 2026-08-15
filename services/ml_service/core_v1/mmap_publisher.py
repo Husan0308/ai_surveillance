@@ -4,7 +4,7 @@ import time
 
 import cv2
 
-from shared.mmap_frame import MmapFrameWriter
+from shared.safe_mmap_frame import SigbusSafeMmapFrameWriter
 
 from .jpeg_publisher import LatestJpegPublisher
 
@@ -14,7 +14,9 @@ class MmapFramePublisher(LatestJpegPublisher):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.writer = MmapFrameWriter(self.camera_id, self.max_width, self.max_height, channels=3)
+        self.writer = SigbusSafeMmapFrameWriter(
+            self.camera_id, self.max_width, self.max_height, channels=3
+        )
         self.event_wakeups = 0
         self.coalesced_frames = 0
         self._last_transport_ms = 0.0
@@ -27,7 +29,7 @@ class MmapFramePublisher(LatestJpegPublisher):
             payload.update(
                 {
                     "publisher_mode": "event-driven-mmap-latest-only",
-                    "transport": "mmap-bgr-double-buffer",
+                    "transport": "mmap-bgr-double-buffer-sigbus-safe",
                     "mmap_path": str(self.writer.path),
                     "event_wakeups": self.event_wakeups,
                     "coalesced_frames": self.coalesced_frames,
