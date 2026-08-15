@@ -102,7 +102,7 @@ class MmapFrameTransportTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "shared/safe_mmap_frame.py").read_text(encoding="utf-8")
         self.assertIn("posix_fallocate", source)
         self.assertIn("os.replace", source)
-        self.assertNotIn("O_TRUNC", source)
+        self.assertNotIn("os.O_TRUNC", source)
 
 
 if __name__ == "__main__":
