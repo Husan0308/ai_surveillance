@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import time
 
-from . import deepstream_torch_batch6_smooth as smooth
+from . import deepstream_torch_batch6_smooth_v2 as smooth_v2
 
 
-class DeepStreamCameraOnlyProbe(smooth.DeepStreamTorchBatch6SmoothWall):
-    """Same six-camera display/decode pipeline with inference branch fully dropped."""
+class DeepStreamCameraOnlyProbe(smooth_v2.DeepStreamTorchBatch6SmoothV2):
+    """Same six-camera display/decode pipeline with inference fully disabled."""
 
     def _preprocess_gate_probe(self, _pad, _info, _cid: str):
         # Drop before nvvideoconvert: zero inference resize/color-conversion cost.
@@ -34,7 +34,7 @@ class DeepStreamCameraOnlyProbe(smooth.DeepStreamTorchBatch6SmoothWall):
             dq = int(self.display_queues[cid].get_property("current-level-buffers"))
             parts.append(f"{cid}:{fps:.1f}fps dq={dq}")
         print(
-            "CAMERA_ONLY_PROBE " + " | ".join(parts)
+            "CAMERA_ONLY_PROBE_V2 " + " | ".join(parts)
             + f" || pre_infer_drops={self.preprocess_drops}",
             flush=True,
         )
