@@ -11,6 +11,7 @@ import yaml
 class CameraConfig:
     camera_id: str
     uri: str
+    codec: str
 
 
 @dataclass(frozen=True)
@@ -20,14 +21,12 @@ class DeepStreamConfig:
     latency_ms: int
     drop_on_latency: bool
     decoder_extra_surfaces: int
-    cudadec_memtype: int
     udp_buffer_size: int
-    reconnect_interval_sec: int
-    reconnect_attempts: int
     postdecode_queue_buffers: int
     capture_timeout_ms: int
     startup_grace_sec: float
     reconnect_delay_sec: float
+    reconnect_delay_max_sec: float
     startup_stagger_sec: float
     display_width: int
     display_height: int
@@ -72,11 +71,14 @@ def load_settings(path: str | Path | None = None) -> Settings:
         uri = os.getenv(env_uri, str(row["uri"]).strip()) if env_uri else str(row["uri"]).strip()
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
-        cameras.append(CameraConfig(camera_id=camera_id, uri=uri))
+        codec = str(row.get("codec", "")).strip().lower()
+        if codec not in {"h264", "h265"}:
+            raise ValueError(f"{camera_id}: codec must be h264 or h265")
+        cameras.append(CameraConfig(camera_id=camera_id, uri=uri, codec=codec))
 
     ds = raw.get("deepstream") or {}
     display = raw.get("display") or {}
-    transport = str(ds.get("rtsp_transport", "auto")).strip().lower()
+    transport = str(ds.get("rtsp_transport", "tcp")).strip().lower()
     if transport not in {"auto", "tcp", "udp"}:
         raise ValueError("deepstream.rtsp_transport must be auto, tcp, or udp")
 
@@ -99,15 +101,13 @@ def load_settings(path: str | Path | None = None) -> Settings:
             latency_ms=int(ds.get("latency_ms", 150)),
             drop_on_latency=_as_bool(ds.get("drop_on_latency", True)),
             decoder_extra_surfaces=int(ds.get("decoder_extra_surfaces", 4)),
-            cudadec_memtype=int(ds.get("cudadec_memtype", 0)),
             udp_buffer_size=int(ds.get("udp_buffer_size", 1_048_576)),
-            reconnect_interval_sec=int(ds.get("reconnect_interval_sec", 2)),
-            reconnect_attempts=int(ds.get("reconnect_attempts", -1)),
             postdecode_queue_buffers=int(ds.get("postdecode_queue_buffers", 1)),
-            capture_timeout_ms=int(ds.get("capture_timeout_ms", 1000)),
-            startup_grace_sec=float(ds.get("startup_grace_sec", 8.0)),
-            reconnect_delay_sec=float(ds.get("reconnect_delay_sec", 1.0)),
-            startup_stagger_sec=float(ds.get("startup_stagger_sec", 0.20)),
+            capture_timeout_ms=int(ds.get("capture_timeout_ms", 1200)),
+            startup_grace_sec=float(ds.get("startup_grace_sec", 12.0)),
+            reconnect_delay_sec=float(ds.get("reconnect_delay_sec", 2.0)),
+            reconnect_delay_max_sec=float(ds.get("reconnect_delay_max_sec", 10.0)),
+            startup_stagger_sec=float(ds.get("startup_stagger_sec", 0.5)),
             display_width=width,
             display_height=height,
             display_fps=fps,
