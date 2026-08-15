@@ -6,6 +6,7 @@ on:
       - "main"
       - "agent/people-roster-v1"
       - "agent/smooth-camera-mmap"
+      - "agent/sigbus-safe-mmap"
   pull_request:
     paths:
       - "shared/**"
@@ -32,6 +33,7 @@ jobs:
         run: |
           python -m py_compile \
             shared/mmap_frame.py \
+            shared/safe_mmap_frame.py \
             services/ml_service/core_v1/__init__.py \
             services/ml_service/core_v1/app.py \
             services/ml_service/core_v1/simple_app.py \
