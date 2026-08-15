@@ -69,9 +69,6 @@ static int add_boxes_to_frame(NvDsBatchMeta *batch_meta,
     return added;
 }
 
-/*
- * Detection-only helper. Coordinates are source-frame pixels.
- */
 int camera_v2_add_boxes(uintptr_t buffer_ptr,
                         unsigned int source_id,
                         const float *boxes,
@@ -85,17 +82,7 @@ int camera_v2_add_boxes(uintptr_t buffer_ptr,
     return add_boxes_to_frame(batch_meta, frame_meta, boxes, count);
 }
 
-/*
- * Emulate the metadata contract of a primary detector for nvtracker.
- * Returns:
- *   >=0 : matching source frame was present; value is number of object metas added
- *    -1 : invalid buffer / no batch meta
- *    -2 : this partial nvstreammux batch did not contain source_id
- *
- * Crucially bInferDone is TRUE only on frames for which our external YOLO actually
- * produced a result. Frames between sparse detector calls remain FALSE, allowing
- * NvDCF to distinguish "inference skipped" from "inference ran and found zero".
- */
+/* Emulate a primary detector's per-frame metadata contract for nvtracker. */
 int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
                                     unsigned int source_id,
                                     const float *boxes,
@@ -111,20 +98,65 @@ int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
     return add_boxes_to_frame(batch_meta, frame_meta, boxes, count);
 }
 
-/* Diagnostic + OSD style helper used after nvtracker. */
+static float clampf_local(float value, float low, float high) {
+    if (value < low) return low;
+    if (value > high) return high;
+    return value;
+}
+
+/*
+ * Diagnostic + OSD helper used after nvtracker.
+ *
+ * NvDCF should track the tight statistical bbox. For visualization we expand only
+ * rect_params so hands/feet/head are less likely to leave the green box during
+ * walking, leaning or sitting. This does NOT feed the enlarged rectangle back into
+ * NvDCF and therefore does not destabilize target state estimation.
+ */
 int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
     GstBuffer *buffer = (GstBuffer *) buffer_ptr;
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
     if (!batch_meta) return -1;
 
+    const float side_margin = 0.08f;
+    const float top_margin = 0.06f;
+    const float bottom_margin = 0.12f;
+
     int count = 0;
     for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) fnode->data;
         if (!frame_meta) continue;
+
+        float frame_w = (float) frame_meta->source_frame_width;
+        float frame_h = (float) frame_meta->source_frame_height;
+        if (frame_w <= 1.0f) frame_w = (float) frame_meta->pipeline_width;
+        if (frame_h <= 1.0f) frame_h = (float) frame_meta->pipeline_height;
+
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *) onode->data;
             if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
+
+            float left = obj->rect_params.left;
+            float top = obj->rect_params.top;
+            float width = obj->rect_params.width;
+            float height = obj->rect_params.height;
+
+            if (width > 1.0f && height > 1.0f && frame_w > 1.0f && frame_h > 1.0f) {
+                float new_left = left - width * side_margin;
+                float new_top = top - height * top_margin;
+                float new_right = left + width + width * side_margin;
+                float new_bottom = top + height + height * bottom_margin;
+
+                new_left = clampf_local(new_left, 0.0f, frame_w - 1.0f);
+                new_top = clampf_local(new_top, 0.0f, frame_h - 1.0f);
+                new_right = clampf_local(new_right, new_left + 1.0f, frame_w);
+                new_bottom = clampf_local(new_bottom, new_top + 1.0f, frame_h);
+
+                obj->rect_params.left = new_left;
+                obj->rect_params.top = new_top;
+                obj->rect_params.width = new_right - new_left;
+                obj->rect_params.height = new_bottom - new_top;
+            }
 
             obj->rect_params.border_width = 3;
             obj->rect_params.border_color.red = 0.10;
@@ -138,7 +170,6 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     return count;
 }
 
-/* Backward-compatible diagnostic symbol. */
 int camera_v2_count_tracked(uintptr_t buffer_ptr) {
     return camera_v2_style_and_count_tracked(buffer_ptr);
 }
