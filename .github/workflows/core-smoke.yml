@@ -3,7 +3,8 @@ name: Detection + tracking + ReID + CUDA face + MUKAMMAL UI smoke tests
 on:
   push:
     branches:
-      - "agent/fix-buffalo-m-pack"
+      - "main"
+      - "agent/people-roster-v1"
   pull_request:
     paths:
       - "services/ml_service/**"
@@ -59,7 +60,8 @@ jobs:
             services/frontend/core_v1/smooth_frame_reader.py \
             services/frontend/core_v1/operator_dashboard_mukammal.py \
             services/frontend/core_v1/operator_dashboard_face.py \
-            services/frontend/core_v1/operator_dashboard_face_cuda.py
+            services/frontend/core_v1/operator_dashboard_face_cuda.py \
+            services/frontend/core_v1/operator_dashboard_people_roster.py
 
       - name: Test detector model resolution
         run: python -m unittest discover -s tests -p "test_stable_detector.py" -v
@@ -90,6 +92,9 @@ jobs:
 
       - name: Test verified buffalo_m model pack provisioning
         run: python -m unittest discover -s tests -p "test_face_model_pack.py" -v
+
+      - name: Test ten-slot worker roster UI
+        run: python -m unittest discover -s tests -p "test_people_roster_ui.py" -v
 
       - name: Test smooth camera pipeline
         run: python -m unittest discover -s tests -p "test_camera_smoothness.py" -v
