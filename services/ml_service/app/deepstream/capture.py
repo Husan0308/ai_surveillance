@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
-import os
 import re
 import time
-from urllib.parse import quote, urlsplit, urlunsplit
 
 import gi
 import numpy as np
@@ -25,22 +23,10 @@ def _gst_quote(value: str) -> str:
 
 
 def _redact(value: str) -> str:
-    return re.sub(r"(?i)(rtsps?://)[^@/\s]+@", r"\1***:***@", value)
-
-
-def _with_optional_auth(uri: str, camera_id: str) -> str:
-    prefix = camera_id.replace("-", "_")
-    username = os.getenv(f"{prefix}_RTSP_USERNAME", "").strip()
-    password = os.getenv(f"{prefix}_RTSP_PASSWORD", "")
-    if not username:
-        return uri
-    parts = urlsplit(uri)
-    if "@" in parts.netloc:
-        return uri
-    userinfo = quote(username, safe="")
-    if password:
-        userinfo += ":" + quote(password, safe="")
-    return urlunsplit((parts.scheme, f"{userinfo}@{parts.netloc}", parts.path, parts.query, parts.fragment))
+    value = re.sub(r"(?i)(rtsps?://)[^@/\s]+@", r"\1***:***@", value)
+    value = re.sub(r'(?i)user-id="[^"]*"', 'user-id="***"', value)
+    value = re.sub(r'(?i)user-pw="[^"]*"', 'user-pw="***"', value)
+    return value
 
 
 def _owned_bgr(mapped_data, width: int, height: int) -> np.ndarray:
@@ -51,19 +37,30 @@ def _owned_bgr(mapped_data, width: int, height: int) -> np.ndarray:
 class DeepStreamCapture:
     """Explicit RTSP + NVIDIA NVDEC capture for one camera.
 
-    The previous nvurisrcbin path could swallow RTSP failures inside its own
-    reconnect loop. Here rtspsrc owns RTSP negotiation and posts failures to the
-    bus; nvv4l2decoder/nvvideoconvert keep decode and scale on NVIDIA hardware.
+    RTSP negotiation is owned by rtspsrc. NVIDIA owns decode/scale via
+    nvv4l2decoder + nvvideoconvert. The downstream queue and appsink each keep
+    only the newest frame, so no presentation backlog can grow.
     """
 
     backend = "rtspsrc-nvv4l2decoder"
 
-    def __init__(self, camera_id: str, uri: str, codec: str, config, transport: str | None = None) -> None:
+    def __init__(
+        self,
+        camera_id: str,
+        uri: str,
+        codec: str,
+        config,
+        transport: str | None = None,
+        username: str = "",
+        password: str = "",
+    ) -> None:
         self.camera_id = camera_id
-        self.uri = _with_optional_auth(uri, camera_id)
+        self.uri = uri
         self.codec = codec.lower()
         self.config = config
         self.transport = (transport or config.rtsp_transport).lower()
+        self.username = username
+        self.password = password
         self._opened = False
         self._last_error = ""
         self._last_warning = ""
@@ -102,6 +99,15 @@ class DeepStreamCapture:
             f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
             "buffer-mode=auto",
         ]
+
+        # rtspsrc natively handles RTSP Basic/Digest challenges via these
+        # properties; secrets never need to appear inside the committed URI.
+        if self.username:
+            source_options.append(f"user-id={_gst_quote(self.username)}")
+            source_options.append(f"user-pw={_gst_quote(self.password)}")
+
+        # 'auto' preserves GStreamer's normal UDP->TCP negotiation. The old
+        # working project used auto; force TCP/UDP only when explicitly asked.
         if self.transport in {"tcp", "udp"}:
             source_options.append(f"protocols={self.transport}")
         if self.transport in {"udp", "auto"} and c.udp_buffer_size > 0:
@@ -203,6 +209,7 @@ class DeepStreamCapture:
             "backend": self.backend,
             "transport": self.transport,
             "codec": self.codec,
+            "auth_configured": bool(self.username),
             "pipeline": _redact(self.pipeline_text),
             "last_error": self._last_error,
             "last_warning": self._last_warning,
