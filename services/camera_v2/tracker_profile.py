@@ -6,38 +6,30 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
-# Production fixed-CCTV pedestrian profile.
+# 4 GB Pascal fixed-CCTV pedestrian profile.
 #
-# Important design choice: shadow tracks are kept INTERNAL to NvDCF for recovery,
-# but are not promoted to live OSD. NVIDIA explicitly warns that overly permissive
-# inactive/shadow output can create lingering ghost bboxes after a person leaves.
-# Continuity is instead improved at the real detector/association/tracker levels.
+# NvMultiObjectTracker pre-allocates GPU memory from
+# streams * maxTargetsPerStream, so keep the target pool realistic for an office.
+# The detector remains high resolution; NvDCF itself is intentionally lightweight.
 _REQUIRED_PATCHES: dict[str, str] = {
-    # Keep low-score pedestrian detections available for association. New false
-    # targets are controlled by probation + early termination below.
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "1",
-    # Reject near-duplicate new targets around an existing target.
+    "maxTargetsPerStream": "24",
     "minIouDiff4NewTarget": "0.14",
-    # NVIDIA's optimized PeopleNet+NvDCF example is around 0.21. Use a slightly
-    # more permissive value for our sparse external YOLO corrections.
     "minTrackerConfidence": "0.18",
     "probationAge": "1",
-    "maxShadowTrackingAge": "40",
+    "maxShadowTrackingAge": "28",
     "earlyTerminationAge": "2",
 }
 
-# Apply only when the selected DeepStream sample config exposes the key.
-# Cascaded association is the key improvement: low-confidence detections are used
-# to recover existing ACTIVE targets instead of being discarded, similar in spirit
-# to ByteTrack's second-stage low-score association.
+# Only patch keys actually present in the NVIDIA max_perf sample. Cascaded
+# association keeps low-score YOLO person candidates useful for recovering an
+# existing target, while the visual feature footprint is kept small enough for a
+# GTX 1050 Ti running six decoded streams plus YOLO26m.
 _OPTIONAL_PATCHES: dict[str, str] = {
-    "useColorNames": "1",
+    "useColorNames": "0",
     "useHog": "1",
-    "featureImgSizeLevel": "5",
-    # At 20 FPS a walking person moves only a small distance per video frame.
-    # NVIDIA notes that too-large search regions reduce effective target feature
-    # resolution, so keep padding at 1 while using level-5 (48x48) features.
+    "featureImgSizeLevel": "3",
     "searchRegionPaddingScale": "1",
     "associationMatcherType": "1",
     "tentativeDetectorConfidence": "0.22",
@@ -47,8 +39,6 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4Iou": "0.02",
     "minMatchingScore4VisualSimilarity": "0.05",
     "usePrediction4Assoc": "1",
-    # If an older NvDCF profile exposes this legacy parameter, do not set it near
-    # zero; NVIDIA warns that very low inactive-output thresholds cause ghosts.
     "minTrackingConfidenceDuringInactive": "0.35",
 }
 
@@ -62,6 +52,7 @@ def _set_or_insert_target_management(lines: list[str], key: str, value: str) -> 
     if section is None:
         return False
 
+    # Replace when already present in TargetManagement.
     for index in range(section + 1, len(lines)):
         stripped = lines[index].strip()
         if not stripped or stripped.startswith("#"):
@@ -99,6 +90,13 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
         if not replaced:
             output.append(line)
 
+    # maxTargetsPerStream is critical to memory usage. Some NVIDIA sample revisions
+    # omit it, so insert it explicitly under TargetManagement when needed.
+    if "maxTargetsPerStream" not in patched:
+        if not _set_or_insert_target_management(output, "maxTargetsPerStream", "24"):
+            raise RuntimeError("NvDCF config has no TargetManagement section")
+        patched.add("maxTargetsPerStream")
+
     missing_required = sorted(set(_REQUIRED_PATCHES) - patched)
     if missing_required:
         raise RuntimeError(
@@ -106,9 +104,8 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing_required)
         )
 
-    # Shadow history may still be useful internally to NvDCF, but live rendering of
-    # its misc history is intentionally disabled. This is the direct fix for stale
-    # giant rectangles / ghost bboxes seen in the previous build.
+    # Never render shadow-history/synthetic tracks. They may stay inside NvDCF for
+    # recovery, but live OSD contains only real current-frame tracked objects.
     shadow_found = False
     for i, line in enumerate(output):
         if line.lstrip().startswith("outputShadowTracks:"):
@@ -123,8 +120,8 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     optional_applied = sorted(set(_OPTIONAL_PATCHES) & patched)
     header = [
         f"# Auto-generated from {stock.name}.",
-        "# Camera V2 production pedestrian tracking profile.",
-        "# No synthetic/shadow OSD boxes: detector + cascaded NvDCF association only.",
+        "# Camera V2 low-memory NvDCF profile for GTX 1050 Ti 4GB.",
+        "# maxTargetsPerStream=24; no synthetic/shadow OSD boxes.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
