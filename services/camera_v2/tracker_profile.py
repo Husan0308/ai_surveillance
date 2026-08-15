@@ -7,33 +7,39 @@ RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
 
-# Sparse external YOLO26m + fixed CCTV camera tuning.
+# Fixed-CCTV pedestrian tracking profile for sparse external YOLO26m detections.
 #
-# Important behavior:
-# - a low minIouDiff4NewTarget rejects a new detector box if it significantly
-#   overlaps an existing target, reducing duplicate boxes;
-# - a low minTrackerConfidence keeps a walking/partially-occluded person visible
-#   instead of immediately moving the target to shadow mode (where current-frame
-#   output is suppressed);
-# - shadow age stays long enough to recover after short occlusions/missed YOLO
-#   frames without keeping ghosts forever.
+# NVIDIA documents two behaviors that matter for our office cameras:
+# 1) NvDCF can suppress downstream current-frame output when tracker confidence
+#    falls below minTrackerConfidence and a target goes to shadow mode;
+# 2) dynamic / abrupt motion needs state-estimator measurements to be trusted more,
+#    otherwise the fused bbox can visibly lag behind the actual target.
 _REQUIRED_PATCHES: dict[str, str] = {
-    "minDetectorConfidence": "0.08",
+    "minDetectorConfidence": "0.06",
     "enableBboxUnClipping": "1",
     "minIouDiff4NewTarget": "0.15",
-    "minTrackerConfidence": "0.06",
+    # Do not hide a valid DCF target merely because correlation confidence dips for
+    # a few frames while a person walks, raises an arm, turns, or is half occluded.
+    "minTrackerConfidence": "0.00",
     "probationAge": "0",
     "maxShadowTrackingAge": "70",
-    "earlyTerminationAge": "4",
+    "earlyTerminationAge": "5",
 }
 
-# Accuracy/performance knobs are patched only when the selected DeepStream sample
-# profile contains them. The balanced `perf` profile is preferred by the runtime.
+# These parameters exist in the DeepStream NvDCF perf/accuracy sample profiles.
+# They are intentionally optional so slightly different DeepStream 7.x configs
+# remain usable. Lower measurement noise = react faster to measured motion; larger
+# search region helps a fast walker remain inside the DCF crop on the next frame.
 _OPTIONAL_PATCHES: dict[str, str] = {
     "useColorNames": "1",
     "useHog": "1",
     "featureImgSizeLevel": "4",
-    "minTrackingConfidenceDuringInactive": "0.06",
+    "searchRegionPaddingScale": "2",
+    "minTrackingConfidenceDuringInactive": "0.00",
+    "processNoiseVar4Loc": "4.0",
+    "processNoiseVar4Vel": "1.0",
+    "measurementNoiseVar4Detector": "1.5",
+    "measurementNoiseVar4Tracker": "3.0",
 }
 
 
@@ -75,8 +81,8 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     optional_applied = sorted(set(_OPTIONAL_PATCHES) & patched)
     header = [
         f"# Auto-generated from {stock.name}.",
-        "# Camera V2: frequent sparse YOLO26m + continuous NvDCF pedestrian tracking.",
-        "# Tuned to reduce duplicate targets and bbox blink during walking/occlusion.",
+        "# Camera V2 fast-pedestrian NvDCF tuning.",
+        "# Goal: less shadow-output blink and less state-estimator lag.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
