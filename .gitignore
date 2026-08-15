@@ -1,40 +1,10 @@
-# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-
-# Virtual environments / IDE
-venv/
+*.so
 .venv/
-.vscode/
-.idea/
-
-# Secrets / local camera overrides
+venv/
 .env
-config/cameras.local.yaml
-
-# Models and generated inference artifacts
-models/
-*.pt
-*.pth
-*.onnx
-*.engine
-*.weights
-
-# Runtime state: never commit machine-local binaries, DB/WAL, logs or captures
-.runtime/
-data/
-logs/
+.idea/
+.vscode/
 *.log
-*.db
-*.db-shm
-*.db-wal
-*.sqlite3
-
-# Generated media / diagnostics
-*.png
-*.jpg
-*.jpeg
-*.mp4
-*.avi
-core_v1_*.jsonl
+.DS_Store

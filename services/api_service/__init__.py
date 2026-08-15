@@ -1,1 +1,0 @@
-"""FastAPI and persistence service."""

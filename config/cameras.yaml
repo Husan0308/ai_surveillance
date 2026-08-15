@@ -1,153 +1,45 @@
 cameras:
-  - id: "CAM-01"
-    name: "Camera 1"
-    location: "Channel 101"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/101"
-    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/101"
-    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/101"
-    codec: "h264"
-    ai_codec: "h264"
-    display_codec: "h264"
-    latency_ms: 20
-    username: "${SURVEILLANCE_RTSP_USERNAME}"
-    password: "${SURVEILLANCE_RTSP_PASSWORD}"
-    online: true
-    ai_enabled: true
-    heatmap_enabled: true
-    recording_enabled: false
-    zone_enabled: false
-    overstay_enabled: false
-    resolution: "1280x720"
-    fps: 25
-    reconnect_interval: 10
-    connection_timeout: 5
-    latency_warn_ms: 200
-    packet_loss_warn_percent: 2.0
+  - id: CAM-01
+    env_uri: CAM_01_URI
+    uri: rtsp://192.168.1.210:554/Streaming/Channels/101
+  - id: CAM-02
+    env_uri: CAM_02_URI
+    uri: rtsp://192.168.1.210:554/Streaming/Channels/201
+  - id: CAM-03
+    env_uri: CAM_03_URI
+    uri: rtsp://192.168.1.210:554/Streaming/Channels/301
+  - id: CAM-04
+    env_uri: CAM_04_URI
+    uri: rtsp://192.168.1.210:554/Streaming/Channels/601
+  - id: CAM-05
+    env_uri: CAM_05_URI
+    uri: rtsp://192.168.1.210:554/Streaming/Channels/502
+  - id: CAM-06
+    env_uri: CAM_06_URI
+    uri: rtsp://192.168.1.210:554/Streaming/Channels/402
 
-  - id: "CAM-02"
-    name: "Camera 2"
-    location: "Channel 201"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/201"
-    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/201"
-    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/201"
-    codec: "h264"
-    ai_codec: "h264"
-    display_codec: "h264"
-    latency_ms: 20
-    username: "${SURVEILLANCE_RTSP_USERNAME}"
-    password: "${SURVEILLANCE_RTSP_PASSWORD}"
-    online: true
-    ai_enabled: true
-    heatmap_enabled: true
-    recording_enabled: false
-    zone_enabled: false
-    overstay_enabled: false
-    resolution: "1280x720"
-    fps: 30
-    reconnect_interval: 10
-    connection_timeout: 5
-    latency_warn_ms: 200
-    packet_loss_warn_percent: 2.0
+deepstream:
+  gpu_id: 0
+  latency_ms: 150
+  drop_on_latency: true
+  reconnect_interval_sec: 2
+  reconnect_attempts: -1
+  decoder_extra_surfaces: 4
+  cudadec_memtype: 0
+  udp_buffer_size: 1048576
+  rtp_protocol: 0
 
-  - id: "CAM-03"
-    name: "Camera 3"
-    location: "Channel 301"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/301"
-    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/301"
-    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/301"
-    codec: "h264"
-    ai_codec: "h264"
-    display_codec: "h264"
-    latency_ms: 20
-    username: "${SURVEILLANCE_RTSP_USERNAME}"
-    password: "${SURVEILLANCE_RTSP_PASSWORD}"
-    online: true
-    ai_enabled: true
-    heatmap_enabled: true
-    recording_enabled: false
-    zone_enabled: false
-    overstay_enabled: false
-    resolution: "1280x720"
-    fps: 30
-    reconnect_interval: 10
-    connection_timeout: 5
-    latency_warn_ms: 200
-    packet_loss_warn_percent: 2.0
+  streammux:
+    batch_size: 6
+    width: 1280
+    height: 720
+    live_source: true
+    batched_push_timeout_us: 50000
+    sync_inputs: false
 
-  - id: "CAM-04"
-    name: "Camera 4"
-    location: "Channel 401"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/601"
-    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/601"
-    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/601"
-    codec: "h265"
-    ai_codec: "h265"
-    display_codec: "h265"
-    latency_ms: 80
-    drop_on_latency: true
-    username: "${SURVEILLANCE_RTSP_USERNAME}"
-    password: "${SURVEILLANCE_RTSP_PASSWORD}"
-    online: true
-    ai_enabled: true
-    heatmap_enabled: true
-    recording_enabled: false
-    zone_enabled: false
-    overstay_enabled: false
-    resolution: "1280x720"
-    fps: 20
-    reconnect_interval: 10
-    connection_timeout: 5
-    latency_warn_ms: 200
-    packet_loss_warn_percent: 2.0
-
-  - id: "CAM-05"
-    name: "Camera 5"
-    location: "Channel 501"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
-    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/502"
-    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/501"
-    codec: "h265"
-    ai_codec: "h265"
-    display_codec: "h265"
-    latency_ms: 80
-    drop_on_latency: true
-    username: "${SURVEILLANCE_RTSP_USERNAME}"
-    password: "${SURVEILLANCE_RTSP_PASSWORD}"
-    online: true
-    ai_enabled: true
-    heatmap_enabled: true
-    recording_enabled: false
-    zone_enabled: false
-    overstay_enabled: false
-    resolution: "1280x720"
-    fps: 30
-    reconnect_interval: 10
-    connection_timeout: 5
-    latency_warn_ms: 200
-    packet_loss_warn_percent: 2.0
-
-  - id: "CAM-06"
-    name: "Camera 6"
-    location: "Channel 601"
-    source: "rtsp://192.168.1.210:554/Streaming/Channels/401"
-    ai_source: "rtsp://192.168.1.210:554/Streaming/Channels/402"
-    display_source: "rtsp://192.168.1.210:554/Streaming/Channels/401"
-    codec: "h265"
-    ai_codec: "h265"
-    display_codec: "h265"
-    latency_ms: 80
-    drop_on_latency: true
-    username: "${SURVEILLANCE_RTSP_USERNAME}"
-    password: "${SURVEILLANCE_RTSP_PASSWORD}"
-    online: true
-    ai_enabled: true
-    heatmap_enabled: true
-    recording_enabled: false
-    zone_enabled: false
-    overstay_enabled: false
-    resolution: "1280x720"
-    fps: 20
-    reconnect_interval: 10
-    connection_timeout: 5
-    latency_warn_ms: 200
-    packet_loss_warn_percent: 2.0
+  display:
+    enabled: true
+    rows: 2
+    columns: 3
+    width: 1920
+    height: 1080
