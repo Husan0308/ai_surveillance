@@ -27,6 +27,20 @@ def main() -> int:
     print(f"repo_root={ROOT}")
     print(f"python={sys.version.split()[0]}")
 
+    try:
+        from services.ml_service.app.config import load_settings
+        settings = load_settings()
+        missing = [c.camera_id for c in settings.cameras if not c.username or not c.password]
+        if missing:
+            failures.append(
+                "RTSP credentials missing for: " + ", ".join(missing)
+                + ". Run: python scripts/setup_rtsp_auth.py"
+            )
+        else:
+            print("rtsp_auth=CONFIGURED (secrets hidden)")
+    except Exception as exc:
+        failures.append(f"camera config: {type(exc).__name__}: {exc}")
+
     for module in ("numpy", "torch", "ultralytics"):
         ok = importlib.util.find_spec(module) is not None
         print(f"python_module {module}={'OK' if ok else 'MISSING'}")
@@ -84,9 +98,9 @@ def main() -> int:
             failures.append("libnvds_meta.so not found")
 
     try:
-        from services.camera_v2.native_bridge import ensure_bridge
-        bridge = ensure_bridge()
-        print(f"native_meta_bridge=OK path={bridge}")
+        from services.camera_v2.native_bridge import NativeMetaBridge
+        bridge = NativeMetaBridge()
+        print(f"native_meta_bridge=OK path={bridge.path}")
     except Exception as exc:
         failures.append(f"native metadata bridge: {type(exc).__name__}: {exc}")
 
