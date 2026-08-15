@@ -9,8 +9,7 @@ from pathlib import Path
 # PP-Human's production MOT pipeline recommends not skipping more than ~3 video
 # frames between detector updates. On this GTX 1050 Ti we cannot afford detector
 # inference at 20 FPS per camera, so use a 2-frame micro-batch plus an adaptive
-# per-camera detection-Hz target. This is much closer to industrial MOT cadence
-# than the old ~0.8-1 Hz/camera micro-batch=1 schedule.
+# per-camera detection-Hz target.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "640")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
@@ -19,8 +18,6 @@ os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.45")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
 os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "640")
 os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "384")
-# Keep tracker input close to the actual visible person. Display-only expansion is
-# performed later by the native bridge so limbs can fit without polluting DCF crop.
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.02")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.01")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.03")
@@ -34,15 +31,7 @@ from .tracker_profile import prepare_sparse_tracker_config
 
 
 class CameraPersonTrackingFinal(_BaseTracking):
-    """High-cadence YOLO26m + timestamp-aware NvDCF pedestrian tracking.
-
-    Design rules copied from mature MOT systems rather than hand-smoothing boxes:
-      * detection corrections arrive several times per second per camera;
-      * low-confidence/missed frames are bridged by NvDCF visual tracking;
-      * a detector result is motion-compensated only for its inference latency
-        before being attached to a newer live frame;
-      * NvDCF is the sole temporal tracker, avoiding duplicate custom tracks.
-    """
+    """High-cadence YOLO26m + continuous NvDCF pedestrian tracking."""
 
     def __init__(self) -> None:
         self.detector_frames_applied = 0
@@ -59,8 +48,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
     def _resolve_tracker_files(self):
         lib, stock_max_perf = super()._resolve_tracker_files()
-        # Prefer balanced visual features over max_perf. max_perf was designed to
-        # save compute; here bbox continuity during walking is more important.
         perf = stock_max_perf.with_name("config_tracker_NvDCF_perf.yml")
         stock = perf if perf.exists() else stock_max_perf
         config = prepare_sparse_tracker_config(stock)
@@ -72,9 +59,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         captured_t: float,
         prepared: list[PreparedDetection],
     ) -> None:
-        # Publish EVERY detector result, including an empty one. The native bridge
-        # marks only that source frame bInferDone=True; frames between calls stay
-        # bInferDone=False, matching DeepStream PGIE interval semantics.
         with self.pending_lock:
             self.pending_seq += 1
             self.pending[cid] = (self.pending_seq, float(captured_t), list(prepared))
@@ -101,7 +85,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
             boxes, age_ms = self.latency_compensator.project(prepared, captured_t, now)
             result = self.bridge.apply_detector_result(buffer, source_id, boxes)
-            if result == -2:  # source is not in this partial mux batch yet
+            if result == -2:
                 continue
             if result < 0:
                 continue
@@ -121,8 +105,9 @@ class CameraPersonTrackingFinal(_BaseTracking):
     def _tracker_probe(self, _pad, info):
         buffer = info.get_buffer()
         if buffer is not None:
-            # Native helper expands only the rendered rectangle; the internal NvDCF
-            # bbox stays tight and therefore keeps better visual features.
+            # Native bridge first promotes official current-frame NvDCF shadow-track
+            # metadata, then applies display-only lead/limb margin. NvDCF remains
+            # the only temporal tracker.
             count = self.bridge.style_and_count_tracked(buffer)
             if count >= 0:
                 with self.det_lock:
@@ -152,7 +137,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"range={self.detector_min_hz:.1f}-{self.detector_max_hz:.1f}Hz/cam "
             f"NvDCF={self.tracker_width}x{self.tracker_height} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
-            "timestamp_compensation=1 nvdcf_per_frame=1",
+            "timestamp_compensation=1 nvdcf_per_frame=1 shadow_output=1",
             flush=True,
         )
 
@@ -230,9 +215,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 self.det_error = ""
                 target_hz = self.detector_target_hz
 
-            # Rate scheduling is easier to reason about than the old GPU-duty
-            # scheduler. For N groups, each group must run target_hz times/sec so
-            # every camera gets approximately target_hz detector corrections.
             desired_call_interval = 1.0 / max(0.1, target_hz * len(groups))
             elapsed = time.monotonic() - cycle_started
             idle = max(self.detector_min_idle, desired_call_interval - elapsed)
@@ -253,8 +235,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         now = time.monotonic()
 
         with self.det_lock:
-            # Smooth camera wall remains the hard guardrail. Raise detector cadence
-            # only while wall timing is healthy; cut it quickly if render jitter rises.
             if p95 is not None:
                 if p95 > 88.0:
                     self.detector_target_hz -= 0.60
@@ -274,14 +254,15 @@ class CameraPersonTrackingFinal(_BaseTracking):
         rates = {cid: self._recent_rate(rows, now) for cid, rows in self.detector_times.items()}
         rate_text = " ".join(f"{cid}:{rates.get(cid, 0.0):.1f}" for cid in self.camera_index)
         expected_skip = max(0.0, 20.0 / max(0.1, target_hz) - 1.0)
+        shadow_promoted = self.bridge.shadow_promoted_total()
         print(
             "CAMERA_TRACK_FINAL "
-            f"detector_frames={applied} tracked_now={tracked} "
+            f"detector_frames={applied} tracked_now={tracked} shadow_promoted={shadow_promoted} "
             f"detector={INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
             f"target_hz={target_hz:.1f}/cam approx_skip={expected_skip:.1f}frames "
             f"actual_hz=[{rate_text}] result_age={age_ms:.0f}ms "
             f"tracker={self.tracker_width}x{self.tracker_height} "
-            f"config={self.tracker_config} timestamp_comp=1",
+            f"config={self.tracker_config} timestamp_comp=1 shadow_output=1",
             flush=True,
         )
         return keep
