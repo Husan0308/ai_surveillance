@@ -26,7 +26,7 @@ cameras:
 
 deepstream:
   gpu_id: 0
-  rtsp_transport: tcp
+  rtsp_transport: auto
   latency_ms: 150
   drop_on_latency: true
   decoder_extra_surfaces: 4
