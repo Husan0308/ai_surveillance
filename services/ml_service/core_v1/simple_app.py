@@ -6,13 +6,12 @@ from pathlib import Path
 
 import uvicorn
 import yaml
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI
 
 from shared.config import camera_config
 
-from .event_publisher import EventDrivenJpegPublisher
 from .manager import CameraManager
+from .mmap_publisher import MmapFramePublisher
 from .runtime_metrics import process_metrics
 from .stable_detector import StableYoloDetectorWorker
 
@@ -34,20 +33,26 @@ def _load_yaml(path: Path):
         return _expand(yaml.safe_load(handle) or {})
 
 
-# Keep the full project config untouched for later. Simple mode overrides only
-# presentation/capture settings and intentionally does not start ReID or Face.
+# Simple mode keeps the expensive identity stack frozen. Camera -> detection ->
+# local mmap display is the entire hot path. The detector still receives its
+# configured 416x736 tensor, independent from the 960x540 presentation frame.
 core_cfg = dict(_load_yaml(ROOT / "config/core_v1.yaml").get("core_v1", {}))
 core_cfg.update(
     {
-        "profile": "simple-clear-detection-v1",
+        "profile": "simple-smooth-detection-mmap-v2",
         "display_fps": 20,
-        "jpeg_quality": 88,
         "max_display_width": 960,
         "max_display_height": 540,
         "capture_output_width": 960,
         "capture_output_height": 540,
+        "drop_on_latency": True,
+        "postdecode_queue_buffers": 1,
     }
 )
+# Do not force the old global 150 ms jitterbuffer in simple mode. Every camera
+# already has a tuned latency in cameras.yaml (20 ms H264, 80 ms H265), and
+# CameraWorker falls back to that value when the global override is absent.
+core_cfg.pop("rtsp_latency_ms", None)
 
 camera_cfg = camera_config().get("cameras", [])
 manager = CameraManager(camera_cfg, core_cfg)
@@ -55,15 +60,12 @@ manager = CameraManager(camera_cfg, core_cfg)
 detector_cfg = dict(core_cfg.get("detector") or {})
 detector = StableYoloDetectorWorker(manager.stores, detector_cfg, ROOT)
 
-# Base event-driven publisher deliberately has no identity provider. It still
-# smooths detector observations with the visual tracker, but the overlay label
-# stays simply "Person" rather than Cxx/Gxxx/name identity UI.
 publishers = {
-    cid: EventDrivenJpegPublisher(
+    cid: MmapFramePublisher(
         cid,
         store,
         core_cfg.get("display_fps", 20),
-        core_cfg.get("jpeg_quality", 88),
+        0,  # JPEG is intentionally not used in simple local mode.
         core_cfg.get("max_display_width", 960),
         core_cfg.get("max_display_height", 540),
         detections=detector.results,
@@ -74,7 +76,7 @@ publishers = {
     for cid, store in manager.stores.items()
 }
 
-app = FastAPI(title="AI Surveillance Simple Detection Core", version="1.0-simple")
+app = FastAPI(title="AI Surveillance Smooth Detection Core", version="2.0-mmap")
 
 
 @app.on_event("startup")
@@ -105,7 +107,7 @@ def health():
     detector_metrics = detector.metrics()
     return {
         "status": "ok" if detector_metrics.get("ready") else "degraded",
-        "mode": "simple-camera+detection",
+        "mode": "simple-camera+detection+mmap",
         "profile": core_cfg["profile"],
         "cameras": camera_metrics,
         "online": sum(bool(value.get("online")) for value in camera_metrics.values()),
@@ -118,8 +120,10 @@ def health():
         "display": {
             "width": int(core_cfg["max_display_width"]),
             "height": int(core_cfg["max_display_height"]),
-            "jpeg_quality": int(core_cfg["jpeg_quality"]),
             "fps": int(core_cfg["display_fps"]),
+            "transport": "mmap-bgr-double-buffer",
+            "codec": "none",
+            "http_mjpeg": False,
         },
     }
 
@@ -148,50 +152,6 @@ def detections():
             ],
         }
     return {"enabled": True, "cameras": results, "metrics": detector.metrics()}
-
-
-@app.get("/frame/{camera_id}")
-def latest_frame(camera_id: str, after: int = Query(-1), wait_ms: int = Query(200, ge=0, le=500)):
-    if camera_id not in publishers:
-        raise HTTPException(404, "camera not found")
-    jpeg, version, published, source_frame_id = publishers[camera_id].wait_newer(after, wait_ms / 1000.0)
-    if jpeg is None:
-        raise HTTPException(503, "frame not ready")
-    return Response(
-        content=jpeg,
-        media_type="image/jpeg",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "X-Frame-Version": str(version),
-            "X-Source-Frame-Id": str(source_frame_id),
-            "X-Published-Monotonic": f"{published:.6f}",
-        },
-    )
-
-
-def _mjpeg(camera_id: str):
-    publisher = publishers[camera_id]
-    last = -1
-    while True:
-        jpeg, version, _, _ = publisher.wait_newer(last, 0.5)
-        if jpeg is None or version <= last:
-            continue
-        last = version
-        yield (
-            b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-            + str(len(jpeg)).encode()
-            + b"\r\n\r\n"
-            + jpeg
-            + b"\r\n"
-        )
-
-
-@app.get("/video/{camera_id}")
-def video(camera_id: str):
-    if camera_id not in publishers:
-        raise HTTPException(404, "camera not found")
-    return StreamingResponse(_mjpeg(camera_id), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 def run():
