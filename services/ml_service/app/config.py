@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
 
 import yaml
 
@@ -16,37 +14,25 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
-class FrameTransportConfig:
-    enabled: bool
-    directory: str
-    width: int
-    height: int
-    max_fps: int
-
-
-@dataclass(frozen=True)
 class DeepStreamConfig:
     gpu_id: int
+    rtsp_transport: str
     latency_ms: int
     drop_on_latency: bool
-    reconnect_interval_sec: int
-    reconnect_attempts: int
     decoder_extra_surfaces: int
     cudadec_memtype: int
     udp_buffer_size: int
-    rtp_protocol: int
-    batch_size: int
-    mux_width: int
-    mux_height: int
-    live_source: bool
-    batched_push_timeout_us: int
-    sync_inputs: bool
-    display_enabled: bool
-    display_rows: int
-    display_columns: int
+    reconnect_interval_sec: int
+    reconnect_attempts: int
+    postdecode_queue_buffers: int
+    capture_timeout_ms: int
+    startup_grace_sec: float
+    reconnect_delay_sec: float
+    startup_stagger_sec: float
     display_width: int
     display_height: int
-    frame_transport: FrameTransportConfig
+    display_fps: int
+    jpeg_quality: int
 
 
 @dataclass(frozen=True)
@@ -55,47 +41,12 @@ class Settings:
     deepstream: DeepStreamConfig
 
 
-def _as_bool(value: Any) -> bool:
+def _as_bool(value) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
-
-
-def _inject_rtsp_auth(uri: str, row: dict[str, Any]) -> str:
-    """Optionally inject per-camera RTSP credentials from environment.
-
-    Authentication is opt-in: unless username_env is explicitly configured for a
-    camera, the URI is left exactly as written in cameras.yaml. This avoids
-    silently changing camera URLs that already work without URI credentials.
-    """
-    username_env = str(row.get("username_env", "")).strip()
-    if not username_env:
-        return uri
-
-    parts = urlsplit(uri)
-    if parts.scheme.lower() != "rtsp" or "@" in parts.netloc:
-        return uri
-
-    password_env = str(row.get("password_env", "")).strip()
-    username = os.getenv(username_env, "").strip()
-    password = os.getenv(password_env, "") if password_env else ""
-    if not username:
-        return uri
-
-    userinfo = quote(username, safe="")
-    if password:
-        userinfo += ":" + quote(password, safe="")
-    return urlunsplit(
-        (
-            parts.scheme,
-            f"{userinfo}@{parts.netloc}",
-            parts.path,
-            parts.query,
-            parts.fragment,
-        )
-    )
 
 
 def load_settings(path: str | Path | None = None) -> Settings:
@@ -111,75 +62,55 @@ def load_settings(path: str | Path | None = None) -> Settings:
         raise ValueError(f"Expected exactly 6 cameras, got {len(camera_rows)}")
 
     cameras: list[CameraConfig] = []
-    seen_ids: set[str] = set()
+    seen: set[str] = set()
     for row in camera_rows:
         camera_id = str(row["id"]).strip()
-        if camera_id in seen_ids:
+        if camera_id in seen:
             raise ValueError(f"Duplicate camera id: {camera_id}")
-        seen_ids.add(camera_id)
-
+        seen.add(camera_id)
         env_uri = str(row.get("env_uri", "")).strip()
-        uri = (
-            os.getenv(env_uri, str(row["uri"]).strip())
-            if env_uri
-            else str(row["uri"]).strip()
-        )
+        uri = os.getenv(env_uri, str(row["uri"]).strip()) if env_uri else str(row["uri"]).strip()
         if not uri.startswith("rtsp://"):
-            raise ValueError(f"{camera_id}: only rtsp:// sources are allowed")
-        uri = _inject_rtsp_auth(uri, row)
+            raise ValueError(f"{camera_id}: source must start with rtsp://")
         cameras.append(CameraConfig(camera_id=camera_id, uri=uri))
 
     ds = raw.get("deepstream") or {}
-    mux = ds.get("streammux") or {}
-    display = ds.get("display") or {}
-    frame_transport = ds.get("frame_transport") or {}
+    display = raw.get("display") or {}
+    transport = str(ds.get("rtsp_transport", "auto")).strip().lower()
+    if transport not in {"auto", "tcp", "udp"}:
+        raise ValueError("deepstream.rtsp_transport must be auto, tcp, or udp")
 
-    batch_size = int(mux.get("batch_size", len(cameras)))
-    if batch_size != len(cameras):
-        raise ValueError(
-            f"streammux.batch_size must equal camera count ({len(cameras)}), got {batch_size}"
-        )
-
-    frame_width = int(frame_transport.get("width", 640))
-    frame_height = int(frame_transport.get("height", 360))
-    frame_max_fps = int(frame_transport.get("max_fps", 15))
-    if frame_width <= 0 or frame_height <= 0:
-        raise ValueError("frame_transport width/height must be positive")
-    if not 1 <= frame_max_fps <= 60:
-        raise ValueError("frame_transport.max_fps must be between 1 and 60")
+    width = int(display.get("width", 736))
+    height = int(display.get("height", 416))
+    fps = int(display.get("fps", 20))
+    quality = int(display.get("jpeg_quality", 70))
+    if width <= 0 or height <= 0:
+        raise ValueError("display width/height must be positive")
+    if not 1 <= fps <= 60:
+        raise ValueError("display.fps must be 1..60")
+    if not 20 <= quality <= 95:
+        raise ValueError("display.jpeg_quality must be 20..95")
 
     return Settings(
         cameras=tuple(cameras),
         deepstream=DeepStreamConfig(
             gpu_id=int(ds.get("gpu_id", 0)),
+            rtsp_transport=transport,
             latency_ms=int(ds.get("latency_ms", 150)),
             drop_on_latency=_as_bool(ds.get("drop_on_latency", True)),
-            reconnect_interval_sec=int(ds.get("reconnect_interval_sec", 10)),
-            reconnect_attempts=int(ds.get("reconnect_attempts", -1)),
             decoder_extra_surfaces=int(ds.get("decoder_extra_surfaces", 4)),
             cudadec_memtype=int(ds.get("cudadec_memtype", 0)),
             udp_buffer_size=int(ds.get("udp_buffer_size", 1_048_576)),
-            rtp_protocol=int(ds.get("rtp_protocol", 4)),
-            batch_size=batch_size,
-            mux_width=int(mux.get("width", 1280)),
-            mux_height=int(mux.get("height", 720)),
-            live_source=_as_bool(mux.get("live_source", True)),
-            batched_push_timeout_us=int(mux.get("batched_push_timeout_us", 50_000)),
-            sync_inputs=_as_bool(mux.get("sync_inputs", False)),
-            display_enabled=_as_bool(display.get("enabled", False)),
-            display_rows=int(display.get("rows", 2)),
-            display_columns=int(display.get("columns", 3)),
-            display_width=int(display.get("width", 1920)),
-            display_height=int(display.get("height", 1080)),
-            frame_transport=FrameTransportConfig(
-                enabled=_as_bool(frame_transport.get("enabled", True)),
-                directory=os.getenv(
-                    "FRAME_BUS_DIR",
-                    str(frame_transport.get("directory", "/dev/shm/ai_surveillance")),
-                ),
-                width=frame_width,
-                height=frame_height,
-                max_fps=frame_max_fps,
-            ),
+            reconnect_interval_sec=int(ds.get("reconnect_interval_sec", 2)),
+            reconnect_attempts=int(ds.get("reconnect_attempts", -1)),
+            postdecode_queue_buffers=int(ds.get("postdecode_queue_buffers", 1)),
+            capture_timeout_ms=int(ds.get("capture_timeout_ms", 1000)),
+            startup_grace_sec=float(ds.get("startup_grace_sec", 8.0)),
+            reconnect_delay_sec=float(ds.get("reconnect_delay_sec", 1.0)),
+            startup_stagger_sec=float(ds.get("startup_stagger_sec", 0.20)),
+            display_width=width,
+            display_height=height,
+            display_fps=fps,
+            jpeg_quality=quality,
         ),
     )
