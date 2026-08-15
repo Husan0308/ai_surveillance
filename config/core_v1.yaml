@@ -1,5 +1,5 @@
 core_v1:
-  profile: "detection-tracking-room-consensus-reid-face-cuda-v2"
+  profile: "camera-deepstream-baseline-v1"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
@@ -18,7 +18,9 @@ core_v1:
   max_read_timeouts: 3
   reconnect_delay_sec: 1.0
 
-  capture_backend: "auto"
+  # Phase 1 invariant: camera ingest must stay on DeepStream. Do not silently
+  # fall back to the generic GStreamer/OpenCV path while measuring smoothness.
+  capture_backend: "deepstream"
   rtsp_transport: "auto"
   rtsp_latency_ms: 150
   rtsp_buffer_mode: "auto"
@@ -31,14 +33,18 @@ core_v1:
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
+  # Scale on the GPU before the one unavoidable host copy used by the current
+  # MJPEG frontend. This keeps six-camera CPU/memory traffic bounded.
   capture_output_width: 736
   capture_output_height: 416
   capture_metrics_interval_sec: 5.0
   max_pipeline_lag_ms: 900
   max_pipeline_lag_samples: 20
 
+  # Phase 1: all AI is deliberately disabled. Re-enable only after the
+  # six-camera DeepStream baseline is stable under measurement.
   detector:
-    enabled: true
+    enabled: false
     model: "yolo26m.pt"
     model_fallback: "yolo26m.pt"
     device: "cuda:0"
@@ -120,7 +126,7 @@ core_v1:
     camera_exclusion_zones: {}
 
   reid:
-    enabled: true
+    enabled: false
     model_name: "osnet_ain_x1_0"
     device: "cpu"
     cpu_threads: 2
@@ -181,15 +187,12 @@ core_v1:
       "CAM-03|CAM-06": 0.74
 
   face:
-    enabled: true
+    enabled: false
     provider: "CUDAExecutionProvider"
     device_id: 0
     allow_cpu_fallback: true
     gpu_mem_limit_mb: 768
     cuda_cudnn_conv_algo_search: "HEURISTIC"
-    # buffalo_m keeps the same ResNet50 recognition accuracy as buffalo_l but
-    # uses the much lighter SCRFD-2.5GF detector. InsightFace does not mark this
-    # pack Auto=Y, so provision the official v0.7 release asset ourselves.
     model_pack: "buffalo_m"
     model_root: "models/insightface"
     model_url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_m.zip"
