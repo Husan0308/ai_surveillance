@@ -20,15 +20,19 @@ class CameraTile(QWidget):
         self.reader = reader
         self._version = -1
         self._image: QImage | None = None
+        self._payload: bytes | None = None
         self._last_frame_mono = 0.0
         self.setMinimumSize(320, 180)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
 
     def refresh_if_new(self) -> None:
-        image, version = self.reader.latest()
-        if image is None or image.isNull() or version <= self._version:
+        image, version, payload = self.reader.latest_frame()
+        if image is None or image.isNull() or payload is None or version <= self._version:
             return
+        # QImage points at payload memory. Retain both until the next frame so
+        # the GUI never paints memory that the reader has already released.
+        self._payload = payload
         self._image = image
         self._version = int(version)
         self._last_frame_mono = time.monotonic()
@@ -74,7 +78,7 @@ class CameraTile(QWidget):
 class CameraWallWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AI Surveillance — Camera Baseline")
+        self.setWindowTitle("AI Surveillance — DeepStream 720p Baseline")
         self.setStyleSheet("background:#000;")
 
         body = QWidget()
@@ -104,7 +108,8 @@ class CameraWallWindow(QMainWindow):
         self.render_timer = QTimer(self)
         self.render_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.render_timer.timeout.connect(self._render)
-        self.render_timer.start(33)
+        # Poll faster than the 20 FPS stream cadence but repaint only on a new frame.
+        self.render_timer.start(25)
 
         self.metrics_timer = QTimer(self)
         self.metrics_timer.timeout.connect(self._print_metrics)
@@ -144,7 +149,7 @@ class CameraWallWindow(QMainWindow):
 
 def run() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("AI Surveillance Camera Baseline")
+    app.setApplicationName("AI Surveillance DeepStream 720p Baseline")
     window = CameraWallWindow()
     window.showMaximized()
     return app.exec()
