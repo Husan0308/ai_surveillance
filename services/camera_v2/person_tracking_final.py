@@ -1,19 +1,40 @@
 from __future__ import annotations
 
-import threading
+import os
+from pathlib import Path
+
+# Final quality defaults must be set before importing detection/person_tracking,
+# because those modules read their defaults at import time.
+os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "640")
+os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
+os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "1")
+os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.14")
+os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.45")
+os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
+os.environ.setdefault("CAMERA_V2_DETECT_GPU_DUTY", "0.30")
+os.environ.setdefault("CAMERA_V2_DETECT_GPU_DUTY_MIN", "0.18")
+os.environ.setdefault("CAMERA_V2_DETECT_GPU_DUTY_MAX", "0.34")
+os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "640")
+os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "384")
+os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.05")
+os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.04")
+os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.08")
+os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.48")
+os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.78")
 
 from .person_tracking import CameraPersonTrackingV2 as _BaseTracking
 from .tracker_profile import prepare_sparse_tracker_config
 
 
 class CameraPersonTrackingFinal(_BaseTracking):
-    """Final Camera V2 person detector + sparse-aware NvDCF tracking.
+    """Camera V2 + higher-resolution YOLO26m + balanced NvDCF tracking.
 
-    Fixes two issues from the first NvDCF integration:
-    1) external YOLO results now emulate primary-inference frame metadata by setting
-       NvDsFrameMeta.bInferDone only on frames where YOLO actually ran;
-    2) the stock max_perf tracker profile is patched for sparse detections so a new
-       person is activated immediately and duplicate-target creation is stricter.
+    Quality goals:
+    * improve small/far-person recall with 640x384 inference;
+    * keep CUDA bursts short with micro-batch 1;
+    * use DeepStream's balanced NvDCF perf profile instead of max_perf when present;
+    * suppress duplicate target creation;
+    * keep detector-skipped frames distinct through bInferDone semantics.
     """
 
     def __init__(self) -> None:
@@ -21,15 +42,20 @@ class CameraPersonTrackingFinal(_BaseTracking):
         super().__init__()
 
     def _resolve_tracker_files(self):
-        lib, stock = super()._resolve_tracker_files()
+        # Resolve the low-level tracker library using the base implementation, but
+        # prefer DeepStream's balanced perf profile over max_perf. NVIDIA documents
+        # perf as the middle ground between resource use and tracking robustness.
+        lib, stock_max_perf = super()._resolve_tracker_files()
+        perf = stock_max_perf.with_name("config_tracker_NvDCF_perf.yml")
+        stock = perf if perf.exists() else stock_max_perf
         config = prepare_sparse_tracker_config(stock)
         return lib, config
 
     def _publish_detector_result(self, cid: str, boxes) -> None:
         # Publish EVERY YOLO result, including an empty result. The native bridge
-        # marks that source frame bInferDone=True, matching the semantics of PGIE.
-        # Frames between detector calls are left bInferDone=False so NvDCF knows
-        # inference was skipped rather than interpreting it as a false negative.
+        # marks that source frame bInferDone=True, matching PGIE semantics. Frames
+        # between detector calls stay bInferDone=False so NvDCF treats them as
+        # inference-skipped frames rather than detector false negatives.
         with self.pending_lock:
             self.pending_seq += 1
             self.pending[cid] = (self.pending_seq, list(boxes))
@@ -53,8 +79,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 continue
 
             result = self.bridge.apply_detector_result(buffer, source_id, boxes)
-            # -2 means this partial mux batch did not contain this source yet.
-            if result == -2:
+            if result == -2:  # source not present in this partial mux batch yet
                 continue
             if result < 0:
                 continue
@@ -72,9 +97,9 @@ class CameraPersonTrackingFinal(_BaseTracking):
     def _tracker_probe(self, _pad, info):
         buffer = info.get_buffer()
         if buffer is not None:
-            # Re-apply OSD border style after nvtracker updates rect_params and count
-            # real tracked objects. This closes the case where tracking is valid but
-            # the downstream OSD receives zero-width/default styling.
+            # Re-apply green OSD styling and a conservative display-only expansion
+            # after NvDCF updates the tracker bbox. Tracking state itself is not
+            # inflated; only the rendered rectangle gets extra room for limbs.
             count = self.bridge.style_and_count_tracked(buffer)
             if count >= 0:
                 with self.det_lock:
@@ -90,6 +115,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
         print(
             "CAMERA_TRACK_FINAL "
             f"detector_frames={applied} tracked_now={tracked} "
+            f"detector=640x384/micro1 conf=0.14 nms_iou=0.45 "
+            f"tracker={self.tracker_width}x{self.tracker_height} "
             f"config={self.tracker_config} bInferDone_contract=1 sparse_profile=1",
             flush=True,
         )
