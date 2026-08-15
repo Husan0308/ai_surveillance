@@ -20,6 +20,21 @@ def _run(cmd: list[str]) -> tuple[int, str]:
         return 127, f"{type(exc).__name__}: {exc}"
 
 
+def _torch_code_can_run_on_device(code_cc: int, device_cc: int) -> bool:
+    """Mirror the relevant NVIDIA/PyTorch same-major compatibility rule.
+
+    For Pascal dGPU, official PyTorch cu126 wheels currently ship sm_60 code.
+    PyTorch treats sm_60 code as compatible with sm_61 hardware, while sm_62 is
+    a separate Jetson target. Exact string equality with torch.get_arch_list()
+    is therefore too strict.
+    """
+    if code_cc == device_cc:
+        return True
+    if code_cc == 60 and device_cc == 61:
+        return True
+    return False
+
+
 def main() -> int:
     failures: list[str] = []
     warnings: list[str] = []
@@ -47,34 +62,74 @@ def main() -> int:
         if not ok:
             failures.append(f"missing Python module: {module}")
 
+    model = os.environ.get("CAMERA_V2_YOLO_MODEL", "yolo26m.pt")
+    model_path = Path(model)
+    if not model_path.is_absolute():
+        rooted = ROOT / model
+        if rooted.exists():
+            model_path = rooted
+    print(f"model={model_path if model_path.exists() else model}")
+    if not model_path.exists():
+        warnings.append(
+            "YOLO model file is not in the repo; Ultralytics will try to resolve/download CAMERA_V2_YOLO_MODEL"
+        )
+
+    cuda_base_ok = False
     if importlib.util.find_spec("torch") is not None:
         try:
             import torch
+
             print(f"torch={torch.__version__} cuda_runtime={torch.version.cuda}")
+            print(f"cudnn={torch.backends.cudnn.version()}")
             if not torch.cuda.is_available():
                 failures.append("torch.cuda.is_available() is False")
             else:
                 device = torch.cuda.get_device_name(0)
                 capability = torch.cuda.get_device_capability(0)
-                target_arch = f"sm_{capability[0]}{capability[1]}"
+                device_cc = capability[0] * 10 + capability[1]
                 arch_list = list(torch.cuda.get_arch_list())
-                print(f"cuda_device={device} capability={capability} target_arch={target_arch}")
+                code_ccs = []
+                for arch in arch_list:
+                    if arch.startswith("sm_"):
+                        try:
+                            code_ccs.append(int(arch[3:]))
+                        except ValueError:
+                            pass
+                compatible = [cc for cc in code_ccs if _torch_code_can_run_on_device(cc, device_cc)]
+                print(f"cuda_device={device} capability={capability} device_cc={device_cc}")
                 print(f"torch_cuda_arch_list={arch_list}")
-                if target_arch not in arch_list:
+                print(f"compatible_binary_cc={compatible}")
+                if not compatible:
                     failures.append(
-                        f"installed PyTorch wheel does not contain {target_arch}; "
-                        "GTX 1050 Ti/Pascal needs an official CUDA 12.6 wheel that includes sm_61"
+                        "installed PyTorch binary has no CUDA code compatible with this GPU; "
+                        f"device_cc={device_cc}, binary_ccs={code_ccs}"
                     )
                 else:
                     try:
-                        x = torch.ones((32, 32), device="cuda")
+                        x = torch.ones((64, 64), device="cuda", dtype=torch.float32)
                         y = x @ x
                         torch.cuda.synchronize()
-                        print(f"torch_cuda_smoke=OK value={float(y[0, 0].item()):.1f}")
+                        print(f"torch_cuda_matmul=OK value={float(y[0, 0].item()):.1f}")
+                        cuda_base_ok = True
                     except Exception as exc:
-                        failures.append(f"PyTorch CUDA kernel smoke test failed: {type(exc).__name__}: {exc}")
+                        failures.append(
+                            f"PyTorch CUDA matmul failed: {type(exc).__name__}: {exc}"
+                        )
 
-                    if importlib.util.find_spec("torchvision") is not None:
+                    if cuda_base_ok:
+                        try:
+                            conv = torch.nn.Conv2d(3, 16, 3, padding=1).cuda().eval()
+                            img = torch.zeros((1, 3, 64, 64), device="cuda")
+                            with torch.inference_mode():
+                                out = conv(img)
+                            torch.cuda.synchronize()
+                            print(f"cudnn_conv=OK shape={tuple(out.shape)}")
+                        except Exception as exc:
+                            failures.append(
+                                f"cuDNN/Conv2d CUDA smoke failed: {type(exc).__name__}: {exc}"
+                            )
+
+                    if cuda_base_ok and importlib.util.find_spec("torchvision") is not None:
                         try:
                             import torchvision
                             from torchvision.ops import nms
@@ -90,23 +145,38 @@ def main() -> int:
                             print(f"torchvision_cuda_nms=OK keep={keep.detach().cpu().tolist()}")
                         except Exception as exc:
                             failures.append(
-                                "torchvision CUDA NMS failed; torch/torchvision wheel pair is not usable "
-                                f"for this Pascal GPU: {type(exc).__name__}: {exc}"
+                                "torchvision CUDA NMS failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+
+                    if cuda_base_ok and importlib.util.find_spec("ultralytics") is not None and model_path.exists():
+                        try:
+                            import numpy as np
+                            from ultralytics import YOLO
+
+                            print("yolo_cuda_smoke=START")
+                            detector = YOLO(str(model_path))
+                            zeros = [np.zeros((288, 512, 3), dtype=np.uint8)]
+                            detector.predict(
+                                source=zeros,
+                                imgsz=(288, 512),
+                                rect=True,
+                                classes=[0],
+                                conf=0.20,
+                                iou=0.55,
+                                max_det=30,
+                                device="cuda:0",
+                                verbose=False,
+                                stream=False,
+                            )
+                            torch.cuda.synchronize()
+                            print("yolo_cuda_smoke=OK")
+                        except Exception as exc:
+                            failures.append(
+                                f"YOLO26m CUDA smoke failed: {type(exc).__name__}: {exc}"
                             )
         except Exception as exc:
             failures.append(f"torch CUDA check: {type(exc).__name__}: {exc}")
-
-    model = os.environ.get("CAMERA_V2_YOLO_MODEL", "yolo26m.pt")
-    model_path = Path(model)
-    if not model_path.is_absolute():
-        rooted = ROOT / model
-        if rooted.exists():
-            model_path = rooted
-    print(f"model={model_path if model_path.exists() else model}")
-    if not model_path.exists():
-        warnings.append(
-            "YOLO model file is not in the repo; Ultralytics will try to resolve/download CAMERA_V2_YOLO_MODEL"
-        )
 
     for tool in ("gcc", "pkg-config", "gst-inspect-1.0"):
         found = shutil.which(tool)
@@ -131,9 +201,8 @@ def main() -> int:
     print(f"deepstream_root={ds or 'NOT_FOUND'}")
     if ds is None:
         failures.append("DeepStream development headers not found")
-    else:
-        if not (ds / "lib/libnvds_meta.so").exists():
-            failures.append("libnvds_meta.so not found")
+    elif not (ds / "lib/libnvds_meta.so").exists():
+        failures.append("libnvds_meta.so not found")
 
     try:
         from services.camera_v2.native_bridge import NativeMetaBridge
