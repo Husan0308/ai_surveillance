@@ -16,34 +16,42 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         self.setWindowTitle("AI Surveillance")
         self.resize(1500, 920)
+
         self.api_status = QLabel("API: checking...")
         self.ml_status = QLabel("ML: checking...")
         self.camera_count = QLabel("Cameras: checking...")
+
         status_row = QHBoxLayout()
         status_row.addWidget(self.api_status)
         status_row.addWidget(self.ml_status)
         status_row.addWidget(self.camera_count)
         status_row.addStretch(1)
-        self.camera_wall = CameraWall(frame_bus_dir=self.settings.frame_bus_dir, stale_after_ms=self.settings.frame_stale_after_ms)
+
+        self.camera_wall = CameraWall(ml_video_base_url=self.settings.ml_video_base_url)
+
         layout = QVBoxLayout()
         layout.addLayout(status_row)
         layout.addWidget(self.camera_wall, 1)
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+
         self.api = ApiClient(self.settings.api_base_url, self)
         self.api.api_health_received.connect(self._on_api_health)
         self.api.ml_health_received.connect(self._on_ml_health)
         self.api.cameras_received.connect(self._on_cameras)
         self.api.request_failed.connect(self._on_request_failed)
+
         self.api_timer = QTimer(self)
         self.api_timer.setInterval(self.settings.refresh_interval_ms)
         self.api_timer.timeout.connect(self.api.refresh_all)
         self.api_timer.start()
+
         self.frame_timer = QTimer(self)
         self.frame_timer.setInterval(self.settings.frame_refresh_interval_ms)
         self.frame_timer.timeout.connect(self.camera_wall.refresh_frames)
         self.frame_timer.start()
+
         self.api.refresh_all()
 
     def _on_api_health(self, data: dict) -> None:
@@ -51,17 +59,15 @@ class MainWindow(QMainWindow):
 
     def _on_ml_health(self, data: dict) -> None:
         status = data.get("status", "unknown")
-        camera_count = data.get("camera_count", "?")
-        last_error = data.get("last_error")
-        text = f"ML: {status} | cameras={camera_count}"
-        if last_error:
-            text += f" | error={last_error}"
-        self.ml_status.setText(text)
+        online = data.get("online_camera_count", "?")
+        total = data.get("camera_count", "?")
+        self.ml_status.setText(f"ML: {status} | online={online}/{total}")
 
     def _on_cameras(self, data: dict) -> None:
         cameras = data.get("cameras", [])
         camera_ids = [str(camera.get("id", "unknown")) for camera in cameras]
-        self.camera_count.setText(f"Cameras: {data.get('count', len(camera_ids))}")
+        online = sum(1 for camera in cameras if camera.get("online"))
+        self.camera_count.setText(f"Cameras: {online}/{data.get('count', len(camera_ids))}")
         self.camera_wall.set_cameras(camera_ids)
 
     def _on_request_failed(self, request_name: str, reason: str) -> None:
