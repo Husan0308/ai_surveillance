@@ -23,7 +23,7 @@ async def lifespan(_app: FastAPI):
         runtime.stop()
 
 
-app = FastAPI(title="AI Surveillance ML Service", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="AI Surveillance ML Service", version="0.3.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -70,16 +70,13 @@ def video(camera_id: str):
     return StreamingResponse(
         stream(),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
     )
 
 
 def main() -> None:
     uvicorn.run(
-        "services.ml_service.app.main:app",
+        app,
         host=os.getenv("ML_HOST", "0.0.0.0"),
         port=int(os.getenv("ML_PORT", "8001")),
         reload=False,
