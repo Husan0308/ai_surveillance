@@ -16,18 +16,18 @@ cameras:
     uri: rtsp://192.168.1.210:554/Streaming/Channels/502
   - id: CAM-06
     env_uri: CAM_06_URI
-    uri: rtsp://192.168.1.210:554/Streaming/Channels/402
+    uri: rtsp://192.168.1.210:554/Streaming/Channels/401
 
 deepstream:
   gpu_id: 0
   latency_ms: 150
   drop_on_latency: true
-  reconnect_interval_sec: 2
+  reconnect_interval_sec: 10
   reconnect_attempts: -1
   decoder_extra_surfaces: 4
   cudadec_memtype: 0
   udp_buffer_size: 1048576
-  rtp_protocol: 0
+  rtp_protocol: 4
 
   streammux:
     batch_size: 6
