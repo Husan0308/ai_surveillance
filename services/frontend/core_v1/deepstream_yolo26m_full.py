@@ -750,6 +750,17 @@ class NativeCameraYolo26mFull(base.NativeCameraYolo26mBatch6Wall):
                     except Exception as exc:
                         self._identity_error = f"Face: {type(exc).__name__}: {exc}"
 
+    def _adapt_detector_rate(self, min_camera_fps: float) -> None:
+        # Keep the base batch-rate controller, then adapt GPU duty as well.
+        super()._adapt_detector_rate(min_camera_fps)
+        with self.det_lock:
+            if not self.detector_ready:
+                return
+            if min_camera_fps < 19.3:
+                self.max_gpu_duty = max(0.16, self.max_gpu_duty * 0.82)
+            elif min_camera_fps >= 19.8:
+                self.max_gpu_duty = min(0.25, self.max_gpu_duty + 0.01)
+
     def _print_stats(self) -> bool:
         result = super()._print_stats()
         with self.identity_lock:
