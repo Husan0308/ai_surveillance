@@ -7,29 +7,33 @@ RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
 
-# Common target-management tuning for sparse external YOLO26m detections.
-# Lower minIouDiff4NewTarget suppresses duplicate trackers. A moderate
-# minTrackerConfidence avoids low-confidence flicker while Shadow Tracking keeps
-# temporary misses alive. These parameters exist in all DeepStream NvDCF sample
-# profiles we support.
+# Sparse external YOLO26m + fixed CCTV camera tuning.
+#
+# Important behavior:
+# - a low minIouDiff4NewTarget rejects a new detector box if it significantly
+#   overlaps an existing target, reducing duplicate boxes;
+# - a low minTrackerConfidence keeps a walking/partially-occluded person visible
+#   instead of immediately moving the target to shadow mode (where current-frame
+#   output is suppressed);
+# - shadow age stays long enough to recover after short occlusions/missed YOLO
+#   frames without keeping ghosts forever.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.08",
     "enableBboxUnClipping": "1",
     "minIouDiff4NewTarget": "0.15",
-    "minTrackerConfidence": "0.18",
+    "minTrackerConfidence": "0.06",
     "probationAge": "0",
-    "maxShadowTrackingAge": "50",
+    "maxShadowTrackingAge": "70",
     "earlyTerminationAge": "4",
 }
 
-# Accuracy/performance knobs are patched when present. The perf/accuracy NvDCF
-# samples contain these fields; keeping them optional also preserves compatibility
-# with slightly different DeepStream 7.x sample configs.
+# Accuracy/performance knobs are patched only when the selected DeepStream sample
+# profile contains them. The balanced `perf` profile is preferred by the runtime.
 _OPTIONAL_PATCHES: dict[str, str] = {
     "useColorNames": "1",
     "useHog": "1",
     "featureImgSizeLevel": "4",
-    "minTrackingConfidenceDuringInactive": "0.15",
+    "minTrackingConfidenceDuringInactive": "0.06",
 }
 
 
@@ -71,8 +75,8 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     optional_applied = sorted(set(_OPTIONAL_PATCHES) & patched)
     header = [
         f"# Auto-generated from {stock.name}.",
-        "# Tuned for sparse YOLO26m person detections on Camera V2.",
-        "# Required target-management tuning plus balanced visual features.",
+        "# Camera V2: frequent sparse YOLO26m + continuous NvDCF pedestrian tracking.",
+        "# Tuned to reduce duplicate targets and bbox blink during walking/occlusion.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
