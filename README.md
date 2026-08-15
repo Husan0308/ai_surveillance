@@ -1,37 +1,42 @@
-# AI Surveillance — Fresh Foundation
+# AI Surveillance — Camera Foundation
 
-Fresh three-service foundation. Phase 1 is deliberately limited to **six RTSP cameras + NVIDIA DeepStream**.
+Fresh three-service architecture. Current phase is intentionally limited to **six RTSP cameras + NVIDIA DeepStream display transport**.
 
 ## Architecture
 
 ```text
-6 RTSP cameras
-      |
-      v
-+---------------------------+
-| ml_service :8001          |
-|                           |
-| nvurisrcbin x6            |
-|      |                    |
-|      v                    |
-| nvstreammux batch=6       |
-|      |                    |
-|      v                    |
-| nvmultistreamtiler 3x2    |
-|      |                    |
-|      v                    |
-| nveglglessink             |
-+---------------------------+
+                         CONTROL / METADATA
+Frontend ──────────────> API :8000 ──────────────> ML :8001
+   │
+   │                     VIDEO PLANE
+   └─────────────────────────────────────────────> ML :8001/video/CAM-xx
 
-+---------------------------+       +---------------------------+
-| api_service :8000         |       | frontend                  |
-| FastAPI boundary only     |       | PySide6 client shell      |
-+---------------------------+       +---------------------------+
+Inside ML:
+
+CAM-01 RTSP -> nvurisrcbin -> latest-only queue -> nvvideoconvert -> appsink -> LatestFrameStore(1) -> JPEG
+CAM-02 RTSP -> nvurisrcbin -> latest-only queue -> nvvideoconvert -> appsink -> LatestFrameStore(1) -> JPEG
+CAM-03 RTSP -> nvurisrcbin -> latest-only queue -> nvvideoconvert -> appsink -> LatestFrameStore(1) -> JPEG
+CAM-04 RTSP -> nvurisrcbin -> latest-only queue -> nvvideoconvert -> appsink -> LatestFrameStore(1) -> JPEG
+CAM-05 RTSP -> nvurisrcbin -> latest-only queue -> nvvideoconvert -> appsink -> LatestFrameStore(1) -> JPEG
+CAM-06 RTSP -> nvurisrcbin -> latest-only queue -> nvvideoconvert -> appsink -> LatestFrameStore(1) -> JPEG
 ```
 
-The three services do not import each other's application code. Camera ingest/decode belongs only to `ml_service`.
+There is deliberately **no nvstreammux in the camera display path**. Each camera has its own DeepStream/NVDEC pipeline, so one slow or reconnecting camera cannot stall the other five.
 
-## Phase 1 intentionally excludes
+The frontend keeps one persistent MJPEG HTTP connection per camera and always replaces the previous image with the newest one. There is no per-frame HTTP polling and no frame backlog.
+
+## Camera display sources
+
+- CAM-01: `.../101`
+- CAM-02: `.../201`
+- CAM-03: `.../301`
+- CAM-04: `.../601`
+- CAM-05: `.../501`
+- CAM-06: `.../401`
+
+These are the display sources preserved from the earlier working project.
+
+## Phase intentionally excludes
 
 - YOLO / inference
 - tracking
@@ -41,102 +46,51 @@ The three services do not import each other's application code. Camera ingest/de
 - heatmap
 - recording
 - alerts
-- business UI
 
-## System requirements
-
-DeepStream, GStreamer and PyGObject (`gi`) are system dependencies, not normal pip-only dependencies.
+## ML setup
 
 ```bash
 sudo apt update
-sudo apt install -y \
-  python3-gi \
-  python3-gst-1.0 \
-  gir1.2-gstreamer-1.0 \
-  python3-venv
+sudo apt install -y python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0 python3-venv
 
-./scripts/check_deepstream.sh
-```
-
-The expected DeepStream plugins are:
-
-- `nvurisrcbin`
-- `nvstreammux`
-- `nvmultistreamtiler`
-- `nveglglessink`
-
-## Run each service independently
-
-### ML service
-
-`python3-gi` is installed by APT into the system Python site-packages. Therefore the ML virtual environment must be allowed to see system site-packages.
-
-```bash
 rm -rf .venv-ml
 python3 -m venv --system-site-packages .venv-ml
 source .venv-ml/bin/activate
 pip install -r services/ml_service/requirements.txt
 
-python -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; print("GI/GStreamer OK", Gst.version_string())'
-
+./scripts/check_deepstream.sh
 python -m services.ml_service.app.main
 ```
 
-Health:
+Expected startup logs include:
+
+```text
+[CAMERA] CAM-01 first frame 736x416
+[MJPEG] CAM-01 first JPEG ...
+```
+
+Tests:
 
 ```bash
 curl http://127.0.0.1:8001/health
+curl http://127.0.0.1:8001/cameras
+curl -v http://127.0.0.1:8001/video/CAM-01 -o /dev/null
 ```
 
-The ML process starts the DeepStream six-camera graph and, with `display.enabled: true`, opens the 3x2 DeepStream view.
-
-### API service
+## API
 
 ```bash
-python3 -m venv .venv-api
 source .venv-api/bin/activate
 pip install -r services/api_service/requirements.txt
 python -m services.api_service.app.main
 ```
 
-Health:
+## Frontend
 
 ```bash
-curl http://127.0.0.1:8000/health
-```
-
-### Frontend
-
-```bash
-python3 -m venv .venv-frontend
 source .venv-frontend/bin/activate
 pip install -r services/frontend/requirements.txt
 python -m services.frontend.app.main
 ```
 
-The frontend is intentionally only a shell in phase 1.
-
-## Camera config
-
-Edit `config/cameras.yaml`, or override a camera URI without changing Git history:
-
-```bash
-export CAM_01_URI='rtsp://...'
-```
-
-Equivalent variables exist through `CAM_06_URI`.
-
-## DeepStream baseline
-
-The baseline uses:
-
-- `nvurisrcbin` for each RTSP source and NVIDIA decoder path
-- `rtsp-reconnect-interval` with unlimited reconnect attempts
-- `drop-on-latency=true`
-- GPU decoder memory (`cudadec-memtype=0`)
-- `nvstreammux batch-size=6`
-- `live-source=true`
-- `sync-inputs=false` so a slow camera does not intentionally synchronize all six feeds
-- 3x2 `nvmultistreamtiler`
-
-No AI element is inserted until this camera-only baseline is stable.
+The PySide6 frontend renders six persistent MJPEG streams in a 3x2 wall.
