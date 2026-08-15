@@ -7,6 +7,7 @@ on:
       - "agent/people-roster-v1"
       - "agent/smooth-camera-mmap"
       - "agent/sigbus-safe-mmap"
+      - "agent/direct-camera-detection-v1"
   pull_request:
     paths:
       - "shared/**"
@@ -67,6 +68,7 @@ jobs:
             services/frontend/core_v1/smooth_frame_reader.py \
             services/frontend/core_v1/mmap_frame_reader.py \
             services/frontend/core_v1/simple_detection_wall.py \
+            services/frontend/core_v1/direct_detection_wall.py \
             services/frontend/core_v1/operator_dashboard_mukammal.py \
             services/frontend/core_v1/operator_dashboard_face.py \
             services/frontend/core_v1/operator_dashboard_face_cuda.py \
@@ -114,5 +116,5 @@ jobs:
       - name: Test event-driven publisher
         run: python -m unittest discover -s tests -p "test_event_driven_publisher.py" -v
 
-      - name: Test default simple smooth architecture
+      - name: Test default direct smooth architecture
         run: python -m unittest discover -s tests -p "test_detection_only_baseline.py" -v
