@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sys
 
-from . import deepstream_torch_batch6_smooth_v3
+from . import dashboard_mmap
 
 
 if __name__ == "__main__":
-    sys.exit(deepstream_torch_batch6_smooth_v3.run())
+    sys.exit(dashboard_mmap.run())
