@@ -16,9 +16,11 @@ os.environ.setdefault("CAMERA_V2_DETECT_GPU_DUTY_MIN", "0.18")
 os.environ.setdefault("CAMERA_V2_DETECT_GPU_DUTY_MAX", "0.34")
 os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "640")
 os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "384")
-os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.05")
-os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.04")
-os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.08")
+# Keep the bbox fed into NvDCF close to the detector's actual person region.
+# The native bridge expands only the rendered rectangle after tracking.
+os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.02")
+os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.01")
+os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.03")
 os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.48")
 os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.78")
 
@@ -42,9 +44,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         super().__init__()
 
     def _resolve_tracker_files(self):
-        # Resolve the low-level tracker library using the base implementation, but
-        # prefer DeepStream's balanced perf profile over max_perf. NVIDIA documents
-        # perf as the middle ground between resource use and tracking robustness.
         lib, stock_max_perf = super()._resolve_tracker_files()
         perf = stock_max_perf.with_name("config_tracker_NvDCF_perf.yml")
         stock = perf if perf.exists() else stock_max_perf
@@ -52,10 +51,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         return lib, config
 
     def _publish_detector_result(self, cid: str, boxes) -> None:
-        # Publish EVERY YOLO result, including an empty result. The native bridge
-        # marks that source frame bInferDone=True, matching PGIE semantics. Frames
-        # between detector calls stay bInferDone=False so NvDCF treats them as
-        # inference-skipped frames rather than detector false negatives.
         with self.pending_lock:
             self.pending_seq += 1
             self.pending[cid] = (self.pending_seq, list(boxes))
@@ -79,7 +74,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 continue
 
             result = self.bridge.apply_detector_result(buffer, source_id, boxes)
-            if result == -2:  # source not present in this partial mux batch yet
+            if result == -2:
                 continue
             if result < 0:
                 continue
@@ -97,9 +92,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
     def _tracker_probe(self, _pad, info):
         buffer = info.get_buffer()
         if buffer is not None:
-            # Re-apply green OSD styling and a conservative display-only expansion
-            # after NvDCF updates the tracker bbox. Tracking state itself is not
-            # inflated; only the rendered rectangle gets extra room for limbs.
             count = self.bridge.style_and_count_tracked(buffer)
             if count >= 0:
                 with self.det_lock:
