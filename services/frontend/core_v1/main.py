@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sys
 
-from . import dual_gpu_camera_detection_v2
+from . import intel_display_yolo26m_v3
 
 
 if __name__ == "__main__":
-    sys.exit(dual_gpu_camera_detection_v2.run())
+    sys.exit(intel_display_yolo26m_v3.run())
