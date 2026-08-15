@@ -43,13 +43,18 @@ The three services do not import each other's application code. Camera ingest/de
 - alerts
 - business UI
 
-## Requirements
+## System requirements
 
-DeepStream and GStreamer are system dependencies, not pip dependencies.
+DeepStream, GStreamer and PyGObject (`gi`) are system dependencies, not normal pip-only dependencies.
 
 ```bash
 sudo apt update
-sudo apt install -y python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0
+sudo apt install -y \
+  python3-gi \
+  python3-gst-1.0 \
+  gir1.2-gstreamer-1.0 \
+  python3-venv
+
 ./scripts/check_deepstream.sh
 ```
 
@@ -62,14 +67,18 @@ The expected DeepStream plugins are:
 
 ## Run each service independently
 
-From the repository root, create a separate environment for each service if desired.
-
 ### ML service
 
+`python3-gi` is installed by APT into the system Python site-packages. Therefore the ML virtual environment must be allowed to see system site-packages.
+
 ```bash
-python3 -m venv .venv-ml
+rm -rf .venv-ml
+python3 -m venv --system-site-packages .venv-ml
 source .venv-ml/bin/activate
 pip install -r services/ml_service/requirements.txt
+
+python -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; print("GI/GStreamer OK", Gst.version_string())'
+
 python -m services.ml_service.app.main
 ```
 
