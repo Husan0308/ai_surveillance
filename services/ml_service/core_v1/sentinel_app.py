@@ -8,8 +8,49 @@ import numpy as np
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from .app import app, core_cfg, face
+from .app import (
+    app,
+    core_cfg,
+    detector,
+    detector_cfg,
+    face,
+    manager,
+    publishers,
+    reid,
+    visual_cfg,
+)
 from .face_service import _normalize
+from .sentinel_tracking_mmap_publisher import TrackingMmapPublisher
+
+
+# app.py already constructs the full detector/ReID/Face graph, but its historical
+# publisher encodes six JPEG streams. Replace that not-yet-started publisher map in
+# place so startup, ReID and Face keep the same shared dictionary while Sentinel's
+# local Qt wall receives latest-only BGR mmap frames instead.
+_identity_provider = face or reid
+_sentinel_publishers = {
+    cid: TrackingMmapPublisher(
+        cid,
+        store,
+        core_cfg.get("display_fps", 20),
+        core_cfg.get("jpeg_quality", 70),
+        core_cfg.get("max_display_width", 736),
+        core_cfg.get("max_display_height", 416),
+        detections=(detector.results if detector else None),
+        overlay_max_age_ms=detector_cfg.get("overlay_max_age_ms", 700),
+        tracker_config=visual_cfg,
+        identity_provider=_identity_provider,
+    )
+    for cid, store in manager.stores.items()
+}
+publishers.clear()
+publishers.update(_sentinel_publishers)
+if reid is not None:
+    reid.publishers = publishers
+if face is not None:
+    face.publishers = publishers
+for publisher in publishers.values():
+    publisher.identity_provider = _identity_provider
 
 
 class FaceEnrollFilesRequest(BaseModel):
