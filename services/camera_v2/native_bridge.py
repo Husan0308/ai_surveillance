@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("native_meta_bridge.c")
 SMOOTHER_SOURCE = Path(__file__).with_name("native_display_smoother.c")
+HEATMAP_SOURCE = Path(__file__).with_name("native_heatmap.c")
 BUILD_DIR = ROOT / ".runtime" / "camera_v2"
 LIB_PATH = BUILD_DIR / "libcamera_v2_meta.so"
 
@@ -30,7 +31,8 @@ def _deepstream_root() -> Path:
 
 
 def ensure_bridge() -> Path:
-    for src in (SOURCE, SMOOTHER_SOURCE):
+    sources = (SOURCE, SMOOTHER_SOURCE, HEATMAP_SOURCE)
+    for src in sources:
         if not src.exists():
             raise RuntimeError(f"metadata bridge source missing: {src}")
 
@@ -39,7 +41,7 @@ def ensure_bridge() -> Path:
     lib_dir = ds / "lib"
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
-    newest_source_mtime = max(SOURCE.stat().st_mtime, SMOOTHER_SOURCE.stat().st_mtime)
+    newest_source_mtime = max(src.stat().st_mtime for src in sources)
     rebuild = not LIB_PATH.exists() or LIB_PATH.stat().st_mtime < newest_source_mtime
     if not rebuild:
         return LIB_PATH
@@ -63,6 +65,7 @@ def ensure_bridge() -> Path:
         "-std=c11",
         str(SOURCE),
         str(SMOOTHER_SOURCE),
+        str(HEATMAP_SOURCE),
         "-o",
         str(LIB_PATH),
         f"-I{include_dir}",
@@ -118,6 +121,31 @@ class NativeMetaBridge:
 
         self.lib.camera_v2_shadow_promoted_total.argtypes = []
         self.lib.camera_v2_shadow_promoted_total.restype = ctypes.c_uint64
+
+        self.lib.camera_v2_heatmap_configure.argtypes = [
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_uint,
+        ]
+        self.lib.camera_v2_heatmap_configure.restype = None
+        self.lib.camera_v2_heatmap_reset.argtypes = []
+        self.lib.camera_v2_heatmap_reset.restype = None
+        self.lib.camera_v2_heatmap_update.argtypes = [ctypes.c_uint64]
+        self.lib.camera_v2_heatmap_update.restype = ctypes.c_int
+        self.lib.camera_v2_heatmap_render.argtypes = [
+            ctypes.c_uint64,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+        ]
+        self.lib.camera_v2_heatmap_render.restype = ctypes.c_int
+        self.lib.camera_v2_heatmap_rendered_points_total.argtypes = []
+        self.lib.camera_v2_heatmap_rendered_points_total.restype = ctypes.c_uint64
         self.path = path
 
     @staticmethod
@@ -168,10 +196,59 @@ class NativeMetaBridge:
         buffer_ptr = ctypes.c_uint64(hash(gst_buffer))
         count = int(self.lib.camera_v2_style_and_count_tracked(buffer_ptr))
         if count >= 0:
-            # Final display-only pass: interpolate active/shadow/fallback rectangles.
-            # It never feeds modified coordinates back into NvDCF.
+            # Only existing current-frame tracker boxes are smoothed; this never
+            # creates a box and therefore cannot leave a ghost behind.
             self.lib.camera_v2_smooth_display_boxes(buffer_ptr)
         return count
+
+    def configure_heatmap(
+        self,
+        *,
+        deposit: float = 0.008,
+        decay: float = 0.99990,
+        low_threshold: float = 0.015,
+        yellow_threshold: float = 0.28,
+        red_threshold: float = 0.62,
+        max_points_per_source: int = 24,
+    ) -> None:
+        self.lib.camera_v2_heatmap_configure(
+            ctypes.c_float(float(deposit)),
+            ctypes.c_float(float(decay)),
+            ctypes.c_float(float(low_threshold)),
+            ctypes.c_float(float(yellow_threshold)),
+            ctypes.c_float(float(red_threshold)),
+            ctypes.c_uint(int(max_points_per_source)),
+        )
+
+    def reset_heatmap(self) -> None:
+        self.lib.camera_v2_heatmap_reset()
+
+    def heatmap_update(self, gst_buffer) -> int:
+        return int(self.lib.camera_v2_heatmap_update(ctypes.c_uint64(hash(gst_buffer))))
+
+    def heatmap_render(
+        self,
+        gst_buffer,
+        *,
+        wall_width: int,
+        wall_height: int,
+        rows: int = 2,
+        columns: int = 3,
+        source_count: int = 6,
+    ) -> int:
+        return int(
+            self.lib.camera_v2_heatmap_render(
+                ctypes.c_uint64(hash(gst_buffer)),
+                ctypes.c_uint(int(wall_width)),
+                ctypes.c_uint(int(wall_height)),
+                ctypes.c_uint(int(rows)),
+                ctypes.c_uint(int(columns)),
+                ctypes.c_uint(int(source_count)),
+            )
+        )
+
+    def heatmap_rendered_points_total(self) -> int:
+        return int(self.lib.camera_v2_heatmap_rendered_points_total())
 
     def shadow_promoted_total(self) -> int:
         return int(self.lib.camera_v2_shadow_promoted_total())
