@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .secure import main
+from .qt_live import main
 
 
 if __name__ == "__main__":
