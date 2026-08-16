@@ -11,12 +11,14 @@ This branch wires the supplied Sentinel PySide6 design to the real Core v1 surve
   -> camera-local ownership-locked ByteTrack/Hungarian tracking
   -> room-consensus OSNet ReID
   -> low-rate InsightFace recognition
-  -> TrackingJpegPublisher / FastAPI
-  -> six persistent latest-only MJPEG readers
+  -> ownership-tracking latest-only mmap publishers
+  -> six decode-free SmoothMmapFrameReader consumers
   -> Sentinel PySide6 UI
 ```
 
-The UI does not create a second RTSP connection for fullscreen. Normal tiles and fullscreen dialogs share one `CameraFeed` / `SmoothFrameReader` per camera.
+The Sentinel camera wall does not use the legacy `/video/{camera}` MJPEG path. Annotated BGR presentation frames are published locally through the existing SIGBUS-safe double-buffer mmap transport, so the UI hot path avoids JPEG encode, HTTP delivery and JPEG decode.
+
+The UI does not create a second RTSP connection for fullscreen. Normal tiles, single-camera fullscreen dialogs and the all-camera fullscreen view share the same per-camera reader/feed objects.
 
 ## Realtime pages
 
