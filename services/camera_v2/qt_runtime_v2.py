@@ -8,10 +8,9 @@ from .qt_runtime import CameraQtRuntime
 class CameraQtRuntimeV2(CameraQtRuntime):
     """Qt-safe embedding layer for CameraQtRuntime.
 
-    The DeepStream graph stays unchanged. This class only fixes the GstVideoOverlay
-    lifecycle: native Qt handles are cached on the UI thread, then applied from the
-    synchronous prepare-window-handle bus callback exactly when each EGL sink asks
-    for its target window.
+    The DeepStream graph stays unchanged through detection/tracking. This class
+    fixes the GstVideoOverlay lifecycle and keeps the six post-demux display
+    branches lightweight for the GTX 1050 Ti by rendering each card at 768x432.
     """
 
     def __init__(self) -> None:
@@ -19,6 +18,23 @@ class CameraQtRuntimeV2(CameraQtRuntime):
         self._prepared_sinks: set[str] = set()
         self._render_rectangles: dict[str, tuple[int, int]] = {}
         super().__init__()
+
+        # Tracking still runs on the mux/tracker resolution. Only the final Qt card
+        # branches are scaled down before RGBA/OSD, which saves display memory and
+        # OSD work without reducing detector/tracker quality.
+        display_w = 768
+        display_h = 432
+        for cid, index in self.camera_index.items():
+            capsfilter = self.pipeline.get_by_name(f"qt_display_caps_{index}")
+            if capsfilter is None:
+                raise RuntimeError(f"{cid}: Qt display capsfilter not found")
+            capsfilter.set_property(
+                "caps",
+                self.Gst.Caps.from_string(
+                    f"video/x-raw(memory:NVMM),format=RGBA,width={display_w},height={display_h},pixel-aspect-ratio=1/1"
+                ),
+            )
+        print(f"CAMERA_QT_V2 display_branches={display_w}x{display_h}x6", flush=True)
 
     def bind_window_handles(self, handles: Mapping[str, int]) -> None:
         import gi
@@ -39,6 +55,9 @@ class CameraQtRuntimeV2(CameraQtRuntime):
             self._window_handles[name] = handle
             self._sink_to_camera[name] = cid
 
+        # GStreamer requires prepare-window-handle to be handled synchronously.
+        # We cache integer WIds on the Qt thread, then the streaming callback only
+        # forwards those integers to GstVideoOverlay (no Qt calls from that thread).
         self.bus.set_sync_handler(self._bus_sync_handler_v2, None)
         print(
             "CAMERA_QT_V2 handles_cached="
