@@ -3,12 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 from pathlib import Path
-import sys
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "services" / "frontend" / "core_v1"
+ML = ROOT / "services" / "ml_service" / "core_v1"
 EXPECTED_SHA256 = "65487172d3e63f96dbd59539c6da1cf050002b77a43f60799ed651b5fd65518e"
 
 
@@ -54,6 +54,7 @@ def main() -> int:
                 "/faces/enrollment/files",
                 "showFullScreen",
                 "WA_Hover",
+                "SmoothFrameReader",
             )
             missing = [token for token in required if token not in source]
             if missing:
@@ -66,18 +67,38 @@ def main() -> int:
         ok = False
 
     try:
-        ml_main = (ROOT / "services/ml_service/core_v1/main.py").read_text(encoding="utf-8")
-        sentinel_app = (ROOT / "services/ml_service/core_v1/sentinel_app.py").read_text(encoding="utf-8")
-        compile(ml_main, "services/ml_service/core_v1/main.py", "exec")
-        compile(sentinel_app, "services/ml_service/core_v1/sentinel_app.py", "exec")
+        ml_main = (ML / "main.py").read_text(encoding="utf-8")
+        sentinel_app = (ML / "sentinel_app.py").read_text(encoding="utf-8")
+        tracking_mmap = (ML / "sentinel_tracking_mmap_publisher.py").read_text(encoding="utf-8")
+        reader = (CORE / "smooth_frame_reader.py").read_text(encoding="utf-8")
+        mmap_reader = (CORE / "mmap_frame_reader.py").read_text(encoding="utf-8")
+
+        for name, source in (
+            ("services/ml_service/core_v1/main.py", ml_main),
+            ("services/ml_service/core_v1/sentinel_app.py", sentinel_app),
+            ("services/ml_service/core_v1/sentinel_tracking_mmap_publisher.py", tracking_mmap),
+            ("services/frontend/core_v1/smooth_frame_reader.py", reader),
+            ("services/frontend/core_v1/mmap_frame_reader.py", mmap_reader),
+        ):
+            compile(source, name, "exec")
+
         if "from .sentinel_app import app, core_cfg" not in ml_main:
             raise RuntimeError("ML main is not using the full Sentinel app")
         if '@app.post("/faces/enrollment/files")' not in sentinel_app:
             raise RuntimeError("file enrollment endpoint is missing")
+        if "TrackingMmapPublisher" not in sentinel_app:
+            raise RuntimeError("Sentinel backend is not replacing publishers with tracking mmap")
+        if "class TrackingMmapPublisher(TrackingJpegPublisher)" not in tracking_mmap:
+            raise RuntimeError("ownership-tracking mmap publisher is missing")
+        if "SmoothMmapFrameReader" not in reader:
+            raise RuntimeError("Sentinel SmoothFrameReader is not routed through mmap")
+
         print("ml_entrypoint=FULL_STACK")
         print("file_enrollment_endpoint=OK")
+        print("camera_transport=TRACKING_MMAP_LATEST_ONLY")
+        print("frontend_reader=MMAP_DECODE_FREE")
     except Exception as exc:
-        print(f"FAIL backend wiring: {type(exc).__name__}: {exc}")
+        print(f"FAIL backend/frontend wiring: {type(exc).__name__}: {exc}")
         ok = False
 
     print("SENTINEL_REALTIME_UI_PREFLIGHT=" + ("PASS" if ok else "FAIL"))
