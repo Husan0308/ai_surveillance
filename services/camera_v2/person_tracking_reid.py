@@ -16,6 +16,7 @@ from .reid_runtime import CropJob, ReIdIdentityEngine
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "config" / "reid.yaml"
+DISPLAY_HOLD_BINDING_SEC = 1.15
 
 
 def _load_reid_config() -> dict:
@@ -42,6 +43,7 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
         self._reid_lock = threading.RLock()
         self._track_history: dict[str, deque[tuple[float, list[dict]]]] = {}
         self._sample_versions: dict[str, int] = {}
+        self._last_real_track_seen: dict[tuple[str, int], float] = {}
         self._sample_stop = threading.Event()
         self._sample_thread: threading.Thread | None = None
         self._reid_crop_submitted = 0
@@ -77,8 +79,15 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
                 # hold/smoothing adds any visual-only objects.
                 rows = self.bridge.copy_tracks(buffer, max_rows=128)
                 grouped: dict[int, list[dict]] = {}
+                current_keys: set[tuple[str, int]] = set()
                 for row in rows:
-                    grouped.setdefault(int(row.get("source_id", -1)), []).append(row)
+                    source_id = int(row.get("source_id", -1))
+                    grouped.setdefault(source_id, []).append(row)
+                    if 0 <= source_id < len(self.cameras):
+                        camera_id = self.cameras[source_id].camera_id
+                        key = (camera_id, int(row["object_id"]))
+                        current_keys.add(key)
+                        self._last_real_track_seen[key] = now
                 with self._reid_lock:
                     for source_id, camera in enumerate(self.cameras):
                         current = grouped.get(source_id, [])
@@ -94,20 +103,23 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
                             now=now,
                         )
             except Exception as exc:
+                current_keys = set()
                 self._reid_crop_failures += 1
                 print(
                     f"CAMERA_GLOBAL_ID track_snapshot warning={type(exc).__name__}:{exc}",
                     flush=True,
                 )
+        else:
+            current_keys = set()
 
         # Preserve the exact stable local NvDCF styling/counting path first. The
         # smoother may append a short display-only hold object using the old local
         # ID while a person is briefly hidden behind a chair/desk.
         result = super()._tracker_probe(pad, info)
 
-        # Replace local Unknown_Cx_y text for every currently known binding, not
-        # just objects present in the pre-smoother snapshot. This also relabels the
-        # bounded display-hold object with the sticky Global ID during an occlusion.
+        # Replace local Unknown_Cx_y for real current tracks and for the short
+        # display-hold interval only. Do not apply six-hour LOST bindings blindly:
+        # that would be unsafe if a tracker ID were ever recycled later.
         if buffer is not None and self.identity is not None:
             try:
                 bindings = self.identity.bindings()
@@ -117,6 +129,10 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
                 }
                 mappings = []
                 for (camera_id, object_id), binding in bindings.items():
+                    key = (camera_id, int(object_id))
+                    last_real = self._last_real_track_seen.get(key, -1e9)
+                    if key not in current_keys and now - last_real > DISPLAY_HOLD_BINDING_SEC:
+                        continue
                     source_id = source_by_camera.get(camera_id)
                     if source_id is None:
                         continue
