@@ -16,20 +16,24 @@ static NvDsFrameMeta *find_frame(NvDsBatchMeta *batch_meta, unsigned int source_
     return NULL;
 }
 
-/* Sentinel VMS overlay: use the same teal accent as the Qt shell instead of the
- * diagnostic neon-green rectangle. A very light translucent fill keeps the box
- * readable on both bright and dark CCTV regions without hiding the person. */
-static void style_sentinel(NvDsObjectMeta *obj) {
-    obj->rect_params.border_width = 2;
-    obj->rect_params.border_color.red = 0.224;
-    obj->rect_params.border_color.green = 0.851;
-    obj->rect_params.border_color.blue = 0.773;
-    obj->rect_params.border_color.alpha = 0.98;
-    obj->rect_params.has_bg_color = 1;
-    obj->rect_params.bg_color.red = 0.035;
-    obj->rect_params.bg_color.green = 0.090;
-    obj->rect_params.bg_color.blue = 0.105;
-    obj->rect_params.bg_color.alpha = 0.055;
+/*
+ * Qt owns the final Known/Unknown visual style.
+ *
+ * Keep rect_params populated because the native UI bridge snapshots those
+ * coordinates after NvDCF, but make nvdsosd's rectangle itself invisible. This
+ * avoids drawing a second generic box underneath the identity-aware Qt overlay.
+ */
+static void style_metadata_only(NvDsObjectMeta *obj) {
+    obj->rect_params.border_width = 0;
+    obj->rect_params.border_color.red = 0.0;
+    obj->rect_params.border_color.green = 0.0;
+    obj->rect_params.border_color.blue = 0.0;
+    obj->rect_params.border_color.alpha = 0.0;
+    obj->rect_params.has_bg_color = 0;
+    obj->rect_params.bg_color.red = 0.0;
+    obj->rect_params.bg_color.green = 0.0;
+    obj->rect_params.bg_color.blue = 0.0;
+    obj->rect_params.bg_color.alpha = 0.0;
 }
 
 static float clampf_local(float value, float low, float high) {
@@ -78,7 +82,7 @@ static int add_boxes_to_frame(NvDsBatchMeta *batch_meta,
         obj->rect_params.top = y1;
         obj->rect_params.width = width;
         obj->rect_params.height = height;
-        style_sentinel(obj);
+        style_metadata_only(obj);
 
         nvds_add_obj_meta_to_frame(frame_meta, obj, NULL);
         ++added;
@@ -118,15 +122,15 @@ int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
 }
 
 /*
- * Live OSD helper AFTER nvtracker.
+ * Live metadata helper AFTER nvtracker.
  *
  * Strict rule: never invent an object here. No timer hold, no stale shadow-history
  * promotion, no synthetic prediction metadata. Only current-frame NvDsObjectMeta
- * produced by NvDCF is styled for display. This removes lingering giant rectangles
- * when a person has already left the camera view.
+ * produced by NvDCF is used.
  *
- * NvDCF keeps its tight bbox internally. We enlarge rect_params only for display so
- * hands/head/feet have a small safety margin without contaminating DCF features.
+ * NvDCF keeps its tight bbox internally. We enlarge rect_params only for the final
+ * display/UI coordinates so head/hands/feet get a small safety margin. The native
+ * OSD rectangle stays invisible; Qt draws the identity-aware Known/Unknown box.
  */
 int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
@@ -173,7 +177,7 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
             obj->rect_params.top = new_top;
             obj->rect_params.width = new_right - new_left;
             obj->rect_params.height = new_bottom - new_top;
-            style_sentinel(obj);
+            style_metadata_only(obj);
             ++count;
         }
     }
