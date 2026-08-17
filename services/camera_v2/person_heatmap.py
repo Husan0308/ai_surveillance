@@ -71,6 +71,7 @@ class CameraPersonHeatmap(CameraPersonTrackingFinal):
         return f"CAM-{source_id + 1:02d}"
 
     def _update_ui_tracks(self, rows: list[dict], now: float) -> None:
+        wall_now = time.time()
         with self.ui_lock:
             for row in rows:
                 source_id = int(row["source_id"])
@@ -82,14 +83,20 @@ class CameraPersonHeatmap(CameraPersonTrackingFinal):
                 item["label"] = f"Unknown_{source_id + 1:02d}_{object_id}"
                 item["first_seen"] = previous["first_seen"] if previous else now
                 item["last_seen"] = now
+                item["first_seen_epoch"] = previous.get("first_seen_epoch", wall_now) if previous else wall_now
+                item["last_seen_epoch"] = wall_now
+                item["room_id"] = source_id // 2 + 1
+                item["cameras"] = [item["camera_id"]]
                 self.live_tracks[key] = item
                 if previous is None:
                     self.live_events.appendleft({
                         "type": "entry",
-                        "time": time.time(),
+                        "time": wall_now,
                         "camera_id": item["camera_id"],
                         "source_id": source_id,
+                        "room_id": item["room_id"],
                         "object_id": object_id,
+                        "person_id": f"{source_id}:{object_id}",
                         "label": item["label"],
                         "message": f"{item['label']} {item['camera_id']} da paydo bo'ldi",
                     })
@@ -99,10 +106,12 @@ class CameraPersonHeatmap(CameraPersonTrackingFinal):
                 item = self.live_tracks.pop(key)
                 self.live_events.appendleft({
                     "type": "exit",
-                    "time": time.time(),
+                    "time": wall_now,
                     "camera_id": item["camera_id"],
                     "source_id": item["source_id"],
+                    "room_id": item["room_id"],
                     "object_id": item["object_id"],
+                    "person_id": f"{item['source_id']}:{item['object_id']}",
                     "label": item["label"],
                     "message": f"{item['label']} {item['camera_id']} dan chiqdi",
                 })
@@ -122,8 +131,8 @@ class CameraPersonHeatmap(CameraPersonTrackingFinal):
         return super()._tracker_probe(pad, info)
 
     def _heatmap_render_probe(self, _pad, info):
-        # Qt mode uses transparent per-camera overlays. This lets every camera own
-        # an independent Heatmap button while the native video path stays untouched.
+        # Qt mode renders heat as a transparent per-camera Qt overlay. The native
+        # movement accumulator still runs continuously even when all buttons are off.
         if self.qt_mode:
             self.heatmap_points_now = 0
             return self.Gst.PadProbeReturn.OK
@@ -144,13 +153,15 @@ class CameraPersonHeatmap(CameraPersonTrackingFinal):
 
     def ui_snapshot(self) -> dict:
         now = time.monotonic()
+        wall_now = time.time()
         with self.ui_lock:
             expired = [key for key, item in self.live_tracks.items() if now - float(item["last_seen"]) > 0.85]
             for key in expired:
                 item = self.live_tracks.pop(key)
                 self.live_events.appendleft({
-                    "type": "exit", "time": time.time(), "camera_id": item["camera_id"],
-                    "source_id": item["source_id"], "object_id": item["object_id"],
+                    "type": "exit", "time": wall_now, "camera_id": item["camera_id"],
+                    "source_id": item["source_id"], "room_id": item["room_id"],
+                    "object_id": item["object_id"], "person_id": f"{item['source_id']}:{item['object_id']}",
                     "label": item["label"], "message": f"{item['label']} {item['camera_id']} dan chiqdi",
                 })
             tracks = [dict(item) for item in self.live_tracks.values()]
@@ -165,6 +176,7 @@ class CameraPersonHeatmap(CameraPersonTrackingFinal):
             cameras.append({
                 "source_id": source_id,
                 "camera_id": camera.camera_id,
+                "room_id": source_id // 2 + 1,
                 "fps": fps,
                 "online": runtime.last_pts_ns is not None,
                 "count": count,
@@ -178,6 +190,7 @@ class CameraPersonHeatmap(CameraPersonTrackingFinal):
                 "name": f"Room {room_index}",
                 "count": max(per_camera) if per_camera else 0,
                 "camera_counts": per_camera,
+                "camera_ids": [self._camera_name(sid) for sid in pair],
             })
 
         return {"cameras": cameras, "tracks": tracks, "events": events, "rooms": room_counts}
