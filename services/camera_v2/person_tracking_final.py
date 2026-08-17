@@ -26,12 +26,9 @@ os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
 # only near-identical duplicates, not two real people whose boxes overlap.
 os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.88")
 os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.97")
-# A brand-new person must be fully inside the camera FOV before being handed to
-# NvDCF. This suppresses the half-person boxes that appear while somebody is only
-# entering from a frame edge, without rejecting distant people that are fully in view.
-os.environ.setdefault("CAMERA_V2_ADMISSION_EDGE_X_FRAC", "0.012")
-os.environ.setdefault("CAMERA_V2_ADMISSION_EDGE_TOP_FRAC", "0.008")
-os.environ.setdefault("CAMERA_V2_ADMISSION_EDGE_BOTTOM_FRAC", "0.020")
+# Reject only detections that are actually clipped by the image border. The older
+# percentage-based gate rejected valid people merely because they were near an edge.
+os.environ.setdefault("CAMERA_V2_ADMISSION_BORDER_PX", "2.0")
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
 from .detector_latency import DetectorLatencyCompensator, PreparedDetection
@@ -56,14 +53,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.detector_min_idle = float(os.environ.get("CAMERA_V2_DETECT_MIN_IDLE_MS", "8")) / 1000.0
         self.detector_result_age_ms = 0.0
         self.detector_times: dict[str, deque[float]] = {}
-        self.admission_edge_x_frac = max(
-            0.0, min(0.08, float(os.environ.get("CAMERA_V2_ADMISSION_EDGE_X_FRAC", "0.012")))
-        )
-        self.admission_edge_top_frac = max(
-            0.0, min(0.08, float(os.environ.get("CAMERA_V2_ADMISSION_EDGE_TOP_FRAC", "0.008")))
-        )
-        self.admission_edge_bottom_frac = max(
-            0.0, min(0.12, float(os.environ.get("CAMERA_V2_ADMISSION_EDGE_BOTTOM_FRAC", "0.020")))
+        self.admission_border_px = max(
+            0.0, min(12.0, float(os.environ.get("CAMERA_V2_ADMISSION_BORDER_PX", "2.0")))
         )
         self.admission_rejected = 0
         super().__init__()
@@ -79,34 +70,31 @@ class CameraPersonTrackingFinal(_BaseTracking):
         return lib, prepare_sparse_tracker_config(stock_max_perf)
 
     def _dedup_and_expand(self, rows):
-        """Keep close people separate and reject only frame-clipped new candidates.
+        """Keep close people separate; reject only truly frame-clipped entrants.
 
-        This is deliberately *not* a generic "full body visible" classifier. A seated
-        person or somebody occluded by a desk can still be a valid person and must not
-        be thrown away. We only reject a detector box that is clipped by the camera
-        frame itself, which is the reliable signal that a new entrant is only partly
-        inside the FOV. Existing NvDCF tracks can continue through the edge using the
-        tracker's normal shadow/recovery logic.
+        Do not try to infer "full body visibility" from bbox size or distance: a
+        seated person, a person behind a desk, and a distant person can all have a
+        legitimate short bbox. The reliable signal available to this detector is a
+        bbox that is actually clipped by the camera frame. Only those candidates are
+        held back until YOLO returns a bbox fully inside the frame.
         """
         detections = super()._dedup_and_expand(rows)
-        if not detections:
+        if not detections or self.admission_border_px <= 0.0:
             return detections
 
         right = float(self.frame_width - 1)
         bottom = float(self.frame_height - 1)
-        margin_x = max(2.0, float(self.frame_width) * self.admission_edge_x_frac)
-        margin_top = max(2.0, float(self.frame_height) * self.admission_edge_top_frac)
-        margin_bottom = max(2.0, float(self.frame_height) * self.admission_edge_bottom_frac)
+        margin = self.admission_border_px
 
         admitted = []
         rejected = 0
         for detection in detections:
             x1, y1, x2, y2, _conf = detection
             clipped_by_fov = (
-                x1 <= margin_x
-                or x2 >= right - margin_x
-                or y1 <= margin_top
-                or y2 >= bottom - margin_bottom
+                x1 <= margin
+                or x2 >= right - margin
+                or y1 <= margin
+                or y2 >= bottom - margin
             )
             if clipped_by_fov:
                 rejected += 1
@@ -202,7 +190,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"NvDCF={self.tracker_width}x{self.tracker_height} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
             "profile=max_perf memory_profile=4gb max_targets=24 "
-            "close_person=1 edge_admission=1 synthetic_boxes=0",
+            "close_person=1 strict_edge_clip_only=1 synthetic_boxes=0",
             flush=True,
         )
 
