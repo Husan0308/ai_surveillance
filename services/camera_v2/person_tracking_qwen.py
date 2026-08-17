@@ -16,6 +16,17 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
     """
 
     def __init__(self) -> None:
+        # IMPORTANT: source IDs follow the 3x2 live wall in cameras.yaml order:
+        #   top:    CAM-01=dev-room-2, CAM-02=entrance-2, CAM-03=main-room-1
+        #   bottom: CAM-04=dev-room-1, CAM-05=entrance-1, CAM-06=main-room-2
+        # Therefore the physical peer-camera pairs are vertical columns, not
+        # adjacent source IDs. A wrong room map makes both TAO room memory and Qwen
+        # compare people from different rooms and is catastrophic for Global IDs.
+        os.environ.setdefault(
+            "CAMERA_V2_REID_ROOM_MAP",
+            "0:0,3:0,1:1,4:1,2:2,5:2",
+        )
+
         self.qwen_reid: QwenRoomReIDVerifier | None = None
         super().__init__()
         if self.reid_mode != "off":
@@ -25,6 +36,7 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
                 "CAMERA_QWEN_REID "
                 f"enabled={int(q.enabled)} url={q.url} model={q.model} "
                 "scope=same-room-peer-cameras async=1 reversible=1 votes=2 "
+                "pairs=CAM01+CAM04,CAM02+CAM05,CAM03+CAM06 "
                 f"room_map={self.global_reid.room_map}",
                 flush=True,
             )
@@ -135,7 +147,8 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
                 f"requests={q['requests']} responses={q['responses']} pending={q['pending']} "
                 f"same={q['same']} different={q['different']} uncertain={q['uncertain']} "
                 f"merges={q['merges']} splits={q['splits']} cannot_links={q['cannot_links']} "
-                f"latency_ms={float(q['latency_ms']):.0f} failed={q['failed']} dropped={q['dropped']} "
+                f"stale={q.get('stale', 0)} latency_ms={float(q['latency_ms']):.0f} "
+                f"failed={q['failed']} dropped={q['dropped']} "
                 f"last={q['last_verdict']} error={q['error'] or 'none'}",
                 flush=True,
             )
