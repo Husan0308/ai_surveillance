@@ -48,10 +48,11 @@ def main() -> int:
         ok = ok and present
 
     for rel in (
-        "services/camera_v2/qt_live.py",
+        "services/camera_v2/sentinel_exact.py",
         "services/camera_v2/qt_runtime.py",
         "services/camera_v2/person_heatmap.py",
         "services/camera_v2/ui_bridge.py",
+        "services/camera_v2/__main__.py",
     ):
         path = ROOT / rel
         try:
