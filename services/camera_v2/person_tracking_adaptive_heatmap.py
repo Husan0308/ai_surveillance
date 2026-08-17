@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 
-from .adaptive_reid import AdaptiveTrackletReID
+from .adaptive_reid_live import LiveAdaptiveTrackletReID
 from .person_tracking_heatmap import CameraPersonTrackingHeatmap
 
 
@@ -26,15 +26,15 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
         os.environ.setdefault("CAMERA_V2_REID_COVISIBLE", "0.52")
         os.environ.setdefault("CAMERA_V2_REID_CONFIRM_VOTES", "4")
 
-        self.adaptive_reid: AdaptiveTrackletReID | None = None
+        self.adaptive_reid: LiveAdaptiveTrackletReID | None = None
         super().__init__()
         if self.reid_mode == "external":
-            self.adaptive_reid = AdaptiveTrackletReID(self.global_reid)
+            self.adaptive_reid = LiveAdaptiveTrackletReID(self.global_reid)
             print(
                 "CAMERA_ADAPTIVE_REID ready "
-                "frozen_model=1 online_training=0 diverse_bank=1 tracklet_multi_frame=1 "
-                "camera_pair_adaptive=1 mutual_best=1 temporal_votes=1 late_reassoc=1 "
-                "same_camera_unique=1 qwen=0 "
+                "frozen_model=1 online_training=0 diverse_bank=1 stationary_bootstrap=1 "
+                "fresh_evidence_votes=1 tracklet_multi_frame=1 camera_pair_adaptive=1 "
+                "mutual_best=1 temporal_votes=1 late_reassoc=1 same_camera_unique=1 qwen=0 "
                 f"room_map={self.global_reid.room_map}",
                 flush=True,
             )
