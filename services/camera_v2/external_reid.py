@@ -25,15 +25,17 @@ class ReIDTask:
 class ExternalReIDWorker:
     """Sparse CPU ONNX ReID for Pascal hosts running DeepStream/TensorRT 10.x.
 
-    Local detection/tracking stay exactly where they are: YOLO on PyTorch CUDA and
-    NvDCF on the DeepStream GPU path. Only appearance embeddings move out of the
-    unsupported TensorRT-10 ReID path. They are computed asynchronously from the
-    detector branch's existing 704x416 CPU frames and never change tracker geometry.
+    Local detection/tracking stay on YOLO CUDA + NvDCF. Only appearance embedding
+    extraction runs here. The NVIDIA TAO ReIdentificationNet model is trained/evaluated
+    on person crops resized directly to 256x128, so preprocessing intentionally uses a
+    direct resize rather than letterboxing/padding the crop.
     """
 
     MEAN_RGB = np.asarray([123.6750, 116.2800, 103.5300], dtype=np.float32)
-    SCALE = np.float32(0.01735207)
+    SCALE = np.float32(0.01735207)  # 1 / (255 * 0.226)
     FEATURE_SIZE = 256
+    INPUT_WIDTH = 128
+    INPUT_HEIGHT = 256
 
     def __init__(self) -> None:
         self.max_queue = max(4, int(os.environ.get("CAMERA_V2_REID_QUEUE", "16")))
@@ -44,6 +46,8 @@ class ExternalReIDWorker:
         self.error = ""
         self.backend = "opencv-cpu"
         self.features = 0
+        self.submitted = 0
+        self.failed = 0
         self.dropped = 0
         self.infer_ms = 0.0
         self.warmup_ms = 0.0
@@ -51,34 +55,32 @@ class ExternalReIDWorker:
         self.thread = threading.Thread(target=self._run, name="camera-v2-reid", daemon=True)
         self.thread.start()
 
-    @staticmethod
-    def _letterbox_rgb(crop_bgr: np.ndarray) -> np.ndarray:
+    @classmethod
+    def _resize_rgb(cls, crop_bgr: np.ndarray) -> np.ndarray:
         import cv2
 
         if crop_bgr is None or crop_bgr.size == 0:
             raise ValueError("empty ReID crop")
-        rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-        target_w, target_h = 128, 256
-        h, w = rgb.shape[:2]
-        scale = min(target_w / max(1, w), target_h / max(1, h))
-        new_w = max(1, min(target_w, int(round(w * scale))))
-        new_h = max(1, min(target_h, int(round(h * scale))))
-        resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        if crop_bgr.ndim != 3 or crop_bgr.shape[2] < 3:
+            raise ValueError(f"invalid ReID crop shape: {getattr(crop_bgr, 'shape', None)}")
 
-        # Mean-colored padding maps near zero after normalization, which is safer
-        # than black padding for tall/narrow CCTV person crops.
-        canvas = np.empty((target_h, target_w, 3), dtype=np.float32)
-        canvas[...] = ExternalReIDWorker.MEAN_RGB
-        x0 = (target_w - new_w) // 2
-        y0 = (target_h - new_h) // 2
-        canvas[y0 : y0 + new_h, x0 : x0 + new_w] = resized.astype(np.float32)
-        return canvas
+        rgb = cv2.cvtColor(crop_bgr[..., :3], cv2.COLOR_BGR2RGB)
+        # TAO ReIdentificationNet expects person crops resized to HxW=256x128.
+        resized = cv2.resize(
+            rgb,
+            (cls.INPUT_WIDTH, cls.INPUT_HEIGHT),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        return resized.astype(np.float32, copy=False)
 
     @classmethod
     def _blob(cls, crop_bgr: np.ndarray) -> np.ndarray:
-        image = cls._letterbox_rgb(crop_bgr)
+        image = cls._resize_rgb(crop_bgr)
         image = (image - cls.MEAN_RGB) * cls.SCALE
-        return np.ascontiguousarray(image.transpose(2, 0, 1)[None, ...], dtype=np.float32)
+        return np.ascontiguousarray(
+            image.transpose(2, 0, 1)[None, ...],
+            dtype=np.float32,
+        )
 
     @classmethod
     def _normalize_feature(cls, raw: np.ndarray) -> tuple[float, ...]:
@@ -98,7 +100,9 @@ class ExternalReIDWorker:
             import cv2
 
             try:
-                cv2.setNumThreads(max(1, int(os.environ.get("CAMERA_V2_REID_CPU_THREADS", "2"))))
+                cv2.setNumThreads(
+                    max(1, int(os.environ.get("CAMERA_V2_REID_CPU_THREADS", "2")))
+                )
             except Exception:
                 pass
 
@@ -107,18 +111,21 @@ class ExternalReIDWorker:
             net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
             net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
-            # Parse + execute one real-shaped input before declaring the worker
-            # healthy. This catches unsupported ONNX operators immediately while
-            # keeping failure isolated from GStreamer/NvDCF.
-            dummy = np.full((256, 128, 3), 127, dtype=np.uint8)
+            # Parse and execute one correctly preprocessed input before declaring
+            # the worker ready. Failure remains isolated from GStreamer/NvDCF.
+            dummy = np.full((320, 120, 3), 127, dtype=np.uint8)
             started = time.monotonic()
-            net.setInput(self._blob(dummy))
+            blob = self._blob(dummy)
+            if blob.shape != (1, 3, self.INPUT_HEIGHT, self.INPUT_WIDTH):
+                raise RuntimeError(f"unexpected ReID blob shape: {blob.shape}")
+            net.setInput(blob)
             self._normalize_feature(net.forward())
             self.warmup_ms = (time.monotonic() - started) * 1000.0
             self.ready_event.set()
             print(
                 "CAMERA_REID external worker ready: "
-                f"backend=opencv-cpu feature={self.FEATURE_SIZE} "
+                f"backend=opencv-cpu input={self.INPUT_WIDTH}x{self.INPUT_HEIGHT} "
+                f"feature={self.FEATURE_SIZE} preprocess=tao-direct-resize "
                 f"warmup={self.warmup_ms:.1f}ms model={self.model_path.name}",
                 flush=True,
             )
@@ -157,6 +164,7 @@ class ExternalReIDWorker:
                         except queue.Full:
                             self.dropped += 1
                 except Exception as exc:
+                    self.failed += 1
                     self.error = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
@@ -189,6 +197,7 @@ class ExternalReIDWorker:
         )
         try:
             self.input_q.put_nowait(task)
+            self.submitted += 1
             return True
         except queue.Full:
             self.dropped += 1
@@ -208,6 +217,8 @@ class ExternalReIDWorker:
             "backend": self.backend,
             "ready": self.ready_event.is_set() and not self.error,
             "features": self.features,
+            "submitted": self.submitted,
+            "failed": self.failed,
             "queued": self.input_q.qsize(),
             "dropped": self.dropped,
             "infer_ms": self.infer_ms,
