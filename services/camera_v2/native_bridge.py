@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("native_meta_bridge.c")
 SMOOTHER_SOURCE = Path(__file__).with_name("native_display_smoother.c")
+LABEL_SOURCE = Path(__file__).with_name("native_label_style.c")
 HEATMAP_SOURCE = Path(__file__).with_name("native_heatmap.c")
 BUILD_DIR = ROOT / ".runtime" / "camera_v2"
 LIB_PATH = BUILD_DIR / "libcamera_v2_meta.so"
@@ -31,7 +32,7 @@ def _deepstream_root() -> Path:
 
 
 def ensure_bridge() -> Path:
-    sources = (SOURCE, SMOOTHER_SOURCE, HEATMAP_SOURCE)
+    sources = (SOURCE, SMOOTHER_SOURCE, LABEL_SOURCE, HEATMAP_SOURCE)
     for src in sources:
         if not src.exists():
             raise RuntimeError(f"metadata bridge source missing: {src}")
@@ -65,6 +66,7 @@ def ensure_bridge() -> Path:
         "-std=c11",
         str(SOURCE),
         str(SMOOTHER_SOURCE),
+        str(LABEL_SOURCE),
         str(HEATMAP_SOURCE),
         "-o",
         str(LIB_PATH),
@@ -115,6 +117,9 @@ class NativeMetaBridge:
 
         self.lib.camera_v2_smooth_display_boxes.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_smooth_display_boxes.restype = ctypes.c_int
+
+        self.lib.camera_v2_apply_identity_style.argtypes = [ctypes.c_uint64]
+        self.lib.camera_v2_apply_identity_style.restype = ctypes.c_int
 
         self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_count_tracked.restype = ctypes.c_int
@@ -196,9 +201,11 @@ class NativeMetaBridge:
         buffer_ptr = ctypes.c_uint64(hash(gst_buffer))
         count = int(self.lib.camera_v2_style_and_count_tracked(buffer_ptr))
         if count >= 0:
-            # Only existing current-frame tracker boxes are smoothed; this never
-            # creates a box and therefore cannot leave a ghost behind.
+            # Geometry smoothing/display-gap bridging runs first. Identity styling
+            # runs last so label chips stay attached to the final visible bbox,
+            # including bounded display-only hold boxes.
             self.lib.camera_v2_smooth_display_boxes(buffer_ptr)
+            self.lib.camera_v2_apply_identity_style(buffer_ptr)
         return count
 
     def configure_heatmap(
