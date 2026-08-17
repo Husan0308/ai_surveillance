@@ -45,6 +45,10 @@ def _normalize(raw: np.ndarray) -> np.ndarray:
     return vector / norm
 
 
+def _label_map(manager: GlobalReIDManager) -> dict[tuple[int, int], str]:
+    return {(sid, oid): label for sid, oid, label in manager.label_assignments()}
+
+
 def _validate_global_identity_logic() -> None:
     manager = GlobalReIDManager()
     expected_rooms = {0: 0, 1: 0, 2: 1, 5: 1, 4: 2, 3: 2}
@@ -61,6 +65,7 @@ def _validate_global_identity_logic() -> None:
     color[3] = 1.0
     color_feature = tuple(float(v) for v in color)
 
+    # First establish one person in room 1 through CAM-03.
     row_a = {
         "source_id": 2,
         "object_id": 101,
@@ -70,6 +75,12 @@ def _validate_global_identity_logic() -> None:
         "confidence": 0.90,
         "tracker_confidence": 0.70,
     }
+    manager.update_active_tracks([row_a], now=100.0)
+    manager.observe([row_a], now=100.0)
+    manager.observe([row_a], now=100.7)
+
+    # CAM-06 is the peer view of that same physical room. The room-memory path
+    # must reuse the same Global ID rather than making one identity per camera.
     row_b = {
         "source_id": 5,
         "object_id": 202,
@@ -79,17 +90,16 @@ def _validate_global_identity_logic() -> None:
         "confidence": 0.90,
         "tracker_confidence": 0.70,
     }
-    manager.update_active_tracks([row_a], now=100.0)
-    manager.observe([row_a], now=100.0)
-    manager.update_active_tracks([row_b], now=100.2)
-    manager.observe([row_b], now=100.2)
-
-    labels = {(sid, oid): label for sid, oid, label in manager.label_assignments()}
+    manager.update_active_tracks([row_b], now=100.8)
+    manager.observe([row_b], now=100.8)
+    labels = _label_map(manager)
     if labels.get((2, 101)) != labels.get((5, 202)):
-        raise RuntimeError(f"same-room cross-camera ReID did not preserve one global ID: {labels}")
+        raise RuntimeError(f"same-room peer cameras did not share one global ID: {labels}")
+    room1_label = labels[(2, 101)]
 
-    # Simultaneous different-room appearance must not teleport into the active ID.
-    row_c = {
+    # A simultaneously active person in a different physical room cannot teleport
+    # into that Global ID even if the synthetic appearance is identical.
+    row_conflict = {
         "source_id": 3,
         "object_id": 303,
         "feature": feature,
@@ -98,14 +108,44 @@ def _validate_global_identity_logic() -> None:
         "confidence": 0.90,
         "tracker_confidence": 0.70,
     }
-    manager.update_active_tracks([row_c], now=100.3)
-    manager.observe([row_c], now=100.3)
-    labels = {(sid, oid): label for sid, oid, label in manager.label_assignments()}
-    if labels.get((3, 303)) == labels.get((2, 101)):
+    manager.update_active_tracks([row_conflict], now=100.9)
+    manager.observe([row_conflict], now=100.9)
+    manager.observe([row_conflict], now=101.3)
+    labels = _label_map(manager)
+    if labels.get((3, 303)) == room1_label:
         raise RuntimeError("cross-room active conflict guard failed")
 
-    # Same-camera NvDCF ID reset after the old track is no longer active should
-    # preserve the global identity using appearance + spatial continuity.
+    # After the original room track disappears, the same person entering another
+    # room must be remembered from its previous room-tracklet signature.
+    row_transition = {
+        "source_id": 4,
+        "object_id": 404,
+        "feature": feature,
+        "color_feature": color_feature,
+        "bbox": (260.0, 100.0, 350.0, 330.0),
+        "confidence": 0.90,
+        "tracker_confidence": 0.68,
+    }
+    manager.update_active_tracks([row_transition], now=103.0)
+    manager.observe([row_transition], now=103.0)
+    manager.observe([row_transition], now=103.7)
+    labels = _label_map(manager)
+    if labels.get((4, 404)) != room1_label:
+        raise RuntimeError(
+            "room-transition memory did not recover the previous Global ID: "
+            f"expected={room1_label} labels={labels}"
+        )
+
+    snapshot = manager.snapshot()
+    profile = next(
+        (p for p in snapshot["profiles"] if p["label"] == room1_label),
+        None,
+    )
+    if profile is None or len(profile.get("rooms", {})) < 2:
+        raise RuntimeError(f"per-person room memories were not retained: profile={profile}")
+
+    # Same-camera NvDCF ID reset should also preserve the Global ID using short
+    # tracklet appearance plus spatial continuity.
     manager2 = GlobalReIDManager()
     first = {
         "source_id": 0,
@@ -118,24 +158,28 @@ def _validate_global_identity_logic() -> None:
     }
     manager2.update_active_tracks([first], now=200.0)
     manager2.observe([first], now=200.0)
+    manager2.observe([first], now=200.7)
     second = dict(first)
     second["object_id"] = 12
     second["bbox"] = (132.0, 102.0, 222.0, 332.0)
-    manager2.update_active_tracks([second], now=201.0)
-    manager2.observe([second], now=201.0)
-    labels2 = {(sid, oid): label for sid, oid, label in manager2.label_assignments()}
+    manager2.update_active_tracks([second], now=202.0)
+    manager2.observe([second], now=202.0)
+    manager2.observe([second], now=202.7)
+    labels2 = _label_map(manager2)
     if labels2.get((0, 11)) != labels2.get((0, 12)):
         raise RuntimeError(f"same-camera ID-reset continuity failed: {labels2}")
 
-    snapshot = manager.snapshot()
     snapshot2 = manager2.snapshot()
-    if snapshot["stats"].get("direct_match", 0) < 1:
-        raise RuntimeError("global ReID direct-match path was not exercised")
+    stats = snapshot["stats"]
+    if stats.get("direct_match", 0) < 2:
+        raise RuntimeError("room peer/transition direct-match paths were not exercised")
     if snapshot2["stats"].get("continuation_match", 0) < 1:
         raise RuntimeError("same-camera continuation path was not exercised")
     print(
         "REID_PREFLIGHT global_identity=PASS "
-        f"room_map={snapshot['room_map']} direct={snapshot['stats']['direct_match']} "
+        f"room_map={snapshot['room_map']} room_memories={snapshot['room_memories']} "
+        f"direct={stats['direct_match']} covis={stats['covisible_match']} "
+        f"transition={stats['transition_match']} revisit={stats['revisit_match']} "
         f"continuation={snapshot2['stats']['continuation_match']}"
     )
 
