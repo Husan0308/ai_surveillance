@@ -41,12 +41,13 @@ static uint64_t g_rendered_points_total = 0;
 
 /* Defaults are deliberately trail-like, not blob-like. Python computes decay
  * from the configured camera FPS so approximately 10% of heat remains after an
- * hour. A single pass stays cyan and fades away; repeated traffic becomes warm. */
+ * hour. A single pass stays blue/cyan; repeatedly-used floor cells warm to
+ * yellow and only sustained traffic reaches red. */
 static float g_deposit = 0.0045f;
 static float g_decay = 0.999968f;
 static float g_low = 0.00075f;
-static float g_yellow = 0.020f;
-static float g_red = 0.060f;
+static float g_yellow = 0.040f;
+static float g_red = 0.120f;
 static unsigned int g_max_points_per_source = 30;
 
 /* At 1280x720 with a 48x27 grid one cell is ~27 px. Require two real movements
@@ -56,6 +57,7 @@ static const float DEPOSIT_DIST2 = 0.0100f;        /* 0.10^2 cell */
 static const uint64_t MOTION_VOTE_WINDOW = 16;    /* ~0.8 s @20 FPS */
 static const uint64_t MOVING_HOLD_FRAMES = 12;    /* bridge tiny tracker wobble */
 static const float FOOT_EMA_ALPHA = 0.58f;
+static const float FOOT_LIFT_RATIO = 0.08f;        /* render ~8% above bbox bottom */
 
 static float clampf_heat(float v, float lo, float hi) {
     if (v < lo) return lo;
@@ -204,8 +206,9 @@ static void deposit_segment(unsigned int source_id,
     }
 }
 
-/* Accumulate only from current real NvDCF objects. The foot anchor is the exact
- * bbox bottom-center, the same spatial point used by DeepStream analytics. */
+/* Accumulate only from current real NvDCF objects. We use bottom-center as the
+ * floor reference but lift it 8% of bbox height so the overlay sits slightly
+ * above the absolute image edge/feet line instead of looking too low. */
 int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
     GstBuffer *buffer = (GstBuffer *)buffer_ptr;
@@ -235,7 +238,7 @@ int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
             if (w <= 2.0f || h <= 4.0f) continue;
 
             float foot_x = obj->rect_params.left + w * 0.5f;
-            float foot_y = obj->rect_params.top + h;
+            float foot_y = obj->rect_params.top + h * (1.0f - FOOT_LIFT_RATIO);
             float raw_gx = clampf_heat((foot_x / frame_w) * (float)(HEAT_GRID_W - 1),
                                        0.0f, (float)(HEAT_GRID_W - 1));
             float raw_gy = clampf_heat((foot_y / frame_h) * (float)(HEAT_GRID_H - 1),
@@ -323,32 +326,37 @@ static void push_candidate(HeatCandidate *items,
 }
 
 static void heat_color(float value, NvOSD_ColorParams *color) {
-    float r = 0.02f, g = 0.66f, b = 1.00f;
+    /* Density palette, not a per-person color:
+     *   low traffic / one pass      -> deep blue to cyan
+     *   repeated traffic            -> cyan to yellow
+     *   heavily repeated floor cell -> yellow to red
+     * This keeps a single person's trail cool instead of making it orange/red. */
+    float r = 0.02f, g = 0.35f, b = 1.00f;
     if (value < g_yellow) {
         float u = (value - g_low) / (g_yellow - g_low + 0.000001f);
         u = clampf_heat(u, 0.0f, 1.0f);
-        r = 0.02f + 0.86f * u;
-        g = 0.66f + 0.30f * u;
-        b = 1.00f - 0.88f * u;
+        r = 0.02f + 0.08f * u;
+        g = 0.35f + 0.55f * u;
+        b = 1.00f;
     } else if (value < g_red) {
         float u = (value - g_yellow) / (g_red - g_yellow + 0.000001f);
         u = clampf_heat(u, 0.0f, 1.0f);
-        r = 0.95f + 0.05f * u;
-        g = 0.96f - 0.66f * u;
-        b = 0.12f * (1.0f - u);
+        r = 0.10f + 0.90f * u;
+        g = 0.90f + 0.02f * u;
+        b = 1.00f - 0.95f * u;
     } else {
         float u = (value - g_red) / (1.0f - g_red + 0.000001f);
         u = clampf_heat(u, 0.0f, 1.0f);
         r = 1.00f;
-        g = 0.30f * (1.0f - u);
-        b = 0.00f;
+        g = 0.92f * (1.0f - u);
+        b = 0.05f * (1.0f - u);
     }
 
     float strength = clampf_heat(value / g_red, 0.0f, 1.0f);
     color->red = r;
     color->green = g;
     color->blue = b;
-    color->alpha = 0.055f + 0.135f * strength;
+    color->alpha = 0.060f + 0.145f * strength;
 }
 
 static NvDsDisplayMeta *new_display_meta(NvDsBatchMeta *batch_meta, NvDsFrameMeta *anchor) {
