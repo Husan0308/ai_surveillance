@@ -2,18 +2,15 @@ from __future__ import annotations
 
 import os
 import queue as pyqueue
+import threading
 import time
 from collections import deque
 
 # Production person tracking for GTX 1050 Ti 4 GB + six fixed CCTV streams.
-# Use a modestly larger detector input than the old 640x384 baseline so adjacent
-# people retain more spatial detail, while keeping micro-batch=2 for 4 GB VRAM.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "704")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.08")
-# High NMS IoU intentionally permits strongly-overlapping person detections to
-# survive. Ultralytics NMS only suppresses boxes; it cannot split a merged person.
 os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.82")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
 os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "480")
@@ -21,26 +18,26 @@ os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
-# Ultralytics has already run NMS. The second pass is now near-identical-only so
-# two real people are not collapsed merely because their person boxes overlap.
 os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.96")
 os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.995")
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
 from .detector_latency import DetectorLatencyCompensator, PreparedDetection
+from .external_reid import ExternalReIDWorker
 from .global_reid import GlobalReIDManager
 from .person_tracking import CameraPersonTrackingV2 as _BaseTracking
-from .tracker_profile import prepare_sparse_tracker_config
+from .tracker_profile import prepare_sparse_tracker_config, reid_backend
 
 
 class CameraPersonTrackingFinal(_BaseTracking):
-    """YOLO26m + NvDCF + DeepStream ReID + conservative global identities.
+    """YOLO26m + NvDCF local tracking + cross-camera global identity.
 
-    NvDCF owns local per-camera tracking. NVIDIA's TensorRT ReID module emits an
-    appearance embedding for each target at a throttled interval. GlobalReIDManager
-    maps local (camera, tracker-id) pairs onto session-level IDs so the same person
-    can keep Unknown_03 when seen from another camera. The global layer never feeds
-    synthetic geometry back into NvDCF; it changes identity labels only.
+    On the GTX 1050 Ti, DeepStream 7.1's TensorRT 10.x ReID path is intentionally
+    disabled because Pascal/SM6.1 is not a supported TensorRT 10.x target. Instead,
+    the official NVIDIA ReIdentificationNet ONNX runs sparsely in an asynchronous
+    OpenCV-DNN CPU worker using person crops already produced for YOLO. NvDCF stays
+    authoritative for local geometry and local object IDs; ReID only maps those
+    local tracks onto stable session-level Global IDs.
     """
 
     def __init__(self) -> None:
@@ -51,23 +48,52 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.detector_min_idle = float(os.environ.get("CAMERA_V2_DETECT_MIN_IDLE_MS", "8")) / 1000.0
         self.detector_result_age_ms = 0.0
         self.detector_times: dict[str, deque[float]] = {}
+
+        enabled = os.environ.get("CAMERA_V2_REID", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self.reid_mode = reid_backend() if enabled else "off"
         self.global_reid = GlobalReIDManager()
+        self.reid_lock = threading.RLock()
+        self.track_snapshot_lock = threading.RLock()
+        self.latest_tracks: dict[tuple[int, int], dict] = {}
+        self.reid_last_submit: dict[tuple[int, int], float] = {}
         self.reid_vectors_seen = 0
         self.reid_last_batch = 0
         self.reid_error = ""
+        self.reid_submitted = 0
+        self.reid_match_misses = 0
+        self.reid_track_interval = max(0.5, float(os.environ.get("CAMERA_V2_REID_TRACK_INTERVAL", "1.2")))
+        self.reid_cycle_budget = max(1, min(4, int(os.environ.get("CAMERA_V2_REID_CROPS_PER_CYCLE", "1"))))
+        self.reid_min_crop_h = max(24, int(os.environ.get("CAMERA_V2_REID_MIN_CROP_H", "48")))
+        self.external_reid: ExternalReIDWorker | None = None
+
         super().__init__()
-        # nvdsosd must have text enabled for compact name/Unknown_ID chips attached
-        # to NvDsObjectMeta.text_params after global ReID assignment.
         self._set_if(self.osd, "display-text", True)
         self.detector_target_hz = max(self.detector_min_hz, min(self.detector_max_hz, self.detector_target_hz))
         self.detector_times = {cid: deque(maxlen=100) for cid in self.camera_index}
         self.latency_compensator = DetectorLatencyCompensator(self.frame_width, self.frame_height)
 
+        if self.reid_mode == "external":
+            self.external_reid = ExternalReIDWorker()
+            print(
+                "CAMERA_REID backend=external-opencv-cpu reason=Pascal_SM6.1_not_supported_by_TensorRT10 "
+                "nvtracker_reid=0 global_reid=1",
+                flush=True,
+            )
+        elif self.reid_mode == "deepstream":
+            print("CAMERA_REID backend=deepstream-tensorrt global_reid=1", flush=True)
+        else:
+            print("CAMERA_REID backend=off", flush=True)
+
     def _resolve_tracker_files(self):
         lib, stock_max_perf = super()._resolve_tracker_files()
-        # Keep NVIDIA's max-perf NvDCF base for the 4 GB card. tracker_profile.py
-        # adds a small-batch FP16 ReID network and outputReidTensor metadata.
         return lib, prepare_sparse_tracker_config(stock_max_perf)
+
+    def run(self) -> int:
+        try:
+            return super().run()
+        finally:
+            if self.external_reid is not None:
+                self.external_reid.close()
 
     def _publish_prepared(
         self,
@@ -118,6 +144,41 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 self.detector_result_age_ms = max_age_ms
         return self.Gst.PadProbeReturn.OK
 
+    @staticmethod
+    def _box_iou(a, b) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        if inter <= 0.0:
+            return 0.0
+        aa = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        bb = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        union = aa + bb - inter
+        return inter / union if union > 0.0 else 0.0
+
+    @staticmethod
+    def _track_box(row: dict) -> tuple[float, float, float, float]:
+        left = float(row["left"])
+        top = float(row["top"])
+        return (left, top, left + float(row["width"]), top + float(row["height"]))
+
+    def _consume_external_reid(self) -> None:
+        worker = self.external_reid
+        if worker is None:
+            return
+        rows = worker.drain(16)
+        if not rows:
+            if worker.error:
+                self.reid_error = worker.error
+            return
+        with self.reid_lock:
+            self.global_reid.observe(rows, time.monotonic())
+            self.reid_vectors_seen += len(rows)
+            self.reid_last_batch = len(rows)
+        self.reid_error = worker.error
+
     def _tracker_probe(self, _pad, info):
         buffer = info.get_buffer()
         if buffer is None:
@@ -129,20 +190,31 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 self.tracked_now = count
                 self.tracker_frames += 1
 
-        # ReID extraction/matching runs only when tracker metadata contains a fresh
-        # embedding. On the other video frames the cached local->global binding is
-        # simply re-applied, so Python never performs image inference or frame copy.
         try:
-            rows = self.bridge.snapshot_reid(buffer)
-            self.reid_last_batch = len(rows)
-            if rows:
-                self.global_reid.observe(rows, time.monotonic())
-                self.reid_vectors_seen += len(rows)
-            self.bridge.apply_global_identity(buffer, self.global_reid.label_assignments())
-            self.reid_error = ""
+            if self.reid_mode == "external":
+                tracks = self.bridge.snapshot_tracks(buffer)
+                with self.track_snapshot_lock:
+                    self.latest_tracks = {
+                        (int(row["source_id"]), int(row["object_id"])): row for row in tracks
+                    }
+                self._consume_external_reid()
+            elif self.reid_mode == "deepstream":
+                rows = self.bridge.snapshot_reid(buffer)
+                self.reid_last_batch = len(rows)
+                if rows:
+                    with self.reid_lock:
+                        self.global_reid.observe(rows, time.monotonic())
+                    self.reid_vectors_seen += len(rows)
+
+            if self.reid_mode != "off":
+                with self.reid_lock:
+                    assignments = self.global_reid.label_assignments()
+                self.bridge.apply_global_identity(buffer, assignments)
+            else:
+                self.bridge.apply_global_identity(buffer, [])
+            if self.reid_mode != "external":
+                self.reid_error = ""
         except Exception as exc:
-            # Identity enrichment must never take the camera wall down. Preserve
-            # tracking and render local Unknown fallbacks if the ReID sidecar fails.
             self.reid_error = f"{type(exc).__name__}: {exc}"
             try:
                 self.bridge.apply_global_identity(buffer, [])
@@ -150,6 +222,89 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 pass
 
         return self.Gst.PadProbeReturn.OK
+
+    def _submit_external_reid(
+        self,
+        cid: str,
+        frame,
+        detections: list[tuple[tuple[float, float, float, float], float]],
+    ) -> None:
+        worker = self.external_reid
+        if worker is None or worker.error or not detections:
+            return
+        source_id = int(self.camera_index[cid])
+        now = time.monotonic()
+        with self.track_snapshot_lock:
+            tracks = [row for (sid, _oid), row in self.latest_tracks.items() if sid == source_id]
+        if not tracks:
+            return
+
+        # Greedy one-to-one detector->track association. ReID is identity evidence,
+        # so a conservative miss is safer than attaching a crop to the wrong local ID.
+        pairs: list[tuple[float, int, int]] = []
+        for di, (det_box, _conf) in enumerate(detections):
+            for ti, track in enumerate(tracks):
+                iou = self._box_iou(det_box, self._track_box(track))
+                if iou >= 0.20:
+                    pairs.append((iou, di, ti))
+        pairs.sort(reverse=True)
+        used_dets: set[int] = set()
+        used_tracks: set[int] = set()
+        matches: list[tuple[int, int]] = []
+        for _score, di, ti in pairs:
+            if di in used_dets or ti in used_tracks:
+                continue
+            used_dets.add(di)
+            used_tracks.add(ti)
+            matches.append((di, ti))
+
+        if not matches:
+            self.reid_match_misses += 1
+            return
+
+        # New/oldest local tracks get embedding priority. One crop per YOLO cycle is
+        # enough for identity while keeping the i5 CPU and the live wall responsive.
+        ranked = []
+        for di, ti in matches:
+            track = tracks[ti]
+            key = (source_id, int(track["object_id"]))
+            ranked.append((self.reid_last_submit.get(key, 0.0), di, ti, key))
+        ranked.sort(key=lambda item: item[0])
+
+        submitted = 0
+        sx = INFER_WIDTH / float(self.frame_width)
+        sy = INFER_HEIGHT / float(self.frame_height)
+        fh, fw = frame.shape[:2]
+        for last_submit, di, ti, key in ranked:
+            if submitted >= self.reid_cycle_budget:
+                break
+            if last_submit and now - last_submit < self.reid_track_interval:
+                continue
+            det_box, det_conf = detections[di]
+            x1 = max(0, min(fw - 1, int(round(det_box[0] * sx))))
+            y1 = max(0, min(fh - 1, int(round(det_box[1] * sy))))
+            x2 = max(x1 + 1, min(fw, int(round(det_box[2] * sx))))
+            y2 = max(y1 + 1, min(fh, int(round(det_box[3] * sy))))
+
+            # Do not teach the global gallery with severely truncated/very tiny crops.
+            # Detection/tracking still remain visible; this gate affects ReID only.
+            if y2 - y1 < self.reid_min_crop_h or x2 - x1 < 18:
+                continue
+            if x1 <= 1 or y1 <= 1 or x2 >= fw - 1 or y2 >= fh - 1:
+                continue
+
+            track = tracks[ti]
+            crop = frame[y1:y2, x1:x2]
+            if worker.submit(
+                source_id=source_id,
+                object_id=int(track["object_id"]),
+                crop_bgr=crop,
+                confidence=float(det_conf),
+                tracker_confidence=float(track.get("tracker_confidence", 0.0) or 0.0),
+            ):
+                self.reid_last_submit[key] = now
+                self.reid_submitted += 1
+                submitted += 1
 
     def _scheduler(self) -> None:
         assert self.result_q is not None and self.job_q is not None
@@ -175,8 +330,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"range={self.detector_min_hz:.1f}-{self.detector_max_hz:.1f}Hz/cam "
             f"NvDCF={self.tracker_width}x{self.tracker_height} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
-            "profile=max_perf memory_profile=4gb max_targets=24 "
-            "deepstream_reid=1 global_reid=1 close_person=1 display_gap_bridge=1",
+            f"reid_backend={self.reid_mode} close_person=1 display_gap_bridge=1",
             flush=True,
         )
 
@@ -241,6 +395,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 continue
 
             completed_t = time.monotonic()
+            frame_by_cid = {cid: frame for cid, frame in zip(group, frames)}
             counts: dict[str, int] = {}
             ages_ms: list[float] = []
             for cid, captured_t in zip(result["cameras"], result["captured"]):
@@ -250,6 +405,10 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 counts[cid] = len(detections)
                 ages_ms.append(max(0.0, (completed_t - captured_t) * 1000.0))
                 self.detector_times[cid].append(completed_t)
+                if self.reid_mode == "external":
+                    frame = frame_by_cid.get(cid)
+                    if frame is not None:
+                        self._submit_external_reid(cid, frame, detections)
 
             batch_ms = float(result.get("batch_ms") or 0.0)
             with self.det_lock:
@@ -313,15 +472,21 @@ class CameraPersonTrackingFinal(_BaseTracking):
             flush=True,
         )
 
-        reid = self.global_reid.snapshot()
+        with self.reid_lock:
+            reid = self.global_reid.snapshot()
         stats = reid["stats"]
+        worker_stats = self.external_reid.snapshot() if self.external_reid is not None else {}
+        worker_error = worker_stats.get("error", "") if worker_stats else ""
         print(
             "CAMERA_REID "
-            f"vectors={self.reid_vectors_seen} last_batch={self.reid_last_batch} "
+            f"backend={self.reid_mode} vectors={self.reid_vectors_seen} "
+            f"last_batch={self.reid_last_batch} submitted={self.reid_submitted} "
             f"globals={reid['global_count']} bindings={reid['local_bindings']} "
             f"strong={stats['strong_match']} merged={stats['merged']} "
-            f"conflicts={stats['rejected_conflict']} "
-            f"error={self.reid_error or 'none'}",
+            f"conflicts={stats['rejected_conflict']} match_miss={self.reid_match_misses} "
+            f"infer_ms={float(worker_stats.get('infer_ms', 0.0)):.1f} "
+            f"queue={int(worker_stats.get('queued', 0))} dropped={int(worker_stats.get('dropped', 0))} "
+            f"error={self.reid_error or worker_error or 'none'}",
             flush=True,
         )
         return keep
