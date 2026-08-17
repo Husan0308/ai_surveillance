@@ -11,9 +11,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIR = ROOT / ".runtime" / "camera_v2" / "models" / "reid"
 DEFAULT_MODEL = DEFAULT_DIR / "resnet50_market1501_aicity156.onnx"
+# NVIDIA's current NGC registry endpoint. The older
+# /models/org/nvidia/team/tao/... route now returns HTTP 404 on some clients.
 MODEL_URL = (
-    "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/tao/"
-    "reidentificationnet/deployable_v1.2/files/resnet50_market1501_aicity156.onnx"
+    "https://api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/"
+    "versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx"
 )
 MODEL_SHA256 = "0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b"
 
@@ -36,7 +38,7 @@ def _download(url: str, destination: Path) -> None:
     ) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "camera-v2-reid-setup/1.1"})
+        request = urllib.request.Request(url, headers={"User-Agent": "camera-v2-reid-setup/1.2"})
         with urllib.request.urlopen(request, timeout=120) as response, tmp_path.open("wb") as out:
             shutil.copyfileobj(response, out, length=1024 * 1024)
         if tmp_path.stat().st_size < 80 * 1024 * 1024:
