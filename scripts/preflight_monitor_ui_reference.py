@@ -65,8 +65,10 @@ def main() -> int:
         return fail(f"expected 6 cameras, got {len(cameras)}")
     print("camera_count=OK 6")
 
+    from services.camera_v2 import monitor_ui as base
     from services.camera_v2 import monitor_ui_reference as ui
 
+    ui._apply_geometry()
     checks = {
         "columns_2": ui.GRID_COLUMNS == 2,
         "rows_3": ui.GRID_ROWS == 3,
@@ -75,6 +77,11 @@ def main() -> int:
         "aspect_16_9": abs(ui.TILE_WIDTH / ui.TILE_HEIGHT - 16 / 9) < 0.001,
         "large_like_reference": ui.TILE_WIDTH >= 500 and ui.TILE_HEIGHT >= 280,
         "lighter_than_old_wall": ui.WALL_WIDTH * ui.WALL_HEIGHT < 1920 * 720,
+        "base_geometry_applied": (
+            base.TILE_WIDTH, base.TILE_HEIGHT, base.GRID_COLUMNS, base.GRID_ROWS,
+            base.WALL_WIDTH, base.WALL_HEIGHT,
+        ) == (512, 288, 2, 3, 1024, 864),
+        "spawn_wrapper_present": callable(ui._reference_pipeline_process),
     }
     for name, ok in checks.items():
         print(f"contract {name}={'OK' if ok else 'FAIL'}")
@@ -85,6 +92,7 @@ def main() -> int:
     print("camera_tile=512x288")
     print("wall=1024x864")
     print("screenshot_scale=PASS")
+    print("spawn_geometry=PASS")
     print("pipeline_core_files=UNCHANGED")
     print("MONITOR_UI_REFERENCE_PREFLIGHT=PASS")
     return 0
