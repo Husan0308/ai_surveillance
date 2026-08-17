@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 .env
+.runtime/
 .idea/
 .vscode/
 *.log
