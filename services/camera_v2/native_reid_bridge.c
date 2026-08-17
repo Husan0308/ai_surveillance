@@ -40,6 +40,46 @@ static NvDsObjReid *find_object_reid(NvDsObjectMeta *obj) {
     return NULL;
 }
 
+/* Snapshot every real NvDCF person track, even when DeepStream ReID is disabled.
+ * This is used by the Pascal-safe external ReID sidecar to bind CPU person crops
+ * to the authoritative local tracker object_id without feeding any geometry back
+ * into NvDCF. feature_size is intentionally zero in this path. */
+int camera_v2_snapshot_tracks(uintptr_t buffer_ptr,
+                              CameraV2ReidRow *rows,
+                              int max_rows) {
+    if (!buffer_ptr || !rows || max_rows <= 0) return 0;
+    GstBuffer *buffer = (GstBuffer *)buffer_ptr;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
+    if (!batch_meta) return -1;
+
+    int count = 0;
+    for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)fnode->data;
+        if (!frame_meta) continue;
+
+        for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)onode->data;
+            if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
+            if (obj->unique_component_id == 191) continue; /* display-only hold box */
+            if (obj->rect_params.width <= 1.0f || obj->rect_params.height <= 1.0f) continue;
+            if (count >= max_rows) return count;
+
+            CameraV2ReidRow *row = &rows[count++];
+            memset(row, 0, sizeof(*row));
+            row->source_id = frame_meta->source_id;
+            row->object_id = (uint64_t)obj->object_id;
+            row->left = obj->rect_params.left;
+            row->top = obj->rect_params.top;
+            row->width = obj->rect_params.width;
+            row->height = obj->rect_params.height;
+            row->confidence = obj->confidence;
+            row->tracker_confidence = obj->tracker_confidence;
+            row->feature_size = 0;
+        }
+    }
+    return count;
+}
+
 int camera_v2_snapshot_reid(uintptr_t buffer_ptr,
                             CameraV2ReidRow *rows,
                             int max_rows) {
