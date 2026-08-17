@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <gst/gst.h>
 #include "gstnvdsmeta.h"
@@ -29,6 +30,17 @@ static float clampf_local(float value, float low, float high) {
     if (value < low) return low;
     if (value > high) return high;
     return value;
+}
+
+static float env_margin(const char *name, float fallback) {
+    const char *value = g_getenv(name);
+    if (!value || !value[0]) return fallback;
+    char *end = NULL;
+    double parsed = g_ascii_strtod(value, &end);
+    if (end == value || !g_ascii_isfinite(parsed)) return fallback;
+    if (parsed < 0.0) parsed = 0.0;
+    if (parsed > 0.25) parsed = 0.25;
+    return (float) parsed;
 }
 
 static int add_boxes_to_frame(NvDsBatchMeta *batch_meta,
@@ -93,8 +105,7 @@ int camera_v2_add_boxes(uintptr_t buffer_ptr,
 }
 
 /* Emulate a primary detector result on exactly the live source frame where the
- * asynchronous YOLO observation is attached. Empty detector results are valid:
- * bInferDone is TRUE with zero object meta, matching nvinfer interval semantics. */
+ * asynchronous YOLO observation is attached. */
 int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
                                     unsigned int source_id,
                                     const float *boxes,
@@ -110,26 +121,18 @@ int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
     return add_boxes_to_frame(batch_meta, frame_meta, boxes, count);
 }
 
-/*
- * Live OSD helper AFTER nvtracker.
- *
- * Strict rule: never invent an object here. No timer hold, no stale shadow-history
- * promotion, no synthetic prediction metadata. Only current-frame NvDsObjectMeta
- * produced by NvDCF is styled for display. This removes lingering giant rectangles
- * when a person has already left the camera view.
- *
- * NvDCF keeps its tight bbox internally. We enlarge rect_params only for display so
- * hands/head/feet have a small safety margin without contaminating DCF features.
- */
+/* Style only real current-frame NvDCF objects. Display margins are controlled by
+ * the same CAMERA_V2_TRACK_BOX_* environment settings as the Python runtime so the
+ * native bridge cannot silently inflate boxes behind the runtime's back. */
 int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
     GstBuffer *buffer = (GstBuffer *) buffer_ptr;
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
     if (!batch_meta) return -1;
 
-    const float side_margin = 0.07f;
-    const float top_margin = 0.05f;
-    const float bottom_margin = 0.10f;
+    const float side_margin = env_margin("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", 0.0f);
+    const float top_margin = env_margin("CAMERA_V2_TRACK_BOX_TOP_MARGIN", 0.0f);
+    const float bottom_margin = env_margin("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", 0.0f);
     int count = 0;
 
     for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
@@ -173,7 +176,6 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     return count;
 }
 
-/* Kept for Python ABI compatibility with the previous diagnostic build. */
 uint64_t camera_v2_shadow_promoted_total(void) {
     return 0;
 }
