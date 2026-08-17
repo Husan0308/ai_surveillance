@@ -21,13 +21,6 @@ def _run(cmd: list[str]) -> tuple[int, str]:
 
 
 def _torch_code_can_run_on_device(code_cc: int, device_cc: int) -> bool:
-    """Mirror the relevant NVIDIA/PyTorch same-major compatibility rule.
-
-    For Pascal dGPU, official PyTorch cu126 wheels currently ship sm_60 code.
-    PyTorch treats sm_60 code as compatible with sm_61 hardware, while sm_62 is
-    a separate Jetson target. Exact string equality with torch.get_arch_list()
-    is therefore too strict.
-    """
     if code_cc == device_cc:
         return True
     if code_cc == 60 and device_cc == 61:
@@ -112,9 +105,7 @@ def main() -> int:
                         print(f"torch_cuda_matmul=OK value={float(y[0, 0].item()):.1f}")
                         cuda_base_ok = True
                     except Exception as exc:
-                        failures.append(
-                            f"PyTorch CUDA matmul failed: {type(exc).__name__}: {exc}"
-                        )
+                        failures.append(f"PyTorch CUDA matmul failed: {type(exc).__name__}: {exc}")
 
                     if cuda_base_ok:
                         try:
@@ -125,9 +116,7 @@ def main() -> int:
                             torch.cuda.synchronize()
                             print(f"cudnn_conv=OK shape={tuple(out.shape)}")
                         except Exception as exc:
-                            failures.append(
-                                f"cuDNN/Conv2d CUDA smoke failed: {type(exc).__name__}: {exc}"
-                            )
+                            failures.append(f"cuDNN/Conv2d CUDA smoke failed: {type(exc).__name__}: {exc}")
 
                     if cuda_base_ok and importlib.util.find_spec("torchvision") is not None:
                         try:
@@ -144,27 +133,27 @@ def main() -> int:
                             torch.cuda.synchronize()
                             print(f"torchvision_cuda_nms=OK keep={keep.detach().cpu().tolist()}")
                         except Exception as exc:
-                            failures.append(
-                                "torchvision CUDA NMS failed: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
+                            failures.append("torchvision CUDA NMS failed: " + f"{type(exc).__name__}: {exc}")
 
                     if cuda_base_ok and importlib.util.find_spec("ultralytics") is not None and model_path.exists():
                         try:
                             import numpy as np
                             from ultralytics import YOLO
 
-                            print("yolo_cuda_smoke=START")
+                            print("yolo_cuda_smoke=START production=640x360 conf=0.08 iou=0.72 micro_batch=2")
                             detector = YOLO(str(model_path))
-                            zeros = [np.zeros((288, 512, 3), dtype=np.uint8)]
+                            zeros = [
+                                np.zeros((360, 640, 3), dtype=np.uint8),
+                                np.zeros((360, 640, 3), dtype=np.uint8),
+                            ]
                             detector.predict(
                                 source=zeros,
-                                imgsz=(288, 512),
+                                imgsz=(360, 640),
                                 rect=True,
                                 classes=[0],
-                                conf=0.20,
-                                iou=0.55,
-                                max_det=30,
+                                conf=0.08,
+                                iou=0.72,
+                                max_det=40,
                                 device="cuda:0",
                                 verbose=False,
                                 stream=False,
@@ -172,9 +161,7 @@ def main() -> int:
                             torch.cuda.synchronize()
                             print("yolo_cuda_smoke=OK")
                         except Exception as exc:
-                            failures.append(
-                                f"YOLO26m CUDA smoke failed: {type(exc).__name__}: {exc}"
-                            )
+                            failures.append(f"YOLO26m CUDA smoke failed: {type(exc).__name__}: {exc}")
         except Exception as exc:
             failures.append(f"torch CUDA check: {type(exc).__name__}: {exc}")
 
