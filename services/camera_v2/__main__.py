@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .sentinel_exact import main
+from .sentinel_runtime import main
 
 
 if __name__ == "__main__":
