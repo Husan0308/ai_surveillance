@@ -74,6 +74,13 @@ class DetectorLatencyCompensator:
         captured_t: float,
         boxes: list[tuple[float, float, float, float, float]],
     ) -> list[PreparedDetection]:
+        # A single sparse-detector miss must not erase velocity history. The next
+        # real detection can still be matched to the last observation (up to the
+        # existing 2s matching horizon), which prevents the correction box from
+        # falling behind after one missed YOLO sample.
+        if not boxes:
+            return []
+
         previous = self.history.get(cid, [])
         current_plain = [(float(x1), float(y1), float(x2), float(y2)) for x1, y1, x2, y2, _ in boxes]
 
