@@ -1,25 +1,43 @@
 cameras:
   - id: CAM-01
+    name: Dev Room 2
+    room: Devs
+    enabled: true
     env_uri: CAM_01_URI
     uri: rtsp://192.168.1.210:554/Streaming/Channels/101
     codec: h264
   - id: CAM-02
+    name: Entrance 2
+    room: Entrance
+    enabled: true
     env_uri: CAM_02_URI
     uri: rtsp://192.168.1.210:554/Streaming/Channels/201
     codec: h264
   - id: CAM-03
+    name: Main Room 1
+    room: Main Rooms
+    enabled: true
     env_uri: CAM_03_URI
     uri: rtsp://192.168.1.210:554/Streaming/Channels/301
     codec: h264
   - id: CAM-04
+    name: Dev Room 1
+    room: Devs
+    enabled: true
     env_uri: CAM_04_URI
     uri: rtsp://192.168.1.210:554/Streaming/Channels/601
     codec: h265
   - id: CAM-05
+    name: Entrance 1
+    room: Entrance
+    enabled: true
     env_uri: CAM_05_URI
     uri: rtsp://192.168.1.210:554/Streaming/Channels/501
     codec: h265
   - id: CAM-06
+    name: Main Room 2
+    room: Main Rooms
+    enabled: true
     env_uri: CAM_06_URI
     uri: rtsp://192.168.1.210:554/Streaming/Channels/401
     codec: h265
