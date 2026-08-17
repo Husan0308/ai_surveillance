@@ -5,6 +5,14 @@
 #include "nvdsmeta.h"
 
 #define MAX_SMOOTH_STATES 512
+/*
+ * The production detector runs sparsely (~2-3 Hz/camera) while the wall is ~20 FPS.
+ * DeepStream can omit realtime tracker metadata between inferenced frames even though
+ * NvDCF keeps tracking internally. Bridge only that short display gap downstream of
+ * nvtracker. 12 frames is ~0.6 s at 20 FPS: enough to cover the slowest normal detector
+ * cadence without leaving multi-second ghost boxes after a person exits.
+ */
+#define DISPLAY_HOLD_FRAMES 12
 
 typedef struct {
     int valid;
@@ -51,6 +59,15 @@ static float alpha_for_steps(float one_step_alpha, uint64_t steps) {
     return 1.0f - remain;
 }
 
+static void style_display_box(NvDsObjectMeta *obj) {
+    obj->rect_params.border_width = 3;
+    obj->rect_params.border_color.red = 0.10f;
+    obj->rect_params.border_color.green = 1.00f;
+    obj->rect_params.border_color.blue = 0.15f;
+    obj->rect_params.border_color.alpha = 1.00f;
+    obj->rect_params.has_bg_color = 0;
+}
+
 static void write_rect(NvDsObjectMeta *obj,
                        float cx,
                        float cy,
@@ -79,13 +96,47 @@ static void write_rect(NvDsObjectMeta *obj,
     obj->rect_params.height = bottom - top;
 }
 
+static int add_display_hold(NvDsBatchMeta *batch_meta,
+                            NvDsFrameMeta *frame_meta,
+                            SmoothBoxState *s,
+                            uint64_t gap,
+                            float frame_w,
+                            float frame_h) {
+    if (!batch_meta || !frame_meta || !s || !s->valid || gap == 0 || gap > DISPLAY_HOLD_FRAMES) return 0;
+
+    NvDsObjectMeta *obj = nvds_acquire_obj_meta_from_pool(batch_meta);
+    if (!obj) return 0;
+
+    /*
+     * Predict only a small bounded distance so a held box follows a walking person
+     * instead of freezing behind them. This metadata is created AFTER nvtracker and
+     * is therefore display-only: it can never seed or alter a tracker target.
+     */
+    float predict_steps = (float) (gap > 6 ? 6 : gap);
+    float held_cx = s->display_cx + s->vx * predict_steps * 0.65f;
+    float held_cy = s->display_cy + s->vy * predict_steps * 0.65f;
+
+    obj->unique_component_id = 191;
+    obj->class_id = 0;
+    obj->object_id = s->object_id;
+    obj->confidence = -0.1f;
+    obj->tracker_confidence = -0.1f;
+    strncpy(obj->obj_label, "Person", MAX_LABEL_SIZE - 1);
+    obj->obj_label[MAX_LABEL_SIZE - 1] = '\0';
+    write_rect(obj, held_cx, held_cy, s->display_w, s->display_h, frame_w, frame_h);
+    style_display_box(obj);
+    nvds_add_obj_meta_to_frame(frame_meta, obj, NULL);
+    return 1;
+}
+
 /*
- * Display-only smoother for REAL current-frame NvDCF objects.
+ * Display smoother for REAL current-frame NvDCF objects plus a bounded downstream
+ * display hold across sparse-inference metadata gaps.
  *
- * It never creates metadata and therefore cannot leave a ghost rectangle behind.
- * Position follows quickly; size changes are eased enough to avoid visible jumps
- * when a person raises an arm, turns, sits or stands. A very small velocity lead
- * offsets the interpolation latency without shooting the box ahead of the target.
+ * The hold never enters nvtracker because this probe runs on nvtracker's src pad.
+ * It expires after DISPLAY_HOLD_FRAMES, so a person who really leaves cannot create
+ * a long-lived ghost rectangle. Position follows quickly; size changes are eased to
+ * avoid visible jumps when a person raises an arm, turns, sits or stands.
  */
 int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
@@ -115,6 +166,8 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *) onode->data;
             if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
+            /* Ignore our own downstream-only hold boxes if this helper is ever called twice. */
+            if (obj->unique_component_id == 191) continue;
 
             float left = obj->rect_params.left;
             float top = obj->rect_params.top;
@@ -175,11 +228,17 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
             ++smoothed;
         }
 
-        /* State alone is harmless, but retire it quickly so recycled IDs start clean. */
+        /* Fill only short downstream OSD gaps for states not present on this frame. */
         for (int i = 0; i < MAX_SMOOTH_STATES; ++i) {
             SmoothBoxState *s = &g_smooth_states[i];
             if (!s->valid || s->source_id != source_id) continue;
-            if (frame_num > s->last_frame_num && frame_num - s->last_frame_num > 40) s->valid = 0;
+            if (frame_num <= s->last_frame_num) continue;
+            uint64_t gap = frame_num - s->last_frame_num;
+            if (gap <= DISPLAY_HOLD_FRAMES) {
+                smoothed += add_display_hold(batch_meta, frame_meta, s, gap, frame_w, frame_h);
+            } else if (gap > 40) {
+                s->valid = 0;
+            }
         }
     }
     return smoothed;
