@@ -50,21 +50,24 @@ def main() -> int:
         raise RuntimeError("native bridge still exposes ReID/global identity APIs")
 
     bridge.configure_heatmap(
-        deposit=float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0030")),
+        deposit=float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0022")),
         decay=decay,
-        low_threshold=float(os.environ.get("CAMERA_V2_HEATMAP_LOW", "0.00050")),
-        yellow_threshold=float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.070")),
-        red_threshold=float(os.environ.get("CAMERA_V2_HEATMAP_RED", "0.200")),
+        low_threshold=float(os.environ.get("CAMERA_V2_HEATMAP_LOW", "0.00028")),
+        yellow_threshold=float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.100")),
+        red_threshold=float(os.environ.get("CAMERA_V2_HEATMAP_RED", "0.300")),
         max_points_per_source=max(
             12,
-            min(96, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "72"))),
+            min(96, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "84"))),
         ),
     )
     bridge.reset_heatmap()
 
     print(f"HEATMAP_PREFLIGHT bridge={bridge.path}")
     print("HEATMAP_PREFLIGHT local_nvdcf_only=PASS cross_camera_reid=ABSENT")
-    print("HEATMAP_PREFLIGHT anchor=feet-lifted-8pct all_tracks=PASS")
+    print(
+        "HEATMAP_PREFLIGHT analytics=stable-track+dwell+motion "
+        "anchor=bottom-center-lift3pct perspective_splat=PASS"
+    )
     print(
         "HEATMAP_PREFLIGHT cooling=PASS "
         f"fps={source_fps} seconds={cool_seconds:.0f} decay={decay:.8f} "
