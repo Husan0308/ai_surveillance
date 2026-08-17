@@ -21,13 +21,15 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
     """False-merge-first hardening around the base reversible identity state.
 
     Important differences from a naive gallery matcher:
-    - a confirmed cross-camera track is evaluated against identity evidence that
-      excludes its own samples, so a bad merge cannot validate itself;
+    - a confirmed cross-camera track is evaluated against independent identity
+      evidence that excludes its own samples, so a bad merge cannot validate itself;
+    - a stable canonical origin is retained even when the bounded diverse gallery is
+      refreshed with later viewpoints;
     - low-confidence/Qwen-only confirmations do not update the canonical gallery;
     - repeated fresh ReID contradictions can rollback a confirmed non-canonical
       binding even when no new Qwen response arrives;
     - a very strong Qwen SAME may confirm a gray-zone track without allowing that
-      track to poison the canonical appearance gallery.
+      visual-only decision to poison canonical ReID appearance memory.
     """
 
     def __init__(self, config: dict | None = None) -> None:
@@ -43,17 +45,24 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
         self.qwen_suspect_confidence = float(
             cfg.get("qwen_suspect_confidence", 0.90)
         )
+        self._canonical_by_gid: dict[int, tuple[str, int]] = {}
         self._metrics.setdefault("gallery_update_skips", 0)
         self._metrics.setdefault("reid_contradiction_rollbacks", 0)
         self._metrics.setdefault("qwen_gray_confirms", 0)
         self._metrics.setdefault("qwen_suspects", 0)
 
-    @staticmethod
-    def _canonical_origin(identity: GlobalIdentity) -> tuple[str, int] | None:
+    def _canonical_origin(
+        self, identity: GlobalIdentity
+    ) -> tuple[str, int] | None:
         if not identity.gallery:
             return None
-        first = min(identity.gallery, key=lambda row: row.captured_at)
-        return first.origin_key
+        origins = {row.origin_key for row in identity.gallery}
+        configured = self._canonical_by_gid.get(identity.global_id)
+        if configured in origins:
+            return configured
+        first = min(identity.gallery, key=lambda row: row.captured_at).origin_key
+        self._canonical_by_gid[identity.global_id] = first
+        return first
 
     def _candidate_score(
         self,
@@ -73,12 +82,16 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
             and canonical is not None
             and track.key != canonical
         ):
-            independent = [row for row in candidate_gallery if row.origin_key != track.key]
+            independent = [
+                row for row in candidate_gallery if row.origin_key != track.key
+            ]
             if independent:
                 candidate_gallery = independent
 
         new_samples = self._diverse_top(track.samples)
-        old_samples = self._diverse_top(candidate_gallery, min(self.gallery_size, 6))
+        old_samples = self._diverse_top(
+            candidate_gallery, min(self.gallery_size, 6)
+        )
         if not new_samples or not old_samples:
             return None
 
@@ -86,10 +99,10 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
         old_matrix = np.stack([row.embedding for row in old_samples], axis=0)
         matrix = new_matrix @ old_matrix.T
         best_per_new = np.max(matrix, axis=1)
-        q = np.asarray(
+        quality = np.asarray(
             [max(0.05, row.quality) for row in new_samples], dtype=np.float32
         )
-        raw = float(np.average(best_per_new, weights=q))
+        raw = float(np.average(best_per_new, weights=quality))
         best = float(np.max(matrix))
         new_proto = self._weighted_prototype(new_samples)
         old_proto = self._weighted_prototype(old_samples)
@@ -98,15 +111,27 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
         reason = "independent_gallery"
 
         gap = max(0.0, now - identity.last_seen)
-        if identity.last_camera == track.camera_id and gap <= self.same_camera_reconnect_sec:
+        if (
+            identity.last_camera == track.camera_id
+            and gap <= self.same_camera_reconnect_sec
+        ):
             score += 0.035
             reason = "same_camera_reconnect"
-        elif identity.last_room and identity.last_room == track.room_id and gap <= self.active_timeout:
+        elif (
+            identity.last_room
+            and identity.last_room == track.room_id
+            and gap <= self.active_timeout
+        ):
             score += 0.020
             reason = "same_room_overlap"
         score = max(-1.0, min(1.0, score))
         return CandidateScore(
-            identity.global_id, score, raw, proto, best, reason=reason
+            identity.global_id,
+            score,
+            raw,
+            proto,
+            best,
+            reason=reason,
         )
 
     def _confirm_without_gallery(self, track: TrackletState, now: float) -> None:
@@ -131,13 +156,15 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
         if identity is None:
             return
 
-        # The first track creates the canonical identity gallery. Later camera
-        # observations may use the same G-ID without automatically entering that
-        # canonical gallery. Only strong independent ReID evidence may update it.
+        # The first confirmed track establishes the canonical identity origin.
         if not identity.confirmed:
+            self._canonical_by_gid.setdefault(identity.global_id, track.key)
             super()._commit_track_to_gallery(track, now)
             return
 
+        # Later camera observations may use the same G-ID without automatically
+        # entering canonical memory. Only strong independent ReID evidence may
+        # update the bounded gallery.
         allow_update = (
             track.assigned_score >= self.prototype_update_similarity
             and track.qwen_verdict != "DIFFERENT"
@@ -193,8 +220,8 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
                     "state": track.state,
                 }
 
-        # A Qwen-rescued gray-zone candidate must not occupy a G-ID forever when
-        # all available appearance evidence stays below the normal provisional gate.
+        # A rescued tentative candidate must not occupy a G-ID forever when all
+        # available appearance evidence stays even below the Qwen rescue floor.
         if (
             track.global_id is not None
             and track.state == STATE_TENTATIVE
@@ -260,8 +287,7 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
                 }
 
             # A single VLM disagreement cannot tear down a strong ReID match, but it
-            # may mark it SUSPECT once. It must be corroborated by fresh ReID/Qwen
-            # evidence before rollback.
+            # may mark it SUSPECT once. It must be corroborated by fresh evidence.
             elif (
                 verdict_u == "DIFFERENT"
                 and float(confidence) >= self.qwen_suspect_confidence
