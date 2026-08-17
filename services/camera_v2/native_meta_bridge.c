@@ -6,6 +6,18 @@
 #include "gstnvdsmeta.h"
 #include "nvdsmeta.h"
 
+typedef struct {
+    uint64_t object_id;
+    uint64_t frame_num;
+    uint32_t source_id;
+    float left;
+    float top;
+    float width;
+    float height;
+    float confidence;
+    float tracker_confidence;
+} CameraV2TrackRow;
+
 static NvDsFrameMeta *find_frame(NvDsBatchMeta *batch_meta, unsigned int source_id) {
     if (!batch_meta) return NULL;
     for (NvDsMetaList *node = batch_meta->frame_meta_list; node != NULL; node = node->next) {
@@ -167,6 +179,38 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
             obj->rect_params.height = new_bottom - new_top;
             style_green(obj);
             ++count;
+        }
+    }
+    return count;
+}
+
+int camera_v2_copy_tracks(uintptr_t buffer_ptr,
+                          CameraV2TrackRow *rows,
+                          int max_rows) {
+    if (!buffer_ptr || !rows || max_rows <= 0) return 0;
+    GstBuffer *buffer = (GstBuffer *) buffer_ptr;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
+    if (!batch_meta) return -1;
+
+    int count = 0;
+    for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) fnode->data;
+        if (!frame_meta) continue;
+        for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *) onode->data;
+            if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
+            if (obj->rect_params.width <= 1.0f || obj->rect_params.height <= 1.0f) continue;
+            if (count >= max_rows) return count;
+            CameraV2TrackRow *dst = &rows[count++];
+            dst->object_id = (uint64_t)obj->object_id;
+            dst->frame_num = (uint64_t)frame_meta->frame_num;
+            dst->source_id = (uint32_t)frame_meta->source_id;
+            dst->left = obj->rect_params.left;
+            dst->top = obj->rect_params.top;
+            dst->width = obj->rect_params.width;
+            dst->height = obj->rect_params.height;
+            dst->confidence = obj->confidence;
+            dst->tracker_confidence = obj->tracker_confidence;
         }
     }
     return count;
