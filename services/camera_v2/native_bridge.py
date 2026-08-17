@@ -150,6 +150,13 @@ class NativeMetaBridge:
         self.lib.camera_v2_apply_identity_style.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_apply_identity_style.restype = ctypes.c_int
 
+        self.lib.camera_v2_snapshot_tracks.argtypes = [
+            ctypes.c_uint64,
+            ctypes.POINTER(_ReIDRow),
+            ctypes.c_int,
+        ]
+        self.lib.camera_v2_snapshot_tracks.restype = ctypes.c_int
+
         self.lib.camera_v2_snapshot_reid.argtypes = [
             ctypes.c_uint64,
             ctypes.POINTER(_ReIDRow),
@@ -244,17 +251,16 @@ class NativeMetaBridge:
         buffer_ptr = ctypes.c_uint64(hash(gst_buffer))
         count = int(self.lib.camera_v2_style_and_count_tracked(buffer_ptr))
         if count >= 0:
-            # Geometry is finalized first. Global identity labels are injected later
-            # in the same tracker probe after ReID matching, then OSD text is styled.
             self.lib.camera_v2_smooth_display_boxes(buffer_ptr)
         return count
 
-    def snapshot_reid(self, gst_buffer, max_rows: int = MAX_REID_ROWS) -> list[dict]:
+    def _snapshot_rows(self, gst_buffer, function_name: str, max_rows: int, include_feature: bool) -> list[dict]:
         max_rows = max(1, min(int(max_rows), 128))
         array_type = _ReIDRow * max_rows
         rows = array_type()
+        func = getattr(self.lib, function_name)
         count = int(
-            self.lib.camera_v2_snapshot_reid(
+            func(
                 ctypes.c_uint64(hash(gst_buffer)),
                 rows,
                 ctypes.c_int(max_rows),
@@ -266,23 +272,29 @@ class NativeMetaBridge:
         output: list[dict] = []
         for index in range(min(count, max_rows)):
             row = rows[index]
-            size = max(0, min(int(row.feature_size), MAX_REID_FEATURE))
-            if size <= 0:
-                continue
-            output.append(
-                {
-                    "source_id": int(row.source_id),
-                    "object_id": int(row.object_id),
-                    "left": float(row.left),
-                    "top": float(row.top),
-                    "width": float(row.width),
-                    "height": float(row.height),
-                    "confidence": float(row.confidence),
-                    "tracker_confidence": float(row.tracker_confidence),
-                    "feature": tuple(float(row.feature[i]) for i in range(size)),
-                }
-            )
+            item = {
+                "source_id": int(row.source_id),
+                "object_id": int(row.object_id),
+                "left": float(row.left),
+                "top": float(row.top),
+                "width": float(row.width),
+                "height": float(row.height),
+                "confidence": float(row.confidence),
+                "tracker_confidence": float(row.tracker_confidence),
+            }
+            if include_feature:
+                size = max(0, min(int(row.feature_size), MAX_REID_FEATURE))
+                if size <= 0:
+                    continue
+                item["feature"] = tuple(float(row.feature[i]) for i in range(size))
+            output.append(item)
         return output
+
+    def snapshot_tracks(self, gst_buffer, max_rows: int = MAX_REID_ROWS) -> list[dict]:
+        return self._snapshot_rows(gst_buffer, "camera_v2_snapshot_tracks", max_rows, False)
+
+    def snapshot_reid(self, gst_buffer, max_rows: int = MAX_REID_ROWS) -> list[dict]:
+        return self._snapshot_rows(gst_buffer, "camera_v2_snapshot_reid", max_rows, True)
 
     def apply_global_identity(self, gst_buffer, assignments: list[tuple[int, int, str]]) -> int:
         buffer_ptr = ctypes.c_uint64(hash(gst_buffer))
@@ -303,8 +315,6 @@ class NativeMetaBridge:
                     ctypes.c_int(len(assignments)),
                 )
             )
-        # Always style all visible tracked boxes. Objects that do not yet have a
-        # global binding receive a safe local Unknown fallback for this frame.
         self.lib.camera_v2_apply_identity_style(buffer_ptr)
         return applied
 
