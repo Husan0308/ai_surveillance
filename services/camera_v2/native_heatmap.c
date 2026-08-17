@@ -5,10 +5,10 @@
 #include "nvdsmeta.h"
 
 #define HEAT_MAX_SOURCES 16
-#define HEAT_GRID_W 32
-#define HEAT_GRID_H 18
+#define HEAT_GRID_W 48
+#define HEAT_GRID_H 27
 #define HEAT_MAX_TRACKS 512
-#define HEAT_MAX_POINTS_PER_SOURCE 40
+#define HEAT_MAX_POINTS_PER_SOURCE 48
 
 typedef struct {
     int valid;
@@ -18,8 +18,8 @@ typedef struct {
     uint64_t last_vote_frame;
     uint64_t moving_until;
     unsigned int motion_votes;
-    float gx;
-    float gy;
+    float smooth_gx;
+    float smooth_gy;
     float anchor_gx;
     float anchor_gy;
     float deposit_gx;
@@ -39,22 +39,23 @@ static uint64_t g_last_frame[HEAT_MAX_SOURCES];
 static HeatTrackState g_tracks[HEAT_MAX_TRACKS];
 static uint64_t g_rendered_points_total = 0;
 
-/* Movement-only defaults. One ordinary walk should stay cool/cyan; repeated
- * traffic along the same path slowly progresses through yellow to red. */
-static float g_deposit = 0.0025f;
-static float g_decay = 0.99992f;
-static float g_low = 0.0030f;
-static float g_yellow = 0.070f;
-static float g_red = 0.180f;
-static unsigned int g_max_points_per_source = 18;
+/* Defaults are deliberately trail-like, not blob-like. Python computes decay
+ * from the configured camera FPS so approximately 10% of heat remains after an
+ * hour. A single pass stays cyan and fades away; repeated traffic becomes warm. */
+static float g_deposit = 0.0045f;
+static float g_decay = 0.999968f;
+static float g_low = 0.00075f;
+static float g_yellow = 0.020f;
+static float g_red = 0.060f;
+static unsigned int g_max_points_per_source = 30;
 
-/* Grid-space motion gating. At 1280x720 with a 32x18 grid, one cell is about
- * 40 pixels. Two confirmed ~0.24-cell displacements are required before a track
- * is considered walking. This rejects normal tracker/bbox jitter while seated. */
-static const float MOTION_CONFIRM_DIST2 = 0.0576f;  /* 0.24^2 cells */
-static const float DEPOSIT_DIST2 = 0.0144f;         /* 0.12^2 cells */
-static const uint64_t MOTION_VOTE_WINDOW = 14;      /* ~0.7 s at 20 FPS */
-static const uint64_t MOVING_HOLD_FRAMES = 10;      /* bridge short tracker wobble */
+/* At 1280x720 with a 48x27 grid one cell is ~27 px. Require two real movements
+ * before depositing so seated people / bbox jitter do not paint the floor. */
+static const float MOTION_CONFIRM_DIST2 = 0.1024f; /* 0.32^2 cell */
+static const float DEPOSIT_DIST2 = 0.0100f;        /* 0.10^2 cell */
+static const uint64_t MOTION_VOTE_WINDOW = 16;    /* ~0.8 s @20 FPS */
+static const uint64_t MOVING_HOLD_FRAMES = 12;    /* bridge tiny tracker wobble */
+static const float FOOT_EMA_ALPHA = 0.58f;
 
 static float clampf_heat(float v, float lo, float hi) {
     if (v < lo) return lo;
@@ -70,12 +71,12 @@ void camera_v2_heatmap_configure(float deposit,
                                  float yellow_threshold,
                                  float red_threshold,
                                  unsigned int max_points_per_source) {
-    g_deposit = clampf_heat(deposit, 0.0003f, 0.03f);
-    g_decay = clampf_heat(decay, 0.95f, 1.0f);
-    g_low = clampf_heat(low_threshold, 0.0005f, 0.95f);
-    g_yellow = clampf_heat(yellow_threshold, g_low + 0.005f, 0.98f);
-    g_red = clampf_heat(red_threshold, g_yellow + 0.005f, 1.0f);
-    if (max_points_per_source < 4) max_points_per_source = 4;
+    g_deposit = clampf_heat(deposit, 0.0005f, 0.03f);
+    g_decay = clampf_heat(decay, 0.95f, 0.9999999f);
+    g_low = clampf_heat(low_threshold, 0.0005f, 0.50f);
+    g_yellow = clampf_heat(yellow_threshold, g_low + 0.001f, 0.95f);
+    g_red = clampf_heat(red_threshold, g_yellow + 0.002f, 1.0f);
+    if (max_points_per_source < 8) max_points_per_source = 8;
     if (max_points_per_source > HEAT_MAX_POINTS_PER_SOURCE) {
         max_points_per_source = HEAT_MAX_POINTS_PER_SOURCE;
     }
@@ -118,8 +119,8 @@ static void reset_track(HeatTrackState *s,
     s->object_id = object_id;
     s->last_frame_num = frame_num;
     s->last_vote_frame = frame_num;
-    s->gx = gx;
-    s->gy = gy;
+    s->smooth_gx = gx;
+    s->smooth_gy = gy;
     s->anchor_gx = gx;
     s->anchor_gy = gy;
     s->deposit_gx = gx;
@@ -133,14 +134,16 @@ static void decay_source(unsigned int source_id, uint64_t frame_num) {
         g_last_frame[source_id] = frame_num;
         return;
     }
+
     uint64_t delta = frame_num - last;
-    if (delta > 2000) delta = 2000;
+    if (delta > 4000) delta = 4000;
     float factor = 1.0f;
     for (uint64_t i = 0; i < delta; ++i) factor *= g_decay;
+
     for (int y = 0; y < HEAT_GRID_H; ++y) {
         for (int x = 0; x < HEAT_GRID_W; ++x) {
             float v = g_heat[source_id][y][x] * factor;
-            g_heat[source_id][y][x] = v < 0.00035f ? 0.0f : v;
+            g_heat[source_id][y][x] = v < g_low * 0.55f ? 0.0f : v;
         }
     }
     g_last_frame[source_id] = frame_num;
@@ -151,23 +154,25 @@ static void deposit_point(unsigned int source_id,
                           float gy,
                           uint32_t frame_num,
                           float amount_scale) {
-    /* Narrow 3x3 kernel: smooth enough to look like a trail without creating the
-     * large opaque red bubbles of the first implementation. */
+    /* Very narrow Gaussian-like footprint. On the 3x2 1920x720 wall the center
+     * spot is only a few pixels across, so walking produces a thin soft trail. */
     static const float kernel[3][3] = {
-        {0.08f, 0.18f, 0.08f},
-        {0.18f, 1.00f, 0.18f},
-        {0.08f, 0.18f, 0.08f},
+        {0.035f, 0.105f, 0.035f},
+        {0.105f, 1.000f, 0.105f},
+        {0.035f, 0.105f, 0.035f},
     };
-    amount_scale = clampf_heat(amount_scale, 0.45f, 1.35f);
+    amount_scale = clampf_heat(amount_scale, 0.35f, 1.15f);
     int cx = (int)(gx + 0.5f);
     int cy = (int)(gy + 0.5f);
+
     for (int ky = -1; ky <= 1; ++ky) {
         int y = cy + ky;
         if (y < 0 || y >= HEAT_GRID_H) continue;
         for (int kx = -1; kx <= 1; ++kx) {
             int x = cx + kx;
             if (x < 0 || x >= HEAT_GRID_W) continue;
-            float next = g_heat[source_id][y][x] + g_deposit * amount_scale * kernel[ky + 1][kx + 1];
+            float add = g_deposit * amount_scale * kernel[ky + 1][kx + 1];
+            float next = g_heat[source_id][y][x] + add;
             g_heat[source_id][y][x] = next > 1.0f ? 1.0f : next;
             g_touch[source_id][y][x] = frame_num;
         }
@@ -185,28 +190,22 @@ static void deposit_segment(unsigned int source_id,
     float adx = dx < 0.0f ? -dx : dx;
     float ady = dy < 0.0f ? -dy : dy;
     float span = adx > ady ? adx : ady;
-    int steps = (int)(span * 1.6f) + 1;
-    if (steps < 1) steps = 1;
-    if (steps > 16) steps = 16;
 
-    /* Deposit is distance-driven rather than frame-driven. A stationary track
-     * therefore contributes exactly zero heat regardless of how long it sits. */
-    float amount_scale = clampf_heat(span, 0.50f, 1.20f);
+    /* Sub-cell interpolation avoids a dotted trail even when NvDCF jumps several
+     * pixels between frames. Limit work so OSD stays cheap on the GTX 1050 Ti. */
+    int steps = (int)(span * 2.4f) + 1;
+    if (steps < 1) steps = 1;
+    if (steps > 18) steps = 18;
+    float scale = clampf_heat(0.48f + span * 0.24f, 0.48f, 1.10f);
+
     for (int i = 1; i <= steps; ++i) {
         float t = (float)i / (float)steps;
-        deposit_point(source_id, x0 + dx * t, y0 + dy * t, frame_num, amount_scale);
+        deposit_point(source_id, x0 + dx * t, y0 + dy * t, frame_num, scale);
     }
 }
 
-/* Update movement heat only from real current-frame NvDCF people.
- *
- * Important behavior:
- *   - first sighting: initialize only, no heat;
- *   - seated/standing jitter: no heat;
- *   - two meaningful displacements confirm walking;
- *   - once walking, bottom-center path is interpolated smoothly;
- *   - when the person stops, deposits stop after a short hysteresis window.
- */
+/* Accumulate only from current real NvDCF objects. The foot anchor is the exact
+ * bbox bottom-center, the same spatial point used by DeepStream analytics. */
 int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
     GstBuffer *buffer = (GstBuffer *)buffer_ptr;
@@ -219,7 +218,7 @@ int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
         if (!frame_meta) continue;
         unsigned int source_id = frame_meta->source_id;
         if (source_id >= HEAT_MAX_SOURCES) continue;
-        uint64_t frame_num = frame_meta->frame_num >= 0 ? (uint64_t)frame_meta->frame_num : 0;
+        uint64_t frame_num = (uint64_t)frame_meta->frame_num;
         decay_source(source_id, frame_num);
 
         float frame_w = frame_meta->pipeline_width > 1 ? (float)frame_meta->pipeline_width
@@ -235,20 +234,27 @@ int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
             float h = obj->rect_params.height;
             if (w <= 2.0f || h <= 4.0f) continue;
 
-            /* DeepStream analytics also uses bbox bottom-center as the object's
-             * spatial/floor location. Keep the tracker bbox tight and use 98% Y. */
             float foot_x = obj->rect_params.left + w * 0.5f;
-            float foot_y = obj->rect_params.top + h * 0.98f;
-            float gx = clampf_heat((foot_x / frame_w) * (float)(HEAT_GRID_W - 1), 0.0f, (float)(HEAT_GRID_W - 1));
-            float gy = clampf_heat((foot_y / frame_h) * (float)(HEAT_GRID_H - 1), 0.0f, (float)(HEAT_GRID_H - 1));
+            float foot_y = obj->rect_params.top + h;
+            float raw_gx = clampf_heat((foot_x / frame_w) * (float)(HEAT_GRID_W - 1),
+                                       0.0f, (float)(HEAT_GRID_W - 1));
+            float raw_gy = clampf_heat((foot_y / frame_h) * (float)(HEAT_GRID_H - 1),
+                                       0.0f, (float)(HEAT_GRID_H - 1));
 
             int idx = find_track(source_id, (uint64_t)obj->object_id);
             HeatTrackState *s = &g_tracks[idx];
             if (!s->valid || s->source_id != source_id || s->object_id != (uint64_t)obj->object_id ||
-                frame_num < s->last_frame_num || frame_num - s->last_frame_num > 14) {
-                reset_track(s, source_id, (uint64_t)obj->object_id, frame_num, gx, gy);
+                frame_num < s->last_frame_num || frame_num - s->last_frame_num > 18) {
+                reset_track(s, source_id, (uint64_t)obj->object_id, frame_num, raw_gx, raw_gy);
                 continue;
             }
+
+            /* EMA removes tiny foot jitter while retaining enough responsiveness for
+             * walking. Heat is deposited from this smoothed foot path, not bbox top. */
+            float gx = FOOT_EMA_ALPHA * raw_gx + (1.0f - FOOT_EMA_ALPHA) * s->smooth_gx;
+            float gy = FOOT_EMA_ALPHA * raw_gy + (1.0f - FOOT_EMA_ALPHA) * s->smooth_gy;
+            s->smooth_gx = gx;
+            s->smooth_gy = gy;
 
             float anchor_dist2 = sqr(gx - s->anchor_gx) + sqr(gy - s->anchor_gy);
             if (anchor_dist2 >= MOTION_CONFIRM_DIST2) {
@@ -267,33 +273,30 @@ int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
             }
 
             if (frame_num <= s->moving_until) {
-                float deposit_dist2 = sqr(gx - s->deposit_gx) + sqr(gy - s->deposit_gy);
-                if (deposit_dist2 >= DEPOSIT_DIST2) {
+                float dist2 = sqr(gx - s->deposit_gx) + sqr(gy - s->deposit_gy);
+                if (dist2 >= DEPOSIT_DIST2) {
                     deposit_segment(source_id, s->deposit_gx, s->deposit_gy, gx, gy, (uint32_t)frame_num);
                     s->deposit_gx = gx;
                     s->deposit_gy = gy;
                     s->moving_until = frame_num + MOVING_HOLD_FRAMES;
                     ++movement_updates;
                 }
-            } else {
-                /* While stationary, follow slow bbox drift without accumulating it.
-                 * This prevents a later movement from drawing a false long segment
-                 * from an old chair/desk position. */
-                if (anchor_dist2 < MOTION_CONFIRM_DIST2) {
-                    s->deposit_gx = gx;
-                    s->deposit_gy = gy;
-                }
+            } else if (anchor_dist2 < MOTION_CONFIRM_DIST2) {
+                /* Follow stationary drift without painting it, so getting up later
+                 * cannot create a long fake segment from an old chair position. */
+                s->deposit_gx = gx;
+                s->deposit_gy = gy;
             }
 
             s->last_frame_num = frame_num;
-            s->gx = gx;
-            s->gy = gy;
         }
 
         for (int i = 0; i < HEAT_MAX_TRACKS; ++i) {
             HeatTrackState *s = &g_tracks[i];
             if (!s->valid || s->source_id != source_id) continue;
-            if (frame_num > s->last_frame_num && frame_num - s->last_frame_num > 80) s->valid = 0;
+            if (frame_num > s->last_frame_num && frame_num - s->last_frame_num > 100) {
+                s->valid = 0;
+            }
         }
     }
     return movement_updates;
@@ -320,33 +323,32 @@ static void push_candidate(HeatCandidate *items,
 }
 
 static void heat_color(float value, NvOSD_ColorParams *color) {
-    /* Cool cyan/blue -> yellow -> warm red. Alpha deliberately stays low so the
-     * CCTV image, body and bbox remain readable underneath. */
-    float r = 0.05f, g = 0.58f, b = 1.00f;
+    float r = 0.02f, g = 0.66f, b = 1.00f;
     if (value < g_yellow) {
-        float u = (value - g_low) / (g_yellow - g_low + 0.0001f);
+        float u = (value - g_low) / (g_yellow - g_low + 0.000001f);
         u = clampf_heat(u, 0.0f, 1.0f);
-        r = 0.05f + 0.90f * u;
-        g = 0.58f + 0.37f * u;
-        b = 1.00f - 0.92f * u;
+        r = 0.02f + 0.86f * u;
+        g = 0.66f + 0.30f * u;
+        b = 1.00f - 0.88f * u;
     } else if (value < g_red) {
-        float u = (value - g_yellow) / (g_red - g_yellow + 0.0001f);
+        float u = (value - g_yellow) / (g_red - g_yellow + 0.000001f);
         u = clampf_heat(u, 0.0f, 1.0f);
-        r = 1.00f;
-        g = 0.95f * (1.0f - u);
-        b = 0.02f;
+        r = 0.95f + 0.05f * u;
+        g = 0.96f - 0.66f * u;
+        b = 0.12f * (1.0f - u);
     } else {
-        float u = (value - g_red) / (1.0f - g_red + 0.0001f);
+        float u = (value - g_red) / (1.0f - g_red + 0.000001f);
         u = clampf_heat(u, 0.0f, 1.0f);
         r = 1.00f;
-        g = 0.10f * (1.0f - u);
+        g = 0.30f * (1.0f - u);
         b = 0.00f;
     }
+
     float strength = clampf_heat(value / g_red, 0.0f, 1.0f);
     color->red = r;
     color->green = g;
     color->blue = b;
-    color->alpha = 0.045f + 0.105f * strength;
+    color->alpha = 0.055f + 0.135f * strength;
 }
 
 static NvDsDisplayMeta *new_display_meta(NvDsBatchMeta *batch_meta, NvDsFrameMeta *anchor) {
@@ -361,6 +363,8 @@ static NvDsDisplayMeta *new_display_meta(NvDsBatchMeta *batch_meta, NvDsFrameMet
     return meta;
 }
 
+/* Called after nvmultistreamtiler and immediately before nvdsosd. Heat stays in
+ * per-camera source coordinates; only here is it mapped into the 3x2 wall. */
 int camera_v2_heatmap_render(uintptr_t buffer_ptr,
                              unsigned int wall_width,
                              unsigned int wall_height,
@@ -377,6 +381,7 @@ int camera_v2_heatmap_render(uintptr_t buffer_ptr,
     unsigned int max_sources = rows * columns;
     if (source_count < max_sources) max_sources = source_count;
     if (max_sources > HEAT_MAX_SOURCES) max_sources = HEAT_MAX_SOURCES;
+
     float tile_w = (float)wall_width / (float)columns;
     float tile_h = (float)wall_height / (float)rows;
     NvDsDisplayMeta *display = NULL;
@@ -386,15 +391,18 @@ int camera_v2_heatmap_render(uintptr_t buffer_ptr,
         HeatCandidate candidates[HEAT_MAX_POINTS_PER_SOURCE];
         unsigned int count = 0;
         uint64_t current_frame = g_last_frame[sid];
+
         for (int gy = 0; gy < HEAT_GRID_H; ++gy) {
             for (int gx = 0; gx < HEAT_GRID_W; ++gx) {
                 float value = g_heat[sid][gy][gx];
                 if (value < g_low) continue;
                 uint32_t touched = g_touch[sid][gy][gx];
-                uint64_t age = (current_frame >= touched) ? current_frame - touched : 0;
-                float recency = 1.0f - clampf_heat((float)age / 180.0f, 0.0f, 1.0f);
+                uint64_t age = current_frame >= touched ? current_frame - touched : 0;
+                /* Recency only breaks ties. The actual one-hour cooling is encoded
+                 * in heat value itself, so an old trail fades instead of vanishing. */
+                float recency = 1.0f - clampf_heat((float)age / 1200.0f, 0.0f, 1.0f);
                 HeatCandidate c;
-                c.score = value + recency * 0.035f;
+                c.score = value + recency * 0.0012f;
                 c.value = value;
                 c.gx = gx;
                 c.gy = gy;
@@ -408,8 +416,8 @@ int camera_v2_heatmap_render(uintptr_t buffer_ptr,
         float origin_y = (float)row * tile_h;
         float cell_w = tile_w / (float)HEAT_GRID_W;
         float cell_h = tile_h / (float)HEAT_GRID_H;
-        float base_radius = (cell_w < cell_h ? cell_w : cell_h) * 0.58f;
-        if (base_radius < 4.0f) base_radius = 4.0f;
+        float base_radius = (cell_w < cell_h ? cell_w : cell_h) * 0.56f;
+        if (base_radius < 3.0f) base_radius = 3.0f;
 
         for (unsigned int i = 0; i < count; ++i) {
             if (!display || display->num_circles >= MAX_ELEMENTS_IN_DISPLAY_META) {
@@ -421,16 +429,17 @@ int camera_v2_heatmap_render(uintptr_t buffer_ptr,
             float strength = clampf_heat(c->value / g_red, 0.0f, 1.0f);
             circle->xc = (unsigned int)(origin_x + ((float)c->gx + 0.5f) * cell_w);
             circle->yc = (unsigned int)(origin_y + ((float)c->gy + 0.5f) * cell_h);
-            circle->radius = (unsigned int)(base_radius * (1.0f + 0.10f * strength));
+            circle->radius = (unsigned int)(base_radius * (1.0f + 0.06f * strength));
             if (circle->radius < 3) circle->radius = 3;
             circle->circle_width = 1;
             circle->has_bg_color = 1;
             heat_color(c->value, &circle->bg_color);
             circle->circle_color = circle->bg_color;
-            circle->circle_color.alpha *= 0.45f;
+            circle->circle_color.alpha *= 0.38f;
             ++rendered;
         }
     }
+
     g_rendered_points_total += (uint64_t)rendered;
     return rendered;
 }
