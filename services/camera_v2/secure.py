@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import sys
 
-from .main import CameraWallV2
+from .dynamic_wall import DynamicCameraWallV2
 
 
-class SecureCameraWallV2(CameraWallV2):
+class SecureCameraWallV2(DynamicCameraWallV2):
     """Camera V2 with RTSP credentials applied to nvurisrcbin's child rtspsrc.
 
     nvurisrcbin does not expose rtspsrc's user-id/user-pw properties directly.
@@ -19,17 +19,14 @@ class SecureCameraWallV2(CameraWallV2):
         if factory_name != "rtspsrc":
             return
 
-        # rtspsrc natively handles RTSP Basic/Digest challenge-response with
-        # user-id/user-pw. Secrets are never printed or embedded in a loggable URI.
         if camera.username:
             self._set_if(element, "user-id", camera.username)
             self._set_if(element, "user-pw", camera.password)
 
-        # Keep the actual child aligned with the smooth camera profile too.
         self._set_if(element, "latency", self.rtsp_latency_ms)
         self._set_if(element, "drop-on-latency", True)
         self._set_if(element, "udp-buffer-size", self.udp_buffer_size)
-        self._set_if(element, "buffer-mode", 3)  # auto
+        self._set_if(element, "buffer-mode", 3)
 
         print(
             f"CAMERA_V2 {camera.camera_id} rtspsrc configured "
@@ -42,15 +39,10 @@ class SecureCameraWallV2(CameraWallV2):
         source = self._make("nvurisrcbin", f"camera_v2_source_{index}")
         queue = self._make("queue", f"camera_v2_queue_{index}")
 
-        # Connect before assigning URI / entering READY so dynamically-created
-        # children cannot appear before our authentication hook is installed.
         source.connect("deep-element-added", self._configure_rtsp_child, camera)
-
-        # Keep credentials OUT of the URI. They are injected into the child
-        # rtspsrc using its official user-id/user-pw properties above.
         source.set_property("uri", camera.uri)
         self._set_if(source, "disable-audio", True)
-        self._set_if(source, "select-rtp-protocol", 0)  # UDP/UDP multicast/TCP auto
+        self._set_if(source, "select-rtp-protocol", 0)
         self._set_if(source, "latency", self.rtsp_latency_ms)
         self._set_if(source, "drop-on-latency", True)
         self._set_if(source, "low-latency-mode", self.low_latency_mode)
