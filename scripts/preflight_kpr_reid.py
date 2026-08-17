@@ -7,9 +7,6 @@ from pathlib import Path
 
 import numpy as np
 
-# When a script is executed as `python scripts/foo.py`, Python puts `scripts/`
-# (not the repository root) at sys.path[0]. Add the repo root explicitly so the
-# production `services` package imports work without requiring PYTHONPATH hacks.
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -21,7 +18,6 @@ def make_person(seed: int = 1) -> np.ndarray:
     rng = np.random.default_rng(seed)
     image = np.zeros((320, 128, 3), dtype=np.uint8)
     image[:] = (32, 34, 36)
-    # Deterministic person-like appearance with independently visible regions.
     image[20:75, 43:85] = (80, 105, 145)
     image[75:185, 22:106] = (32, 82, 180)
     image[185:300, 28:62] = (70, 62, 52)
@@ -30,7 +26,20 @@ def make_person(seed: int = 1) -> np.ndarray:
     return np.clip(image + noise, 0, 255).astype(np.uint8)
 
 
-def wait_result(verifier: KPRPairVerifier, a, b, timeout: float = 45.0) -> str:
+def wait_ready(verifier: KPRPairVerifier, timeout: float = 180.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        verifier.poll()
+        snap = verifier.snapshot()
+        if snap["ready"]:
+            return True
+        if verifier.error:
+            return False
+        time.sleep(0.20)
+    return False
+
+
+def wait_result(verifier: KPRPairVerifier, a, b, timeout: float = 90.0) -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         state = verifier.authorization(a, b)
@@ -45,21 +54,26 @@ def main() -> int:
     os.environ.setdefault("CAMERA_V2_KPR_REQUIRED", "1")
     verifier = KPRPairVerifier()
     try:
-        if not verifier.ready_event.wait(timeout=120.0):
-            print("KPR_PREFLIGHT=FAIL reason=model-startup-timeout")
+        # Production is lazy, but preflight explicitly starts the isolated worker.
+        verifier.start()
+        if not wait_ready(verifier):
+            snap = verifier.snapshot()
+            print(f"KPR_PREFLIGHT=FAIL startup={snap}")
             return 2
-        if verifier.error:
-            print(f"KPR_PREFLIGHT=FAIL reason={verifier.error}")
-            print("If this is CUDA OOM, retry with CAMERA_V2_KPR_DEVICE=cpu for diagnosis.")
-            return 2
+
+        snap0 = verifier.snapshot()
+        print(
+            "KPR_PREFLIGHT_START "
+            f"backend={snap0['backend']} pid={snap0['worker_pid']} "
+            f"fallbacks={snap0['fallbacks']} error={snap0['error'] or 'none'}"
+        )
 
         a, b = (0, 101), (3, 202)
         image = make_person(7)
 
-        # Vote 1.
         verifier.remember(a, image, 0.95)
         verifier.remember(b, image.copy(), 0.95)
-        first_deadline = time.monotonic() + 45.0
+        first_deadline = time.monotonic() + 90.0
         while time.monotonic() < first_deadline:
             verifier.authorization(a, b)
             verifier.poll()
@@ -71,18 +85,18 @@ def main() -> int:
             print(f"KPR_PREFLIGHT=FAIL first={snap1}")
             return 2
 
-        # Independent fresh vote 2.
         time.sleep(0.55)
         verifier.remember(a, make_person(8), 0.96)
         verifier.remember(b, make_person(8), 0.96)
-        state = wait_result(verifier, a, b, timeout=45.0)
+        state = wait_result(verifier, a, b, timeout=90.0)
         snap = verifier.snapshot()
         print(
             "KPR_PREFLIGHT_DIAG "
-            f"backend={snap['backend']} score={snap['score']:.3f} "
-            f"distance={snap['distance']:.3f} parts={snap['visible_parts']} "
-            f"latency_ms={snap['latency_ms']:.0f} responses={snap['responses']} "
-            f"same={snap['same']} different={snap['different']} error={snap['error'] or 'none'}"
+            f"backend={snap['backend']} pid={snap['worker_pid']} fallbacks={snap['fallbacks']} "
+            f"score={snap['score']:.3f} distance={snap['distance']:.3f} "
+            f"parts={snap['visible_parts']} latency_ms={snap['latency_ms']:.0f} "
+            f"responses={snap['responses']} same={snap['same']} different={snap['different']} "
+            f"worker_exit={snap['worker_exit']} error={snap['error'] or 'none'}"
         )
         if state != "approved":
             print(f"KPR_PREFLIGHT=FAIL state={state}")
