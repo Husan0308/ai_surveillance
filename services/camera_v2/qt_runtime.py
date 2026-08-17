@@ -8,8 +8,13 @@ import time
 from pathlib import Path
 
 
-WALL_WIDTH = 1024
-WALL_HEIGHT = 864
+# 2 columns x 3 rows, with each tile exactly 16:9.
+# 640x360 per tile keeps the live wall sharper than the previous 512x288 output
+# without exceeding the old 1920x720 wall pixel budget.
+WALL_WIDTH = 1280
+WALL_HEIGHT = 1080
+FOCUS_WIDTH = 1280
+FOCUS_HEIGHT = 720
 GRID_ROWS = 3
 GRID_COLUMNS = 2
 CAMERA_COUNT = 6
@@ -121,6 +126,15 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
 
             if got_focus and runtime.tiler.find_property("show-source") is not None:
                 source_id = latest_focus if 0 <= latest_focus < CAMERA_COUNT else -1
+                # The grid is 32:27 because it contains six 16:9 tiles. A focused
+                # source is 16:9. Reconfigure tiler output so neither mode stretches
+                # the camera image before it reaches nveglglessink.
+                if source_id >= 0:
+                    runtime.tiler.set_property("width", FOCUS_WIDTH)
+                    runtime.tiler.set_property("height", FOCUS_HEIGHT)
+                else:
+                    runtime.tiler.set_property("width", WALL_WIDTH)
+                    runtime.tiler.set_property("height", WALL_HEIGHT)
                 runtime.tiler.set_property("show-source", source_id)
 
             if stop_requested:
@@ -136,7 +150,9 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
             return not runtime._stopping
 
         runtime.GLib.timeout_add(50, poll_commands)
-        runtime.GLib.timeout_add(200, publish_snapshot)
+        # Metadata is tiny (no frames cross the process boundary), so publish it at
+        # 20 Hz to keep Qt bboxes visually locked to the 20 FPS camera wall.
+        runtime.GLib.timeout_add(50, publish_snapshot)
         _put_latest(
             status_q,
             (
@@ -191,6 +207,8 @@ class CameraQtController:
                     "fps": 0.0,
                     "online": False,
                     "count": 0,
+                    "source_width": 1280,
+                    "source_height": 720,
                 }
                 for i in range(CAMERA_COUNT)
             ],
