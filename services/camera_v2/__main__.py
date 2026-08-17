@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .secure import main
+from .sentinel_app import main
 
 
 if __name__ == "__main__":
