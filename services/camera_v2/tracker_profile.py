@@ -13,17 +13,16 @@ SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 # The detector remains high resolution; NvDCF itself is intentionally lightweight.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
-    # Do not extrapolate a full bbox outside the camera FOV. New partial people at
-    # the image edge are admission-gated before NvDCF, and existing tracks can rely
-    # on normal shadow tracking while they leave the frame.
-    "enableBboxUnClipping": "0",
+    "enableBboxUnClipping": "1",
     "maxTargetsPerStream": "24",
-    # NVIDIA's 0.5 default is much safer for two nearby people. 0.14 treated many
-    # overlapping person detections as duplicates of an existing target.
+    # Keep close detections eligible to become separate targets. The old 0.14 value
+    # was too aggressive for shoulder-to-shoulder people in these fixed CCTV views.
     "minIouDiff4NewTarget": "0.50",
-    "minTrackerConfidence": "0.14",
+    # Restore the known-stable lifecycle thresholds. Realtime OSD gaps are handled
+    # downstream by a bounded display bridge rather than by weakening NvDCF state.
+    "minTrackerConfidence": "0.18",
     "probationAge": "1",
-    "maxShadowTrackingAge": "38",
+    "maxShadowTrackingAge": "28",
     "earlyTerminationAge": "2",
 }
 
@@ -44,7 +43,7 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4Iou": "0.02",
     "minMatchingScore4VisualSimilarity": "0.05",
     "usePrediction4Assoc": "1",
-    "minTrackingConfidenceDuringInactive": "0.28",
+    "minTrackingConfidenceDuringInactive": "0.35",
 }
 
 
@@ -109,8 +108,8 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing_required)
         )
 
-    # Never render shadow-history/synthetic tracks. They may stay inside NvDCF for
-    # recovery, but live OSD contains only real current-frame tracked objects.
+    # Shadow-history remains internal to NvDCF. The live OSD bridge below the tracker
+    # is bounded independently, so we do not export long-lived shadow metadata here.
     shadow_found = False
     for i, line in enumerate(output):
         if line.lstrip().startswith("outputShadowTracks:"):
@@ -126,8 +125,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     header = [
         f"# Auto-generated from {stock.name}.",
         "# Camera V2 low-memory NvDCF profile for GTX 1050 Ti 4GB.",
-        "# maxTargetsPerStream=24; no synthetic/shadow OSD boxes.",
-        "# Partial edge detections are gated before tracker admission; bbox unclipping is disabled.",
+        "# maxTargetsPerStream=24; close-person admission tuned; shadow output stays internal.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
