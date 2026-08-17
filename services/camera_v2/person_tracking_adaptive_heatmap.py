@@ -4,17 +4,18 @@ import os
 import time
 
 from .person_tracking_heatmap import CameraPersonTrackingHeatmap
-from .stable_adaptive_reid import StableAdaptiveTrackletReID
+from .position_aware_reid import PositionAwareAdaptiveTrackletReID
 from .stable_global_reid import StableGlobalReIDManager
 
 
 class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
-    """Production camera wall with frozen ReID + sticky online tracklet adaptation.
+    """Production camera wall with frozen ReID + sticky position-aware adaptation.
 
     No Qwen and no online neural-network training are used here. The embedding
-    model remains frozen. GlobalReIDManager is replaced before streaming starts by
-    a sticky store that never performs competing frame-level cross-camera switches;
-    StableAdaptiveTrackletReID is the sole cross-camera identity controller.
+    model stays frozen. New local tracks are sticky private anchors; one cross-camera
+    controller performs multi-frame mutual-best association. For mostly-seated office
+    workers it additionally learns camera-local stationary seat anchors and learns
+    peer-camera seat correspondence only from already-confirmed identity leases.
     """
 
     def __init__(self) -> None:
@@ -30,20 +31,36 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
         os.environ.setdefault("CAMERA_V2_REID_COVISIBLE", "0.52")
         os.environ.setdefault("CAMERA_V2_REID_CONFIRM_VOTES", "4")
 
-        self.adaptive_reid: StableAdaptiveTrackletReID | None = None
+        # Position layer defaults are intentionally conservative: geometry is
+        # learned only while a worker is stationary, and a peer seat link is taught
+        # only by an already-confirmed ReID identity lease.
+        os.environ.setdefault("CAMERA_V2_POS_WINDOW", "8")
+        os.environ.setdefault("CAMERA_V2_POS_MIN_SAMPLES", "4")
+        os.environ.setdefault("CAMERA_V2_POS_STATIONARY_SPREAD", "0.040")
+        os.environ.setdefault("CAMERA_V2_POS_SEAT_RADIUS", "0.085")
+        os.environ.setdefault("CAMERA_V2_POS_LINK_VOTES", "3")
+        os.environ.setdefault("CAMERA_V2_POS_LINK_MIN_REID", "0.52")
+        os.environ.setdefault("CAMERA_V2_POS_MATCH_BOOST", "0.11")
+
+        self.adaptive_reid: PositionAwareAdaptiveTrackletReID | None = None
         super().__init__()
 
         if self.reid_mode == "external":
             # No frames have been consumed yet, so replacing the empty base manager
             # here is safe. From this point there is exactly one cross-camera writer.
             self.global_reid = StableGlobalReIDManager()
-            self.adaptive_reid = StableAdaptiveTrackletReID(self.global_reid)
+            self.adaptive_reid = PositionAwareAdaptiveTrackletReID(
+                self.global_reid,
+                frame_width=self.frame_width,
+                frame_height=self.frame_height,
+            )
             print(
                 "CAMERA_ADAPTIVE_REID ready "
                 "frozen_model=1 online_training=0 single_controller=1 sticky_local_id=1 "
                 "diverse_bank=1 stationary_bootstrap=1 fresh_both_cameras_votes=1 "
                 "tracklet_multi_frame=1 camera_pair_adaptive=1 mutual_best=1 "
                 "temporal_votes=1 peer_identity_lease=1 hysteresis=1 late_reassoc=1 "
+                "auto_seat_geometry=1 learned_peer_seats=1 position_veto=1 "
                 "same_camera_unique=1 qwen=0 "
                 f"room_map={self.global_reid.room_map}",
                 flush=True,
@@ -97,6 +114,13 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
                 f"lock_releases={row.get('lock_releases', 0)} "
                 f"lock_corrections={row.get('lock_corrections', 0)} "
                 f"fresh_vote_skip={row.get('fresh_vote_skip', 0)} "
+                f"pos_tracks={row.get('position_tracks', 0)} "
+                f"stationary={row.get('stationary_tracks', 0)} "
+                f"seat_anchors={row.get('seat_anchors', 0)} "
+                f"seat_links={row.get('seat_links', 0)} "
+                f"pos_match={row.get('position_matches', 0)} "
+                f"pos_veto={row.get('position_vetoes', 0)} "
+                f"seat_conflicts={row.get('seat_link_conflicts', 0)} "
                 f"samecam_collisions={row['samecam_collisions']} "
                 f"samecam_repairs={row['samecam_repairs']} "
                 f"pair={row['last_camera_pair']} "
