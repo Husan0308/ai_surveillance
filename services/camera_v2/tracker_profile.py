@@ -15,19 +15,21 @@ _REQUIRED_PATCHES: dict[str, str] = {
     "enableBboxUnClipping": "1",
     "maxTargetsPerStream": "24",
     # A very low value suppresses a new target whenever it overlaps an existing
-    # target even modestly. That is bad for shoulder-to-shoulder office scenes.
-    # 0.50 keeps obvious duplicates suppressed while allowing a second nearby
-    # person to become a separate NvDCF target.
+    # target even modestly. 0.50 is NVIDIA's documented default and lets a second
+    # shoulder-to-shoulder person become a separate target when appropriate.
     "minIouDiff4NewTarget": "0.50",
-    "minTrackerConfidence": "0.18",
+    # Keep the visual tracker alive through short partial occlusions instead of
+    # dropping the bbox as soon as DCF confidence softens.
+    "minTrackerConfidence": "0.14",
     "probationAge": "1",
-    "maxShadowTrackingAge": "28",
+    # At ~20 FPS this gives roughly two seconds for recovery/re-association.
+    "maxShadowTrackingAge": "40",
     "earlyTerminationAge": "2",
 }
 
 # Only patch keys actually present in the NVIDIA max_perf sample. Cascaded
 # association keeps low-score YOLO person candidates useful for recovering an
-# existing target, while the visual feature footprint is kept small enough for a
+# existing target, while the visual feature footprint stays realistic for a
 # GTX 1050 Ti running six decoded streams plus YOLO26m.
 _OPTIONAL_PATCHES: dict[str, str] = {
     "useColorNames": "0",
@@ -35,8 +37,6 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "featureImgSizeLevel": "3",
     "searchRegionPaddingScale": "1",
     "associationMatcherType": "1",
-    # Occluded/nearby persons often have a lower detector score than isolated
-    # persons. Keep tentative association aligned with our low-score detector path.
     "tentativeDetectorConfidence": "0.10",
     "minMatchingScore4TentativeIou": "0.10",
     "minMatchingScore4Overall": "0.06",
@@ -44,9 +44,9 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4Iou": "0.02",
     "minMatchingScore4VisualSimilarity": "0.05",
     "usePrediction4Assoc": "1",
-    "minTrackingConfidenceDuringInactive": "0.35",
-    # If the stock profile exposes duplicate-target cleanup, require almost exact
-    # overlap before deleting one tracker. Two close people must not be collapsed.
+    "minTrackingConfidenceDuringInactive": "0.28",
+    # Duplicate cleanup should require almost exact overlap so two nearby people
+    # are not collapsed into one track.
     "minIou4TargetDuplicate": "0.94",
 }
 
@@ -60,7 +60,6 @@ def _set_or_insert_target_management(lines: list[str], key: str, value: str) -> 
     if section is None:
         return False
 
-    # Replace when already present in TargetManagement.
     for index in range(section + 1, len(lines)):
         stripped = lines[index].strip()
         if not stripped or stripped.startswith("#"):
@@ -98,8 +97,6 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
         if not replaced:
             output.append(line)
 
-    # maxTargetsPerStream is critical to memory usage. Some NVIDIA sample revisions
-    # omit it, so insert it explicitly under TargetManagement when needed.
     if "maxTargetsPerStream" not in patched:
         if not _set_or_insert_target_management(output, "maxTargetsPerStream", "24"):
             raise RuntimeError("NvDCF config has no TargetManagement section")
@@ -112,8 +109,8 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing_required)
         )
 
-    # Never render shadow-history/synthetic tracks. They may stay inside NvDCF for
-    # recovery, but live OSD contains only real current-frame tracked objects.
+    # Shadow state is kept internally for recovery, but we do not emit synthetic
+    # shadow-history boxes to the live OSD/UI.
     shadow_found = False
     for i, line in enumerate(output):
         if line.lstrip().startswith("outputShadowTracks:"):
@@ -129,7 +126,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     header = [
         f"# Auto-generated from {stock.name}.",
         "# Camera V2 low-memory NvDCF profile for GTX 1050 Ti 4GB.",
-        "# maxTargetsPerStream=24; close-person separation tuned; no synthetic/shadow OSD boxes.",
+        "# close-person separation + short-occlusion recovery tuned; no synthetic OSD boxes.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
