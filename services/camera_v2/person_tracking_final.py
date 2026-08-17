@@ -26,9 +26,6 @@ os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
 # only near-identical duplicates, not two real people whose boxes overlap.
 os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.88")
 os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.97")
-# Reject only detections that are actually clipped by the image border. The older
-# percentage-based gate rejected valid people merely because they were near an edge.
-os.environ.setdefault("CAMERA_V2_ADMISSION_BORDER_PX", "2.0")
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
 from .detector_latency import DetectorLatencyCompensator, PreparedDetection
@@ -41,8 +38,9 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
     The detector keeps the higher resolution needed by distant office pedestrians.
     NvDCF is deliberately kept small enough to coexist with six NVDEC streams and
-    YOLO26m on a 4 GB Pascal GPU. Live OSD contains only real current-frame tracker
-    objects; there are no synthetic timer/shadow-history boxes.
+    YOLO26m on a 4 GB Pascal GPU. The detector/tracker own identity and geometry;
+    the native display stage is allowed to bridge only short OSD gaps so boxes do
+    not visibly blink between sparse detector updates.
     """
 
     def __init__(self) -> None:
@@ -53,10 +51,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.detector_min_idle = float(os.environ.get("CAMERA_V2_DETECT_MIN_IDLE_MS", "8")) / 1000.0
         self.detector_result_age_ms = 0.0
         self.detector_times: dict[str, deque[float]] = {}
-        self.admission_border_px = max(
-            0.0, min(12.0, float(os.environ.get("CAMERA_V2_ADMISSION_BORDER_PX", "2.0")))
-        )
-        self.admission_rejected = 0
         super().__init__()
         self.detector_target_hz = max(self.detector_min_hz, min(self.detector_max_hz, self.detector_target_hz))
         self.detector_times = {cid: deque(maxlen=100) for cid in self.camera_index}
@@ -68,43 +62,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         # profile; tracker_profile.py then applies only the pedestrian association
         # and realistic target-pool tuning we need.
         return lib, prepare_sparse_tracker_config(stock_max_perf)
-
-    def _dedup_and_expand(self, rows):
-        """Keep close people separate; reject only truly frame-clipped entrants.
-
-        Do not try to infer "full body visibility" from bbox size or distance: a
-        seated person, a person behind a desk, and a distant person can all have a
-        legitimate short bbox. The reliable signal available to this detector is a
-        bbox that is actually clipped by the camera frame. Only those candidates are
-        held back until YOLO returns a bbox fully inside the frame.
-        """
-        detections = super()._dedup_and_expand(rows)
-        if not detections or self.admission_border_px <= 0.0:
-            return detections
-
-        right = float(self.frame_width - 1)
-        bottom = float(self.frame_height - 1)
-        margin = self.admission_border_px
-
-        admitted = []
-        rejected = 0
-        for detection in detections:
-            x1, y1, x2, y2, _conf = detection
-            clipped_by_fov = (
-                x1 <= margin
-                or x2 >= right - margin
-                or y1 <= margin
-                or y2 >= bottom - margin
-            )
-            if clipped_by_fov:
-                rejected += 1
-                continue
-            admitted.append(detection)
-
-        if rejected:
-            with self.det_lock:
-                self.admission_rejected += rejected
-        return admitted
 
     def _publish_prepared(
         self,
@@ -190,7 +147,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"NvDCF={self.tracker_width}x{self.tracker_height} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
             "profile=max_perf memory_profile=4gb max_targets=24 "
-            "close_person=1 strict_edge_clip_only=1 synthetic_boxes=0",
+            "close_person=1 edge_gate=0 display_gap_bridge=1 synthetic_tracker_boxes=0",
             flush=True,
         )
 
@@ -311,7 +268,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
             tracked = self.tracked_now
             age_ms = self.detector_result_age_ms
             target_hz = self.detector_target_hz
-            admission_rejected = self.admission_rejected
 
         rates = {cid: self._recent_rate(rows, now) for cid, rows in self.detector_times.items()}
         rate_text = " ".join(f"{cid}:{rates.get(cid, 0.0):.1f}" for cid in self.camera_index)
@@ -322,10 +278,9 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"detector={INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
             f"target_hz={target_hz:.1f}/cam approx_skip={expected_skip:.1f}frames "
             f"actual_hz=[{rate_text}] result_age={age_ms:.0f}ms "
-            f"edge_rejected={admission_rejected} "
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"config={self.tracker_config} profile=max_perf max_targets=24 "
-            "cascaded_assoc=1 synthetic_boxes=0",
+            "cascaded_assoc=1 display_gap_bridge=1 synthetic_tracker_boxes=0",
             flush=True,
         )
         return keep
