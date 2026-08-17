@@ -10,7 +10,7 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
 
     Heatmap is deliberately isolated from detector/tracker/ReID logic:
       * accumulation happens on raw current NvDCF boxes before display smoothing;
-      * the anchor is bbox bottom-center (feet/floor point);
+      * the anchor is near bbox bottom-center, lifted slightly above the feet line;
       * only confirmed motion deposits heat, so seated jitter does not paint;
       * rendering happens after the tiler and before nvdsosd;
       * all state is native metadata/grid state, never copied through NumPy/Python.
@@ -34,9 +34,8 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             return
 
         # Exponential cooling: by default about 10% of a cell's heat remains after
-        # one hour at the configured source FPS. A single thin trail usually falls
-        # below the visible threshold before/around that hour; repeatedly-used paths
-        # stay visible longer but cool from red/yellow back toward cyan.
+        # one hour at the configured source FPS. A single pass stays blue/cyan and
+        # fades; repeated traffic accumulates into yellow and eventually red.
         cool_seconds = max(300.0, float(os.environ.get("CAMERA_V2_HEATMAP_COOL_SEC", "3600")))
         hour_remaining = min(
             0.60,
@@ -46,8 +45,10 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
 
         deposit = float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0045"))
         low = float(os.environ.get("CAMERA_V2_HEATMAP_LOW", "0.00075"))
-        yellow = float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.020"))
-        red = float(os.environ.get("CAMERA_V2_HEATMAP_RED", "0.060"))
+        # Keep normal one-person trails cool. Only repeatedly-used cells cross the
+        # warmer thresholds, so density rather than one detection controls color.
+        yellow = float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.040"))
+        red = float(os.environ.get("CAMERA_V2_HEATMAP_RED", "0.120"))
         max_points = max(8, min(48, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "30"))))
 
         self.bridge.configure_heatmap(
@@ -70,9 +71,10 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
 
         print(
             "CAMERA_HEATMAP ready "
-            f"anchor=feet-bottom-center motion_only=1 grid=48x27 points={max_points}/cam "
+            f"anchor=feet-lifted-8pct motion_only=1 grid=48x27 points={max_points}/cam "
             f"deposit={deposit:.5f} decay={decay:.8f} cool={cool_seconds:.0f}s "
-            f"remain={hour_remaining:.2f} overlay=post-tiler/pre-osd",
+            f"remain={hour_remaining:.2f} yellow={yellow:.3f} red={red:.3f} "
+            "palette=blue-cyan-yellow-red overlay=post-tiler/pre-osd",
             flush=True,
         )
 
