@@ -34,6 +34,12 @@ reid:
   strong_margin: 0.025
   confirm_votes: 2
 
+  # Protect the canonical appearance gallery from a mistaken cross-camera merge.
+  # A confirmed track can use a Global ID at lower score, but its crops only update
+  # the canonical gallery when independent ReID evidence is strong.
+  prototype_update_similarity: 0.82
+  reid_rollback_votes: 4
+
   # A local NvDCF ID may disappear behind a chair/desk and come back as a new local
   # ID. Tracker snapshots release the missing local binding quickly while the
   # Global-ID gallery remains alive for same-person reconnect.
@@ -57,6 +63,8 @@ reid:
   qwen_queue: 24
   qwen_same_confidence: 0.72
   qwen_different_confidence: 0.78
+  qwen_gray_confirm_confidence: 0.90
+  qwen_suspect_confidence: 0.90
   qwen_negative_ttl_sec: 20.0
   rollback_contradictions: 2
   qwen_jpeg_quality: 82
