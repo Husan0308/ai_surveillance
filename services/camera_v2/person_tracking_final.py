@@ -8,11 +8,10 @@ import time
 from collections import deque
 from pathlib import Path
 
-# Production person tracking for GTX 1050 Ti 4 GB + six fixed CCTV streams.
-# Preserve the camera's 16:9 geometry before YOLO. The detector frame itself is
-# physically resized by GStreamer, so keeping 16:9 here avoids stretching people.
+# Stride-32 valid detector geometry. 704x396 was silently changed by Ultralytics
+# to 704x416 on every call; 704x384 avoids that hidden resize/warning entirely.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "704")
-os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "396")
+os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.08")
 os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.78")
@@ -22,8 +21,6 @@ os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
-# Ultralytics already performs NMS. This pass should only remove obvious duplicate
-# person predictions; legitimate close people must survive into NvDCF.
 os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.92")
 os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.99")
 
@@ -36,12 +33,7 @@ from .tracker_profile import prepare_sparse_tracker_config, reid_backend
 
 
 class CameraPersonTrackingFinal(_BaseTracking):
-    """YOLO26m + NvDCF local tracking + conservative cross-camera identity.
-
-    NvDCF remains authoritative for geometry/local IDs. On the Pascal GTX 1050 Ti,
-    appearance embeddings are extracted asynchronously with OpenCV-DNN/CPU from
-    the detector branch. ReID never feeds geometry back into the tracker.
-    """
+    """YOLO26m + NvDCF local tracking + multi-cue cross-camera identity."""
 
     def __init__(self) -> None:
         self.detector_frames_applied = 0
@@ -57,12 +49,10 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.global_reid = GlobalReIDManager()
         self.reid_lock = threading.RLock()
 
-        # nvstreammux may push partial batches because sync-inputs is disabled. Keep
-        # a short per-(camera, local track) cache and merge each partial snapshot.
         self.track_snapshot_lock = threading.RLock()
         self.latest_tracks: dict[tuple[int, int], dict] = {}
         self.reid_track_cache_ttl = max(
-            0.45, float(os.environ.get("CAMERA_V2_REID_TRACK_CACHE_TTL", "1.10"))
+            0.30, float(os.environ.get("CAMERA_V2_REID_TRACK_CACHE_TTL", "0.65"))
         )
         self.reid_last_submit: dict[tuple[int, int], float] = {}
 
@@ -75,11 +65,12 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.reid_worker_not_ready = 0
         self.reid_track_rows_seen = 0
         self.reid_skip_small = 0
+        self.reid_skip_partial = 0
         self.reid_skip_cooldown = 0
         self.reid_submit_fail = 0
 
         self.reid_track_interval = max(
-            0.6, float(os.environ.get("CAMERA_V2_REID_TRACK_INTERVAL", "1.20"))
+            0.55, float(os.environ.get("CAMERA_V2_REID_TRACK_INTERVAL", "0.90"))
         )
         self.reid_cycle_budget = max(
             1, min(3, int(os.environ.get("CAMERA_V2_REID_CROPS_PER_CYCLE", "1")))
@@ -101,9 +92,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             self.detector_min_hz, min(self.detector_max_hz, self.detector_target_hz)
         )
         self.detector_times = {cid: deque(maxlen=100) for cid in self.camera_index}
-        self.latency_compensator = DetectorLatencyCompensator(
-            self.frame_width, self.frame_height
-        )
+        self.latency_compensator = DetectorLatencyCompensator(self.frame_width, self.frame_height)
 
         if self.reid_mode == "external":
             self.external_reid = ExternalReIDWorker()
@@ -111,8 +100,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 timeout=max(1.0, float(os.environ.get("CAMERA_V2_REID_READY_TIMEOUT", "12")))
             )
             print(
-                "CAMERA_REID backend=external-opencv-cpu "
-                "nvtracker_reid=0 global_reid=1",
+                "CAMERA_REID backend=external-opencv-cpu nvtracker_reid=0 "
+                "global_reid=1 topology=1 local_consensus=1 color_cue=1",
                 flush=True,
             )
         elif self.reid_mode == "deepstream":
@@ -122,19 +111,20 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
-        """Undo over-aggressive close-person tuning without rewriting stock NvDCF.
+        """Keep sparse NvDCF stable without duplicate-ID over-tuning.
 
-        minIouDiff4NewTarget=0.90 caused ordinary detector jitter to create a second
-        local target for the same person. NVIDIA's documented default is 0.5. We use
-        a moderate 0.60: enough room for nearby distinct people, but not every 60-80%
-        overlapping correction becomes a new tracker. Duplicate cleanup is restored
-        to a practical 0.90/5-frame cadence and shadow age to 38 for sparse YOLO.
+        Shadow tracking remains long enough to survive sparse YOLO misses. A modest
+        inactive-output threshold lets a still-confident NvDCF target keep reporting
+        between detections; the downstream display hold remains a bounded fallback.
         """
         replacements = {
             "enableBboxUnClipping": "0",
             "minIouDiff4NewTarget": "0.60",
+            "minTrackerConfidence": "0.18",
             "probationAge": "2",
-            "maxShadowTrackingAge": "38",
+            "maxShadowTrackingAge": "50",
+            "earlyTerminationAge": "2",
+            "minTrackingConfidenceDuringInactive": "0.22",
             "minIou4TargetDuplicate": "0.90",
             "targetDuplicateRunInterval": "5",
         }
@@ -157,7 +147,12 @@ class CameraPersonTrackingFinal(_BaseTracking):
             if not replaced:
                 output.append(line)
 
-        critical = {"enableBboxUnClipping", "minIouDiff4NewTarget", "probationAge", "maxShadowTrackingAge"}
+        critical = {
+            "enableBboxUnClipping",
+            "minIouDiff4NewTarget",
+            "probationAge",
+            "maxShadowTrackingAge",
+        }
         missing = sorted(critical - found)
         if missing:
             raise RuntimeError(
@@ -178,23 +173,14 @@ class CameraPersonTrackingFinal(_BaseTracking):
             if self.external_reid is not None:
                 self.external_reid.close()
 
-    def _publish_prepared(
-        self,
-        cid: str,
-        captured_t: float,
-        prepared: list[PreparedDetection],
-    ) -> None:
-        # Empty observations are not injected. NvDCF owns shadow tracking and target
-        # termination; one sparse YOLO miss must not explicitly erase a live target.
+    def _publish_prepared(self, cid: str, captured_t: float, prepared: list[PreparedDetection]) -> None:
+        # Never inject an explicit empty detector result. NvDCF shadow tracking must
+        # own short detector misses instead of being told that the target vanished.
         if not prepared:
             return
         with self.pending_lock:
             self.pending_seq += 1
-            self.pending[cid] = (
-                self.pending_seq,
-                float(captured_t),
-                list(prepared),
-            )
+            self.pending[cid] = (self.pending_seq, float(captured_t), list(prepared))
 
     def _inject_detector_probe(self, _pad, info):
         buffer = info.get_buffer()
@@ -215,16 +201,12 @@ class CameraPersonTrackingFinal(_BaseTracking):
             seq, captured_t, prepared = row
             if seq <= self.injected_seq.get(cid, 0):
                 continue
-
             boxes, age_ms = self.latency_compensator.project(prepared, captured_t, now)
             result = self.bridge.apply_detector_result(buffer, source_id, boxes)
             if result == -2:
-                # Partial mux batch: keep this detection pending until its source is
-                # present instead of consuming it on the wrong batch.
                 continue
             if result < 0:
                 continue
-
             self.injected_seq[cid] = seq
             frames_applied += 1
             boxes_added += result
@@ -255,27 +237,17 @@ class CameraPersonTrackingFinal(_BaseTracking):
     def _track_box(row: dict) -> tuple[float, float, float, float]:
         left = float(row["left"])
         top = float(row["top"])
-        return (
-            left,
-            top,
-            left + float(row["width"]),
-            top + float(row["height"]),
-        )
+        return (left, top, left + float(row["width"]), top + float(row["height"]))
 
     @staticmethod
     def _box_area(box) -> float:
-        return max(1.0, float(box[2]) - float(box[0])) * max(
-            1.0, float(box[3]) - float(box[1]))
+        return max(1.0, float(box[2]) - float(box[0])) * max(1.0, float(box[3]) - float(box[1]))
 
     @staticmethod
     def _box_center(box) -> tuple[float, float]:
-        return (
-            (float(box[0]) + float(box[2])) * 0.5,
-            (float(box[1]) + float(box[3])) * 0.5,
-        )
+        return ((float(box[0]) + float(box[2])) * 0.5, (float(box[1]) + float(box[3])) * 0.5)
 
     def _association_score(self, det_box, track_box) -> float | None:
-        """Associate a latency-projected detector box to a current raw NvDCF box."""
         iou = self._box_iou(det_box, track_box)
         dcx, dcy = self._box_center(det_box)
         tcx, tcy = self._box_center(track_box)
@@ -283,7 +255,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         th = max(1.0, track_box[3] - track_box[1])
         diag = max(24.0, math.hypot(tw, th))
         center_dist = math.hypot(dcx - tcx, dcy - tcy) / diag
-
         da = self._box_area(det_box)
         ta = self._box_area(track_box)
         size_similarity = min(da, ta) / max(da, ta)
@@ -291,7 +262,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
             return None
         if iou < self.reid_assoc_min_iou and center_dist > self.reid_assoc_max_center:
             return None
-
         center_similarity = max(0.0, 1.0 - center_dist)
         return 0.66 * iou + 0.24 * center_similarity + 0.10 * size_similarity
 
@@ -316,8 +286,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
             return self.Gst.PadProbeReturn.OK
 
         try:
-            # Snapshot authoritative NvDCF geometry BEFORE display expansion/smoothing.
-            # The previous order matched ReID against display-inflated rectangles.
             raw_tracks = self.bridge.snapshot_tracks(buffer) if self.reid_mode == "external" else []
             deepstream_rows = self.bridge.snapshot_reid(buffer) if self.reid_mode == "deepstream" else []
 
@@ -329,6 +297,10 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
             if self.reid_mode == "external":
                 now = time.monotonic()
+                with self.reid_lock:
+                    # Critical: conflict decisions use actual current NvDCF activity,
+                    # not stale embedding timestamps from a track that already ended.
+                    self.global_reid.update_active_tracks(raw_tracks, now)
                 with self.track_snapshot_lock:
                     for row in raw_tracks:
                         item = dict(row)
@@ -336,7 +308,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
                         key = (int(item["source_id"]), int(item["object_id"]))
                         self.latest_tracks[key] = item
                     self.reid_track_rows_seen += len(raw_tracks)
-
                     stale = [
                         key
                         for key, row in self.latest_tracks.items()
@@ -351,6 +322,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 self.reid_last_batch = len(deepstream_rows)
                 if deepstream_rows:
                     with self.reid_lock:
+                        self.global_reid.update_active_tracks(deepstream_rows, time.monotonic())
                         self.global_reid.observe(deepstream_rows, time.monotonic())
                     self.reid_vectors_seen += len(deepstream_rows)
 
@@ -369,7 +341,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 self.bridge.apply_global_identity(buffer, [])
             except Exception:
                 pass
-
         return self.Gst.PadProbeReturn.OK
 
     def _submit_external_reid(
@@ -400,10 +371,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             return
 
         if match_boxes is None or len(match_boxes) != len(detections):
-            match_boxes = [
-                (float(row[0]), float(row[1]), float(row[2]), float(row[3]))
-                for row in detections
-            ]
+            match_boxes = [(float(row[0]), float(row[1]), float(row[2]), float(row[3])) for row in detections]
 
         pairs: list[tuple[float, int, int]] = []
         for di, det_box in enumerate(match_boxes):
@@ -411,7 +379,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 score = self._association_score(det_box, self._track_box(track))
                 if score is not None:
                     pairs.append((score, di, ti))
-
         pairs.sort(reverse=True)
         used_dets: set[int] = set()
         used_tracks: set[int] = set()
@@ -422,7 +389,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
             used_dets.add(di)
             used_tracks.add(ti)
             matches.append((di, ti))
-
         if not matches:
             self.reid_match_misses += 1
             return
@@ -446,10 +412,19 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 self.reid_skip_cooldown += 1
                 continue
 
-            # _dedup_and_expand returns source-space (x1,y1,x2,y2,conf) 5-tuples.
-            # The previous code incorrectly unpacked each row as (box, conf), which
-            # prevented the external ReID path from ever submitting a valid crop.
             dx1, dy1, dx2, dy2, det_conf = [float(v) for v in detections[di]]
+            # Do not let a frame-edge partial body poison the identity gallery.
+            # Detection/tracking still remain visible; only ReID sampling waits for
+            # a cleaner full-body/person crop.
+            if (
+                dx1 <= 2.0
+                or dy1 <= 2.0
+                or dx2 >= float(self.frame_width - 2)
+                or dy2 >= float(self.frame_height - 2)
+            ):
+                self.reid_skip_partial += 1
+                continue
+
             bw = max(1.0, dx2 - dx1)
             bh = max(1.0, dy2 - dy1)
             crop_box = (
@@ -462,12 +437,12 @@ class CameraPersonTrackingFinal(_BaseTracking):
             y1 = max(0, min(fh - 1, int(round(crop_box[1] * sy))))
             x2 = max(x1 + 1, min(fw, int(round(crop_box[2] * sx))))
             y2 = max(y1 + 1, min(fh, int(round(crop_box[3] * sy))))
-
             if y2 - y1 < self.reid_min_crop_h or x2 - x1 < 14:
                 self.reid_skip_small += 1
                 continue
 
             track = tracks[ti]
+            track_box = self._track_box(track)
             crop = frame[y1:y2, x1:x2]
             tracker_conf = float(track.get("tracker_confidence", 0.0) or 0.0)
             if worker.submit(
@@ -476,6 +451,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 crop_bgr=crop,
                 confidence=float(det_conf),
                 tracker_confidence=tracker_conf,
+                bbox=track_box,
             ):
                 self.reid_last_submit[key] = now
                 self.reid_submitted += 1
@@ -508,7 +484,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"NvDCF={self.tracker_width}x{self.tracker_height} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
             f"reid_backend={self.reid_mode} close_person=balanced "
-            "aspect_preserved=1 raw_track_assoc=1",
+            "stride32=1 raw_track_assoc=1",
             flush=True,
         )
 
@@ -523,7 +499,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
             group = groups[group_index % len(groups)]
             group_index += 1
             group_key = tuple(group)
-
             if prefetched_group != group_key:
                 self._request_group(group)
             rows = self.mailbox.wait_group(group, versions, timeout=0.8)
@@ -549,10 +524,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             prefetched_group = tuple(next_group)
 
             try:
-                self.job_q.put(
-                    {"cameras": group, "frames": frames, "captured": captured},
-                    timeout=0.3,
-                )
+                self.job_q.put({"cameras": group, "frames": frames, "captured": captured}, timeout=0.3)
                 result = self.result_q.get(timeout=5.0)
             except pyqueue.Empty:
                 with self.det_lock:
@@ -588,12 +560,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 if self.reid_mode == "external" and detections:
                     frame = frame_by_cid.get(cid)
                     if frame is not None:
-                        projected, _ = self.latency_compensator.project(
-                            prepared, captured_t, completed_t
-                        )
-                        match_boxes = [
-                            (row[0], row[1], row[2], row[3]) for row in projected
-                        ]
+                        projected, _ = self.latency_compensator.project(prepared, captured_t, completed_t)
+                        match_boxes = [(row[0], row[1], row[2], row[3]) for row in projected]
                         self._submit_external_reid(cid, frame, detections, match_boxes)
 
             batch_ms = float(result.get("batch_ms") or 0.0)
@@ -634,21 +602,14 @@ class CameraPersonTrackingFinal(_BaseTracking):
                     self.detector_target_hz -= 0.20
                 elif p95 < 64.0 and self.det_ready:
                     self.detector_target_hz += 0.10
-            self.detector_target_hz = max(
-                self.detector_min_hz,
-                min(self.detector_max_hz, self.detector_target_hz),
-            )
+            self.detector_target_hz = max(self.detector_min_hz, min(self.detector_max_hz, self.detector_target_hz))
             applied = self.detector_frames_applied
             tracked = self.tracked_now
             age_ms = self.detector_result_age_ms
             target_hz = self.detector_target_hz
 
-        rates = {
-            cid: self._recent_rate(rows, now) for cid, rows in self.detector_times.items()
-        }
-        rate_text = " ".join(
-            f"{cid}:{rates.get(cid, 0.0):.1f}" for cid in self.camera_index
-        )
+        rates = {cid: self._recent_rate(rows, now) for cid, rows in self.detector_times.items()}
+        rate_text = " ".join(f"{cid}:{rates.get(cid, 0.0):.1f}" for cid in self.camera_index)
         expected_skip = max(0.0, 20.0 / max(0.1, target_hz) - 1.0)
         print(
             "CAMERA_TRACK_FINAL "
@@ -658,7 +619,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"actual_hz=[{rate_text}] result_age={age_ms:.0f}ms "
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"config={self.tracker_config} profile=max_perf max_targets=24 "
-            "display_gap_bridge=1 synthetic_tracker_boxes=0",
+            "shadow=50 display_gap_bridge=1 synthetic_tracker_boxes=0",
             flush=True,
         )
 
@@ -678,11 +639,19 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"submitted={self.reid_submitted} worker_submitted={int(worker_stats.get('submitted', 0))} "
             f"track_rows={self.reid_track_rows_seen} track_cache={track_cache} "
             f"cache_miss={self.reid_track_cache_misses} assoc_miss={self.reid_match_misses} "
-            f"small_skip={self.reid_skip_small} cooldown={self.reid_skip_cooldown} "
-            f"submit_fail={self.reid_submit_fail} worker_wait={self.reid_worker_not_ready} "
-            f"globals={reid['global_count']} bindings={reid['local_bindings']} "
-            f"strong={stats['strong_match']} merged={stats['merged']} "
-            f"conflicts={stats['rejected_conflict']} "
+            f"small_skip={self.reid_skip_small} partial_skip={self.reid_skip_partial} "
+            f"cooldown={self.reid_skip_cooldown} submit_fail={self.reid_submit_fail} "
+            f"worker_wait={self.reid_worker_not_ready} globals={reid['global_count']} "
+            f"bindings={reid['local_bindings']} active={reid.get('active_tracks', 0)} "
+            f"direct={stats.get('direct_match', 0)} covis={stats.get('covisible_match', 0)} "
+            f"continuation={stats.get('continuation_match', 0)} strong={stats.get('strong_match', 0)} "
+            f"merged={stats.get('merged', 0)} ambiguous={stats.get('ambiguous_new', 0)} "
+            f"conflicts={stats.get('rejected_conflict', 0)} "
+            f"score={stats.get('last_best_milli', -1000)/1000.0:.3f}/"
+            f"{stats.get('last_second_milli', -1000)/1000.0:.3f} "
+            f"thr={stats.get('last_threshold_milli', 0)/1000.0:.3f} "
+            f"reid={stats.get('last_reid_milli', -1000)/1000.0:.3f} "
+            f"color={stats.get('last_color_milli', -1000)/1000.0:.3f} "
             f"infer_ms={float(worker_stats.get('infer_ms', 0.0)):.1f} "
             f"queue={int(worker_stats.get('queued', 0))} "
             f"worker_failed={int(worker_stats.get('failed', 0))} "
