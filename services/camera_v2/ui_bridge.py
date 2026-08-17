@@ -38,18 +38,43 @@ def ensure_ui_bridge() -> Path:
     pkg = shutil.which("pkg-config")
     if not gcc or not pkg:
         raise RuntimeError("gcc and pkg-config are required to build the UI metadata bridge")
+
     pkg_flags = shlex.split(
-        subprocess.check_output([pkg, "--cflags", "--libs", "gstreamer-1.0", "glib-2.0"], text=True).strip()
+        subprocess.check_output(
+            [pkg, "--cflags", "--libs", "gstreamer-1.0", "glib-2.0"],
+            text=True,
+        ).strip()
     )
-    command = [
-        gcc, "-shared", "-fPIC", "-O2", "-std=c11", str(SOURCE), "-o", str(LIB_PATH),
-        f"-I{ds / 'sources/includes'}", f"-L{ds / 'lib'}", f"-Wl,-rpath,{ds / 'lib'}",
-        *pkg_flags, "-lnvds_meta", "-lnvdsgst_meta",
+    common = [
+        gcc,
+        "-shared",
+        "-fPIC",
+        "-O2",
+        "-std=c11",
+        str(SOURCE),
+        "-o",
+        str(LIB_PATH),
+        f"-I{ds / 'sources/includes'}",
+        f"-L{ds / 'lib'}",
+        f"-Wl,-rpath,{ds / 'lib'}",
+        *pkg_flags,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    if result.returncode != 0 or not LIB_PATH.exists():
-        raise RuntimeError("UI metadata bridge compile failed: " + (result.stderr or result.stdout).strip())
-    return LIB_PATH
+
+    # Keep the UI bridge as tolerant as the proven detector metadata bridge.
+    # DeepStream package variants do not always expose both link names equally.
+    attempts = (
+        ("-lnvds_meta", "-lnvdsgst_meta"),
+        ("-lnvds_meta",),
+        ("-lnvdsgst_meta", "-lnvds_meta"),
+    )
+    errors: list[str] = []
+    for libs in attempts:
+        result = subprocess.run([*common, *libs], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and LIB_PATH.exists():
+            return LIB_PATH
+        errors.append((result.stderr or result.stdout or "unknown compiler error").strip())
+
+    raise RuntimeError("UI metadata bridge compile failed: " + " | ".join(errors[-2:]))
 
 
 class NativeUIBridge:
