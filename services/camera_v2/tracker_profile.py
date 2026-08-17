@@ -8,21 +8,19 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+from .reid_engine import ensure_reid_engine
+
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 REID_MODEL_DIR = RUNTIME_DIR / "models" / "reid"
 REID_MODEL_NAME = "resnet50_market1501_aicity156.onnx"
-# Current NVIDIA NGC registry endpoint. The older
-# /models/org/nvidia/team/tao/... path is still present in some tracker docs but
-# may return HTTP 404; NVIDIA's current PipeTuner docs use this /versions/ route.
 REID_MODEL_URL = (
     "https://api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/"
     "versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx"
 )
 REID_MODEL_SHA256 = "0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b"
 
-# 4 GB Pascal fixed-CCTV pedestrian profile.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "1",
@@ -96,7 +94,7 @@ def _download_official_reid(destination: Path) -> Path:
     try:
         request = urllib.request.Request(
             REID_MODEL_URL,
-            headers={"User-Agent": "camera-v2-reid/1.1"},
+            headers={"User-Agent": "camera-v2-reid/1.2"},
         )
         with urllib.request.urlopen(request, timeout=120) as response, tmp_path.open("wb") as out:
             shutil.copyfileobj(response, out, length=1024 * 1024)
@@ -132,7 +130,6 @@ def resolve_reid_model() -> Path:
 
     local_model = REID_MODEL_DIR / REID_MODEL_NAME
     if local_model.exists() and local_model.is_file():
-        # Files installed by our setup path must be the exact NVIDIA artifact.
         digest = _sha256(local_model)
         if digest == REID_MODEL_SHA256:
             return local_model.resolve()
@@ -238,7 +235,13 @@ def _set_or_insert_target_management(lines: list[str], key: str, value: str) -> 
 
 def _configure_reid(lines: list[str]) -> Path:
     model = resolve_reid_model()
-    batch_size = max(1, min(16, int(os.environ.get("CAMERA_V2_REID_BATCH", "8"))))
+
+    # GTX 1050 Ti has 4 GB and also drives the desktop. A large TensorRT ReID batch
+    # is the wrong trade-off here: it increases engine-build and runtime memory, and
+    # the build was observed aborting when NvMultiObjectTracker tried to construct
+    # the engine after the live camera pipeline had already allocated GPU memory.
+    # Batch=1 plus periodic embeddings is sufficient for the global identity layer.
+    batch_size = max(1, min(4, int(os.environ.get("CAMERA_V2_REID_BATCH", "1"))))
     extraction_interval = max(-1, int(os.environ.get("CAMERA_V2_REID_INTERVAL", "5")))
     workspace_mb = max(64, min(512, int(os.environ.get("CAMERA_V2_REID_WORKSPACE_MB", "256"))))
     engine = Path(
@@ -248,6 +251,18 @@ def _configure_reid(lines: list[str]) -> Path:
         )
     ).expanduser().resolve()
     engine.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build before CameraDetectionV2 creates six decoders, EGL surfaces and the
+    # YOLO worker. This converts a crash-prone in-pipeline TensorRT build into a
+    # bounded offline-style build and lets nvtracker only deserialize at startup.
+    if batch_size == 1:
+        ensure_reid_engine(model, engine, workspace_mb=workspace_mb)
+    elif not engine.exists():
+        raise RuntimeError(
+            "CAMERA_V2_REID_BATCH > 1 requires a prebuilt matching TensorRT engine. "
+            "Use the default batch=1 on GTX 1050 Ti or set CAMERA_V2_REID_ENGINE "
+            "to a compatible prebuilt plan."
+        )
 
     trajectory = {
         "useUniqueID": "1",
@@ -261,9 +276,6 @@ def _configure_reid(lines: list[str]) -> Path:
     for key, value in trajectory.items():
         _set_section_key(lines, "TrajectoryManagement", key, value)
 
-    # NVIDIA explicitly requires the legacy TAO/ETLT path keys to be removed when
-    # switching the tracker ReID block to the ONNX v1.2 model. Leaving both model
-    # sources in the generated YAML can make NvDCF select or validate the wrong one.
     _remove_section_keys(
         lines,
         "ReID",
@@ -275,7 +287,7 @@ def _configure_reid(lines: list[str]) -> Path:
         "batchSize": str(batch_size),
         "workspaceSize": str(workspace_mb),
         "reidFeatureSize": "256",
-        "reidHistorySize": "32",
+        "reidHistorySize": "24",
         "inferDims": "[3, 256, 128]",
         "networkMode": "1",
         "inputOrder": "0",
@@ -284,7 +296,7 @@ def _configure_reid(lines: list[str]) -> Path:
         "netScaleFactor": "0.01735207",
         "addFeatureNormalization": "1",
         "keepAspc": "1",
-        "minVisibility4GalleryUpdate": "0.55",
+        "minVisibility4GalleryUpdate": "0.60",
         "outputReidTensor": "1",
         "onnxFile": json.dumps(str(model)),
         "modelEngineFile": json.dumps(str(engine)),
@@ -349,6 +361,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
         "# Camera V2 low-memory NvDCF profile for GTX 1050 Ti 4GB.",
         "# maxTargetsPerStream=24; close-person admission tuned; shadow output stays internal.",
         "# ReID=" + (f"enabled model={model.name}" if model else "disabled"),
+        "# ReID engine is prebuilt before the live pipeline on the 4 GB GPU.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
