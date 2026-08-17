@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.camera_v2.external_reid import ExternalReIDWorker
+from services.camera_v2.global_reid import GlobalReIDManager
 from services.camera_v2.person_tracking_final import CameraPersonTrackingFinal
 from services.camera_v2.tracker_profile import (
     prepare_sparse_tracker_config,
@@ -44,6 +45,97 @@ def _normalize(raw: np.ndarray) -> np.ndarray:
             f"invalid ReID feature: size={vector.size} norm={norm}"
         )
     return vector / norm
+
+
+def _validate_global_identity_logic() -> None:
+    manager = GlobalReIDManager()
+
+    expected_rooms = {
+        0: 0,  # CAM-01
+        1: 0,  # CAM-02
+        2: 1,  # CAM-03
+        5: 1,  # CAM-06
+        4: 2,  # CAM-05
+        3: 2,  # CAM-04
+    }
+    actual_rooms = {sid: manager.room_of(sid) for sid in expected_rooms}
+    if actual_rooms != expected_rooms:
+        raise RuntimeError(
+            f"wrong Camera V2 ReID room topology: got={actual_rooms} expected={expected_rooms}"
+        )
+
+    # Exact same appearance in the two cameras covering one room must directly
+    # reuse one global identity rather than creating a fragment first.
+    vector = np.zeros(256, dtype=np.float32)
+    vector[0] = 1.0
+    feature = tuple(float(v) for v in vector)
+    manager.observe(
+        [
+            {
+                "source_id": 2,
+                "object_id": 101,
+                "feature": feature,
+                "confidence": 0.90,
+                "tracker_confidence": 0.70,
+            }
+        ],
+        now=100.0,
+    )
+    manager.observe(
+        [
+            {
+                "source_id": 5,
+                "object_id": 202,
+                "feature": feature,
+                "confidence": 0.90,
+                "tracker_confidence": 0.70,
+            }
+        ],
+        now=100.2,
+    )
+    labels = {
+        (sid, oid): label
+        for sid, oid, label in manager.label_assignments()
+    }
+    if labels.get((2, 101)) != labels.get((5, 202)):
+        raise RuntimeError(
+            "same-room cross-camera ReID did not preserve one global ID: "
+            f"{labels}"
+        )
+
+    # The same exact vector appearing simultaneously in another physical room
+    # must not be allowed to teleport into the active global identity.
+    manager.observe(
+        [
+            {
+                "source_id": 3,
+                "object_id": 303,
+                "feature": feature,
+                "confidence": 0.90,
+                "tracker_confidence": 0.70,
+            }
+        ],
+        now=100.3,
+    )
+    labels = {
+        (sid, oid): label
+        for sid, oid, label in manager.label_assignments()
+    }
+    if labels.get((3, 303)) == labels.get((2, 101)):
+        raise RuntimeError(
+            "cross-room teleport guard failed: simultaneous different-room tracks "
+            f"share {labels.get((3, 303))}"
+        )
+
+    snapshot = manager.snapshot()
+    if snapshot["stats"].get("direct_match", 0) < 1:
+        raise RuntimeError(
+            "global ReID direct-match path was not exercised by the topology test"
+        )
+    print(
+        "REID_PREFLIGHT global_identity=PASS "
+        f"room_map={snapshot['room_map']} direct_match={snapshot['stats']['direct_match']}"
+    )
 
 
 def main() -> int:
@@ -90,6 +182,8 @@ def main() -> int:
         "REID_PREFLIGHT onnx_forward=PASS "
         f"feature_size=256 repeat_cosine={cosine:.6f} preprocess=tao-direct-resize"
     )
+
+    _validate_global_identity_logic()
 
     generated = prepare_sparse_tracker_config(_deepstream_config())
     generated = CameraPersonTrackingFinal._stabilize_tracker_config(generated)
