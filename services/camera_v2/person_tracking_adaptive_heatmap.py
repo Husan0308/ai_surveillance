@@ -3,18 +3,18 @@ from __future__ import annotations
 import os
 import time
 
-from .manual_geometry_reid import ManualGeometryAdaptiveTrackletReID
+from .annotated_geometry_reid import AnnotatedGeometryAdaptiveTrackletReID
 from .person_tracking_heatmap import CameraPersonTrackingHeatmap
 from .stable_global_reid import StableGlobalReIDManager
 
 
 class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
-    """Production camera wall with frozen ReID + manual calibrated room geometry.
+    """Production camera wall with frozen ReID + user-annotated room geometry.
 
-    No Qwen, no online neural-network training and no automatic seat calibration are
-    used here. The user supplies explicit image->room homography correspondences.
-    Local NvDCF identities stay sticky; one tracklet controller fuses appearance
-    with same-time calibrated room positions for cross-camera Global IDs.
+    No Qwen and no automatic seat calibration are used here. The colored room
+    landmarks supplied by the user define a shared normalized ground plane for each
+    peer-camera pair. NvDCF local identities remain sticky and one tracklet-level
+    controller fuses appearance with same-time calibrated foot positions.
     """
 
     def __init__(self) -> None:
@@ -28,20 +28,18 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
         os.environ.setdefault("CAMERA_V2_REID_COVISIBLE", "0.52")
         os.environ.setdefault("CAMERA_V2_REID_CONFIRM_VOTES", "4")
 
-        # Geometry defaults. Distances themselves live in the manual JSON per room.
         os.environ.setdefault("CAMERA_V2_WORLD_WINDOW", "16")
         os.environ.setdefault("CAMERA_V2_WORLD_TTL", "5.0")
-        os.environ.setdefault("CAMERA_V2_GEOMETRY_WEIGHT", "0.38")
+        os.environ.setdefault("CAMERA_V2_GEOMETRY_WEIGHT", "0.40")
         os.environ.setdefault("CAMERA_V2_GEOMETRY_MIN_REID", "0.24")
         os.environ.setdefault("CAMERA_V2_WORLD_FOOT_LIFT", "0.04")
-        os.environ.setdefault("CAMERA_V2_CALIB_MAX_RMSE_M", "0.25")
 
-        self.adaptive_reid: ManualGeometryAdaptiveTrackletReID | None = None
+        self.adaptive_reid: AnnotatedGeometryAdaptiveTrackletReID | None = None
         super().__init__()
 
         if self.reid_mode == "external":
             self.global_reid = StableGlobalReIDManager()
-            self.adaptive_reid = ManualGeometryAdaptiveTrackletReID(
+            self.adaptive_reid = AnnotatedGeometryAdaptiveTrackletReID(
                 self.global_reid,
                 frame_width=self.frame_width,
                 frame_height=self.frame_height,
@@ -53,10 +51,11 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
                 "diverse_bank=1 fresh_both_cameras_votes=1 tracklet_multi_frame=1 "
                 "camera_pair_adaptive=1 mutual_best=1 temporal_votes=1 "
                 "peer_identity_lease=1 hysteresis=1 late_reassoc=1 "
-                "manual_homography=1 auto_calibration=0 same_time_world_gate=1 "
+                "annotated_room_geometry=1 auto_calibration=0 same_time_world_gate=1 "
                 "same_camera_unique=1 qwen=0 "
                 f"calibrated_cameras={calib['ready_cameras']} "
                 f"calibration_sources={calib['camera_sources']} "
+                f"calibration_models={calib.get('models', {})} "
                 f"room_map={self.global_reid.room_map}",
                 flush=True,
             )
@@ -82,8 +81,6 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
             if adaptive is not None:
                 adaptive.observe_rows(rows, now)
 
-            # Sticky manager owns local anchors only; calibrated tracklet controller
-            # is the sole cross-camera writer, preventing frame-level ID oscillation.
             self.global_reid.observe(rows, now)
 
             if adaptive is not None:
@@ -97,11 +94,15 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
         adaptive = self.adaptive_reid
         if adaptive is not None:
             row = adaptive.snapshot()
+            calib = adaptive.calibration.snapshot()
             thresholds = row.get("thresholds", {})
             threshold_text = ",".join(
                 f"{pair}:{float(value):.3f}" for pair, value in thresholds.items()
             ) or "none"
             errors = row.get("calibration_errors", [])
+            model_text = ",".join(
+                f"{source}:{model}" for source, model in sorted(calib.get("models", {}).items())
+            ) or "none"
             print(
                 "CAMERA_ADAPTIVE_REID "
                 f"banks={row['banks']} samples={row['bank_samples']} "
@@ -115,11 +116,12 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
                 f"lock_corrections={row.get('lock_corrections', 0)} "
                 f"fresh_vote_skip={row.get('fresh_vote_skip', 0)} "
                 f"calib={row.get('calibration_ready_cameras', 0)}/6 "
+                f"calib_models={model_text} "
                 f"world_tracks={row.get('world_tracks', 0)} "
                 f"geo_pairs={row.get('geometry_pairs', 0)} "
                 f"geo_match={row.get('geometry_matches', 0)} "
                 f"geo_veto={row.get('geometry_vetoes', 0)} "
-                f"world_rmse={float(row.get('world_rmse_m', -1.0)):.3f}m "
+                f"world_dist={float(row.get('world_rmse_m', -1.0)):.3f} "
                 f"world_common={row.get('world_common', 0)} "
                 f"samecam_collisions={row['samecam_collisions']} "
                 f"samecam_repairs={row['samecam_repairs']} "
