@@ -9,11 +9,12 @@ from .qwen_reid_verifier_fast import FastQwenRoomReIDVerifier as QwenRoomReIDVer
 
 
 class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
-    """Camera V2 runtime with asynchronous Qwen peer-camera verification.
+    """Camera V2 runtime with tracklet-level room association plus Qwen audit.
 
-    Fast path remains YOLO + NvDCF + TAO ReID. Qwen only audits same-room peer
-    camera identities and can confirm two local tracks as one person or split an
-    accidental shared Global ID after repeated independent visual votes.
+    NvDCF owns local geometry. TAO ReID is the specialized appearance signal.
+    Same-room peer tracks are matched over several recent crops with one-to-one
+    mutual-best constraints. Qwen is deliberately a secondary judge for ambiguous
+    cases, not the primary identity model.
     """
 
     def __init__(self) -> None:
@@ -26,15 +27,28 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
             "0:0,3:0,1:1,4:1,2:2,5:2",
         )
 
-        # TAO is only a candidate generator for Qwen. Cross-view TAO similarity can
-        # be modest even for the same person, so let mutual-best room candidates as
-        # low as 0.24 reach the visual judge. Hard same-camera/cross-room constraints
-        # still veto impossible matches.
-        os.environ.setdefault("CAMERA_V2_QWEN_MIN_PEER_REID", "0.24")
+        # Opposite indoor cameras produce strong viewpoint/pose changes. The old
+        # 0.50 peer hard gate rejected the same person before enough tracklet
+        # evidence accumulated. Lower only the peer provisional gates, while
+        # increasing confirmation votes so weak one-frame matches never commit.
+        os.environ.setdefault("CAMERA_V2_REID_PEER_MIN_REID", "0.38")
+        os.environ.setdefault("CAMERA_V2_REID_PEER_CONFIRM_REID", "0.44")
+        os.environ.setdefault("CAMERA_V2_REID_SAME_ROOM", "0.54")
+        os.environ.setdefault("CAMERA_V2_REID_COVISIBLE", "0.52")
+        os.environ.setdefault("CAMERA_V2_REID_CONFIRM_VOTES", "4")
+
+        # Qwen sees a wider ambiguous band, but cannot by itself force an identity.
+        os.environ.setdefault("CAMERA_V2_QWEN_MIN_PEER_REID", "0.28")
         os.environ.setdefault("CAMERA_V2_QWEN_AUDIT_SAME_GID_BELOW", "0.68")
         os.environ.setdefault("CAMERA_V2_QWEN_TIMEOUT", "18")
         os.environ.setdefault("CAMERA_V2_QWEN_MAX_RESULT_AGE", "18")
         os.environ.setdefault("CAMERA_V2_QWEN_MAX_PENDING", "1")
+
+        # Specialized multi-frame tracklet consensus is the main same-room merge.
+        os.environ.setdefault("CAMERA_V2_ROOM_AUTO_SAME", "0.52")
+        os.environ.setdefault("CAMERA_V2_ROOM_AUTO_MARGIN", "0.045")
+        os.environ.setdefault("CAMERA_V2_ROOM_AUTO_VOTES", "4")
+        os.environ.setdefault("CAMERA_V2_QWEN_DIFF_REID_MAX", "0.38")
 
         self.qwen_reid: QwenRoomReIDVerifier | None = None
         self.same_camera_repairs = 0
@@ -47,8 +61,9 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
             print(
                 "CAMERA_QWEN_REID "
                 f"enabled={int(q.enabled)} url={q.url} model={q.model} "
-                "scope=same-room-peer-cameras async=1 reversible=1 votes=2 "
-                "same_camera_unique=1 fast_classifier=1 "
+                "scope=same-room-peer-cameras async=1 reversible=1 "
+                "tracklet_consensus=1 mutual_best=1 auto_votes=4 qwen_secondary=1 "
+                "same_camera_unique=1 "
                 "pairs=CAM01+CAM04,CAM02+CAM05,CAM03+CAM06 "
                 f"room_map={self.global_reid.room_map}",
                 flush=True,
@@ -275,7 +290,11 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
                 f"enabled={int(bool(q['enabled']))} visual_tracks={q['visual_tracks']} "
                 f"requests={q['requests']} responses={q['responses']} pending={q['pending']} "
                 f"same={q['same']} different={q['different']} uncertain={q['uncertain']} "
-                f"merges={q['merges']} splits={q['splits']} cannot_links={q['cannot_links']} "
+                f"merges={q['merges']} auto_merges={q.get('auto_merges', 0)} "
+                f"splits={q['splits']} cannot_links={q['cannot_links']} "
+                f"pair_score={float(q.get('last_pair_score', -1.0)):.3f} "
+                f"pair_margin={float(q.get('last_pair_margin', -1.0)):.3f} "
+                f"vote_pairs={q.get('appearance_vote_pairs', 0)} "
                 f"samecam_collisions={self.same_camera_collisions} "
                 f"samecam_repairs={self.same_camera_repairs} "
                 f"stale={q.get('stale', 0)} latency_ms={float(q['latency_ms']):.0f} "
