@@ -24,26 +24,32 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
         self.live_tracks: dict[tuple[int, int], dict] = {}
         self.live_events: deque[dict] = deque(maxlen=1200)
         self._last_ui_snapshot = 0.0
-        self._snapshot_period = 0.10
+        # Tracker metadata is cheap. Sample close to the 20 FPS camera cadence so
+        # the UI box follows the live person instead of updating at 5-10 FPS.
+        self._snapshot_period = 0.045
+        # Keep identity/event state longer than display state. A stale coordinate
+        # must never remain painted for >1s after NvDCF stopped reporting it.
+        self._visible_grace = 0.30
+        self._exit_grace = 2.20
         self._camera_last_frames: dict[str, int] = {}
         self._camera_last_change: dict[str, float] = {}
         self.ui_bridge = NativeUIBridge()
 
-        os.environ.setdefault("CAMERA_V2_WALL_WIDTH", "1024")
-        os.environ.setdefault("CAMERA_V2_WALL_HEIGHT", "864")
+        os.environ.setdefault("CAMERA_V2_WALL_WIDTH", "1280")
+        os.environ.setdefault("CAMERA_V2_WALL_HEIGHT", "1080")
         super().__init__()
 
-        self.wall_width = 1024
-        self.wall_height = 864
+        self.wall_width = 1280
+        self.wall_height = 1080
         self._set_if(self.tiler, "rows", 3)
         self._set_if(self.tiler, "columns", 2)
         self._set_if(self.tiler, "width", self.wall_width)
         self._set_if(self.tiler, "height", self.wall_height)
         if self.tiler.find_property("show-source") is not None:
             self.tiler.set_property("show-source", -1)
-        # The Qt grid owns the final visible geometry. Stretching only happens at
-        # the presentation sink; detector/tracker coordinates remain source-space.
-        self._set_if(self.sink, "force-aspect-ratio", False)
+        # Never stretch the tiled output to the Qt window. GStreamer will letterbox
+        # only the unused outer area when the widget ratio differs slightly.
+        self._set_if(self.sink, "force-aspect-ratio", True)
 
         now = time.monotonic()
         for camera in self.cameras:
@@ -68,7 +74,8 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
                 previous = self.live_tracks.get(key)
                 item = dict(row)
                 item["camera_id"] = self._camera_name(source_id)
-                item["label"] = previous.get("label") if previous else f"Unknown_{source_id + 1:02d}_{object_id}"
+                # Match the supplied UI contract: Unknown_03, Unknown_05, ...
+                item["label"] = previous.get("label") if previous else f"Unknown_{object_id:02d}"
                 item["first_seen"] = previous["first_seen"] if previous else now
                 item["last_seen"] = now
                 item["first_seen_epoch"] = previous.get("first_seen_epoch", epoch) if previous else epoch
@@ -90,11 +97,11 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
                         "message": f"{item['label']} {item['camera_id']} da aniqlandi",
                     })
 
-            # nvstreammux may emit partial live batches; do not turn one missing
-            # source in one batch into a false exit event.
+            # nvstreammux may emit partial live batches. Keep identity state across
+            # those gaps, but display freshness is handled separately below.
             expired = [
                 key for key, item in self.live_tracks.items()
-                if now - float(item.get("last_seen", 0.0)) > 1.35
+                if now - float(item.get("last_seen", 0.0)) > self._exit_grace
             ]
             for key in expired:
                 item = self.live_tracks.pop(key)
@@ -134,7 +141,7 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
         with self.ui_lock:
             expired = [
                 key for key, item in self.live_tracks.items()
-                if now - float(item.get("last_seen", 0.0)) > 1.35
+                if now - float(item.get("last_seen", 0.0)) > self._exit_grace
             ]
             for key in expired:
                 item = self.live_tracks.pop(key)
@@ -155,7 +162,14 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
         self._expire_tracks(now)
 
         with self.ui_lock:
-            tracks = [dict(item) for item in self.live_tracks.values()]
+            # Only current/fresh NvDCF coordinates go to the overlay. The longer
+            # retained identity state is deliberately not rendered, preventing a
+            # stale bbox from visibly trailing behind a walking person.
+            tracks = [
+                dict(item)
+                for item in self.live_tracks.values()
+                if now - float(item.get("last_seen", 0.0)) <= self._visible_grace
+            ]
             events = [dict(item) for item in self.live_events]
 
         cameras = []
@@ -179,6 +193,8 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
                 "fps": fps,
                 "online": online,
                 "count": count,
+                "source_width": int(self.frame_width),
+                "source_height": int(self.frame_height),
                 "frame_age_ms": max(0.0, (now - last_change) * 1000.0) if frame_count else 0.0,
             })
 
