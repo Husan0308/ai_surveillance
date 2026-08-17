@@ -19,23 +19,25 @@ class ReIDTask:
     crop_bgr: np.ndarray
     confidence: float
     tracker_confidence: float
+    bbox: tuple[float, float, float, float]
     submitted_at: float
 
 
 class ExternalReIDWorker:
-    """Sparse CPU ONNX ReID for Pascal hosts running DeepStream/TensorRT 10.x.
+    """Sparse CPU ONNX ReID for the Pascal Camera V2 host.
 
-    Local detection/tracking stay on YOLO CUDA + NvDCF. Only appearance embedding
-    extraction runs here. NVIDIA TAO ReIdentificationNet is trained/evaluated on
-    person crops resized directly to 256x128, so preprocessing uses direct resize
-    rather than letterbox padding.
+    Geometry/local identity remain owned by YOLO + NvDCF. This worker extracts a
+    TAO ReIdentificationNet embedding plus a cheap clothing-colour signature from
+    the same person crop. The colour cue is intentionally secondary: it stabilizes
+    difficult cross-view matches but must never be trusted by itself.
     """
 
     MEAN_RGB = np.asarray([123.6750, 116.2800, 103.5300], dtype=np.float32)
-    SCALE = np.float32(0.01735207)  # 1 / (255 * 0.226)
+    SCALE = np.float32(0.01735207)
     FEATURE_SIZE = 256
     INPUT_WIDTH = 128
     INPUT_HEIGHT = 256
+    COLOR_FEATURE_SIZE = 96
 
     def __init__(self) -> None:
         self.max_queue = max(4, int(os.environ.get("CAMERA_V2_REID_QUEUE", "16")))
@@ -68,7 +70,6 @@ class ExternalReIDWorker:
             raise ValueError("empty ReID crop")
         if crop_bgr.ndim != 3 or crop_bgr.shape[2] < 3:
             raise ValueError(f"invalid ReID crop shape: {getattr(crop_bgr, 'shape', None)}")
-
         rgb = cv2.cvtColor(crop_bgr[..., :3], cv2.COLOR_BGR2RGB)
         resized = cv2.resize(
             rgb,
@@ -81,10 +82,7 @@ class ExternalReIDWorker:
     def _blob(cls, crop_bgr: np.ndarray) -> np.ndarray:
         image = cls._resize_rgb(crop_bgr)
         image = (image - cls.MEAN_RGB) * cls.SCALE
-        return np.ascontiguousarray(
-            image.transpose(2, 0, 1)[None, ...],
-            dtype=np.float32,
-        )
+        return np.ascontiguousarray(image.transpose(2, 0, 1)[None, ...], dtype=np.float32)
 
     @classmethod
     def _normalize_feature(cls, raw: np.ndarray) -> tuple[float, ...]:
@@ -99,14 +97,50 @@ class ExternalReIDWorker:
         vector = vector / norm
         return tuple(float(v) for v in vector)
 
+    @classmethod
+    def _color_signature(cls, crop_bgr: np.ndarray) -> tuple[float, ...]:
+        """Return upper/lower-body HSV histograms with a Hellinger transform."""
+        import cv2
+
+        if crop_bgr is None or crop_bgr.size == 0:
+            return ()
+        h, w = crop_bgr.shape[:2]
+        if h < 24 or w < 12:
+            return ()
+
+        # Ignore border/background and most head/feet pixels. Two body bands make
+        # shirt/trouser colour useful without trying to turn colour into an ID.
+        x1, x2 = int(w * 0.12), max(int(w * 0.88), int(w * 0.12) + 1)
+        bands = ((0.18, 0.55), (0.52, 0.90))
+        parts: list[np.ndarray] = []
+        for ylo, yhi in bands:
+            y1 = int(h * ylo)
+            y2 = max(int(h * yhi), y1 + 1)
+            roi = crop_bgr[y1:y2, x1:x2]
+            if roi.size == 0:
+                return ()
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            hist = cv2.calcHist([hsv], [0, 1], None, [12, 4], [0, 180, 0, 256])
+            hist = np.asarray(hist, dtype=np.float32).reshape(-1)
+            total = float(hist.sum())
+            if total <= 1e-8:
+                return ()
+            hist /= total
+            parts.append(np.sqrt(hist))
+
+        vector = np.concatenate(parts).astype(np.float32, copy=False)
+        norm = float(np.linalg.norm(vector))
+        if vector.size != cls.COLOR_FEATURE_SIZE or not np.isfinite(norm) or norm <= 1e-8:
+            return ()
+        vector /= norm
+        return tuple(float(v) for v in vector)
+
     def _run(self) -> None:
         try:
             import cv2
 
             try:
-                cv2.setNumThreads(
-                    max(1, int(os.environ.get("CAMERA_V2_REID_CPU_THREADS", "2")))
-                )
+                cv2.setNumThreads(max(1, int(os.environ.get("CAMERA_V2_REID_CPU_THREADS", "2"))))
             except Exception:
                 pass
 
@@ -122,13 +156,17 @@ class ExternalReIDWorker:
                 raise RuntimeError(f"unexpected ReID blob shape: {blob.shape}")
             net.setInput(blob)
             self._normalize_feature(net.forward())
+            color = self._color_signature(dummy)
+            if len(color) != self.COLOR_FEATURE_SIZE:
+                raise RuntimeError(f"unexpected colour feature size: {len(color)}")
             self.warmup_ms = (time.monotonic() - started) * 1000.0
             self.ready_event.set()
             print(
                 "CAMERA_REID external worker ready: "
                 f"backend=opencv-cpu input={self.INPUT_WIDTH}x{self.INPUT_HEIGHT} "
-                f"feature={self.FEATURE_SIZE} preprocess=tao-direct-resize "
-                f"warmup={self.warmup_ms:.1f}ms model={self.model_path.name}",
+                f"feature={self.FEATURE_SIZE} color={self.COLOR_FEATURE_SIZE} "
+                f"preprocess=tao-direct-resize warmup={self.warmup_ms:.1f}ms "
+                f"model={self.model_path.name}",
                 flush=True,
             )
 
@@ -144,6 +182,7 @@ class ExternalReIDWorker:
                 try:
                     net.setInput(self._blob(task.crop_bgr))
                     feature = self._normalize_feature(net.forward())
+                    color_feature = self._color_signature(task.crop_bgr)
                     self.infer_ms = (time.monotonic() - started) * 1000.0
                     self.features += 1
                     self.last_error = ""
@@ -153,6 +192,8 @@ class ExternalReIDWorker:
                         "confidence": float(task.confidence),
                         "tracker_confidence": float(task.tracker_confidence),
                         "feature": feature,
+                        "color_feature": color_feature,
+                        "bbox": tuple(float(v) for v in task.bbox),
                         "captured_at": float(task.submitted_at),
                     }
                     try:
@@ -167,17 +208,12 @@ class ExternalReIDWorker:
                         except queue.Full:
                             self.dropped += 1
                 except Exception as exc:
-                    # A malformed/edge crop is recoverable. Do not permanently stop
-                    # the worker; a later clean crop from the same track can succeed.
                     self.failed += 1
                     self.last_error = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             self.fatal_error = f"{type(exc).__name__}: {exc}"
             self.ready_event.set()
-            print(
-                f"CAMERA_REID external worker unavailable: {self.fatal_error}",
-                flush=True,
-            )
+            print(f"CAMERA_REID external worker unavailable: {self.fatal_error}", flush=True)
 
     def submit(
         self,
@@ -187,20 +223,19 @@ class ExternalReIDWorker:
         crop_bgr: np.ndarray,
         confidence: float,
         tracker_confidence: float,
+        bbox: tuple[float, float, float, float] | None = None,
     ) -> bool:
-        if (
-            self.fatal_error
-            or not self.ready_event.is_set()
-            or crop_bgr is None
-            or crop_bgr.size == 0
-        ):
+        if self.fatal_error or not self.ready_event.is_set() or crop_bgr is None or crop_bgr.size == 0:
             return False
+        if bbox is None:
+            bbox = (0.0, 0.0, 0.0, 0.0)
         task = ReIDTask(
             source_id=int(source_id),
             object_id=int(object_id),
             crop_bgr=np.ascontiguousarray(crop_bgr),
             confidence=float(confidence),
             tracker_confidence=float(tracker_confidence),
+            bbox=tuple(float(v) for v in bbox),
             submitted_at=time.monotonic(),
         )
         try:
