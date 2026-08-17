@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import tempfile
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -9,32 +13,24 @@ RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 REID_MODEL_DIR = RUNTIME_DIR / "models" / "reid"
 REID_MODEL_NAME = "resnet50_market1501_aicity156.onnx"
+REID_MODEL_URL = (
+    "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/tao/"
+    "reidentificationnet/deployable_v1.2/files/resnet50_market1501_aicity156.onnx"
+)
+REID_MODEL_SHA256 = "0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b"
 
 # 4 GB Pascal fixed-CCTV pedestrian profile.
-#
-# NvMultiObjectTracker pre-allocates GPU memory from
-# streams * maxTargetsPerStream, so keep the target pool realistic for an office.
-# The detector remains high resolution; NvDCF itself is intentionally lightweight.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "1",
     "maxTargetsPerStream": "24",
-    # New-target creation uses: create when max IoU to existing targets is LOWER
-    # than minIouDiff4NewTarget. A high value therefore keeps two strongly
-    # overlapping, but genuinely different, people eligible for separate tracks.
     "minIouDiff4NewTarget": "0.90",
-    # Restore the known-stable lifecycle thresholds. Realtime OSD gaps are handled
-    # downstream by a bounded display bridge rather than by weakening NvDCF state.
     "minTrackerConfidence": "0.18",
     "probationAge": "1",
     "maxShadowTrackingAge": "28",
     "earlyTerminationAge": "2",
 }
 
-# Only patch keys actually present in the NVIDIA max_perf sample. Cascaded
-# association keeps low-score YOLO person candidates useful for recovering an
-# existing target, while the visual feature footprint is kept small enough for a
-# GTX 1050 Ti running six decoded streams plus YOLO26m.
 _OPTIONAL_PATCHES: dict[str, str] = {
     "useColorNames": "0",
     "useHog": "1",
@@ -49,9 +45,6 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4VisualSimilarity": "0.05",
     "usePrediction4Assoc": "1",
     "minTrackingConfidenceDuringInactive": "0.35",
-    # Do not let NvDCF's periodic duplicate-track cleanup collapse two people that
-    # are almost on top of each other. 0.98 means only near-identical track boxes
-    # are eligible for duplicate removal; run it less frequently as well.
     "minIou4TargetDuplicate": "0.98",
     "targetDuplicateRunInterval": "10",
 }
@@ -70,24 +63,108 @@ def _deepstream_roots() -> list[Path]:
     return output
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _auto_download_enabled() -> bool:
+    value = os.environ.get("CAMERA_V2_REID_AUTO_DOWNLOAD", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _download_official_reid(destination: Path) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    print(
+        "CAMERA_REID model missing; downloading NVIDIA TAO ReIdentificationNet v1.2 "
+        f"to {destination}",
+        flush=True,
+    )
+    with tempfile.NamedTemporaryFile(
+        prefix=destination.name + ".",
+        suffix=".part",
+        dir=destination.parent,
+        delete=False,
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        request = urllib.request.Request(
+            REID_MODEL_URL,
+            headers={"User-Agent": "camera-v2-reid/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=120) as response, tmp_path.open("wb") as out:
+            shutil.copyfileobj(response, out, length=1024 * 1024)
+        if tmp_path.stat().st_size < 80 * 1024 * 1024:
+            raise RuntimeError(
+                f"downloaded ReID model is too small: {tmp_path.stat().st_size} bytes"
+            )
+        digest = _sha256(tmp_path)
+        if digest != REID_MODEL_SHA256:
+            raise RuntimeError(
+                "ReID model SHA256 mismatch: "
+                f"expected={REID_MODEL_SHA256} got={digest}"
+            )
+        tmp_path.replace(destination)
+        print(
+            f"CAMERA_REID model ready: {destination} "
+            f"({destination.stat().st_size / (1024 * 1024):.1f} MiB)",
+            flush=True,
+        )
+        return destination.resolve()
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
 def resolve_reid_model() -> Path:
     override = os.environ.get("CAMERA_V2_REID_MODEL", "").strip()
-    candidates: list[Path] = []
     if override:
-        candidates.append(Path(override).expanduser())
-    candidates.append(REID_MODEL_DIR / REID_MODEL_NAME)
-    for root in _deepstream_roots():
-        candidates.append(root / "samples/models/Tracker" / REID_MODEL_NAME)
+        candidate = Path(override).expanduser()
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+        raise RuntimeError(f"CAMERA_V2_REID_MODEL does not exist: {candidate}")
 
-    for candidate in candidates:
+    local_model = REID_MODEL_DIR / REID_MODEL_NAME
+    if local_model.exists() and local_model.is_file():
+        # Files installed by our setup path must be the exact NVIDIA artifact.
+        digest = _sha256(local_model)
+        if digest == REID_MODEL_SHA256:
+            return local_model.resolve()
+        if not _auto_download_enabled():
+            raise RuntimeError(
+                f"Camera V2 ReID model failed SHA256 verification: {local_model}\n"
+                "Run: python scripts/setup_camera_v2_reid.py --force"
+            )
+        print(f"CAMERA_REID replacing corrupt model: {local_model}", flush=True)
+        local_model.unlink(missing_ok=True)
+
+    for root in _deepstream_roots():
+        candidate = root / "samples/models/Tracker" / REID_MODEL_NAME
         if candidate.exists() and candidate.is_file():
             return candidate.resolve()
 
-    searched = "\n  - ".join(str(p) for p in candidates)
+    if _auto_download_enabled():
+        try:
+            return _download_official_reid(local_model)
+        except Exception as exc:
+            raise RuntimeError(
+                "Camera V2 could not auto-install the NVIDIA TAO ReID model.\n"
+                f"Reason: {exc}\n"
+                "Retry manually with:\n"
+                "  python scripts/setup_camera_v2_reid.py --force\n"
+                "Or disable ReID temporarily with:\n"
+                "  CAMERA_V2_REID=0 python -m services.camera_v2.person_tracking_final"
+            ) from exc
+
+    searched = [local_model]
+    searched.extend(root / "samples/models/Tracker" / REID_MODEL_NAME for root in _deepstream_roots())
     raise RuntimeError(
         "Camera V2 ReID model is missing. Install the NVIDIA TAO model first:\n"
         "  python scripts/setup_camera_v2_reid.py\n"
-        "Searched:\n  - " + searched
+        "Searched:\n  - " + "\n  - ".join(str(p) for p in searched)
     )
 
 
@@ -140,6 +217,17 @@ def _set_section_key(lines: list[str], section: str, key: str, value: str) -> No
     lines.insert(end, f"  {key}: {value}")
 
 
+def _remove_section_keys(lines: list[str], section: str, keys: set[str]) -> None:
+    bounds = _section_bounds(lines, section)
+    if bounds is None:
+        return
+    start, end = bounds
+    for index in range(end - 1, start, -1):
+        stripped = lines[index].lstrip()
+        if any(stripped.startswith(key + ":") for key in keys):
+            del lines[index]
+
+
 def _set_or_insert_target_management(lines: list[str], key: str, value: str) -> bool:
     _set_section_key(lines, "TargetManagement", key, value)
     return True
@@ -158,8 +246,6 @@ def _configure_reid(lines: list[str]) -> Path:
     ).expanduser().resolve()
     engine.parent.mkdir(parents=True, exist_ok=True)
 
-    # Re-association is deliberately conservative. NvDCF handles within-camera
-    # continuity; the Python GlobalReIDManager fuses identities across cameras.
     trajectory = {
         "useUniqueID": "1",
         "enableReAssoc": "1",
@@ -172,9 +258,15 @@ def _configure_reid(lines: list[str]) -> Path:
     for key, value in trajectory.items():
         _set_section_key(lines, "TrajectoryManagement", key, value)
 
-    # NVIDIA TAO ReIdentificationNet v1.2: ResNet-50, 256-D embedding,
-    # 3x256x128 RGB input. L2 normalization is explicitly enabled because the raw
-    # model output is not normalized. Small batch/history keep 4 GB VRAM bounded.
+    # NVIDIA explicitly requires the legacy TAO/ETLT path keys to be removed when
+    # switching the tracker ReID block to the ONNX v1.2 model. Leaving both model
+    # sources in the generated YAML can make NvDCF select or validate the wrong one.
+    _remove_section_keys(
+        lines,
+        "ReID",
+        {"tltEncodedModel", "tltModelKey", "onnxFile", "modelEngineFile"},
+    )
+
     reid = {
         "reidType": "2",
         "batchSize": str(batch_size),
@@ -225,8 +317,6 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
         if not replaced:
             output.append(line)
 
-    # maxTargetsPerStream is critical to memory usage. Some NVIDIA sample revisions
-    # omit it, so insert it explicitly under TargetManagement when needed.
     if "maxTargetsPerStream" not in patched:
         _set_or_insert_target_management(output, "maxTargetsPerStream", "24")
         patched.add("maxTargetsPerStream")
@@ -238,8 +328,6 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing_required)
         )
 
-    # Shadow-history remains internal to NvDCF. The live OSD bridge below the tracker
-    # is bounded independently, so we do not export long-lived shadow metadata here.
     _set_section_key(output, "TargetManagement", "outputShadowTracks", "0")
 
     reid_enabled = os.environ.get("CAMERA_V2_REID", "1").strip().lower() not in {"0", "false", "no", "off"}
