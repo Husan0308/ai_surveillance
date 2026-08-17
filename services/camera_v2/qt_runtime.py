@@ -12,12 +12,13 @@ os.environ.setdefault("CAMERA_V2_QT_UI", "1")
 
 
 class CameraQtController:
-    """Qt-safe owner for the existing Camera V2 tracking/heatmap pipeline.
+    """Qt owner for the existing CameraPersonHeatmap pipeline.
 
-    The controller is deliberately lazy: constructing the Qt window does not touch
-    DeepStream. The real pipeline is created only after the native video QWidget has
-    been shown and has a stable WId. This keeps the UI visible even if camera startup
-    fails and avoids binding nveglglessink to a stale/zero handle.
+    The camera architecture is not duplicated or replaced here. This class only:
+      * creates the existing runtime lazily after the Qt native WId exists;
+      * attaches nveglglessink to that WId through GstVideoOverlay;
+      * starts the same YOLO scheduler/process used by the CLI runtime;
+      * exposes realtime metadata snapshots to Qt.
     """
 
     def __init__(self) -> None:
@@ -32,6 +33,10 @@ class CameraQtController:
         self._lock = threading.RLock()
         self._status = "WAITING"
         self._error = ""
+        self._last_bus_error = ""
+        self._started_mono = 0.0
+        self._overlay_bound = False
+        self._bus_observer_connected = False
 
         self._heat_lock = threading.RLock()
         self._heat = [[[0.0 for _ in range(32)] for _ in range(18)] for _ in range(6)]
@@ -62,15 +67,45 @@ class CameraQtController:
         if self.runtime is not None:
             return self.runtime
         from .person_heatmap import CameraPersonHeatmap
-        self.runtime = CameraPersonHeatmap()
-        if len(self.runtime.cameras) != 6:
-            raise RuntimeError(f"Sentinel Qt expects 6 cameras, found {len(self.runtime.cameras)}")
-        return self.runtime
+
+        runtime = CameraPersonHeatmap()
+        if len(runtime.cameras) != 6:
+            raise RuntimeError(f"Sentinel Qt expects 6 cameras, found {len(runtime.cameras)}")
+        self.runtime = runtime
+        return runtime
+
+    def _observe_bus_message(self, _bus, message) -> None:
+        runtime = self.runtime
+        if runtime is None:
+            return
+        Gst = runtime.Gst
+        if message.type == Gst.MessageType.ERROR:
+            try:
+                err, debug = message.parse_error()
+                src = message.src.get_name() if message.src else "unknown"
+                text = f"{src}: {err.message}"
+                if debug:
+                    text += f" | {debug}"
+            except Exception as exc:
+                text = f"GStreamer error: {exc}"
+            self._last_bus_error = text
+            print(f"CAMERA_QT BUS_ERROR {text}", flush=True)
+        elif message.type == Gst.MessageType.STATE_CHANGED and message.src == runtime.pipeline:
+            try:
+                old, new, pending = message.parse_state_changed()
+                print(
+                    f"CAMERA_QT pipeline_state {old.value_nick}->{new.value_nick} "
+                    f"pending={pending.value_nick}",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
     def _install_video_overlay_handler(self) -> None:
         runtime = self.runtime
         if runtime is None:
             return
+
         import gi
         gi.require_version("GstVideo", "1.0")
         from gi.repository import Gst, GstVideo
@@ -79,6 +114,9 @@ class CameraQtController:
         if handle <= 0:
             raise RuntimeError("Qt video window handle is not valid")
 
+        # GStreamer calls this sync handler from the streaming thread exactly when
+        # the video sink needs its native window. Do not call any Qt functions here;
+        # only use the WId already cached on the Qt GUI thread.
         def on_sync_message(_bus, message, _data=None):
             try:
                 is_prepare = GstVideo.is_video_overlay_prepare_window_handle_message(message)
@@ -90,17 +128,32 @@ class CameraQtController:
             try:
                 GstVideo.VideoOverlay.set_window_handle(message.src, handle)
                 GstVideo.VideoOverlay.handle_events(message.src, False)
+                self._overlay_bound = True
+                print(
+                    f"CAMERA_QT overlay_bound sink={message.src.get_name()} wid={handle}",
+                    flush=True,
+                )
                 return Gst.BusSyncReply.DROP
             except Exception as exc:
                 self._set_status("VIDEO ERROR", str(exc))
+                print(f"CAMERA_QT overlay_bind_error {exc}", flush=True)
                 return Gst.BusSyncReply.PASS
 
         runtime.bus.set_sync_handler(on_sync_message, None)
+
+        # Setting the known sink before PLAYING is also valid and avoids an internal
+        # fallback window on sinks that do not emit prepare-window-handle on every run.
         GstVideo.VideoOverlay.set_window_handle(runtime.sink, handle)
         try:
             GstVideo.VideoOverlay.handle_events(runtime.sink, False)
         except Exception:
             pass
+        self._overlay_bound = True
+        print(f"CAMERA_QT overlay_prebound sink={runtime.sink.get_name()} wid={handle}", flush=True)
+
+        if not self._bus_observer_connected:
+            runtime.bus.connect("message", self._observe_bus_message)
+            self._bus_observer_connected = True
 
     def start(self, win_id: int) -> None:
         if self._started or self._starting or self._stopped:
@@ -113,10 +166,15 @@ class CameraQtController:
             self._install_video_overlay_handler()
 
             from .detection import _yolo_worker
+
             ctx = mp.get_context("spawn")
             runtime.job_q = ctx.Queue(maxsize=1)
             runtime.result_q = ctx.Queue(maxsize=2)
-            runtime.worker = ctx.Process(target=_yolo_worker, args=(runtime.job_q, runtime.result_q), daemon=True)
+            runtime.worker = ctx.Process(
+                target=_yolo_worker,
+                args=(runtime.job_q, runtime.result_q),
+                daemon=True,
+            )
             runtime.worker.start()
             runtime.scheduler_thread = threading.Thread(
                 target=runtime._scheduler,
@@ -138,10 +196,12 @@ class CameraQtController:
             )
             self._loop_thread.start()
             self._started = True
-            self._set_status("LIVE")
+            self._started_mono = time.monotonic()
+            self._set_status("CONNECTING")
             print(
-                "CAMERA_QT started: exact Sentinel shell + native 2x3 DeepStream wall + "
-                "YOLO26m + NvDCF; video_copy=0 mjpeg=0",
+                "CAMERA_QT started: Sentinel UI + EXISTING Camera V2 pipeline; "
+                "6xRTSP/NVDEC->mux->YOLO26m/NvDCF->2x3 tiler->OSD->EGL; "
+                "video_copy=0 mjpeg=0 architecture_changed=0",
                 flush=True,
             )
         except Exception as exc:
@@ -220,6 +280,13 @@ class CameraQtController:
         if runtime is None:
             return
         runtime.tiler.set_property("show-source", -1 if source_id is None else int(source_id))
+        try:
+            import gi
+            gi.require_version("GstVideo", "1.0")
+            from gi.repository import GstVideo
+            GstVideo.VideoOverlay.expose(runtime.sink)
+        except Exception:
+            pass
 
     def focus_source(self) -> int | None:
         return self._focus_source
@@ -252,7 +319,11 @@ class CameraQtController:
             return
         cx = max(0, min(31, int(round(gx))))
         cy = max(0, min(17, int(round(gy))))
-        kernel = ((0.08, 0.18, 0.08), (0.18, 1.0, 0.18), (0.08, 0.18, 0.08))
+        kernel = (
+            (0.08, 0.18, 0.08),
+            (0.18, 1.0, 0.18),
+            (0.08, 0.18, 0.08),
+        )
         grid = self._heat[source_id]
         for ky in range(-1, 2):
             y = cy + ky
@@ -261,7 +332,10 @@ class CameraQtController:
             for kx in range(-1, 2):
                 x = cx + kx
                 if 0 <= x < 32:
-                    grid[y][x] = min(1.0, grid[y][x] + amount * kernel[ky + 1][kx + 1])
+                    grid[y][x] = min(
+                        1.0,
+                        grid[y][x] + amount * kernel[ky + 1][kx + 1],
+                    )
 
     def _update_heat(self, snapshot: dict) -> None:
         now = time.monotonic()
@@ -293,7 +367,12 @@ class CameraQtController:
                     amount = min(0.020, 0.0035 + dist * 0.003)
                     for step in range(1, steps + 1):
                         t = step / steps
-                        self._deposit(sid, previous[0] + dx * t, previous[1] + dy * t, amount)
+                        self._deposit(
+                            sid,
+                            previous[0] + dx * t,
+                            previous[1] + dy * t,
+                            amount,
+                        )
             for key in list(self._heat_tracks):
                 if key not in active_keys and now - self._heat_tracks[key][2] > 1.5:
                     self._heat_tracks.pop(key, None)
@@ -302,16 +381,46 @@ class CameraQtController:
         runtime = self.runtime
         if runtime is None:
             cameras = [
-                {"source_id": i, "camera_id": f"CAM-{i + 1:02d}", "fps": 0.0, "online": False, "count": 0}
+                {
+                    "source_id": i,
+                    "camera_id": f"CAM-{i + 1:02d}",
+                    "fps": 0.0,
+                    "online": False,
+                    "count": 0,
+                }
                 for i in range(6)
             ]
             return {"cameras": cameras, "tracks": [], "events": [], "rooms": []}
+
         snap = runtime.ui_snapshot()
         self._update_heat(snap)
         self._last_snapshot = snap
+
+        online = sum(1 for camera in snap.get("cameras", []) if camera.get("online"))
+        if self._started:
+            if online == 6:
+                self._set_status("LIVE")
+            elif online > 0:
+                self._set_status(f"DEGRADED · {online}/6", self._last_bus_error)
+            elif time.monotonic() - self._started_mono > 7.0:
+                detail = self._last_bus_error or "No RTSP/NVDEC frames received yet"
+                self._set_status("NO VIDEO", detail)
+
+        if online and self._overlay_bound:
+            try:
+                import gi
+                gi.require_version("GstVideo", "1.0")
+                from gi.repository import GstVideo
+                GstVideo.VideoOverlay.expose(runtime.sink)
+            except Exception:
+                pass
         return snap
 
-    def heat_points(self, source_id: int, max_points: int = 30) -> list[tuple[float, float, float]]:
+    def heat_points(
+        self,
+        source_id: int,
+        max_points: int = 30,
+    ) -> list[tuple[float, float, float]]:
         if not self.heatmap_enabled(source_id):
             return []
         with self._heat_lock:
@@ -321,7 +430,10 @@ class CameraQtController:
                     if value >= 0.012:
                         candidates.append((value, x + 0.5, y + 0.5))
         candidates.sort(reverse=True)
-        return [(x / 32.0, y / 18.0, value) for value, x, y in candidates[:max_points]]
+        return [
+            (x / 32.0, y / 18.0, value)
+            for value, x, y in candidates[:max_points]
+        ]
 
     def export_events_csv(self, path: str | Path) -> None:
         events = self.snapshot().get("events", [])
@@ -329,8 +441,15 @@ class CameraQtController:
             writer = csv.writer(handle)
             writer.writerow(["time", "type", "camera_id", "label", "message"])
             for event in events:
-                writer.writerow([
-                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(event.get("time", 0))),
-                    event.get("type", ""), event.get("camera_id", ""),
-                    event.get("label", ""), event.get("message", ""),
-                ])
+                writer.writerow(
+                    [
+                        time.strftime(
+                            "%Y-%m-%d %H:%M:%S",
+                            time.localtime(event.get("time", 0)),
+                        ),
+                        event.get("type", ""),
+                        event.get("camera_id", ""),
+                        event.get("label", ""),
+                        event.get("message", ""),
+                    ]
+                )
