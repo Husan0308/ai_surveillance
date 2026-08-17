@@ -5,22 +5,21 @@ MODEL_REPO="${CAMERA_V2_QWEN_HF_REPO:-Qwen/Qwen3-VL-2B-Instruct-GGUF:Q4_K_M}"
 HOST="${CAMERA_V2_QWEN_HOST:-127.0.0.1}"
 PORT="${CAMERA_V2_QWEN_PORT:-8080}"
 THREADS="${CAMERA_V2_QWEN_THREADS:-4}"
-
-# The verifier sends two person montages in one request. Qwen3-VL/llama.cpp warns
-# that Qwen-VL needs at least 1024 image tokens for reliable visual reasoning.
-# 4096 context leaves room for 2x1024 image tokens + prompt + short JSON output.
 CTX="${CAMERA_V2_QWEN_CTX:-4096}"
 IMAGE_MIN_TOKENS="${CAMERA_V2_QWEN_IMAGE_MIN_TOKENS:-1024}"
 IMAGE_MAX_TOKENS="${CAMERA_V2_QWEN_IMAGE_MAX_TOKENS:-1024}"
 
 # GTX 1050 Ti has only 4 GB VRAM and the live YOLO/NvDCF/DeepStream pipeline
-# already uses it. A bounded transformer offload gives useful speedup without
-# handing the whole card to Qwen. Override to 12 after confirming free VRAM.
+# already owns part of it. Keep transformer offload bounded; the vision projector
+# is now GPU-offloaded by default because visual encoding was the dominant ~25 s
+# latency in the previous CPU-mmproj setup.
 GPU_LAYERS="${CAMERA_V2_QWEN_GPU_LAYERS:-8}"
 GPU_DEVICE="${CAMERA_V2_QWEN_GPU_DEVICE:-0}"
+MMPROJ_GPU="${CAMERA_V2_QWEN_MMPROJ_GPU:-1}"
 
-# The llama.app installer places the unified CLI here and it may not be in PATH
-# until a new shell is opened.
+# The llama.app installer currently places the unified CLI here. It may not be
+# visible in PATH until a new shell is opened, so probe the installed location
+# explicitly before falling back to PATH binaries.
 if [[ -x "${HOME}/.llama-app/llama" ]]; then
   LLAMA_BIN="${HOME}/.llama-app/llama"
   MODE="app"
@@ -36,15 +35,11 @@ else
   exit 2
 fi
 
-# Do not produce the cryptic 'couldn't bind' error when an older Qwen server is
-# still alive. Changing GPU layer count requires restarting that existing server.
-if command -v curl >/dev/null 2>&1; then
-  if curl -fsS --max-time 1 "http://${HOST}:${PORT}/health" >/dev/null 2>&1; then
-    echo "QWEN_REID_SERVER already running on http://${HOST}:${PORT}"
-    echo "To change GPU layers, stop the old server (Ctrl-C in its terminal) and run this script again."
-    echo "Current requested gpu_layers=${GPU_LAYERS}; a running process cannot be reconfigured in-place."
-    exit 0
-  fi
+# Avoid the confusing bind error when an older Qwen server is still alive.
+if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE "[.:]${PORT}[[:space:]]"; then
+  echo "QWEN_REID_SERVER port ${PORT} is already in use." >&2
+  echo "Stop the old server first (Ctrl+C), or run: fuser -k ${PORT}/tcp" >&2
+  exit 3
 fi
 
 ARGS=(
@@ -61,18 +56,20 @@ ARGS=(
   --alias qwen3-vl-reid
 )
 
-# Keep the multimodal projector on CPU by default. On this 4 GB Pascal card the
-# projector plus YOLO/NvDCF can push VRAM over the edge. The LLM transformer layers
-# still use CUDA. CAMERA_V2_QWEN_MMPROJ_GPU=1 is an explicit opt-in experiment.
-if [[ "${CAMERA_V2_QWEN_MMPROJ_GPU:-0}" != "1" ]]; then
+# llama.cpp normally offloads the multimodal projector to GPU. On this machine
+# that is desirable because Qwen is only an asynchronous verifier and the current
+# VRAM trace leaves enough headroom. Set CAMERA_V2_QWEN_MMPROJ_GPU=0 to fall back
+# to CPU if the full surveillance runtime ever hits CUDA OOM.
+if [[ "$MMPROJ_GPU" != "1" ]]; then
   ARGS+=(--no-mmproj-offload)
 fi
 
+# Restrict Qwen to the requested CUDA device without changing the parent shell.
 export CUDA_VISIBLE_DEVICES="$GPU_DEVICE"
 
 printf 'QWEN_REID_SERVER binary=%s mode=%s model=%s gpu_layers=%s gpu_device=%s ctx=%s image_tokens=%s..%s mmproj_gpu=%s\n' \
   "$LLAMA_BIN" "$MODE" "$MODEL_REPO" "$GPU_LAYERS" "$GPU_DEVICE" "$CTX" \
-  "$IMAGE_MIN_TOKENS" "$IMAGE_MAX_TOKENS" "${CAMERA_V2_QWEN_MMPROJ_GPU:-0}"
+  "$IMAGE_MIN_TOKENS" "$IMAGE_MAX_TOKENS" "$MMPROJ_GPU"
 
 if [[ "$MODE" == "app" ]]; then
   exec "$LLAMA_BIN" serve "${ARGS[@]}"
