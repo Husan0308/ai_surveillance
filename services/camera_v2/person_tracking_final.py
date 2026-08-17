@@ -6,26 +6,25 @@ import time
 from collections import deque
 
 # Production person tracking for GTX 1050 Ti 4 GB + six fixed CCTV streams.
-# Keep the detector at 640x384 for distant/small pedestrians, but make NvDCF much
-# lighter. NVIDIA recommends max_perf + a reduced tracker resolution for peak
-# performance/resource efficiency.
-os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "640")
-os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
+# Use a modestly larger detector input than the old 640x384 baseline so adjacent
+# people retain more spatial detail, while keeping micro-batch=2 for 4 GB VRAM.
+os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "704")
+os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.08")
-# Keep overlapping people alive. A low NMS IoU can suppress the second person in
-# shoulder-to-shoulder/occluded office scenes before NvDCF ever sees it.
-os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.72")
+# High NMS IoU intentionally permits strongly-overlapping person detections to
+# survive. Ultralytics NMS only suppresses boxes; it cannot split a merged person.
+os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.82")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
 os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "480")
 os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
-# Ultralytics already performs its own suppression. The second pass should remove
-# only near-identical duplicates, not two real people whose boxes overlap.
-os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.88")
-os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.97")
+# Ultralytics has already run NMS. The second pass is now near-identical-only so
+# two real people are not collapsed merely because their person boxes overlap.
+os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.96")
+os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.995")
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
 from .detector_latency import DetectorLatencyCompensator, PreparedDetection
