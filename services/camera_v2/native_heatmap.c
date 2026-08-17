@@ -16,6 +16,7 @@ typedef struct {
     uint64_t object_id;
     uint64_t last_frame_num;
     uint64_t last_vote_frame;
+    uint64_t last_presence_frame;
     uint64_t moving_until;
     unsigned int motion_votes;
     float smooth_gx;
@@ -39,8 +40,8 @@ static uint64_t g_last_frame[HEAT_MAX_SOURCES];
 static HeatTrackState g_tracks[HEAT_MAX_TRACKS];
 static uint64_t g_rendered_points_total = 0;
 
-/* Reference-look defaults: a single path stays cool blue/cyan; repeated traffic
- * slowly moves through green/yellow and only heavily used floor cells become red. */
+/* Reference-look defaults: one/few people remain blue/cyan; repeatedly occupied
+ * floor cells warm through green/yellow and sustained traffic eventually turns red. */
 static float g_deposit = 0.0030f;
 static float g_decay = 0.999968f;
 static float g_low = 0.00050f;
@@ -48,15 +49,18 @@ static float g_yellow = 0.070f;
 static float g_red = 0.200f;
 static unsigned int g_max_points_per_source = 72;
 
-/* At 1280x720 with a 48x27 grid one cell is ~27 px in source coordinates.
- * Require actual motion before painting so a seated person's bbox jitter does not
- * create a permanent hotspot. */
-static const float MOTION_CONFIRM_DIST2 = 0.1024f; /* 0.32^2 cell */
-static const float DEPOSIT_DIST2 = 0.0064f;        /* 0.08^2 cell */
-static const uint64_t MOTION_VOTE_WINDOW = 16;    /* ~0.8 s @20 FPS */
-static const uint64_t MOVING_HOLD_FRAMES = 12;
+/* Every real NvDCF person contributes a very small presence pulse. Motion adds a
+ * denser interpolated trail. This guarantees the heatmap covers every tracked
+ * person while preventing one stationary person from becoming red immediately. */
+static const uint64_t PRESENCE_INTERVAL_FRAMES = 12; /* ~0.6 s @20 FPS */
+static const float PRESENCE_INITIAL_SCALE = 0.60f;
+static const float PRESENCE_HOLD_SCALE = 0.14f;
+static const float MOTION_CONFIRM_DIST2 = 0.0576f; /* 0.24^2 cell */
+static const float DEPOSIT_DIST2 = 0.0049f;        /* 0.07^2 cell */
+static const uint64_t MOTION_VOTE_WINDOW = 20;    /* ~1.0 s @20 FPS */
+static const uint64_t MOVING_HOLD_FRAMES = 14;
 static const float FOOT_EMA_ALPHA = 0.58f;
-static const float FOOT_LIFT_RATIO = 0.08f;        /* slightly above absolute bbox bottom */
+static const float FOOT_LIFT_RATIO = 0.08f;
 
 static float clampf_heat(float v, float lo, float hi) {
     if (v < lo) return lo;
@@ -120,6 +124,7 @@ static void reset_track(HeatTrackState *s,
     s->object_id = object_id;
     s->last_frame_num = frame_num;
     s->last_vote_frame = frame_num;
+    s->last_presence_frame = frame_num;
     s->smooth_gx = gx;
     s->smooth_gy = gy;
     s->anchor_gx = gx;
@@ -155,8 +160,6 @@ static void deposit_point(unsigned int source_id,
                           float gy,
                           uint32_t frame_num,
                           float amount_scale) {
-    /* A compact 5x5 Gaussian footprint produces the continuous halo seen in a
-     * conventional camera heatmap without making every footstep a huge blob. */
     static const float kernel[5][5] = {
         {0.010f, 0.025f, 0.045f, 0.025f, 0.010f},
         {0.025f, 0.080f, 0.180f, 0.080f, 0.025f},
@@ -164,7 +167,7 @@ static void deposit_point(unsigned int source_id,
         {0.025f, 0.080f, 0.180f, 0.080f, 0.025f},
         {0.010f, 0.025f, 0.045f, 0.025f, 0.010f},
     };
-    amount_scale = clampf_heat(amount_scale, 0.30f, 1.10f);
+    amount_scale = clampf_heat(amount_scale, 0.08f, 1.10f);
     int cx = (int)(gx + 0.5f);
     int cy = (int)(gy + 0.5f);
 
@@ -194,8 +197,6 @@ static void deposit_segment(unsigned int source_id,
     float ady = dy < 0.0f ? -dy : dy;
     float span = adx > ady ? adx : ady;
 
-    /* Dense sub-cell interpolation makes the trail continuous even when NvDCF's
-     * foot anchor moves by several pixels between output frames. */
     int steps = (int)(span * 5.0f) + 2;
     if (steps < 2) steps = 2;
     if (steps > 28) steps = 28;
@@ -207,15 +208,15 @@ static void deposit_segment(unsigned int source_id,
     }
 }
 
-/* Accumulate only from current real NvDCF objects. Bottom-center is used as the
- * floor contact reference and lifted 8% so the overlay sits just above the feet. */
+/* Accumulate from every current real NvDCF person. A new/standing person gets a
+ * faint blue presence halo; a moving person additionally paints a continuous path. */
 int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
     GstBuffer *buffer = (GstBuffer *)buffer_ptr;
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
     if (!batch_meta) return -1;
 
-    int movement_updates = 0;
+    int heat_updates = 0;
     for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)fnode->data;
         if (!frame_meta) continue;
@@ -249,6 +250,8 @@ int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
             if (!s->valid || s->source_id != source_id || s->object_id != (uint64_t)obj->object_id ||
                 frame_num < s->last_frame_num || frame_num - s->last_frame_num > 18) {
                 reset_track(s, source_id, (uint64_t)obj->object_id, frame_num, raw_gx, raw_gy);
+                deposit_point(source_id, raw_gx, raw_gy, (uint32_t)frame_num, PRESENCE_INITIAL_SCALE);
+                ++heat_updates;
                 continue;
             }
 
@@ -256,6 +259,15 @@ int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
             float gy = FOOT_EMA_ALPHA * raw_gy + (1.0f - FOOT_EMA_ALPHA) * s->smooth_gy;
             s->smooth_gx = gx;
             s->smooth_gy = gy;
+
+            /* Low-rate occupancy pulse: even a stationary/seated tracked person is
+             * represented. The scale is intentionally tiny so density, not one
+             * person's dwell time, is what pushes a place toward yellow/red. */
+            if (frame_num >= s->last_presence_frame + PRESENCE_INTERVAL_FRAMES) {
+                deposit_point(source_id, gx, gy, (uint32_t)frame_num, PRESENCE_HOLD_SCALE);
+                s->last_presence_frame = frame_num;
+                ++heat_updates;
+            }
 
             float anchor_dist2 = sqr(gx - s->anchor_gx) + sqr(gy - s->anchor_gy);
             if (anchor_dist2 >= MOTION_CONFIRM_DIST2) {
@@ -280,7 +292,7 @@ int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
                     s->deposit_gx = gx;
                     s->deposit_gy = gy;
                     s->moving_until = frame_num + MOVING_HOLD_FRAMES;
-                    ++movement_updates;
+                    ++heat_updates;
                 }
             } else if (anchor_dist2 < MOTION_CONFIRM_DIST2) {
                 s->deposit_gx = gx;
@@ -298,7 +310,7 @@ int camera_v2_heatmap_update(uintptr_t buffer_ptr) {
             }
         }
     }
-    return movement_updates;
+    return heat_updates;
 }
 
 static float smoothed_value(unsigned int sid, int gx, int gy) {
@@ -341,8 +353,6 @@ static void push_candidate(HeatCandidate *items,
 }
 
 static void heat_color(float value, NvOSD_ColorParams *color) {
-    /* Traffic-density palette matching a conventional translucent camera heatmap:
-     * blue/cyan -> green/yellow -> orange/red. */
     float r = 0.00f, g = 0.62f, b = 1.00f;
     if (value < g_yellow) {
         float u = (value - g_low) / (g_yellow - g_low + 0.000001f);
@@ -383,9 +393,6 @@ static NvDsDisplayMeta *new_display_meta(NvDsBatchMeta *batch_meta, NvDsFrameMet
     return meta;
 }
 
-/* Called after nvmultistreamtiler and immediately before nvdsosd. The heat field
- * stays per-camera; overlapping semi-transparent circles turn the grid into a
- * continuous translucent field instead of visible individual dots. */
 int camera_v2_heatmap_render(uintptr_t buffer_ptr,
                              unsigned int wall_width,
                              unsigned int wall_height,
