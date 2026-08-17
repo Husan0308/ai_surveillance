@@ -17,12 +17,15 @@ typedef struct {
 
 static CameraV2LabelState g_label_states[MAX_LABEL_STATES];
 
-static int is_generic_person_label(const char *label) {
+static int is_person_fallback(const char *label) {
     if (!label || !label[0]) return 1;
     if (g_ascii_strcasecmp(label, "Person") == 0) return 1;
     if (g_ascii_strcasecmp(label, "person") == 0) return 1;
-    if (g_ascii_strncasecmp(label, "Unknown", 7) == 0) return 1;
     return 0;
+}
+
+static int is_unknown_label(const char *label) {
+    return label && g_ascii_strncasecmp(label, "Unknown_", 8) == 0;
 }
 
 static CameraV2LabelState *find_label_state(unsigned int source_id,
@@ -71,7 +74,8 @@ static void set_reference_label(NvDsObjectMeta *obj,
     if (!obj) return;
 
     CameraV2LabelState *state = find_label_state(source_id, (uint64_t)obj->object_id, 0);
-    int upstream_known = !is_generic_person_label(obj->obj_label);
+    int upstream_unknown = is_unknown_label(obj->obj_label);
+    int upstream_known = !is_person_fallback(obj->obj_label) && !upstream_unknown;
 
     if (upstream_known) {
         state = find_label_state(source_id, (uint64_t)obj->object_id, 1);
@@ -81,22 +85,26 @@ static void set_reference_label(NvDsObjectMeta *obj,
         }
     } else if (state && state->known_name[0]) {
         /* Keep a recognized name attached to the same NvDCF track even if a
-         * downstream display-hold box carries the generic "Person" label. */
+         * downstream display-hold box carries the generic Person label. */
         state->last_frame_num = frame_num;
     }
 
     const char *known_name = (state && state->known_name[0]) ? state->known_name : NULL;
     int known = known_name != NULL;
-    char unknown_label[64];
+    char fallback_unknown[64];
     const char *display_label = known_name;
-    if (!known) {
+
+    if (!known && upstream_unknown) {
+        /* GlobalReIDManager already assigned the stable session-level Unknown ID. */
+        display_label = obj->obj_label;
+    } else if (!known) {
         g_snprintf(
-            unknown_label,
-            sizeof(unknown_label),
+            fallback_unknown,
+            sizeof(fallback_unknown),
             "Unknown_%02" G_GUINT64_FORMAT,
             (guint64)obj->object_id
         );
-        display_label = unknown_label;
+        display_label = fallback_unknown;
     }
 
     /* Reference UI colors: known = teal/green, unknown = amber. */
