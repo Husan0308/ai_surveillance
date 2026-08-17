@@ -57,7 +57,6 @@ def _yolo_worker(job_q, result_q) -> None:
             pass
         torch.backends.cudnn.benchmark = True
 
-        # Let the camera wall settle before model loading/warmup touches the GPU.
         time.sleep(float(os.environ.get("CAMERA_V2_DETECT_STARTUP_DELAY", "3.0")))
         model_path = _resolve_model(MODEL_SPEC)
         model = YOLO(model_path)
@@ -190,13 +189,6 @@ class MotionTrack:
 
 
 class SmoothBoxManager:
-    """Local per-camera box stabilizer; no identity/ReID semantics.
-
-    Detection timestamps are preserved. When YOLO returns later, the box state is
-    extrapolated from the original capture time to the current display time. This
-    removes most detector-latency trailing without touching camera pixels.
-    """
-
     def __init__(self, width: int, height: int) -> None:
         self.width = float(width)
         self.height = float(height)
@@ -226,7 +218,6 @@ class SmoothBoxManager:
 
     def _predict(self, track: MotionTrack, when: float):
         dt = min(self.max_predict, max(0.0, when - track.last_det_t))
-        # Mild velocity damping prevents the box from shooting ahead after a stop.
         damping = 1.0 / (1.0 + 0.75 * dt)
         cx = track.cx + track.vx * dt * damping
         cy = track.cy + track.vy * dt * damping
@@ -279,21 +270,16 @@ class SmoothBoxManager:
                 dt = max(0.05, captured_t - track.last_det_t)
                 pred_box = self._predict(track, captured_t)
                 pcx, pcy, pw, ph = _xyxy_to_state(pred_box)
-
                 measured_vx = (mcx - track.cx) / dt
                 measured_vy = (mcy - track.cy) / dt
                 max_vx = self.width * 0.90
                 max_vy = self.height * 0.90
                 measured_vx = max(-max_vx, min(max_vx, measured_vx))
                 measured_vy = max(-max_vy, min(max_vy, measured_vy))
-
                 track.vx = track.vx * 0.55 + measured_vx * 0.45
                 track.vy = track.vy * 0.55 + measured_vy * 0.45
                 track.vw = track.vw * 0.70 + ((mw - track.w) / dt) * 0.30
                 track.vh = track.vh * 0.70 + ((mh - track.h) / dt) * 0.30
-
-                # Position follows quickly. Size expands quickly but shrinks slowly,
-                # keeping head/hands/feet inside during transient detector shrinkage.
                 pos_alpha = 0.82
                 size_alpha_w = 0.75 if mw >= pw else 0.28
                 size_alpha_h = 0.78 if mh >= ph else 0.25
@@ -360,7 +346,6 @@ class CameraDetectionV2(SecureCameraWallV2):
         self.scheduler_thread = None
         self.job_q = None
         self.result_q = None
-
         super().__init__()
         self.boxes = SmoothBoxManager(self.frame_width, self.frame_height)
         self.bridge = NativeMetaBridge()
@@ -370,7 +355,6 @@ class CameraDetectionV2(SecureCameraWallV2):
         cid = camera.camera_id
         self.camera_index[cid] = index
         self.capture_requested[cid] = False
-
         source = self._make("nvurisrcbin", f"camera_v2_source_{index}")
         tee = self._make("tee", f"detect_tee_{index}")
         display_queue = self._make("queue", f"camera_v2_queue_{index}")
@@ -378,7 +362,6 @@ class CameraDetectionV2(SecureCameraWallV2):
         converter = self._make("nvvideoconvert", f"detect_convert_{index}")
         capsfilter = self._make("capsfilter", f"detect_caps_{index}")
         appsink = self._make("appsink", f"detect_sink_{index}")
-
         source.connect("deep-element-added", self._configure_rtsp_child, camera)
         source.set_property("uri", camera.uri)
         self._set_if(source, "disable-audio", True)
@@ -393,35 +376,25 @@ class CameraDetectionV2(SecureCameraWallV2):
         self._set_if(source, "rtsp-reconnect-attempts", -1)
         self._set_if(source, "message-forward", True)
         self._set_if(source, "gpu-id", self.gpu_id)
-
         for q in (display_queue, infer_queue):
             self._set_if(q, "max-size-buffers", 1)
             self._set_if(q, "max-size-bytes", 0)
             self._set_if(q, "max-size-time", 0)
             self._set_if(q, "leaky", 2)
             self._set_if(q, "silent", True)
-
         self._set_if(converter, "gpu-id", self.gpu_id)
-        capsfilter.set_property(
-            "caps",
-            self.Gst.Caps.from_string(
-                f"video/x-raw,format=BGRx,width={INFER_WIDTH},height={INFER_HEIGHT},pixel-aspect-ratio=1/1"
-            ),
-        )
+        capsfilter.set_property("caps", self.Gst.Caps.from_string(f"video/x-raw,format=BGRx,width={INFER_WIDTH},height={INFER_HEIGHT},pixel-aspect-ratio=1/1"))
         appsink.set_property("emit-signals", True)
         appsink.set_property("sync", False)
         appsink.set_property("drop", True)
         appsink.set_property("max-buffers", 1)
         self._set_if(appsink, "enable-last-sample", False)
         self._set_if(appsink, "wait-on-eos", False)
-
         for element in (source, tee, display_queue, infer_queue, converter, capsfilter, appsink):
             self.pipeline.add(element)
-
         mux_pad = self._request_mux_pad(index)
         if display_queue.get_static_pad("src").link(mux_pad) != self.Gst.PadLinkReturn.OK:
             raise RuntimeError(f"{cid}: display queue -> nvstreammux link failed")
-
         tee_display = tee.request_pad_simple("src_%u")
         tee_infer = tee.request_pad_simple("src_%u")
         if tee_display is None or tee_infer is None:
@@ -431,18 +404,12 @@ class CameraDetectionV2(SecureCameraWallV2):
         if tee_infer.link(infer_queue.get_static_pad("sink")) != self.Gst.PadLinkReturn.OK:
             raise RuntimeError(f"{cid}: tee -> inference queue failed")
         self.tee_request_pads.extend([(tee, tee_display), (tee, tee_infer)])
-
         if not infer_queue.link(converter) or not converter.link(capsfilter) or not capsfilter.link(appsink):
             raise RuntimeError(f"{cid}: inference branch link failed")
-        infer_queue.get_static_pad("src").add_probe(
-            self.Gst.PadProbeType.BUFFER, self._infer_gate_probe, cid
-        )
+        infer_queue.get_static_pad("src").add_probe(self.Gst.PadProbeType.BUFFER, self._infer_gate_probe, cid)
         appsink.connect("new-sample", self._on_infer_sample, cid)
         source.connect("pad-added", self._source_to_tee, tee, cid)
-        display_queue.get_static_pad("src").add_probe(
-            self.Gst.PadProbeType.BUFFER, self._source_probe, cid
-        )
-
+        display_queue.get_static_pad("src").add_probe(self.Gst.PadProbeType.BUFFER, self._source_probe, cid)
         self.sources[cid] = source
         self.queues[cid] = display_queue
 
@@ -491,8 +458,6 @@ class CameraDetectionV2(SecureCameraWallV2):
         return self.Gst.FlowReturn.OK
 
     def _install_osd_and_meta(self) -> None:
-        # Preserve the exact camera baseline through tiler + latest-only wall queue.
-        # Only the final wall is converted once for OSD; no per-camera CPU overlay.
         if not self.wall_queue.unlink(self.sink):
             raise RuntimeError("could not detach baseline sink for OSD")
         convert = self._make("nvvideoconvert", "detect_wall_convert")
@@ -509,13 +474,8 @@ class CameraDetectionV2(SecureCameraWallV2):
             self.pipeline.add(element)
         if not self.wall_queue.link(convert) or not convert.link(caps) or not caps.link(osd) or not osd.link(self.sink):
             raise RuntimeError("failed wall queue -> convert -> OSD -> EGL link")
-
-        self.mux.get_static_pad("src").add_probe(
-            self.Gst.PadProbeType.BUFFER, self._inject_boxes_probe
-        )
-        osd.get_static_pad("src").add_probe(
-            self.Gst.PadProbeType.BUFFER, self._wall_probe
-        )
+        self.mux.get_static_pad("src").add_probe(self.Gst.PadProbeType.BUFFER, self._inject_boxes_probe)
+        osd.get_static_pad("src").add_probe(self.Gst.PadProbeType.BUFFER, self._wall_probe)
         self.osd = osd
 
     def _inject_boxes_probe(self, _pad, info):
@@ -576,29 +536,22 @@ class CameraDetectionV2(SecureCameraWallV2):
             return
         with self.det_lock:
             self.det_ready = True
-        print(
-            "CAMERA_DETECT ready: "
-            f"YOLO26m micro_batch={MICRO_BATCH} input={INFER_WIDTH}x{INFER_HEIGHT} "
-            f"device={ready.get('device')} cuda={ready.get('cuda')} "
-            "box_motion_stabilizer=1 camera_baseline_preserved=1",
-            flush=True,
-        )
+        print(f"CAMERA_DETECT ready: YOLO26m micro_batch={MICRO_BATCH} input={INFER_WIDTH}x{INFER_HEIGHT} device={ready.get('device')} cuda={ready.get('cuda')} box_motion_stabilizer=1 camera_baseline_preserved=1", flush=True)
 
         ids = [camera.camera_id for camera in self.cameras]
         groups = [ids[i : i + MICRO_BATCH] for i in range(0, len(ids), MICRO_BATCH)]
         versions = {cid: 0 for cid in ids}
         group_index = 0
-
         while not self.det_stop.is_set():
             group = groups[group_index % len(groups)]
             group_index += 1
             self._request_group(group)
-            rows = self.mailbox.wait_group(group, versions, timeout=1.2)
+            rows = self.mailbox.wait_group(group, versions, timeout=1.5)
             if rows is None:
                 self._clear_requests()
                 with self.det_lock:
                     self.capture_timeouts += 1
-                self.det_stop.wait(0.10)
+                self.det_stop.wait(0.15)
                 continue
             frames = []
             captured = []
@@ -608,19 +561,14 @@ class CameraDetectionV2(SecureCameraWallV2):
                 captured.append(captured_t)
                 frames.append(frame)
             self._clear_requests()
-
             try:
-                self.job_q.put(
-                    {"cameras": group, "frames": frames, "captured": captured},
-                    timeout=0.5,
-                )
-                result = self.result_q.get(timeout=8.0)
+                self.job_q.put({"cameras": group, "frames": frames, "captured": captured}, timeout=0.5)
+                result = self.result_q.get(timeout=5.0)
             except pyqueue.Empty:
                 with self.det_lock:
                     self.det_error = "YOLO result timeout"
                 self.det_stop.wait(0.25)
                 continue
-
             if result.get("type") == "fatal":
                 with self.det_lock:
                     self.det_error = result.get("error", "YOLO fatal error")
@@ -632,13 +580,11 @@ class CameraDetectionV2(SecureCameraWallV2):
                 continue
             if result.get("type") != "result":
                 continue
-
             counts = {}
             for cid, captured_t in zip(result["cameras"], result["captured"]):
                 dets = self._scaled_detections(result["boxes"].get(cid, []))
                 counts[cid] = len(dets)
                 self.boxes.update(cid, captured_t, dets)
-
             batch_ms = float(result.get("batch_ms") or 0.0)
             with self.det_lock:
                 self.det_calls += 1
@@ -647,9 +593,6 @@ class CameraDetectionV2(SecureCameraWallV2):
                 self.det_counts.update(counts)
                 duty = max(self.det_duty_min, min(self.det_duty_max, self.det_duty))
                 self.det_error = ""
-
-            # No backlog: after every CUDA burst, explicitly leave idle GPU time
-            # for NVDEC/tiler/EGL. Short micro-batches are deliberate on Pascal.
             active = batch_ms / 1000.0
             idle = max(0.04, active * (1.0 / max(0.05, duty) - 1.0))
             self.det_stop.wait(min(1.5, idle))
@@ -665,7 +608,6 @@ class CameraDetectionV2(SecureCameraWallV2):
         keep = super()._print_stats()
         p95 = self._p95(self.wall_intervals_ms)
         with self.det_lock:
-            # Adapt only detection duty; never alter the known-good camera path.
             if p95 is not None:
                 if p95 > 72.0:
                     self.det_duty = max(self.det_duty_min, self.det_duty - 0.025)
@@ -682,14 +624,7 @@ class CameraDetectionV2(SecureCameraWallV2):
             timeouts = self.capture_timeouts
         count_text = " ".join(f"{cid}:{counts.get(cid, 0)}" for cid in self.camera_index)
         wall = "?" if p95 is None else f"{p95:.1f}ms"
-        print(
-            "CAMERA_DETECT "
-            f"ready={int(ready)} calls={calls} inputs={inputs} micro_batch={MICRO_BATCH} "
-            f"batch={batch_ms:.1f}ms duty_cap={duty:.0%} wall_p95={wall} "
-            f"meta_boxes={meta} timeouts={timeouts} persons=[{count_text}]"
-            + (f" error={error}" if error else ""),
-            flush=True,
-        )
+        print("CAMERA_DETECT " f"ready={int(ready)} calls={calls} inputs={inputs} micro_batch={MICRO_BATCH} " f"batch={batch_ms:.1f}ms duty_cap={duty:.0%} wall_p95={wall} " f"meta_boxes={meta} timeouts={timeouts} persons=[{count_text}]" + (f" error={error}" if error else ""), flush=True)
         return keep
 
     def run(self) -> int:
@@ -700,10 +635,13 @@ class CameraDetectionV2(SecureCameraWallV2):
         self.worker.start()
         self.scheduler_thread = threading.Thread(target=self._scheduler, name="camera-v2-yolo-scheduler", daemon=True)
         self.scheduler_thread.start()
+        # This class is also a base for tracking/ReID runtimes, so do not claim that
+        # those enrichments are disabled here. The concrete subclass prints its own
+        # active backend immediately after construction.
         print(
             "CAMERA_DETECT starting: known-good Camera V2 + ticketed YOLO26m sidecar; "
             f"micro_batch={MICRO_BATCH} input={INFER_WIDTH}x{INFER_HEIGHT}; "
-            "no ReID, no face, no heatmap, no global tracking",
+            "camera path preserved; higher-level tracking/identity depends on runtime",
             flush=True,
         )
         try:
