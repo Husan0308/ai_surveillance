@@ -6,20 +6,21 @@ import time
 from collections import deque
 
 # Production person tracking for GTX 1050 Ti 4 GB + six fixed CCTV streams.
-# Keep the detector at 640x384 for distant/small pedestrians, but make NvDCF much
-# lighter. NVIDIA recommends max_perf + a reduced tracker resolution for peak
-# performance/resource efficiency.
+# Preserve the camera's 16:9 geometry on the detector input. Ultralytics may pad
+# internally to its stride, but the image itself is no longer vertically stretched.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "640")
-os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
+os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "360")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.08")
-# Keep heavily-overlapping person candidates alive. 0.50 was too aggressive for
-# shoulder-to-shoulder/occluded office scenes and could suppress the second person
-# before NvDCF ever saw it.
+# Keep heavily-overlapping person candidates alive. A low NMS IoU can suppress the
+# second person before NvDCF ever gets a chance to create a separate target.
 os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.72")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
-os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "480")
-os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
+# Slightly more NvDCF detail than the old 480x288 profile. 576x320 stays close to
+# 16:9 and improves robustness for distant/partially-occluded office pedestrians
+# without jumping all the way to the expensive full detector resolution.
+os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "576")
+os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "320")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
@@ -37,18 +38,19 @@ from .tracker_profile import prepare_sparse_tracker_config
 class CameraPersonTrackingFinal(_BaseTracking):
     """YOLO26m low-score recovery + low-memory NvDCF pedestrian tracking.
 
-    The detector keeps the higher resolution needed by distant office pedestrians.
-    NvDCF is deliberately kept small enough to coexist with six NVDEC streams and
-    YOLO26m on a 4 GB Pascal GPU. Live OSD contains only real current-frame tracker
-    objects; there are no synthetic timer/shadow-history boxes.
+    The detector keeps the resolution needed by distant office pedestrians while
+    NvDCF owns per-frame propagation. Live OSD contains only real current-frame
+    tracker objects; there are no synthetic timer/shadow-history boxes.
     """
 
     def __init__(self) -> None:
         self.detector_frames_applied = 0
-        self.detector_target_hz = float(os.environ.get("CAMERA_V2_DETECT_TARGET_HZ", "3.0"))
-        self.detector_min_hz = float(os.environ.get("CAMERA_V2_DETECT_MIN_HZ", "2.0"))
-        self.detector_max_hz = float(os.environ.get("CAMERA_V2_DETECT_MAX_HZ", "3.6"))
-        self.detector_min_idle = float(os.environ.get("CAMERA_V2_DETECT_MIN_IDLE_MS", "8")) / 1000.0
+        # 3 Hz made new detections visibly late on a 20 FPS wall. Target ~3.8 Hz,
+        # while the existing wall-p95 governor can still back off automatically.
+        self.detector_target_hz = float(os.environ.get("CAMERA_V2_DETECT_TARGET_HZ", "3.8"))
+        self.detector_min_hz = float(os.environ.get("CAMERA_V2_DETECT_MIN_HZ", "2.8"))
+        self.detector_max_hz = float(os.environ.get("CAMERA_V2_DETECT_MAX_HZ", "4.2"))
+        self.detector_min_idle = float(os.environ.get("CAMERA_V2_DETECT_MIN_IDLE_MS", "6")) / 1000.0
         self.detector_result_age_ms = 0.0
         self.detector_times: dict[str, deque[float]] = {}
         super().__init__()
@@ -58,9 +60,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
     def _resolve_tracker_files(self):
         lib, stock_max_perf = super()._resolve_tracker_files()
-        # GTX 1050 Ti has only 4 GB. Use NVIDIA's lowest-resource NvDCF reference
-        # profile; tracker_profile.py then applies only the pedestrian association
-        # and realistic target-pool tuning we need.
         return lib, prepare_sparse_tracker_config(stock_max_perf)
 
     def _publish_prepared(
@@ -69,6 +68,12 @@ class CameraPersonTrackingFinal(_BaseTracking):
         captured_t: float,
         prepared: list[PreparedDetection],
     ) -> None:
+        # A single empty YOLO result is often an occlusion/pose false-negative.
+        # Do not explicitly tell NvDCF "zero objects" for that frame: let its
+        # visual tracker continue on the live frames and terminate naturally when
+        # confidence/visibility really collapses. This prevents bbox blink-off.
+        if not prepared:
+            return
         with self.pending_lock:
             self.pending_seq += 1
             self.pending[cid] = (self.pending_seq, float(captured_t), list(prepared))
