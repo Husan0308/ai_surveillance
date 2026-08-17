@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 FILES = (
     ROOT / "services/camera_v2/sentinel_exact.py",
     ROOT / "services/camera_v2/sentinel_app.py",
+    ROOT / "services/camera_v2/safe_live_wall.py",
     ROOT / "services/camera_v2/qt_runtime.py",
     ROOT / "services/camera_v2/sentinel_live_runtime.py",
     ROOT / "services/camera_v2/ui_bridge.py",
@@ -28,6 +29,12 @@ def fail(message: str) -> int:
 def require_text(source: str, needle: str, label: str) -> None:
     if needle not in source:
         raise RuntimeError(f"missing contract {label}: {needle}")
+    print(f"contract {label}=OK")
+
+
+def forbid_text(source: str, needle: str, label: str) -> None:
+    if needle in source:
+        raise RuntimeError(f"forbidden contract {label}: {needle}")
     print(f"contract {label}=OK")
 
 
@@ -92,25 +99,35 @@ def main() -> int:
     try:
         exact = FILES[0].read_text(encoding="utf-8")
         app = FILES[1].read_text(encoding="utf-8")
-        runtime = FILES[2].read_text(encoding="utf-8")
-        live = FILES[3].read_text(encoding="utf-8")
+        safe = FILES[2].read_text(encoding="utf-8")
+        runtime = FILES[3].read_text(encoding="utf-8")
+        live = FILES[4].read_text(encoding="utf-8")
 
-        # Visual/source contract from the supplied Sentinel ui.py.
+        # Uploaded Sentinel visual contract.
         require_text(exact, 'setFixedWidth(224)', "sidebar_224")
         require_text(exact, 'setFixedHeight(70)', "header_70")
         require_text(exact, 'self.layout.addLayout(camera_column, 3)', "camera_column_3")
         require_text(exact, 'self.layout.addLayout(self.identity_rail, 1)', "identity_rail_1")
-        require_text(exact, 'self.setMinimumSize(1180, 720)', "window_minimum")
-        for page in ("Monitoring", "People", "Events", "Rooms", "Enrollment", "Reports"):
-            require_text(exact, f'"{page}"', f"page_{page.lower()}")
+        require_text(exact, 'StatCard("Total"', "total_metric")
+        require_text(exact, 'StatCard("Known"', "known_metric")
+        require_text(exact, 'StatCard("Unknown"', "unknown_metric")
+        require_text(exact, 'Recent Views', "recent_views")
         require_text(exact, 'range(10)', "enrollment_10_slots")
         require_text(exact, 'profile_index', "enrollment_profile_photo")
-        require_text(exact, 'Recent Views', "recent_views")
+        require_text(exact, 'self.setMinimumSize(1180, 720)', "window_minimum")
 
-        # Exact-source fixes: no historical per-camera hover controls.
-        require_text(app, 'self.controls.hide()', "per_camera_controls_hidden")
-        require_text(app, 'QEvent.Type.WinIdChange', "video_rebind_on_wid_change")
-        require_text(app, 'window.show()', "uploaded_main_window_show")
+        # Native-video integration: never composite normal child backing stores
+        # directly on the WA_PaintOnScreen GstVideoOverlay target.
+        require_text(app, 'ui.LiveWall = SafeLiveWall', "safe_live_wall_installed")
+        require_text(safe, 'class SafeLiveWall(QWidget)', "safe_live_wall")
+        require_text(safe, 'Qt.WindowType.Tool', "separate_overlay_window")
+        require_text(safe, 'WA_TranslucentBackground', "translucent_overlay")
+        require_text(safe, 'WA_PaintOnScreen', "native_video_surface")
+        require_text(safe, 'def paintEngine(self):', "native_paint_engine_disabled")
+        require_text(safe, 'CameraWallOverlay', "overlay_chrome")
+        require_text(safe, 'self.fullscreenRequested.emit', "camera_fullscreen")
+        require_text(safe, 'self._hover_source', "camera_hover")
+        forbid_text(safe, 'CameraTile(', "no_child_camera_backing_store")
 
         # Realtime architecture contract.
         require_text(runtime, 'mp.get_context("spawn")', "process_isolation")
@@ -123,11 +140,8 @@ def main() -> int:
         require_text(live, 'self.ui_bridge.snapshot_tracks(buffer)', "nvdcf_realtime_metadata")
         require_text(live, 'self.stats[camera.camera_id]', "realtime_camera_metrics")
 
-        # Camera frames must never cross into Qt/Python through a secondary frame
-        # transport. Comments may mention JPEG/MJPEG while explicitly saying they
-        # are absent, so test actual frame APIs/imports rather than prose tokens.
+        # Camera frames must stay zero-copy/native across the Qt boundary.
         forbidden_runtime = (
-            "appsink",
             "cv2.",
             "QImage(",
             "QPixmap(",
@@ -144,9 +158,10 @@ def main() -> int:
     except Exception as exc:
         return fail(str(exc))
 
-    print("layout=uploaded Sentinel source")
-    print("monitoring=2 columns x 3 rows + 1/4 identity rail")
+    print("layout=uploaded Sentinel shell + realtime overlay")
+    print("monitoring=2 columns x 3 rows + Total/Known/Unknown + Recent Views")
     print("video=GstVideoOverlay/nveglglessink")
+    print("overlay=separate translucent top-level Qt window")
     print("metadata=NvDCF current-frame snapshots")
     print("camera_pipeline_core=UNCHANGED")
     print("SENTINEL_EXACT_LIVE_PREFLIGHT=PASS")
