@@ -9,18 +9,39 @@ from .person_tracking_heatmap import CameraPersonTrackingHeatmap
 from .stable_global_reid import StableGlobalReIDManager
 
 
-class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
-    """Production wall: fast TAO candidate retrieval + sparse KPR final ReID gate.
+# Source IDs are the camera order in config/cameras.yaml.  These are the physical
+# peer-camera pairs verified from the live 3x2 wall:
+#   dev room : CAM-01 (0) <-> CAM-04 (3)
+#   entrance : CAM-02 (1) <-> CAM-05 (4)
+#   main room: CAM-03 (2) <-> CAM-06 (5)
+# Do not use setdefault here: an old exported shell variable previously overrode
+# the production mapping and made ReID compare people from different rooms.
+PRODUCTION_ROOM_MAP = "0:0,3:0,1:1,4:1,2:2,5:2"
 
-    No room geometry, calibration, auto-seat logic or Qwen is used. NvDCF owns
-    local identities. The existing lightweight TAO embedding builds multi-frame
-    candidate tracklets; an ECCV'24 KPR part-based verifier is invoked only when a
-    mutual-best pair is ready to merge. KPR must confirm the pair on independent
-    fresh crops before the Global ID can be shared across cameras.
+
+class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
+    """Production wall: fast TAO retrieval + sparse KPR final ReID gate.
+
+    Geometry/calibration/Qwen are deliberately absent. NvDCF owns local tracks,
+    the lightweight TAO embedding generates multi-frame candidates, and KPR is a
+    sparse final authority before two peer-camera tracks may share a Global ID.
+
+    KPR itself runs in an isolated worker process and is started lazily on the
+    first real merge candidate. A native/PyTorch failure therefore cannot abort
+    the DeepStream camera process, and a CUDA worker can fall back to CPU while
+    the wall keeps running.
     """
 
     def __init__(self) -> None:
-        os.environ.setdefault("CAMERA_V2_REID_ROOM_MAP", "0:0,3:0,1:1,4:1,2:2,5:2")
+        previous_room_map = os.environ.get("CAMERA_V2_REID_ROOM_MAP", "").strip()
+        if previous_room_map and previous_room_map != PRODUCTION_ROOM_MAP:
+            print(
+                "CAMERA_REID correcting stale room map "
+                f"old={previous_room_map} new={PRODUCTION_ROOM_MAP}",
+                flush=True,
+            )
+        os.environ["CAMERA_V2_REID_ROOM_MAP"] = PRODUCTION_ROOM_MAP
+
         os.environ.setdefault("CAMERA_V2_REID_PEER_MIN_REID", "0.36")
         os.environ.setdefault("CAMERA_V2_REID_PEER_CONFIRM_REID", "0.42")
         os.environ.setdefault("CAMERA_V2_REID_SAME_ROOM", "0.54")
@@ -34,13 +55,17 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
         super().__init__()
 
         if self.reid_mode == "external":
+            # Recreate the identity manager only after the production room map is
+            # forced above.  This prevents stale shell environment from leaking
+            # into the actual Global-ID topology.
             self.global_reid = StableGlobalReIDManager()
             self.kpr_reid = KPRPairVerifier()
             self.adaptive_reid = KPRGuardedAdaptiveTrackletReID(self.global_reid, self.kpr_reid)
             print(
                 "CAMERA_ADAPTIVE_REID ready "
                 "fast_candidate=tao-resnet50 final_authority=kpr-part-based "
-                "kpr_sparse=1 kpr_fresh_votes=2 visibility_weighted_parts=1 "
+                "kpr_sparse=1 kpr_fresh_votes=2 kpr_process_isolated=1 kpr_lazy_start=1 "
+                "kpr_cuda_fallback_cpu=1 visibility_weighted_parts=1 "
                 "frozen_model=1 online_training=0 single_controller=1 sticky_local_id=1 "
                 "diverse_bank=1 fresh_both_cameras_votes=1 tracklet_multi_frame=1 "
                 "camera_pair_adaptive=1 mutual_best=1 temporal_votes=1 "
@@ -67,12 +92,16 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
             tracks = [
                 dict(row)
                 for (sid, _oid), row in self.latest_tracks.items()
-                if sid == source_id and now - float(row.get("_seen_at", 0.0)) <= self.reid_track_cache_ttl
+                if sid == source_id
+                and now - float(row.get("_seen_at", 0.0)) <= self.reid_track_cache_ttl
             ]
         if not tracks:
             return
         if match_boxes is None or len(match_boxes) != len(detections):
-            match_boxes = [(float(r[0]), float(r[1]), float(r[2]), float(r[3])) for r in detections]
+            match_boxes = [
+                (float(r[0]), float(r[1]), float(r[2]), float(r[3]))
+                for r in detections
+            ]
 
         pairs = []
         for di, det_box in enumerate(match_boxes):
@@ -92,7 +121,12 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
             used_dets.add(di)
             used_tracks.add(ti)
             dx1, dy1, dx2, dy2, det_conf = [float(v) for v in detections[di]]
-            if dx1 <= 2.0 or dy1 <= 2.0 or dx2 >= float(self.frame_width - 2) or dy2 >= float(self.frame_height - 2):
+            if (
+                dx1 <= 2.0
+                or dy1 <= 2.0
+                or dx2 >= float(self.frame_width - 2)
+                or dy2 >= float(self.frame_height - 2)
+            ):
                 continue
             bw, bh = max(1.0, dx2 - dx1), max(1.0, dy2 - dy1)
             x1 = max(0, min(fw - 1, int(round((dx1 - 0.025 * bw) * sx))))
@@ -104,7 +138,11 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
             track = tracks[ti]
             tracker_conf = float(track.get("tracker_confidence", 0.0) or 0.0)
             quality = max(float(det_conf), tracker_conf) * max(0.25, float(assoc_score))
-            verifier.remember((source_id, int(track["object_id"])), frame[y1:y2, x1:x2], quality)
+            verifier.remember(
+                (source_id, int(track["object_id"])),
+                frame[y1:y2, x1:x2],
+                quality,
+            )
 
     def _submit_external_reid(self, cid, frame, detections, match_boxes=None) -> None:
         super()._submit_external_reid(cid, frame, detections, match_boxes)
@@ -139,7 +177,9 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
         if adaptive is not None:
             row = adaptive.snapshot()
             thresholds = row.get("thresholds", {})
-            threshold_text = ",".join(f"{pair}:{float(value):.3f}" for pair, value in thresholds.items()) or "none"
+            threshold_text = ",".join(
+                f"{pair}:{float(value):.3f}" for pair, value in thresholds.items()
+            ) or "none"
             print(
                 "CAMERA_ADAPTIVE_REID "
                 f"banks={row['banks']} samples={row['bank_samples']} dup_skip={row['duplicate_skip']} "
@@ -161,8 +201,10 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
             print(
                 "CAMERA_KPR_REID "
                 f"enabled={int(bool(q['enabled']))} required={int(bool(q['required']))} ready={int(bool(q['ready']))} "
-                f"backend={q['backend']} visual_tracks={q['visual_tracks']} requests={q['requests']} responses={q['responses']} "
-                f"pending={q['pending']} approved={q['approved']} blocked={q['blocked']} same={q['same']} "
+                f"backend={q['backend']} worker_pid={q.get('worker_pid', 0)} worker_exit={q.get('worker_exit', 'none')} "
+                f"fallbacks={q.get('fallbacks', 0)} visual_tracks={q['visual_tracks']} "
+                f"requests={q['requests']} responses={q['responses']} pending={q['pending']} "
+                f"approved={q['approved']} blocked={q['blocked']} same={q['same']} "
                 f"different={q['different']} uncertain={q['uncertain']} score={float(q['score']):.3f} "
                 f"distance={float(q['distance']):.3f} parts={q['visible_parts']} latency_ms={float(q['latency_ms']):.0f} "
                 f"failed={q['failed']} dropped={q['dropped']} wait_fresh={q['wait_fresh']} no_visual={q['no_visual']} "
