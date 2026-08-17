@@ -4,27 +4,23 @@ import os
 import time
 from collections import defaultdict
 
-from .adaptive_reid import AdaptiveTrackletReID, PairVote
+from .adaptive_reid_live import LiveAdaptiveTrackletReID
 
 
-class StableAdaptiveTrackletReID(AdaptiveTrackletReID):
-    """Adaptive tracklet ReID with fresh-evidence voting and identity leases.
+class StableAdaptiveTrackletReID(LiveAdaptiveTrackletReID):
+    """Stationary-safe adaptive ReID with hysteresis and peer identity leases.
 
-    A merge is intentionally hard to obtain and sticky once obtained:
-      * every positive vote must contain a newer observation from BOTH cameras;
-      * while both peer local tracks stay active, each is reserved to the other;
-      * an active reservation blocks a different peer from stealing the identity;
-      * a confirmed pair is broken only after repeated fresh, very-low similarity;
-      * correction sends the weaker/newer side to a fresh anchor, never to a
-        speculative alternative profile.
-
-    This is a hysteresis layer: merge threshold and release threshold are different,
-    preventing IDs from bouncing when a score sits close to the decision boundary.
+    The live base already keeps the first independent observations from a seated
+    worker and prevents a fast service loop from replaying one crop as many votes.
+    This layer adds a second guard: both peer cameras must have newer evidence for
+    every positive vote. Once a room pair is confirmed, each active local track is
+    reserved to its peer so a close score cannot steal the Global ID. A confirmed
+    pair is released only after repeated fresh evidence drops far below the merge
+    threshold, giving merge/release hysteresis instead of boundary oscillation.
     """
 
     def __init__(self, manager) -> None:
         super().__init__(manager)
-        self.last_observed: dict[tuple[int, int], float] = {}
         self.last_vote_observed: dict[frozenset, tuple[float, float]] = {}
         self.peer_owner: dict[tuple[int, int], tuple[int, int]] = {}
         self.lock_bad_votes: dict[frozenset, int] = defaultdict(int)
@@ -38,17 +34,6 @@ class StableAdaptiveTrackletReID(AdaptiveTrackletReID):
         self.stats.setdefault("peer_locks", 0)
         self.stats.setdefault("lock_releases", 0)
         self.stats.setdefault("lock_corrections", 0)
-
-    def observe_rows(self, rows: list[dict], now: float | None = None) -> None:
-        now = time.monotonic() if now is None else float(now)
-        # Record fresh observation time even when the feature is intentionally
-        # discarded as a near-duplicate from a stationary person.
-        for row in rows:
-            sid = int(row.get("source_id", -1))
-            oid = int(row.get("object_id", -1))
-            if sid >= 0 and oid >= 0 and row.get("feature"):
-                self.last_observed[(sid, oid)] = now
-        super().observe_rows(rows, now)
 
     def _active_locked_peer(self, key, now: float):
         peer = self.peer_owner.get(key)
@@ -86,12 +71,11 @@ class StableAdaptiveTrackletReID(AdaptiveTrackletReID):
         obs_b = float(self.last_observed.get(b, 0.0))
         prev_a, prev_b = self.last_vote_observed.get(pair, (0.0, 0.0))
 
-        # One worker result from some unrelated camera must not replay an old pair
-        # and increment its vote. Both cameras need genuinely newer evidence.
+        # A new embedding from only one side is not a new cross-camera vote. Both
+        # camera tracklets must advance before the identity can gain confidence.
         if good and (obs_a <= prev_a + 1e-6 or obs_b <= prev_b + 1e-6):
             self.stats["fresh_vote_skip"] += 1
             return False
-
         if good:
             self.last_vote_observed[pair] = (obs_a, obs_b)
         return super()._update_vote(pair, good, score, margin, now)
@@ -108,7 +92,7 @@ class StableAdaptiveTrackletReID(AdaptiveTrackletReID):
         if merged:
             self.peer_owner[a] = b
             self.peer_owner[b] = a
-            pair = self._pair_key(a, b) if hasattr(self, "_pair_key") else frozenset((a, b))
+            pair = frozenset((a, b))
             self.lock_bad_votes[pair] = 0
             self.last_lock_audit[pair] = (
                 float(self.last_observed.get(a, 0.0)),
@@ -173,7 +157,8 @@ class StableAdaptiveTrackletReID(AdaptiveTrackletReID):
                 continue
             self.last_lock_audit[pair] = (obs_a, obs_b)
 
-            # Audit with the raw base similarity (without sticky bonus).
+            # Audit with the raw stationary-safe base similarity, without the
+            # sticky bonus. Release is intentionally far below the merge threshold.
             score = super().tracklet_similarity(a, b, now)
             if score <= self.release_floor:
                 self.lock_bad_votes[pair] += 1
@@ -183,8 +168,8 @@ class StableAdaptiveTrackletReID(AdaptiveTrackletReID):
             if self.lock_bad_votes[pair] < self.release_votes:
                 continue
 
-            # NVIDIA-style correction principle: the more recent/weaker target
-            # discards the propagated identity and returns to re-association.
+            # Correction follows the late-reassociation principle: the weaker/
+            # newer side drops the propagated identity and becomes a fresh anchor.
             loser = a if self._binding_strength(a, now) < self._binding_strength(b, now) else b
             self.peer_owner.pop(a, None)
             self.peer_owner.pop(b, None)
