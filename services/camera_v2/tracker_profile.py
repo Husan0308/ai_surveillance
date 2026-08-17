@@ -15,9 +15,12 @@ _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "1",
     "maxTargetsPerStream": "24",
-    # Keep close detections eligible to become separate targets. The old 0.14 value
-    # was too aggressive for shoulder-to-shoulder people in these fixed CCTV views.
-    "minIouDiff4NewTarget": "0.50",
+    # New-target creation uses: create when max IoU to existing targets is LOWER
+    # than minIouDiff4NewTarget. A high value therefore keeps two strongly
+    # overlapping, but genuinely different, people eligible for separate tracks.
+    # Upstream YOLO NMS + our near-identical-only dedup are responsible for
+    # suppressing duplicate boxes of the same person.
+    "minIouDiff4NewTarget": "0.90",
     # Restore the known-stable lifecycle thresholds. Realtime OSD gaps are handled
     # downstream by a bounded display bridge rather than by weakening NvDCF state.
     "minTrackerConfidence": "0.18",
@@ -44,6 +47,11 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4VisualSimilarity": "0.05",
     "usePrediction4Assoc": "1",
     "minTrackingConfidenceDuringInactive": "0.35",
+    # Do not let NvDCF's periodic duplicate-track cleanup collapse two people that
+    # are almost on top of each other. 0.98 means only near-identical track boxes
+    # are eligible for duplicate removal; run it less frequently as well.
+    "minIou4TargetDuplicate": "0.98",
+    "targetDuplicateRunInterval": "10",
 }
 
 
