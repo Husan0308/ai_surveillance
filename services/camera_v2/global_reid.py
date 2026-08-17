@@ -26,6 +26,34 @@ def _dot(a: Vector, b: Vector) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+def _parse_room_map() -> dict[int, int]:
+    """Map nvstreammux source indexes to physical rooms.
+
+    cameras.yaml order is CAM-01..CAM-06, while the real room pairs are:
+      CAM-01 + CAM-02
+      CAM-03 + CAM-06
+      CAM-05 + CAM-04
+
+    The previous source_id//2 rule incorrectly paired CAM-03/CAM-04 and
+    CAM-05/CAM-06. That made the conflict guard reject legitimate same-person
+    matches and was the main reason conflicts grew into the thousands while
+    strong matches stayed near zero.
+    """
+    default = "0:0,1:0,2:1,5:1,4:2,3:2"
+    raw = os.environ.get("CAMERA_V2_REID_ROOM_MAP", default)
+    mapping: dict[int, int] = {}
+    for token in raw.replace(";", ",").split(","):
+        token = token.strip()
+        if not token or ":" not in token:
+            continue
+        left, right = token.split(":", 1)
+        try:
+            mapping[int(left.strip())] = int(right.strip())
+        except ValueError:
+            continue
+    return mapping or {0: 0, 1: 0, 2: 1, 5: 1, 4: 2, 3: 2}
+
+
 @dataclass
 class GalleryItem:
     vector: Vector
@@ -58,27 +86,27 @@ class LocalBinding:
 
 
 class GlobalReIDManager:
-    """Conservative session-level multi-camera identity manager.
+    """Session-level multi-camera identity manager.
 
-    Local NvDCF object IDs remain authoritative inside one camera. ReID is used only
-    to map those local tracks onto stable session-level global identities. The
-    matcher deliberately prefers fragmentation over a false merge: a wrong merge
-    poisons every downstream event, while two temporary Unknown IDs can be merged
-    later after more evidence arrives.
+    NvDCF object IDs remain local to a camera. Appearance ReID maps those local
+    tracks to a stable global Unknown_N identity. The matcher uses physical room
+    topology, active-track conflict guards, a gallery/centroid score, ambiguity
+    margin and delayed fragment reconciliation.
     """
 
     def __init__(self) -> None:
-        self.match_threshold = float(os.environ.get("CAMERA_V2_REID_MATCH", "0.74"))
-        self.strong_threshold = float(os.environ.get("CAMERA_V2_REID_STRONG", "0.82"))
-        self.same_room_threshold = float(os.environ.get("CAMERA_V2_REID_SAME_ROOM", "0.70"))
-        self.same_camera_threshold = float(os.environ.get("CAMERA_V2_REID_SAME_CAMERA", "0.76"))
-        self.min_margin = float(os.environ.get("CAMERA_V2_REID_MARGIN", "0.055"))
+        self.match_threshold = float(os.environ.get("CAMERA_V2_REID_MATCH", "0.72"))
+        self.strong_threshold = float(os.environ.get("CAMERA_V2_REID_STRONG", "0.80"))
+        self.same_room_threshold = float(os.environ.get("CAMERA_V2_REID_SAME_ROOM", "0.68"))
+        self.same_camera_threshold = float(os.environ.get("CAMERA_V2_REID_SAME_CAMERA", "0.70"))
+        self.min_margin = float(os.environ.get("CAMERA_V2_REID_MARGIN", "0.025"))
         self.merge_votes_required = max(1, int(os.environ.get("CAMERA_V2_REID_MERGE_VOTES", "2")))
         self.gallery_limit = max(6, int(os.environ.get("CAMERA_V2_REID_GALLERY", "24")))
         self.profile_ttl = float(os.environ.get("CAMERA_V2_REID_PROFILE_TTL", "1800"))
-        self.binding_ttl = float(os.environ.get("CAMERA_V2_REID_BINDING_TTL", "12"))
-        self.teleport_guard = float(os.environ.get("CAMERA_V2_REID_TELEPORT_GUARD", "1.5"))
+        self.binding_ttl = float(os.environ.get("CAMERA_V2_REID_BINDING_TTL", "15"))
+        self.teleport_guard = float(os.environ.get("CAMERA_V2_REID_TELEPORT_GUARD", "1.0"))
         self.max_transition_gap = float(os.environ.get("CAMERA_V2_REID_MAX_TRANSITION", "180"))
+        self.room_map = _parse_room_map()
         self.next_global_id = 1
         self.profiles: dict[int, GlobalProfile] = {}
         self.bindings: dict[LocalKey, LocalBinding] = {}
@@ -86,15 +114,16 @@ class GlobalReIDManager:
         self.stats = {
             "observations": 0,
             "new_global": 0,
+            "direct_match": 0,
             "strong_match": 0,
             "merged": 0,
+            "ambiguous_new": 0,
             "rejected_conflict": 0,
         }
 
-    @staticmethod
-    def room_of(source_id: int) -> int:
-        # Camera V2 pairs adjacent source IDs as two views of one room.
-        return int(source_id) // 2
+    def room_of(self, source_id: int) -> int:
+        source_id = int(source_id)
+        return self.room_map.get(source_id, source_id)
 
     def _resolve(self, global_id: int) -> int:
         root = int(global_id)
@@ -132,11 +161,11 @@ class GlobalReIDManager:
             if now - binding.last_seen > self.teleport_guard:
                 continue
             other_room = self.room_of(sid)
-            # Same identity may legitimately be visible in both cameras covering
-            # one room. It may not be live in two different rooms at once.
+            # The same person may be visible simultaneously in the two cameras
+            # covering one physical room. Different rooms are mutually exclusive.
             if other_room != room:
                 return True
-            # Two simultaneous tracks in the exact same camera cannot be one person.
+            # Two simultaneous local tracks in one exact camera cannot be one body.
             if sid == source_id:
                 return True
         return False
@@ -146,11 +175,12 @@ class GlobalReIDManager:
             return -1.0
         sims = sorted((_dot(vector, item.vector) for item in profile.gallery), reverse=True)
         top = sims[: min(3, len(sims))]
-        gallery_score = sum(top) / len(top)
+        best = top[0]
+        top_mean = sum(top) / len(top)
+        # Keep a strong viewpoint match useful without trusting one neighbour only.
+        gallery_score = 0.60 * best + 0.40 * top_mean
         centroid_score = _dot(vector, profile.centroid) if profile.centroid else gallery_score
-        # Gallery preserves different viewpoints; centroid rejects a one-off lucky
-        # nearest-neighbour collision. Weight both instead of trusting max cosine.
-        return 0.62 * gallery_score + 0.38 * centroid_score
+        return 0.72 * gallery_score + 0.28 * centroid_score
 
     def _threshold_for(self, profile: GlobalProfile, source_id: int, now: float) -> float:
         source_id = int(source_id)
@@ -173,6 +203,7 @@ class GlobalReIDManager:
         exclude: int | None = None,
     ) -> tuple[int | None, float, float, float]:
         scored: list[tuple[float, float, int]] = []
+        conflict_skips = 0
         for raw_gid, profile in self.profiles.items():
             gid = self._resolve(raw_gid)
             if gid != raw_gid:
@@ -182,12 +213,13 @@ class GlobalReIDManager:
             if now - profile.last_seen > self.profile_ttl:
                 continue
             if self._active_conflict(profile, source_id, object_id, now):
-                self.stats["rejected_conflict"] += 1
+                conflict_skips += 1
                 continue
             score = self._score_profile(profile, vector)
             threshold = self._threshold_for(profile, source_id, now)
             scored.append((score, threshold, gid))
 
+        self.stats["rejected_conflict"] += conflict_skips
         if not scored:
             return None, -1.0, -1.0, self.match_threshold
         scored.sort(reverse=True)
@@ -201,8 +233,6 @@ class GlobalReIDManager:
         profile.last_room = self.room_of(source_id)
         profile.sample_count += 1
 
-        # Do not fill the gallery with dozens of almost identical adjacent frames.
-        # Keep new views, camera changes, and materially different embeddings.
         add = True
         if profile.gallery:
             newest = profile.gallery[-1]
@@ -215,7 +245,7 @@ class GlobalReIDManager:
         if profile.centroid is None:
             profile.centroid = vector
         else:
-            alpha = 0.16 if quality >= 0.45 else 0.08
+            alpha = 0.18 if quality >= 0.45 else 0.10
             mixed = tuple((1.0 - alpha) * a + alpha * b for a, b in zip(profile.centroid, vector))
             profile.centroid = _normalize(mixed) or profile.centroid
 
@@ -229,7 +259,6 @@ class GlobalReIDManager:
         if child is None or parent is None:
             return parent_gid
 
-        # Keep the older global ID so labels do not jump unnecessarily.
         if child.created_at < parent.created_at:
             child_gid, parent_gid = parent_gid, child_gid
             child, parent = parent, child
@@ -245,17 +274,19 @@ class GlobalReIDManager:
             mean = tuple(sum(values) / len(values) for values in zip(*vectors))
             parent.centroid = _normalize(mean)
         parent.sample_count += child.sample_count
-        parent.last_seen = max(parent.last_seen, child.last_seen, now)
-        if child.last_seen >= parent.last_seen:
+        if child.last_seen > parent.last_seen:
+            parent.last_seen = child.last_seen
             parent.last_source = child.last_source
             parent.last_room = child.last_room
+        else:
+            parent.last_seen = max(parent.last_seen, now)
         if not parent.known_name and child.known_name:
             parent.known_name = child.known_name
 
         self.aliases[child_gid] = parent_gid
         self.profiles.pop(child_gid, None)
         for binding in self.bindings.values():
-            if self._resolve(binding.global_id) == child_gid or binding.global_id == child_gid:
+            if binding.global_id == child_gid or self._resolve(binding.global_id) == child_gid:
                 binding.global_id = parent_gid
                 binding.merge_candidate = None
                 binding.merge_votes = 0
@@ -275,9 +306,7 @@ class GlobalReIDManager:
         current = self.profiles.get(current_gid)
         if current is None:
             return
-        # Stable, well-populated profiles should not constantly hunt for merges.
-        # Reconciliation focuses on young fragments created by temporary ambiguity.
-        if current.sample_count > 12 and now - current.created_at > 8.0:
+        if current.sample_count > 18 and now - current.created_at > 12.0:
             return
 
         candidate_gid, score, second, threshold = self._best_candidate(
@@ -317,10 +346,9 @@ class GlobalReIDManager:
                 continue
             self.stats["observations"] += 1
             key = (source_id, object_id)
-            quality = max(
-                0.0,
-                float(row.get("tracker_confidence", row.get("confidence", 0.0)) or 0.0),
-            )
+            detector_conf = max(0.0, float(row.get("confidence", 0.0) or 0.0))
+            tracker_conf = max(0.0, float(row.get("tracker_confidence", 0.0) or 0.0))
+            quality = max(detector_conf, tracker_conf)
 
             binding = self.bindings.get(key)
             if binding is not None and now - binding.last_seen <= self.binding_ttl:
@@ -342,16 +370,20 @@ class GlobalReIDManager:
                 object_id,
                 now,
             )
-            strong = (
+            accepted = (
                 best_gid is not None
-                and best_score >= max(threshold, self.strong_threshold)
+                and best_score >= threshold
                 and best_score - second_score >= self.min_margin
             )
-            if strong:
+            if accepted:
                 profile = self.profiles[best_gid]
-                self.stats["strong_match"] += 1
+                self.stats["direct_match"] += 1
+                if best_score >= self.strong_threshold:
+                    self.stats["strong_match"] += 1
             else:
                 profile = self._new_profile(source_id, now)
+                if best_gid is not None:
+                    self.stats["ambiguous_new"] += 1
 
             binding = LocalBinding(
                 global_id=profile.global_id,
@@ -361,7 +393,7 @@ class GlobalReIDManager:
             )
             self.bindings[key] = binding
             self._update_profile(profile, vector, source_id, now, quality)
-            if not strong:
+            if not accepted:
                 self._consider_reconciliation(key, binding, vector, source_id, object_id, now)
 
     def _expire(self, now: float) -> None:
@@ -403,6 +435,7 @@ class GlobalReIDManager:
         return {
             "global_count": len(self.profiles),
             "local_bindings": len(self.bindings),
+            "room_map": dict(self.room_map),
             "stats": dict(self.stats),
             "profiles": [
                 {
