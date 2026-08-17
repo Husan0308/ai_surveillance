@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
+
+# When a script is executed as `python scripts/foo.py`, Python puts `scripts/`
+# (not the repository root) at sys.path[0]. Add the repo root explicitly so the
+# production `services` package imports work without requiring PYTHONPATH hacks.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from services.camera_v2.kpr_reid_verifier import KPRPairVerifier
 
