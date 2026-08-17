@@ -13,9 +13,12 @@ RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 REID_MODEL_DIR = RUNTIME_DIR / "models" / "reid"
 REID_MODEL_NAME = "resnet50_market1501_aicity156.onnx"
+# Current NVIDIA NGC registry endpoint. The older
+# /models/org/nvidia/team/tao/... path is still present in some tracker docs but
+# may return HTTP 404; NVIDIA's current PipeTuner docs use this /versions/ route.
 REID_MODEL_URL = (
-    "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/tao/"
-    "reidentificationnet/deployable_v1.2/files/resnet50_market1501_aicity156.onnx"
+    "https://api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/"
+    "versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx"
 )
 REID_MODEL_SHA256 = "0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b"
 
@@ -93,7 +96,7 @@ def _download_official_reid(destination: Path) -> Path:
     try:
         request = urllib.request.Request(
             REID_MODEL_URL,
-            headers={"User-Agent": "camera-v2-reid/1.0"},
+            headers={"User-Agent": "camera-v2-reid/1.1"},
         )
         with urllib.request.urlopen(request, timeout=120) as response, tmp_path.open("wb") as out:
             shutil.copyfileobj(response, out, length=1024 * 1024)
