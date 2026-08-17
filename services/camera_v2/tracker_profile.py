@@ -51,6 +51,24 @@ _OPTIONAL_PATCHES: dict[str, str] = {
 }
 
 
+def reid_backend() -> str:
+    """Return the ReID execution backend.
+
+    DeepStream 7.1 uses TensorRT 10.3. TensorRT 10.x supports SM7.5+ while the
+    GTX 1050 Ti is Pascal/SM6.1, so NvDCF's TensorRT ReID path is not a valid
+    deployment target on this machine. The safe default is therefore `external`,
+    which keeps NvDCF local tracking but runs sparse ONNX ReID outside TensorRT.
+
+    `deepstream` remains an explicit opt-in for a future Turing/Ampere/RTX host.
+    """
+    value = os.environ.get("CAMERA_V2_REID_BACKEND", "external").strip().lower()
+    if value in {"off", "none", "disabled", "0", "false"}:
+        return "off"
+    if value in {"deepstream", "nvtracker", "tensorrt"}:
+        return "deepstream"
+    return "external"
+
+
 def _deepstream_roots() -> list[Path]:
     roots = [Path("/opt/nvidia/deepstream/deepstream")]
     roots.extend(sorted(Path("/opt/nvidia/deepstream").glob("deepstream-*"), reverse=True))
@@ -94,14 +112,12 @@ def _download_official_reid(destination: Path) -> Path:
     try:
         request = urllib.request.Request(
             REID_MODEL_URL,
-            headers={"User-Agent": "camera-v2-reid/1.2"},
+            headers={"User-Agent": "camera-v2-reid/1.3"},
         )
         with urllib.request.urlopen(request, timeout=120) as response, tmp_path.open("wb") as out:
             shutil.copyfileobj(response, out, length=1024 * 1024)
         if tmp_path.stat().st_size < 80 * 1024 * 1024:
-            raise RuntimeError(
-                f"downloaded ReID model is too small: {tmp_path.stat().st_size} bytes"
-            )
+            raise RuntimeError(f"downloaded ReID model is too small: {tmp_path.stat().st_size} bytes")
         digest = _sha256(tmp_path)
         if digest != REID_MODEL_SHA256:
             raise RuntimeError(
@@ -151,18 +167,16 @@ def resolve_reid_model() -> Path:
             return _download_official_reid(local_model)
         except Exception as exc:
             raise RuntimeError(
-                "Camera V2 could not auto-install the NVIDIA TAO ReID model.\n"
+                "Camera V2 could not install the NVIDIA TAO ReID model.\n"
                 f"Reason: {exc}\n"
                 "Retry manually with:\n"
-                "  python scripts/setup_camera_v2_reid.py --force\n"
-                "Or disable ReID temporarily with:\n"
-                "  CAMERA_V2_REID=0 python -m services.camera_v2.person_tracking_final"
+                "  python scripts/setup_camera_v2_reid.py --force"
             ) from exc
 
     searched = [local_model]
     searched.extend(root / "samples/models/Tracker" / REID_MODEL_NAME for root in _deepstream_roots())
     raise RuntimeError(
-        "Camera V2 ReID model is missing. Install the NVIDIA TAO model first:\n"
+        "Camera V2 ReID model is missing. Install it first:\n"
         "  python scripts/setup_camera_v2_reid.py\n"
         "Searched:\n  - " + "\n  - ".join(str(p) for p in searched)
     )
@@ -228,19 +242,8 @@ def _remove_section_keys(lines: list[str], section: str, keys: set[str]) -> None
             del lines[index]
 
 
-def _set_or_insert_target_management(lines: list[str], key: str, value: str) -> bool:
-    _set_section_key(lines, "TargetManagement", key, value)
-    return True
-
-
-def _configure_reid(lines: list[str]) -> Path:
+def _configure_deepstream_reid(lines: list[str]) -> Path:
     model = resolve_reid_model()
-
-    # GTX 1050 Ti has 4 GB and also drives the desktop. A large TensorRT ReID batch
-    # is the wrong trade-off here: it increases engine-build and runtime memory, and
-    # the build was observed aborting when NvMultiObjectTracker tried to construct
-    # the engine after the live camera pipeline had already allocated GPU memory.
-    # Batch=1 plus periodic embeddings is sufficient for the global identity layer.
     batch_size = max(1, min(4, int(os.environ.get("CAMERA_V2_REID_BATCH", "1"))))
     extraction_interval = max(-1, int(os.environ.get("CAMERA_V2_REID_INTERVAL", "5")))
     workspace_mb = max(64, min(512, int(os.environ.get("CAMERA_V2_REID_WORKSPACE_MB", "256"))))
@@ -251,20 +254,12 @@ def _configure_reid(lines: list[str]) -> Path:
         )
     ).expanduser().resolve()
     engine.parent.mkdir(parents=True, exist_ok=True)
-
-    # Build before CameraDetectionV2 creates six decoders, EGL surfaces and the
-    # YOLO worker. This converts a crash-prone in-pipeline TensorRT build into a
-    # bounded offline-style build and lets nvtracker only deserialize at startup.
     if batch_size == 1:
         ensure_reid_engine(model, engine, workspace_mb=workspace_mb)
     elif not engine.exists():
-        raise RuntimeError(
-            "CAMERA_V2_REID_BATCH > 1 requires a prebuilt matching TensorRT engine. "
-            "Use the default batch=1 on GTX 1050 Ti or set CAMERA_V2_REID_ENGINE "
-            "to a compatible prebuilt plan."
-        )
+        raise RuntimeError("DeepStream ReID batch >1 requires a matching prebuilt engine")
 
-    trajectory = {
+    for key, value in {
         "useUniqueID": "1",
         "enableReAssoc": "1",
         "reidExtractionInterval": str(extraction_interval),
@@ -272,17 +267,11 @@ def _configure_reid(lines: list[str]) -> Path:
         "matchingScoreWeight4ReidSimilarity": "0.85",
         "minTrackletMatchingScore": "0.42",
         "maxTrackletMatchingTimeSearchRange": "20",
-    }
-    for key, value in trajectory.items():
+    }.items():
         _set_section_key(lines, "TrajectoryManagement", key, value)
 
-    _remove_section_keys(
-        lines,
-        "ReID",
-        {"tltEncodedModel", "tltModelKey", "onnxFile", "modelEngineFile"},
-    )
-
-    reid = {
+    _remove_section_keys(lines, "ReID", {"tltEncodedModel", "tltModelKey", "onnxFile", "modelEngineFile"})
+    for key, value in {
         "reidType": "2",
         "batchSize": str(batch_size),
         "workspaceSize": str(workspace_mb),
@@ -300,10 +289,19 @@ def _configure_reid(lines: list[str]) -> Path:
         "outputReidTensor": "1",
         "onnxFile": json.dumps(str(model)),
         "modelEngineFile": json.dumps(str(engine)),
-    }
-    for key, value in reid.items():
+    }.items():
         _set_section_key(lines, "ReID", key, value)
     return model
+
+
+def _disable_tracker_reid(lines: list[str]) -> None:
+    # NvDCF remains the local tracker. Re-association/ReID inference is deliberately
+    # disabled inside libnvds_nvmultiobjecttracker on Pascal, preventing TensorRT
+    # 10.x from trying to build an unsupported SM6.1 engine and aborting the process.
+    _set_section_key(lines, "TrajectoryManagement", "enableReAssoc", "0")
+    _set_section_key(lines, "ReID", "reidType", "0")
+    _set_section_key(lines, "ReID", "outputReidTensor", "0")
+    _remove_section_keys(lines, "ReID", {"tltEncodedModel", "tltModelKey", "onnxFile", "modelEngineFile"})
 
 
 def prepare_sparse_tracker_config(stock: Path) -> Path:
@@ -333,7 +331,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             output.append(line)
 
     if "maxTargetsPerStream" not in patched:
-        _set_or_insert_target_management(output, "maxTargetsPerStream", "24")
+        _set_section_key(output, "TargetManagement", "maxTargetsPerStream", "24")
         patched.add("maxTargetsPerStream")
 
     missing_required = sorted(set(_REQUIRED_PATCHES) - patched)
@@ -345,23 +343,22 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
 
     _set_section_key(output, "TargetManagement", "outputShadowTracks", "0")
 
-    reid_enabled = os.environ.get("CAMERA_V2_REID", "1").strip().lower() not in {"0", "false", "no", "off"}
+    enabled = os.environ.get("CAMERA_V2_REID", "1").strip().lower() not in {"0", "false", "no", "off"}
+    backend = reid_backend() if enabled else "off"
     model = None
-    if reid_enabled:
-        model = _configure_reid(output)
+    if backend == "deepstream":
+        model = _configure_deepstream_reid(output)
     else:
-        _set_section_key(output, "TrajectoryManagement", "enableReAssoc", "0")
-        _set_section_key(output, "ReID", "reidType", "0")
-        _set_section_key(output, "ReID", "outputReidTensor", "0")
+        _disable_tracker_reid(output)
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     optional_applied = sorted(set(_OPTIONAL_PATCHES) & patched)
     header = [
         f"# Auto-generated from {stock.name}.",
-        "# Camera V2 low-memory NvDCF profile for GTX 1050 Ti 4GB.",
+        "# Camera V2 low-memory NvDCF profile.",
         "# maxTargetsPerStream=24; close-person admission tuned; shadow output stays internal.",
-        "# ReID=" + (f"enabled model={model.name}" if model else "disabled"),
-        "# ReID engine is prebuilt before the live pipeline on the 4 GB GPU.",
+        f"# ReID backend={backend}" + (f" model={model.name}" if model else ""),
+        "# External backend keeps TensorRT ReID OFF inside NvDCF and uses CPU ONNX embeddings.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
