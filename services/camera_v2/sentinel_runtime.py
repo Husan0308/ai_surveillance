@@ -140,11 +140,45 @@ class StableLiveWall(QWidget):
             )
 
 
+def _refresh_monitoring(self) -> None:
+    """Exact UI refresh with truthful camera/backend state and visible errors."""
+    try:
+        self._snapshot = self.controller.snapshot()
+        self.monitoring.refresh(self._snapshot)
+        status = self.controller.status
+        online = sum(
+            1 for camera in self._snapshot.get("cameras", []) if camera.get("online")
+        )
+
+        if status == "LIVE":
+            self.pipeline_state.setText(f"LIVE · {online}/6")
+            self.pipeline_state.setStyleSheet(f"color:{ui.C['known']};")
+            self.pipeline_state.setToolTip("")
+        elif status.startswith("DEGRADED"):
+            self.pipeline_state.setText(status)
+            self.pipeline_state.setStyleSheet(f"color:{ui.C['unknown']};")
+            self.pipeline_state.setToolTip(self.controller.error)
+        elif status in {"ERROR", "VIDEO ERROR", "NO VIDEO"}:
+            self.pipeline_state.setText(status)
+            self.pipeline_state.setStyleSheet(f"color:{ui.C['offline']};")
+            self.pipeline_state.setToolTip(self.controller.error)
+        else:
+            self.pipeline_state.setText(status)
+            self.pipeline_state.setStyleSheet(f"color:{ui.C['muted']};")
+            self.pipeline_state.setToolTip(self.controller.error)
+    except Exception as exc:
+        self.pipeline_state.setText("REFRESH ERROR")
+        self.pipeline_state.setStyleSheet(f"color:{ui.C['offline']};")
+        self.pipeline_state.setToolTip(str(exc))
+        print(f"CAMERA_QT refresh_error {type(exc).__name__}: {exc}", flush=True)
+
+
 def main() -> int:
-    # MonitoringPage resolves LiveWall from sentinel_exact's module globals when
-    # MainWindow is instantiated, so replacing it here preserves every original
-    # page/style/control while fixing only the native video host.
+    # MainWindow and MonitoringPage resolve these names from sentinel_exact's module
+    # globals at construction/runtime. Patch only integration points; every page,
+    # spacing, control and original Sentinel visual component remains untouched.
     ui.LiveWall = StableLiveWall
+    ui.MainWindow.refresh_monitoring = _refresh_monitoring
 
     app = QApplication(sys.argv)
     app.setApplicationName("Sentinel VMS")
