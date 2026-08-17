@@ -26,9 +26,9 @@ class ExternalReIDWorker:
     """Sparse CPU ONNX ReID for Pascal hosts running DeepStream/TensorRT 10.x.
 
     Local detection/tracking stay on YOLO CUDA + NvDCF. Only appearance embedding
-    extraction runs here. The NVIDIA TAO ReIdentificationNet model is trained/evaluated
-    on person crops resized directly to 256x128, so preprocessing intentionally uses a
-    direct resize rather than letterboxing/padding the crop.
+    extraction runs here. NVIDIA TAO ReIdentificationNet is trained/evaluated on
+    person crops resized directly to 256x128, so preprocessing uses direct resize
+    rather than letterbox padding.
     """
 
     MEAN_RGB = np.asarray([123.6750, 116.2800, 103.5300], dtype=np.float32)
@@ -43,7 +43,8 @@ class ExternalReIDWorker:
         self.output_q: queue.Queue[dict] = queue.Queue(maxsize=self.max_queue * 2)
         self.stop_event = threading.Event()
         self.ready_event = threading.Event()
-        self.error = ""
+        self.fatal_error = ""
+        self.last_error = ""
         self.backend = "opencv-cpu"
         self.features = 0
         self.submitted = 0
@@ -55,6 +56,10 @@ class ExternalReIDWorker:
         self.thread = threading.Thread(target=self._run, name="camera-v2-reid", daemon=True)
         self.thread.start()
 
+    @property
+    def error(self) -> str:
+        return self.fatal_error
+
     @classmethod
     def _resize_rgb(cls, crop_bgr: np.ndarray) -> np.ndarray:
         import cv2
@@ -65,7 +70,6 @@ class ExternalReIDWorker:
             raise ValueError(f"invalid ReID crop shape: {getattr(crop_bgr, 'shape', None)}")
 
         rgb = cv2.cvtColor(crop_bgr[..., :3], cv2.COLOR_BGR2RGB)
-        # TAO ReIdentificationNet expects person crops resized to HxW=256x128.
         resized = cv2.resize(
             rgb,
             (cls.INPUT_WIDTH, cls.INPUT_HEIGHT),
@@ -111,8 +115,6 @@ class ExternalReIDWorker:
             net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
             net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
-            # Parse and execute one correctly preprocessed input before declaring
-            # the worker ready. Failure remains isolated from GStreamer/NvDCF.
             dummy = np.full((320, 120, 3), 127, dtype=np.uint8)
             started = time.monotonic()
             blob = self._blob(dummy)
@@ -144,6 +146,7 @@ class ExternalReIDWorker:
                     feature = self._normalize_feature(net.forward())
                     self.infer_ms = (time.monotonic() - started) * 1000.0
                     self.features += 1
+                    self.last_error = ""
                     row = {
                         "source_id": int(task.source_id),
                         "object_id": int(task.object_id),
@@ -164,12 +167,17 @@ class ExternalReIDWorker:
                         except queue.Full:
                             self.dropped += 1
                 except Exception as exc:
+                    # A malformed/edge crop is recoverable. Do not permanently stop
+                    # the worker; a later clean crop from the same track can succeed.
                     self.failed += 1
-                    self.error = f"{type(exc).__name__}: {exc}"
+                    self.last_error = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
-            self.error = f"{type(exc).__name__}: {exc}"
+            self.fatal_error = f"{type(exc).__name__}: {exc}"
             self.ready_event.set()
-            print(f"CAMERA_REID external worker unavailable: {self.error}", flush=True)
+            print(
+                f"CAMERA_REID external worker unavailable: {self.fatal_error}",
+                flush=True,
+            )
 
     def submit(
         self,
@@ -181,7 +189,7 @@ class ExternalReIDWorker:
         tracker_confidence: float,
     ) -> bool:
         if (
-            self.error
+            self.fatal_error
             or not self.ready_event.is_set()
             or crop_bgr is None
             or crop_bgr.size == 0
@@ -215,7 +223,7 @@ class ExternalReIDWorker:
     def snapshot(self) -> dict:
         return {
             "backend": self.backend,
-            "ready": self.ready_event.is_set() and not self.error,
+            "ready": self.ready_event.is_set() and not self.fatal_error,
             "features": self.features,
             "submitted": self.submitted,
             "failed": self.failed,
@@ -223,7 +231,8 @@ class ExternalReIDWorker:
             "dropped": self.dropped,
             "infer_ms": self.infer_ms,
             "warmup_ms": self.warmup_ms,
-            "error": self.error,
+            "error": self.fatal_error,
+            "last_error": self.last_error,
             "model": str(self.model_path) if self.model_path else "",
         }
 
