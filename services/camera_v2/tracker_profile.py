@@ -1,26 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import shutil
-import tempfile
-import urllib.request
 from pathlib import Path
-
-from .reid_engine import ensure_reid_engine
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
-REID_MODEL_DIR = RUNTIME_DIR / "models" / "reid"
-REID_MODEL_NAME = "resnet50_market1501_aicity156.onnx"
-REID_MODEL_URL = (
-    "https://api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/"
-    "versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx"
-)
-REID_MODEL_SHA256 = "0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b"
 
+# Local NvDCF tuning only. ReID/re-association is forcibly disabled below.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "1",
@@ -49,137 +35,6 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minIou4TargetDuplicate": "0.98",
     "targetDuplicateRunInterval": "10",
 }
-
-
-def reid_backend() -> str:
-    """Return the ReID execution backend.
-
-    DeepStream 7.1 uses TensorRT 10.3. TensorRT 10.x supports SM7.5+ while the
-    GTX 1050 Ti is Pascal/SM6.1, so NvDCF's TensorRT ReID path is not a valid
-    deployment target on this machine. The safe default is therefore `external`,
-    which keeps NvDCF local tracking but runs sparse ONNX ReID outside TensorRT.
-
-    `deepstream` remains an explicit opt-in for a future Turing/Ampere/RTX host.
-    """
-    value = os.environ.get("CAMERA_V2_REID_BACKEND", "external").strip().lower()
-    if value in {"off", "none", "disabled", "0", "false"}:
-        return "off"
-    if value in {"deepstream", "nvtracker", "tensorrt"}:
-        return "deepstream"
-    return "external"
-
-
-def _deepstream_roots() -> list[Path]:
-    roots = [Path("/opt/nvidia/deepstream/deepstream")]
-    roots.extend(sorted(Path("/opt/nvidia/deepstream").glob("deepstream-*"), reverse=True))
-    output: list[Path] = []
-    seen: set[str] = set()
-    for root in roots:
-        key = str(root)
-        if key not in seen:
-            seen.add(key)
-            output.append(root)
-    return output
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _auto_download_enabled() -> bool:
-    value = os.environ.get("CAMERA_V2_REID_AUTO_DOWNLOAD", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
-
-
-def _download_official_reid(destination: Path) -> Path:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    print(
-        "CAMERA_REID model missing; downloading NVIDIA TAO ReIdentificationNet v1.2 "
-        f"to {destination}",
-        flush=True,
-    )
-    with tempfile.NamedTemporaryFile(
-        prefix=destination.name + ".",
-        suffix=".part",
-        dir=destination.parent,
-        delete=False,
-    ) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        request = urllib.request.Request(
-            REID_MODEL_URL,
-            headers={"User-Agent": "camera-v2-reid/1.3"},
-        )
-        with urllib.request.urlopen(request, timeout=120) as response, tmp_path.open("wb") as out:
-            shutil.copyfileobj(response, out, length=1024 * 1024)
-        if tmp_path.stat().st_size < 80 * 1024 * 1024:
-            raise RuntimeError(f"downloaded ReID model is too small: {tmp_path.stat().st_size} bytes")
-        digest = _sha256(tmp_path)
-        if digest != REID_MODEL_SHA256:
-            raise RuntimeError(
-                "ReID model SHA256 mismatch: "
-                f"expected={REID_MODEL_SHA256} got={digest}"
-            )
-        tmp_path.replace(destination)
-        print(
-            f"CAMERA_REID model ready: {destination} "
-            f"({destination.stat().st_size / (1024 * 1024):.1f} MiB)",
-            flush=True,
-        )
-        return destination.resolve()
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-
-
-def resolve_reid_model() -> Path:
-    override = os.environ.get("CAMERA_V2_REID_MODEL", "").strip()
-    if override:
-        candidate = Path(override).expanduser()
-        if candidate.exists() and candidate.is_file():
-            return candidate.resolve()
-        raise RuntimeError(f"CAMERA_V2_REID_MODEL does not exist: {candidate}")
-
-    local_model = REID_MODEL_DIR / REID_MODEL_NAME
-    if local_model.exists() and local_model.is_file():
-        digest = _sha256(local_model)
-        if digest == REID_MODEL_SHA256:
-            return local_model.resolve()
-        if not _auto_download_enabled():
-            raise RuntimeError(
-                f"Camera V2 ReID model failed SHA256 verification: {local_model}\n"
-                "Run: python scripts/setup_camera_v2_reid.py --force"
-            )
-        print(f"CAMERA_REID replacing corrupt model: {local_model}", flush=True)
-        local_model.unlink(missing_ok=True)
-
-    for root in _deepstream_roots():
-        candidate = root / "samples/models/Tracker" / REID_MODEL_NAME
-        if candidate.exists() and candidate.is_file():
-            return candidate.resolve()
-
-    if _auto_download_enabled():
-        try:
-            return _download_official_reid(local_model)
-        except Exception as exc:
-            raise RuntimeError(
-                "Camera V2 could not install the NVIDIA TAO ReID model.\n"
-                f"Reason: {exc}\n"
-                "Retry manually with:\n"
-                "  python scripts/setup_camera_v2_reid.py --force"
-            ) from exc
-
-    searched = [local_model]
-    searched.extend(root / "samples/models/Tracker" / REID_MODEL_NAME for root in _deepstream_roots())
-    raise RuntimeError(
-        "Camera V2 ReID model is missing. Install it first:\n"
-        "  python scripts/setup_camera_v2_reid.py\n"
-        "Searched:\n  - " + "\n  - ".join(str(p) for p in searched)
-    )
 
 
 def _section_header(line: str) -> str | None:
@@ -242,69 +97,24 @@ def _remove_section_keys(lines: list[str], section: str, keys: set[str]) -> None
             del lines[index]
 
 
-def _configure_deepstream_reid(lines: list[str]) -> Path:
-    model = resolve_reid_model()
-    batch_size = max(1, min(4, int(os.environ.get("CAMERA_V2_REID_BATCH", "1"))))
-    extraction_interval = max(-1, int(os.environ.get("CAMERA_V2_REID_INTERVAL", "5")))
-    workspace_mb = max(64, min(512, int(os.environ.get("CAMERA_V2_REID_WORKSPACE_MB", "256"))))
-    engine = Path(
-        os.environ.get(
-            "CAMERA_V2_REID_ENGINE",
-            str(REID_MODEL_DIR / f"{model.stem}_b{batch_size}_gpu0_fp16.engine"),
-        )
-    ).expanduser().resolve()
-    engine.parent.mkdir(parents=True, exist_ok=True)
-    if batch_size == 1:
-        ensure_reid_engine(model, engine, workspace_mb=workspace_mb)
-    elif not engine.exists():
-        raise RuntimeError("DeepStream ReID batch >1 requires a matching prebuilt engine")
+def _disable_reid(lines: list[str]) -> None:
+    """Make the generated NvDCF profile strictly camera-local.
 
-    for key, value in {
-        "useUniqueID": "1",
-        "enableReAssoc": "1",
-        "reidExtractionInterval": str(extraction_interval),
-        "minMatchingScore4ReidSimilarity": "0.68",
-        "matchingScoreWeight4ReidSimilarity": "0.85",
-        "minTrackletMatchingScore": "0.42",
-        "maxTrackletMatchingTimeSearchRange": "20",
-    }.items():
-        _set_section_key(lines, "TrajectoryManagement", key, value)
-
-    _remove_section_keys(lines, "ReID", {"tltEncodedModel", "tltModelKey", "onnxFile", "modelEngineFile"})
-    for key, value in {
-        "reidType": "2",
-        "batchSize": str(batch_size),
-        "workspaceSize": str(workspace_mb),
-        "reidFeatureSize": "256",
-        "reidHistorySize": "24",
-        "inferDims": "[3, 256, 128]",
-        "networkMode": "1",
-        "inputOrder": "0",
-        "colorFormat": "0",
-        "offsets": "[123.6750, 116.2800, 103.5300]",
-        "netScaleFactor": "0.01735207",
-        "addFeatureNormalization": "1",
-        "keepAspc": "1",
-        "minVisibility4GalleryUpdate": "0.60",
-        "outputReidTensor": "1",
-        "onnxFile": json.dumps(str(model)),
-        "modelEngineFile": json.dumps(str(engine)),
-    }.items():
-        _set_section_key(lines, "ReID", key, value)
-    return model
-
-
-def _disable_tracker_reid(lines: list[str]) -> None:
-    # NvDCF remains the local tracker. Re-association/ReID inference is deliberately
-    # disabled inside libnvds_nvmultiobjecttracker on Pascal, preventing TensorRT
-    # 10.x from trying to build an unsupported SM6.1 engine and aborting the process.
+    This is unconditional so stale CAMERA_V2_REID* shell variables cannot silently
+    re-enable model loading, TensorRT engines, galleries or trajectory reassociation.
+    """
     _set_section_key(lines, "TrajectoryManagement", "enableReAssoc", "0")
     _set_section_key(lines, "ReID", "reidType", "0")
     _set_section_key(lines, "ReID", "outputReidTensor", "0")
-    _remove_section_keys(lines, "ReID", {"tltEncodedModel", "tltModelKey", "onnxFile", "modelEngineFile"})
+    _remove_section_keys(
+        lines,
+        "ReID",
+        {"tltEncodedModel", "tltModelKey", "onnxFile", "modelEngineFile"},
+    )
 
 
 def prepare_sparse_tracker_config(stock: Path) -> Path:
+    """Generate the low-memory local NvDCF profile used by the live wall."""
     stock = Path(stock)
     if not stock.exists():
         raise RuntimeError(f"NvDCF stock config not found: {stock}")
@@ -334,32 +144,27 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
         _set_section_key(output, "TargetManagement", "maxTargetsPerStream", "24")
         patched.add("maxTargetsPerStream")
 
-    missing_required = sorted(set(_REQUIRED_PATCHES) - patched)
-    if missing_required:
+    missing = sorted(set(_REQUIRED_PATCHES) - patched)
+    if missing:
         raise RuntimeError(
             "NvDCF stock config format is unexpected; could not patch required keys: "
-            + ", ".join(missing_required)
+            + ", ".join(missing)
         )
 
+    # Shadow tracks remain internal; only real NvDCF outputs reach OSD/heatmap.
     _set_section_key(output, "TargetManagement", "outputShadowTracks", "0")
-
-    enabled = os.environ.get("CAMERA_V2_REID", "1").strip().lower() not in {"0", "false", "no", "off"}
-    backend = reid_backend() if enabled else "off"
-    model = None
-    if backend == "deepstream":
-        model = _configure_deepstream_reid(output)
-    else:
-        _disable_tracker_reid(output)
+    _disable_reid(output)
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     optional_applied = sorted(set(_OPTIONAL_PATCHES) & patched)
     header = [
         f"# Auto-generated from {stock.name}.",
-        "# Camera V2 low-memory NvDCF profile.",
-        "# maxTargetsPerStream=24; close-person admission tuned; shadow output stays internal.",
-        f"# ReID backend={backend}" + (f" model={model.name}" if model else ""),
-        "# External backend keeps TensorRT ReID OFF inside NvDCF and uses CPU ONNX embeddings.",
-        "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
+        "# Camera V2 local NvDCF profile; cross-camera ReID is intentionally absent.",
+        "# maxTargetsPerStream=24; close-person admission tuned; shadow output internal.",
+        "# TrajectoryManagement.enableReAssoc=0; ReID.reidType=0; outputReidTensor=0.",
+        "# No ReID model, TensorRT engine, gallery, sidecar or room topology is loaded.",
+        "# Optional patches applied: "
+        + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
     SPARSE_CONFIG.write_text("\n".join(header + output) + "\n", encoding="utf-8")
