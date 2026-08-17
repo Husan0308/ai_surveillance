@@ -16,6 +16,29 @@ BUILD_DIR = ROOT / ".runtime" / "camera_v2"
 LIB_PATH = BUILD_DIR / "libcamera_v2_meta.so"
 
 
+class _TrackRow(ctypes.Structure):
+    _fields_ = [
+        ("object_id", ctypes.c_uint64),
+        ("frame_num", ctypes.c_uint64),
+        ("source_id", ctypes.c_uint32),
+        ("left", ctypes.c_float),
+        ("top", ctypes.c_float),
+        ("width", ctypes.c_float),
+        ("height", ctypes.c_float),
+        ("confidence", ctypes.c_float),
+        ("tracker_confidence", ctypes.c_float),
+    ]
+
+
+class _GlobalLabel(ctypes.Structure):
+    _fields_ = [
+        ("object_id", ctypes.c_uint64),
+        ("source_id", ctypes.c_uint32),
+        ("global_id", ctypes.c_uint32),
+        ("state_code", ctypes.c_uint32),
+    ]
+
+
 def _deepstream_root() -> Path:
     env = os.getenv("DEEPSTREAM_ROOT")
     if env:
@@ -32,11 +55,7 @@ def _deepstream_root() -> Path:
 
 
 def ensure_bridge() -> Path:
-    """Build only metadata helpers required by detection/tracking/heatmap.
-
-    ReID snapshot/label code is intentionally not compiled into the live native
-    bridge. This keeps the baseline independent from every abandoned identity path.
-    """
+    """Build metadata helpers required by detection/tracking/ReID/heatmap."""
     sources = (SOURCE, SMOOTHER_SOURCE, LABEL_SOURCE, HEATMAP_SOURCE)
     for src in sources:
         if not src.exists():
@@ -123,6 +142,18 @@ class NativeMetaBridge:
         self.lib.camera_v2_smooth_display_boxes.restype = ctypes.c_int
         self.lib.camera_v2_apply_local_track_style.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_apply_local_track_style.restype = ctypes.c_int
+        self.lib.camera_v2_copy_tracks.argtypes = [
+            ctypes.c_uint64,
+            ctypes.POINTER(_TrackRow),
+            ctypes.c_int,
+        ]
+        self.lib.camera_v2_copy_tracks.restype = ctypes.c_int
+        self.lib.camera_v2_apply_global_track_style.argtypes = [
+            ctypes.c_uint64,
+            ctypes.POINTER(_GlobalLabel),
+            ctypes.c_int,
+        ]
+        self.lib.camera_v2_apply_global_track_style.restype = ctypes.c_int
 
         self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_count_tracked.restype = ctypes.c_int
@@ -166,12 +197,7 @@ class NativeMetaBridge:
         payload = array_type(*flat)
         return payload, ctypes.cast(payload, ctypes.POINTER(ctypes.c_float))
 
-    def add_boxes(
-        self,
-        gst_buffer,
-        source_id: int,
-        boxes: list[tuple[float, float, float, float, float]],
-    ) -> int:
+    def add_boxes(self, gst_buffer, source_id: int, boxes: list[tuple[float, float, float, float, float]]) -> int:
         if not boxes:
             return 0
         payload, pointer = self._payload(boxes)
@@ -185,12 +211,7 @@ class NativeMetaBridge:
             )
         )
 
-    def apply_detector_result(
-        self,
-        gst_buffer,
-        source_id: int,
-        boxes: list[tuple[float, float, float, float, float]],
-    ) -> int:
+    def apply_detector_result(self, gst_buffer, source_id: int, boxes: list[tuple[float, float, float, float, float]]) -> int:
         payload, pointer = self._payload(boxes)
         _ = payload
         if pointer is None:
@@ -218,6 +239,73 @@ class NativeMetaBridge:
             )
         )
 
+    def copy_tracks(self, gst_buffer, max_rows: int = 128) -> list[dict]:
+        max_rows = max(1, min(512, int(max_rows)))
+        array_type = _TrackRow * max_rows
+        payload = array_type()
+        count = int(
+            self.lib.camera_v2_copy_tracks(
+                ctypes.c_uint64(hash(gst_buffer)),
+                payload,
+                ctypes.c_int(max_rows),
+            )
+        )
+        if count <= 0:
+            return []
+        output: list[dict] = []
+        for row in payload[: min(count, max_rows)]:
+            output.append(
+                {
+                    "object_id": int(row.object_id),
+                    "frame_num": int(row.frame_num),
+                    "source_id": int(row.source_id),
+                    "left": float(row.left),
+                    "top": float(row.top),
+                    "width": float(row.width),
+                    "height": float(row.height),
+                    "confidence": float(row.confidence),
+                    "tracker_confidence": float(row.tracker_confidence),
+                }
+            )
+        return output
+
+    @staticmethod
+    def _state_code(state: str) -> int:
+        value = str(state or "").upper()
+        if value == "CONFIRMED":
+            return 2
+        if value == "SUSPECT":
+            return 3
+        return 1
+
+    def apply_global_track_style(self, gst_buffer, mappings: list[dict]) -> int:
+        if not mappings:
+            return 0
+        rows = []
+        for mapping in mappings:
+            gid = int(mapping.get("global_id") or 0)
+            if gid <= 0:
+                continue
+            rows.append(
+                _GlobalLabel(
+                    object_id=int(mapping["object_id"]),
+                    source_id=int(mapping["source_id"]),
+                    global_id=gid,
+                    state_code=self._state_code(mapping.get("state", "TENTATIVE")),
+                )
+            )
+        if not rows:
+            return 0
+        array_type = _GlobalLabel * len(rows)
+        payload = array_type(*rows)
+        return int(
+            self.lib.camera_v2_apply_global_track_style(
+                ctypes.c_uint64(hash(gst_buffer)),
+                payload,
+                ctypes.c_int(len(rows)),
+            )
+        )
+
     def configure_heatmap(
         self,
         *,
@@ -241,7 +329,9 @@ class NativeMetaBridge:
         self.lib.camera_v2_heatmap_reset()
 
     def heatmap_update(self, gst_buffer) -> int:
-        return int(self.lib.camera_v2_heatmap_update(ctypes.c_uint64(hash(gst_buffer))))
+        return int(
+            self.lib.camera_v2_heatmap_update(ctypes.c_uint64(hash(gst_buffer)))
+        )
 
     def heatmap_render(
         self,
@@ -271,4 +361,6 @@ class NativeMetaBridge:
         return int(self.lib.camera_v2_shadow_promoted_total())
 
     def count_tracked(self, gst_buffer) -> int:
-        return int(self.lib.camera_v2_count_tracked(ctypes.c_uint64(hash(gst_buffer))))
+        return int(
+            self.lib.camera_v2_count_tracked(ctypes.c_uint64(hash(gst_buffer)))
+        )
