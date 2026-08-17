@@ -1,0 +1,62 @@
+reid:
+  enabled: true
+
+  # CPU-only side path. "auto" prefers OSNet-AIN x1.0 when torchreid is installed
+  # and falls back to Intel/OpenVINO person-reidentification-retail-0288 through
+  # OpenCV DNN. YOLO/NvDCF keep the GPU to protect the six-camera wall.
+  backend: auto
+  download_if_missing: true
+  cpu_threads: 2
+
+  # Sparse detector frames arrive around 3 Hz/camera. Three independent good
+  # observations can therefore produce a provisional Global ID quickly.
+  sample_interval_sec: 0.28
+  embed_batch: 4
+  crop_queue: 48
+  min_crop_quality: 0.34
+  duplicate_hamming: 5
+  duplicate_window_sec: 1.2
+  max_track_samples: 10
+  top_k: 3
+  gallery_size: 12
+  min_samples: 3
+  new_identity_confirm_samples: 4
+
+  # Conservative open-world matching. These are starting thresholds; production
+  # calibration must use positive and hard-negative score logs from these exact
+  # cameras and the selected ReID backend.
+  provisional_similarity: 0.68
+  confirm_similarity: 0.77
+  strong_similarity: 0.86
+  reject_similarity: 0.56
+  qwen_rescue_similarity: 0.60
+  min_margin: 0.045
+  strong_margin: 0.025
+  confirm_votes: 2
+
+  # A local NvDCF ID may disappear behind a chair/desk and come back as a new local
+  # ID. Tracker snapshots release the missing local binding quickly while the
+  # Global-ID gallery remains alive for same-person reconnect.
+  active_timeout_sec: 1.8
+  missing_active_grace_sec: 0.35
+  lost_timeout_sec: 8.0
+  same_camera_reconnect_sec: 10.0
+  same_camera_reconnect_similarity: 0.62
+  same_camera_reconnect_confirm_similarity: 0.72
+  gallery_ttl_sec: 21600
+
+  # Different rooms cannot contain the same Global ID simultaneously. Same-room
+  # paired cameras are allowed to share one Global ID at the same time.
+  min_room_transition_sec: 0.8
+
+  # Qwen is independent evidence and never blocks video/ReID. Configure URL via
+  # QWEN_REID_URL (OpenAI-compatible base or chat/completions endpoint).
+  qwen_enabled: true
+  qwen_model: qwen3-vl
+  qwen_timeout_sec: 3.0
+  qwen_queue: 24
+  qwen_same_confidence: 0.72
+  qwen_different_confidence: 0.78
+  qwen_negative_ttl_sec: 20.0
+  rollback_contradictions: 2
+  qwen_jpeg_quality: 82
