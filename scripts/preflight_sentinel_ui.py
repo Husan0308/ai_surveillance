@@ -7,12 +7,19 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Import the full UI module during preflight. PySide6 is imported lazily inside
+# sentinel_ui.main(), so this catches Python syntax/import regressions without
+# opening a window or touching the live DeepStream pipeline.
+from services.camera_v2 import sentinel_ui
 from services.camera_v2.sentinel_config import MAX_CAMERAS, ROOMS, list_cameras, room_cameras
 from services.camera_v2.sentinel_store import SentinelStore
 from services.ml_service.app.config import load_settings
 
 
 def main() -> int:
+    if not callable(getattr(sentinel_ui, "main", None)):
+        raise RuntimeError("Sentinel UI entry point is missing")
+
     rows = list_cameras()
     active = [row for row in rows if row.get("enabled", True)]
     if not 1 <= len(active) <= MAX_CAMERAS:
@@ -32,6 +39,7 @@ def main() -> int:
     _ = store.list_people()
     _ = store.list_events(limit=5)
 
+    print("SENTINEL_PREFLIGHT ui_import=PASS")
     print(f"SENTINEL_PREFLIGHT cameras={len(active)} max={MAX_CAMERAS}")
     print(
         "SENTINEL_PREFLIGHT rooms="
