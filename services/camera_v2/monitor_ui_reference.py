@@ -46,25 +46,26 @@ def _reference_pipeline_process(window_id: int, command_q, status_q) -> None:
 
 
 def _patch_qscrollarea() -> None:
-    """Keep Qt's backing store from painting over the native EGL video window."""
+    """Install a safe scroll area that cannot repaint over the EGL video host."""
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QScrollArea
+    from PySide6 import QtWidgets
 
-    if getattr(QScrollArea, "_camera_v2_reference_patch", False):
+    if getattr(QtWidgets, "_camera_v2_reference_patch", False):
         return
 
-    original_set_widget = QScrollArea.setWidget
+    original_class = QtWidgets.QScrollArea
 
-    def safe_set_widget(self, widget):
-        original_set_widget(self, widget)
-        # Qt documents that QScrollArea.setWidget() enables autoFillBackground.
-        # nveglglessink owns this native window, so immediately disable it again.
-        widget.setAutoFillBackground(False)
-        widget.setAttribute(Qt.WA_NoSystemBackground, True)
-        widget.setAttribute(Qt.WA_PaintOnScreen, True)
+    class SafeVideoScrollArea(original_class):
+        def setWidget(self, widget):
+            super().setWidget(widget)
+            # Qt documents that QScrollArea.setWidget() enables autoFillBackground.
+            # nveglglessink owns this native window, so immediately disable it again.
+            widget.setAutoFillBackground(False)
+            widget.setAttribute(Qt.WA_NoSystemBackground, True)
+            widget.setAttribute(Qt.WA_PaintOnScreen, True)
 
-    QScrollArea.setWidget = safe_set_widget
-    QScrollArea._camera_v2_reference_patch = True
+    QtWidgets.QScrollArea = SafeVideoScrollArea
+    QtWidgets._camera_v2_reference_patch = True
 
 
 def main() -> int:
