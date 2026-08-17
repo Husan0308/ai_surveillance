@@ -6,14 +6,14 @@ from .person_tracking_final import CameraPersonTrackingFinal
 
 
 class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
-    """Production tracking runtime plus a lightweight camera-space foot heatmap.
+    """Production tracking runtime plus a smooth camera-space foot heatmap.
 
-    Heatmap is deliberately isolated from detector/tracker/ReID logic:
+    Heatmap is isolated from detector/tracker/ReID logic:
       * accumulation happens on raw current NvDCF boxes before display smoothing;
-      * the anchor is near bbox bottom-center, lifted slightly above the feet line;
+      * the anchor is lifted slightly above bbox bottom-center;
       * only confirmed motion deposits heat, so seated jitter does not paint;
       * rendering happens after the tiler and before nvdsosd;
-      * all state is native metadata/grid state, never copied through NumPy/Python.
+      * the native renderer blends overlapping heat cells into a continuous field.
     """
 
     def __init__(self) -> None:
@@ -33,9 +33,8 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             print("CAMERA_HEATMAP disabled", flush=True)
             return
 
-        # Exponential cooling: by default about 10% of a cell's heat remains after
-        # one hour at the configured source FPS. A single pass stays blue/cyan and
-        # fades; repeated traffic accumulates into yellow and eventually red.
+        # Exponential cooling. About 10% of the accumulated value remains after
+        # one hour by default; old paths therefore cool gradually instead of reset.
         cool_seconds = max(300.0, float(os.environ.get("CAMERA_V2_HEATMAP_COOL_SEC", "3600")))
         hour_remaining = min(
             0.60,
@@ -43,13 +42,17 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         )
         decay = hour_remaining ** (1.0 / max(1.0, float(self.source_fps) * cool_seconds))
 
-        deposit = float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0045"))
-        low = float(os.environ.get("CAMERA_V2_HEATMAP_LOW", "0.00075"))
-        # Keep normal one-person trails cool. Only repeatedly-used cells cross the
-        # warmer thresholds, so density rather than one detection controls color.
-        yellow = float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.040"))
-        red = float(os.environ.get("CAMERA_V2_HEATMAP_RED", "0.120"))
-        max_points = max(8, min(48, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "30"))))
+        # Reference-like traffic density palette:
+        #   one/few passes -> blue/cyan
+        #   repeated path  -> green/yellow
+        #   heavy traffic  -> orange/red
+        # The broader native kernel is compensated with a lower deposit so one
+        # person's single walk does not instantly become a hot spot.
+        deposit = float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0030"))
+        low = float(os.environ.get("CAMERA_V2_HEATMAP_LOW", "0.00050"))
+        yellow = float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.070"))
+        red = float(os.environ.get("CAMERA_V2_HEATMAP_RED", "0.200"))
+        max_points = max(12, min(96, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "72"))))
 
         self.bridge.configure_heatmap(
             deposit=deposit,
@@ -61,9 +64,9 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         )
         self.bridge.reset_heatmap()
 
-        # The native accumulator uses source-camera coordinates before tiling. The
-        # renderer must run after nvmultistreamtiler has produced the 1920x720 wall,
-        # immediately before nvdsosd consumes NvDsDisplayMeta circles.
+        # Accumulator uses source-camera coordinates before tiling. Rendering runs
+        # after the 3x2 tiler and immediately before nvdsosd so the translucent heat
+        # field is painted directly on top of each live camera tile.
         osd_sink = self.osd.get_static_pad("sink")
         if osd_sink is None:
             raise RuntimeError("CAMERA_HEATMAP could not get nvdsosd sink pad")
@@ -74,7 +77,7 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             f"anchor=feet-lifted-8pct motion_only=1 grid=48x27 points={max_points}/cam "
             f"deposit={deposit:.5f} decay={decay:.8f} cool={cool_seconds:.0f}s "
             f"remain={hour_remaining:.2f} yellow={yellow:.3f} red={red:.3f} "
-            "palette=blue-cyan-yellow-red overlay=post-tiler/pre-osd",
+            "style=continuous-field palette=blue-cyan-yellow-red overlay=post-tiler/pre-osd",
             flush=True,
         )
 
@@ -82,9 +85,8 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         buffer = info.get_buffer()
         if self.heatmap_enabled and buffer is not None:
             try:
-                # Run BEFORE parent style/smoothing. This guarantees synthetic
-                # display-hold boxes never add fake heat and only real NvDCF tracks
-                # can leave a trail.
+                # Run BEFORE parent style/smoothing. Synthetic display-hold boxes
+                # therefore never add fake heat; only real NvDCF tracks paint.
                 updates = self.bridge.heatmap_update(buffer)
                 if updates > 0:
                     self.heatmap_updates += int(updates)
