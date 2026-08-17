@@ -84,15 +84,28 @@ Prepare and warm the selected model once:
 python scripts/setup_camera_v2_reid.py
 ```
 
+The first setup needs working DNS/internet if the selected model is not already under
+`.runtime/camera_v2/models/reid/`. A successful setup prints
+`CAMERA_V2_REID_SETUP=PASS`. Production launch also runs this warmup check so ReID
+cannot silently start without a usable embedding model.
+
 ## Qwen verifier
 
-Qwen is optional at runtime and never blocks video. Point it at an OpenAI-compatible
-Qwen-VL server:
+Qwen is optional at runtime and never blocks video. Point it at a real
+OpenAI-compatible Qwen-VL server. The following is a shell-safe example for a server
+listening on local port 8080:
 
 ```bash
-export QWEN_REID_URL=http://127.0.0.1:PORT/v1
-export QWEN_REID_MODEL=qwen3-vl
+export QWEN_REID_URL="http://127.0.0.1:8080/v1"
+export QWEN_REID_MODEL="qwen3-vl"
 ```
+
+Change `8080` and `qwen3-vl` to the actual port/model exposed by your server. Do not
+copy documentation placeholders such as `<PORT>` or `<model name>` directly into
+Bash; angle brackets are shell redirection syntax.
+
+Until a Qwen-VL server is running, leave `QWEN_REID_URL` unset. ReID remains active
+and the Qwen branch degrades to `UNCERTAIN` instead of blocking identity or video.
 
 The verifier receives one compact JPEG contact sheet containing up to three OLD
 Global-ID crops on the first row and up to three NEW-track crops on the second row.
@@ -119,7 +132,8 @@ ABI sizes and compiles the native DeepStream metadata bridge on the target machi
 bash scripts/run_sentinel_vms.sh
 ```
 
-The launcher runs both ReID and UI preflights before opening Sentinel.
+The launcher warms/verifies the ReID embedding model, then runs both ReID and UI
+preflights before opening Sentinel.
 
 ## Important calibration note
 
