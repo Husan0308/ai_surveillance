@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 
 from .person_tracking_final import CameraPersonTrackingFinal
-from .qwen_reid_verifier import QwenRoomReIDVerifier
+from .qwen_reid_verifier_fast import FastQwenRoomReIDVerifier as QwenRoomReIDVerifier
 
 
 class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
@@ -48,7 +48,7 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
                 "CAMERA_QWEN_REID "
                 f"enabled={int(q.enabled)} url={q.url} model={q.model} "
                 "scope=same-room-peer-cameras async=1 reversible=1 votes=2 "
-                "same_camera_unique=1 "
+                "same_camera_unique=1 fast_classifier=1 "
                 "pairs=CAM01+CAM04,CAM02+CAM05,CAM03+CAM06 "
                 f"room_map={self.global_reid.room_map}",
                 flush=True,
@@ -147,7 +147,6 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
             binding.state, 0
         )
         _vec, _color, evidence = manager._track_prototype(key)
-        # Older established track wins only after known/state/evidence quality.
         age_rank = -float(binding.first_seen)
         return (known, state_rank, int(evidence), age_rank)
 
@@ -160,8 +159,6 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
         old_gid = manager._resolve(binding.global_id)
         vector, color, count = manager._track_prototype(key)
         if vector is not None and count >= 2:
-            # First try a different already-existing identity. The manager's hard
-            # conflict rules reject any ID already active in this same camera.
             (
                 alt_gid,
                 _score,
@@ -205,9 +202,6 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
             )
             return
 
-        # A binding normally has ReID evidence, but if a tracker ID races ahead of
-        # the sidecar, still enforce uniqueness immediately with an empty provisional
-        # profile. Later observations will reassess/correct it normally.
         manager._remove_owner_contributions(old_gid, key)
         profile = manager._new_profile(key[0], now)
         binding.global_id = profile.global_id
@@ -262,9 +256,6 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
                 if verifier is not None and verifier.enabled:
                     verifier.service(self.global_reid, now)
 
-                # Run after both fast ReID and Qwen corrections. This is a final
-                # safety net, not a heuristic: same-camera duplicate Global IDs are
-                # physically impossible and must never reach the UI.
                 repaired = self._repair_same_camera_identity_collisions(now)
                 if repaired and buffer is not None:
                     assignments = self.global_reid.label_assignments()
