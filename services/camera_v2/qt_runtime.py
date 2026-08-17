@@ -10,151 +10,249 @@ from pathlib import Path
 
 os.environ.setdefault("CAMERA_V2_QT_UI", "1")
 
-from .detection import _yolo_worker
-from .person_heatmap import CameraPersonHeatmap
-
 
 class CameraQtController:
-    """Non-blocking owner for CameraPersonHeatmap used by the Qt event loop."""
+    """Qt-safe owner for the existing Camera V2 tracking/heatmap pipeline.
+
+    The controller is deliberately lazy: constructing the Qt window does not touch
+    DeepStream. The real pipeline is created only after the native video QWidget has
+    been shown and has a stable WId. This keeps the UI visible even if camera startup
+    fails and avoids binding nveglglessink to a stale/zero handle.
+    """
 
     def __init__(self) -> None:
-        self.runtime = CameraPersonHeatmap()
+        self.runtime = None
         self._loop_thread: threading.Thread | None = None
         self._started = False
+        self._starting = False
         self._stopped = False
+        self._window_handle = 0
         self._focus_source: int | None = None
-        self._heat_enabled = [False] * len(self.runtime.cameras)
+        self._heat_enabled = [False] * 6
+        self._lock = threading.RLock()
+        self._status = "WAITING"
+        self._error = ""
 
-        # Tiny UI-side movement map: no frame copies, only tracker coordinates.
         self._heat_lock = threading.RLock()
-        self._heat = [[[0.0 for _ in range(32)] for _ in range(18)] for _ in self.runtime.cameras]
+        self._heat = [[[0.0 for _ in range(32)] for _ in range(18)] for _ in range(6)]
         self._heat_tracks: dict[tuple[int, int], tuple[float, float, float]] = {}
         self._heat_last_decay = time.monotonic()
         self._last_snapshot: dict = {"cameras": [], "tracks": [], "events": [], "rooms": []}
 
     @property
     def camera_count(self) -> int:
-        return len(self.runtime.cameras)
+        return 6
 
-    def bind_window(self, win_id: int) -> None:
+    @property
+    def status(self) -> str:
+        with self._lock:
+            return self._status
+
+    @property
+    def error(self) -> str:
+        with self._lock:
+            return self._error
+
+    def _set_status(self, status: str, error: str = "") -> None:
+        with self._lock:
+            self._status = status
+            self._error = error
+
+    def _prepare_runtime(self):
+        if self.runtime is not None:
+            return self.runtime
+        from .person_heatmap import CameraPersonHeatmap
+        self.runtime = CameraPersonHeatmap()
+        if len(self.runtime.cameras) != 6:
+            raise RuntimeError(f"Sentinel Qt expects 6 cameras, found {len(self.runtime.cameras)}")
+        return self.runtime
+
+    def _install_video_overlay_handler(self) -> None:
+        runtime = self.runtime
+        if runtime is None:
+            return
         import gi
         gi.require_version("GstVideo", "1.0")
-        from gi.repository import GstVideo
-        GstVideo.VideoOverlay.set_window_handle(self.runtime.sink, int(win_id))
-        try:
-            GstVideo.VideoOverlay.handle_events(self.runtime.sink, False)
-        except Exception:
-            pass
+        from gi.repository import Gst, GstVideo
 
-    def start(self) -> None:
-        if self._started:
-            return
-        ctx = mp.get_context("spawn")
-        self.runtime.job_q = ctx.Queue(maxsize=1)
-        self.runtime.result_q = ctx.Queue(maxsize=2)
-        self.runtime.worker = ctx.Process(
-            target=_yolo_worker,
-            args=(self.runtime.job_q, self.runtime.result_q),
-            daemon=True,
-        )
-        self.runtime.worker.start()
-        self.runtime.scheduler_thread = threading.Thread(
-            target=self.runtime._scheduler,
-            name="camera-v2-yolo-scheduler",
-            daemon=True,
-        )
-        self.runtime.scheduler_thread.start()
+        handle = int(self._window_handle)
+        if handle <= 0:
+            raise RuntimeError("Qt video window handle is not valid")
 
-        result = self.runtime.pipeline.set_state(self.runtime.Gst.State.PLAYING)
-        if result == self.runtime.Gst.StateChangeReturn.FAILURE:
-            self.runtime.pipeline.set_state(self.runtime.Gst.State.NULL)
-            self._stop_detector_sidecar()
-            raise RuntimeError("Camera V2 Qt pipeline failed to enter PLAYING")
-
-        self._loop_thread = threading.Thread(
-            target=self.runtime.loop.run,
-            name="camera-v2-glib-loop",
-            daemon=True,
-        )
-        self._loop_thread.start()
-        self._started = True
-        print("CAMERA_QT started: Sentinel UI + native DeepStream wall + YOLO26m + NvDCF", flush=True)
-
-    def _stop_detector_sidecar(self) -> None:
-        self.runtime.det_stop.set()
-        self.runtime._clear_requests()
-        try:
-            self.runtime.mailbox.close()
-        except Exception:
-            pass
-        if self.runtime.job_q is not None:
+        def on_sync_message(_bus, message, _data=None):
             try:
-                self.runtime.job_q.put_nowait(None)
+                is_prepare = GstVideo.is_video_overlay_prepare_window_handle_message(message)
+            except Exception:
+                structure = message.get_structure()
+                is_prepare = bool(structure and structure.get_name() == "prepare-window-handle")
+            if not is_prepare:
+                return Gst.BusSyncReply.PASS
+            try:
+                GstVideo.VideoOverlay.set_window_handle(message.src, handle)
+                GstVideo.VideoOverlay.handle_events(message.src, False)
+                return Gst.BusSyncReply.DROP
+            except Exception as exc:
+                self._set_status("VIDEO ERROR", str(exc))
+                return Gst.BusSyncReply.PASS
+
+        runtime.bus.set_sync_handler(on_sync_message, None)
+        GstVideo.VideoOverlay.set_window_handle(runtime.sink, handle)
+        try:
+            GstVideo.VideoOverlay.handle_events(runtime.sink, False)
+        except Exception:
+            pass
+
+    def start(self, win_id: int) -> None:
+        if self._started or self._starting or self._stopped:
+            return
+        self._starting = True
+        self._window_handle = int(win_id)
+        self._set_status("STARTING")
+        try:
+            runtime = self._prepare_runtime()
+            self._install_video_overlay_handler()
+
+            from .detection import _yolo_worker
+            ctx = mp.get_context("spawn")
+            runtime.job_q = ctx.Queue(maxsize=1)
+            runtime.result_q = ctx.Queue(maxsize=2)
+            runtime.worker = ctx.Process(target=_yolo_worker, args=(runtime.job_q, runtime.result_q), daemon=True)
+            runtime.worker.start()
+            runtime.scheduler_thread = threading.Thread(
+                target=runtime._scheduler,
+                name="camera-v2-yolo-scheduler",
+                daemon=True,
+            )
+            runtime.scheduler_thread.start()
+
+            result = runtime.pipeline.set_state(runtime.Gst.State.PLAYING)
+            if result == runtime.Gst.StateChangeReturn.FAILURE:
+                runtime.pipeline.set_state(runtime.Gst.State.NULL)
+                self._stop_detector_sidecar()
+                raise RuntimeError("Camera V2 pipeline failed to enter PLAYING")
+
+            self._loop_thread = threading.Thread(
+                target=runtime.loop.run,
+                name="camera-v2-glib-loop",
+                daemon=True,
+            )
+            self._loop_thread.start()
+            self._started = True
+            self._set_status("LIVE")
+            print(
+                "CAMERA_QT started: exact Sentinel shell + native 2x3 DeepStream wall + "
+                "YOLO26m + NvDCF; video_copy=0 mjpeg=0",
+                flush=True,
+            )
+        except Exception as exc:
+            self._set_status("ERROR", f"{type(exc).__name__}: {exc}")
+            print(f"CAMERA_QT START ERROR: {type(exc).__name__}: {exc}", flush=True)
+            try:
+                if self.runtime is not None:
+                    self.runtime.pipeline.set_state(self.runtime.Gst.State.NULL)
             except Exception:
                 pass
-        if self.runtime.scheduler_thread is not None:
-            self.runtime.scheduler_thread.join(timeout=2.0)
-        if self.runtime.worker is not None:
-            self.runtime.worker.join(timeout=3.0)
-            if self.runtime.worker.is_alive():
-                self.runtime.worker.terminate()
-                self.runtime.worker.join(timeout=1.0)
+            self._stop_detector_sidecar()
+        finally:
+            self._starting = False
+
+    def _stop_detector_sidecar(self) -> None:
+        runtime = self.runtime
+        if runtime is None:
+            return
+        try:
+            runtime.det_stop.set()
+            runtime._clear_requests()
+        except Exception:
+            pass
+        try:
+            runtime.mailbox.close()
+        except Exception:
+            pass
+        if getattr(runtime, "job_q", None) is not None:
+            try:
+                runtime.job_q.put_nowait(None)
+            except Exception:
+                pass
+        thread = getattr(runtime, "scheduler_thread", None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        worker = getattr(runtime, "worker", None)
+        if worker is not None:
+            worker.join(timeout=3.0)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=1.0)
 
     def stop(self) -> None:
         if self._stopped:
             return
         self._stopped = True
-        self.runtime.stop()
-        if self._loop_thread is not None:
+        runtime = self.runtime
+        if runtime is None:
+            return
+        try:
+            runtime.stop()
+        except Exception:
+            pass
+        if self._loop_thread is not None and self._loop_thread is not threading.current_thread():
             self._loop_thread.join(timeout=2.0)
         try:
-            self.runtime.pipeline.set_state(self.runtime.Gst.State.NULL)
+            runtime.pipeline.set_state(runtime.Gst.State.NULL)
         except Exception:
             pass
         self._stop_detector_sidecar()
-        for tee, pad in getattr(self.runtime, "tee_request_pads", []):
+        for tee, pad in getattr(runtime, "tee_request_pads", []):
             try:
                 tee.release_request_pad(pad)
             except Exception:
                 pass
-        for pad in getattr(self.runtime, "_request_pads", []):
+        for pad in getattr(runtime, "_request_pads", []):
             try:
-                self.runtime.mux.release_request_pad(pad)
+                runtime.mux.release_request_pad(pad)
             except Exception:
                 pass
+        self._set_status("STOPPED")
 
     def set_focus_source(self, source_id: int | None) -> None:
-        value = -1 if source_id is None else int(source_id)
-        self.runtime.tiler.set_property("show-source", value)
         self._focus_source = source_id
+        runtime = self.runtime
+        if runtime is None:
+            return
+        runtime.tiler.set_property("show-source", -1 if source_id is None else int(source_id))
 
     def focus_source(self) -> int | None:
         return self._focus_source
 
     def set_heatmap_enabled(self, source_id: int, enabled: bool) -> None:
-        self._heat_enabled[int(source_id)] = bool(enabled)
+        source_id = int(source_id)
+        if 0 <= source_id < len(self._heat_enabled):
+            self._heat_enabled[source_id] = bool(enabled)
 
     def heatmap_enabled(self, source_id: int) -> bool:
-        return self._heat_enabled[int(source_id)]
+        source_id = int(source_id)
+        return 0 <= source_id < len(self._heat_enabled) and self._heat_enabled[source_id]
 
     def _decay_heat(self, now: float) -> None:
         dt = max(0.0, now - self._heat_last_decay)
         if dt < 0.05:
             return
-        factor = math.pow(0.985, dt * 10.0)
+        factor = math.pow(0.9975, dt * 10.0)
         with self._heat_lock:
             for source in self._heat:
                 for row in source:
                     for x in range(len(row)):
                         row[x] *= factor
-                        if row[x] < 0.01:
+                        if row[x] < 0.004:
                             row[x] = 0.0
         self._heat_last_decay = now
 
     def _deposit(self, source_id: int, gx: float, gy: float, amount: float) -> None:
+        if not 0 <= source_id < len(self._heat):
+            return
         cx = max(0, min(31, int(round(gx))))
         cy = max(0, min(17, int(round(gy))))
-        kernel = ((0.12, 0.25, 0.12), (0.25, 1.0, 0.25), (0.12, 0.25, 0.12))
+        kernel = ((0.08, 0.18, 0.08), (0.18, 1.0, 0.18), (0.08, 0.18, 0.08))
         grid = self._heat[source_id]
         for ky in range(-1, 2):
             y = cy + ky
@@ -168,17 +266,20 @@ class CameraQtController:
     def _update_heat(self, snapshot: dict) -> None:
         now = time.monotonic()
         self._decay_heat(now)
+        runtime = self.runtime
+        frame_w = max(1.0, float(getattr(runtime, "frame_width", 1280)))
+        frame_h = max(1.0, float(getattr(runtime, "frame_height", 720)))
         active_keys: set[tuple[int, int]] = set()
         with self._heat_lock:
             for track in snapshot.get("tracks", []):
-                sid = int(track["source_id"])
-                oid = int(track["object_id"])
+                sid = int(track.get("source_id", -1))
+                oid = int(track.get("object_id", -1))
+                if not 0 <= sid < 6 or oid < 0:
+                    continue
                 key = (sid, oid)
                 active_keys.add(key)
-                frame_w = max(1.0, float(self.runtime.frame_width))
-                frame_h = max(1.0, float(self.runtime.frame_height))
-                foot_x = float(track["left"]) + float(track["width"]) * 0.5
-                foot_y = float(track["top"]) + float(track["height"]) * 0.98
+                foot_x = float(track.get("left", 0.0)) + float(track.get("width", 0.0)) * 0.5
+                foot_y = float(track.get("top", 0.0)) + float(track.get("height", 0.0)) * 0.98
                 gx = max(0.0, min(31.0, foot_x / frame_w * 31.0))
                 gy = max(0.0, min(17.0, foot_y / frame_h * 17.0))
                 previous = self._heat_tracks.get(key)
@@ -187,29 +288,37 @@ class CameraQtController:
                     continue
                 dx, dy = gx - previous[0], gy - previous[1]
                 dist = math.hypot(dx, dy)
-                if 0.16 <= dist <= 4.5:
-                    steps = max(1, min(8, int(dist * 2.0)))
+                if 0.22 <= dist <= 4.5:
+                    steps = max(1, min(10, int(dist * 2.2)))
+                    amount = min(0.020, 0.0035 + dist * 0.003)
                     for step in range(1, steps + 1):
                         t = step / steps
-                        self._deposit(sid, previous[0] + dx * t, previous[1] + dy * t, min(0.08, 0.018 + dist * 0.012))
+                        self._deposit(sid, previous[0] + dx * t, previous[1] + dy * t, amount)
             for key in list(self._heat_tracks):
                 if key not in active_keys and now - self._heat_tracks[key][2] > 1.5:
                     self._heat_tracks.pop(key, None)
 
     def snapshot(self) -> dict:
-        snap = self.runtime.ui_snapshot()
+        runtime = self.runtime
+        if runtime is None:
+            cameras = [
+                {"source_id": i, "camera_id": f"CAM-{i + 1:02d}", "fps": 0.0, "online": False, "count": 0}
+                for i in range(6)
+            ]
+            return {"cameras": cameras, "tracks": [], "events": [], "rooms": []}
+        snap = runtime.ui_snapshot()
         self._update_heat(snap)
         self._last_snapshot = snap
         return snap
 
-    def heat_points(self, source_id: int, max_points: int = 36) -> list[tuple[float, float, float]]:
+    def heat_points(self, source_id: int, max_points: int = 30) -> list[tuple[float, float, float]]:
         if not self.heatmap_enabled(source_id):
             return []
         with self._heat_lock:
             candidates = []
             for y, row in enumerate(self._heat[int(source_id)]):
                 for x, value in enumerate(row):
-                    if value >= 0.025:
+                    if value >= 0.012:
                         candidates.append((value, x + 0.5, y + 0.5))
         candidates.sort(reverse=True)
         return [(x / 32.0, y / 18.0, value) for value, x, y in candidates[:max_points]]
