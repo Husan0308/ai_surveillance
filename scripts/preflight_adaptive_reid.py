@@ -10,7 +10,7 @@ os.environ.setdefault("CAMERA_V2_REID_SAME_ROOM", "0.54")
 os.environ.setdefault("CAMERA_V2_REID_COVISIBLE", "0.52")
 os.environ.setdefault("CAMERA_V2_REID_CONFIRM_VOTES", "4")
 
-from services.camera_v2.adaptive_reid import AdaptiveTrackletReID
+from services.camera_v2.adaptive_reid_live import LiveAdaptiveTrackletReID
 from services.camera_v2.global_reid import GlobalReIDManager
 
 
@@ -37,7 +37,7 @@ def row(source, oid, feature, x):
 
 def main() -> int:
     manager = GlobalReIDManager()
-    adaptive = AdaptiveTrackletReID(manager)
+    adaptive = LiveAdaptiveTrackletReID(manager)
 
     # Two people, each observed by both cameras in room 0. Cross-view cosine is
     # intentionally only ~0.52: weak for a one-frame match but stable across a
