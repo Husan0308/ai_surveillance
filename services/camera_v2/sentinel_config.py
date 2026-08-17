@@ -86,10 +86,10 @@ def save_camera(row: dict, *, existing_id: str | None = None) -> dict:
     replaced = False
     for index, current in enumerate(rows):
         if str(current.get("id", "")) == str(existing_id or camera["id"]):
-            env_uri = str(current.get("env_uri", "")).strip()
+            # Settings is authoritative after a manual edit. Do not preserve an old
+            # env_uri indirection that could silently override the RTSP URL the user
+            # just entered in the UI.
             rows[index] = dict(camera)
-            if env_uri and camera["id"] == str(existing_id or camera["id"]):
-                rows[index]["env_uri"] = env_uri
             replaced = True
             break
     if not replaced:
