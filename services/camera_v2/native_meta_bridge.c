@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,7 +38,7 @@ static float env_margin(const char *name, float fallback) {
     if (!value || !value[0]) return fallback;
     char *end = NULL;
     double parsed = g_ascii_strtod(value, &end);
-    if (end == value || !g_ascii_isfinite(parsed)) return fallback;
+    if (end == value || !isfinite(parsed)) return fallback;
     if (parsed < 0.0) parsed = 0.0;
     if (parsed > 0.25) parsed = 0.25;
     return (float) parsed;
@@ -104,8 +105,6 @@ int camera_v2_add_boxes(uintptr_t buffer_ptr,
     return add_boxes_to_frame(batch_meta, frame_meta, boxes, count);
 }
 
-/* Emulate a primary detector result on exactly the live source frame where the
- * asynchronous YOLO observation is attached. */
 int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
                                     unsigned int source_id,
                                     const float *boxes,
@@ -121,9 +120,6 @@ int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
     return add_boxes_to_frame(batch_meta, frame_meta, boxes, count);
 }
 
-/* Style only real current-frame NvDCF objects. Display margins are controlled by
- * the same CAMERA_V2_TRACK_BOX_* environment settings as the Python runtime so the
- * native bridge cannot silently inflate boxes behind the runtime's back. */
 int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
     GstBuffer *buffer = (GstBuffer *) buffer_ptr;
