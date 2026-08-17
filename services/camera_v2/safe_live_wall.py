@@ -9,16 +9,17 @@ from . import sentinel_exact as ui
 
 SOURCE_WIDTH = 1280.0
 SOURCE_HEIGHT = 720.0
+GRID_ASPECT = 1280.0 / 1080.0  # 2 columns x 3 rows of 16:9 cameras
+FOCUS_ASPECT = 16.0 / 9.0
 GUTTER = 5.0
 
 
 class CameraWallOverlay(QWidget):
-    """Top-level translucent Qt overlay above the native GstVideoOverlay surface.
+    """Reference-style chrome above the native zero-copy DeepStream wall.
 
-    The DeepStream/EGL target uses WA_PaintOnScreen and therefore must not be
-    composited with child QWidget backing stores. Keeping the chrome in a separate
-    translucent tool window prevents stale Qt backing-store pixels from replacing
-    live camera pixels while still allowing demo-accurate labels and interactions.
+    Video stays in the GstVideoOverlay X11 surface. This top-level translucent
+    window draws only the exact camera chrome, identity boxes and hover affordance,
+    so Qt backing-store pixels never replace live camera pixels.
     """
 
     fullscreenRequested = Signal(int)
@@ -50,9 +51,6 @@ class CameraWallOverlay(QWidget):
         if bool(track.get("known", False)):
             text = str(track.get("label") or "Known").strip()
             return text or "Known"
-        text = str(track.get("label") or "").strip()
-        if text.startswith("Unknown_"):
-            return text
         try:
             object_id = int(track.get("object_id", 0))
         except (TypeError, ValueError):
@@ -60,11 +58,16 @@ class CameraWallOverlay(QWidget):
         return f"Unknown_{object_id:02d}"
 
     def set_snapshot(self, snapshot: dict) -> None:
-        self.cameras = {
-            int(row.get("source_id", -1)): dict(row)
-            for row in snapshot.get("cameras", [])
-            if 0 <= int(row.get("source_id", -1)) < 6
-        }
+        cameras: dict[int, dict] = {}
+        for row in snapshot.get("cameras", []):
+            try:
+                source_id = int(row.get("source_id", -1))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= source_id < 6:
+                cameras[source_id] = dict(row)
+        self.cameras = cameras
+
         grouped: dict[int, list[dict]] = {i: [] for i in range(6)}
         for track in snapshot.get("tracks", []):
             try:
@@ -74,10 +77,14 @@ class CameraWallOverlay(QWidget):
             if source_id in grouped:
                 grouped[source_id].append(dict(track))
         self.tracks = grouped
-        self.rooms = {
-            int(row.get("room_id", -1)): int(row.get("count", 0))
-            for row in snapshot.get("rooms", [])
-        }
+
+        rooms: dict[int, int] = {}
+        for row in snapshot.get("rooms", []):
+            try:
+                rooms[int(row.get("room_id", -1))] = int(row.get("count", 0))
+            except (TypeError, ValueError):
+                continue
+        self.rooms = rooms
         self.update()
 
     def set_focus(self, source_id: int | None) -> None:
@@ -85,21 +92,42 @@ class CameraWallOverlay(QWidget):
         self._hover_source = None
         self.update()
 
+    def _content_rect(self) -> QRectF:
+        """Exact rectangle where nveglglessink renders with aspect preservation."""
+        bounds = QRectF(self.rect())
+        if bounds.width() <= 1 or bounds.height() <= 1:
+            return QRectF()
+        aspect = FOCUS_ASPECT if self.focus_source is not None else GRID_ASPECT
+        available_aspect = bounds.width() / bounds.height()
+        if available_aspect > aspect:
+            h = bounds.height()
+            w = h * aspect
+            return QRectF(bounds.left() + (bounds.width() - w) * 0.5, bounds.top(), w, h)
+        w = bounds.width()
+        h = w / aspect
+        return QRectF(bounds.left(), bounds.top() + (bounds.height() - h) * 0.5, w, h)
+
     def _cell_rect(self, source_id: int) -> QRectF:
+        content = self._content_rect()
+        if content.isEmpty():
+            return QRectF()
         if self.focus_source is not None:
-            return QRectF(self.rect()) if source_id == self.focus_source else QRectF()
-        tile_w = self.width() / 2.0
-        tile_h = self.height() / 3.0
+            return content if source_id == self.focus_source else QRectF()
+        tile_w = content.width() / 2.0
+        tile_h = content.height() / 3.0
         row, col = divmod(source_id, 2)
-        return QRectF(col * tile_w, row * tile_h, tile_w, tile_h)
+        return QRectF(content.left() + col * tile_w, content.top() + row * tile_h, tile_w, tile_h)
 
     def _source_at(self, pos) -> int | None:
-        if self.width() <= 1 or self.height() <= 1:
+        content = self._content_rect()
+        if content.isEmpty() or not content.contains(pos):
             return None
         if self.focus_source is not None:
             return self.focus_source
-        col = min(1, max(0, int(pos.x() / (self.width() / 2.0))))
-        row = min(2, max(0, int(pos.y() / (self.height() / 3.0))))
+        local_x = pos.x() - content.left()
+        local_y = pos.y() - content.top()
+        col = min(1, max(0, int(local_x / (content.width() / 2.0))))
+        row = min(2, max(0, int(local_y / (content.height() / 3.0))))
         return row * 2 + col
 
     def _draw_tracks(self, painter: QPainter, source_id: int, video_rect: QRectF) -> None:
@@ -114,7 +142,6 @@ class CameraWallOverlay(QWidget):
 
         font = QFont("DejaVu Sans Mono", 7)
         metrics = QFontMetrics(font)
-
         for track in self.tracks.get(source_id, []):
             try:
                 left = float(track.get("left", 0.0))
@@ -139,6 +166,7 @@ class CameraWallOverlay(QWidget):
             known = bool(track.get("known", False))
             tone = QColor(ui.C["known"] if known else ui.C["unknown"])
 
+            # Reference bbox: clean 2px line, no translucent fill.
             painter.setPen(QPen(tone, 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(x1, y1, x2 - x1, y2 - y1))
@@ -152,7 +180,6 @@ class CameraWallOverlay(QWidget):
             chip_x = min(x1, max(video_rect.left() + 2.0, video_rect.right() - text_width - 2.0))
             chip_y = max(video_rect.top() + 23.0, y1 - chip_h)
             chip = QRectF(chip_x, chip_y, text_width, chip_h)
-
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(tone)
             painter.drawRoundedRect(chip, 2.5, 2.5)
@@ -169,12 +196,10 @@ class CameraWallOverlay(QWidget):
         if cell.isEmpty():
             return
 
-        # Opaque line-only gutters recreate the demo's 10px QGridLayout spacing
-        # without ever painting over the middle of the live camera surface.
+        # Demo/reference grid spacing: neighboring 5px masks form a 10px gutter.
         painter.setPen(QPen(QColor(ui.C["bg"]), GUTTER * 2.0))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(cell)
-
         rect = cell.adjusted(GUTTER, GUTTER, -GUTTER, -GUTTER)
         if rect.width() <= 20 or rect.height() <= 20:
             return
@@ -243,11 +268,10 @@ class CameraWallOverlay(QWidget):
         )
 
         if self._hover_source == source_id and not focused:
-            shadow = QColor(2, 12, 17, 210)
-            painter.setPen(QPen(shadow, 6))
+            # Only a border/shadow is painted; never wash the live video with color.
+            painter.setPen(QPen(QColor(2, 12, 17, 220), 6))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 7, 7)
-
             accent = QColor(ui.C["primary"])
             accent.setAlpha(220)
             painter.setPen(QPen(accent, 2))
@@ -266,13 +290,11 @@ class CameraWallOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self._fullscreen_rects.clear()
-
         if self.focus_source is not None:
             self._draw_camera(painter, self.focus_source)
         else:
             for source_id in range(6):
                 self._draw_camera(painter, source_id)
-
         painter.end()
 
     def mouseMoveEvent(self, event):
@@ -308,7 +330,7 @@ class CameraWallOverlay(QWidget):
 
 
 class SafeLiveWall(QWidget):
-    """Native DeepStream surface with a separate translucent top-level Qt overlay."""
+    """Native DeepStream surface + exact reference overlay, with no frame copies."""
 
     fullscreenRequested = Signal(int)
 
@@ -327,9 +349,12 @@ class SafeLiveWall(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         _ = int(self.winId())
 
-        self._sync_timer = QTimer(self)
-        self._sync_timer.setInterval(50)
-        self._sync_timer.timeout.connect(self._sync_overlay)
+        # One 20 Hz timer handles both overlay geometry and fresh tracker metadata.
+        # MainWindow can keep its slower cards/recent-views refresh without making
+        # person boxes visibly lag behind the camera.
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(50)
+        self._live_timer.timeout.connect(self._live_tick)
 
     def _ensure_overlay(self) -> CameraWallOverlay:
         if self._overlay is None:
@@ -354,6 +379,16 @@ class SafeLiveWall(QWidget):
             overlay.show()
         overlay.raise_()
 
+    def _live_tick(self) -> None:
+        if not self.isVisible():
+            return
+        overlay = self._ensure_overlay()
+        try:
+            overlay.set_snapshot(self.controller.snapshot())
+        except Exception:
+            pass
+        self._sync_overlay()
+
     def paintEngine(self):
         return None
 
@@ -377,21 +412,21 @@ class SafeLiveWall(QWidget):
         super().showEvent(event)
         overlay = self._ensure_overlay()
         overlay.show()
-        self._sync_timer.start()
-        QTimer.singleShot(0, self._sync_overlay)
+        self._live_timer.start()
+        QTimer.singleShot(0, self._live_tick)
         if not self._boot_requested:
             self._boot_requested = True
             QTimer.singleShot(100, self._start_pipeline)
 
     def hideEvent(self, event):
-        self._sync_timer.stop()
+        self._live_timer.stop()
         if self._overlay is not None:
             self._overlay.hide()
         super().hideEvent(event)
 
     def _start_pipeline(self):
         self.controller.start(int(self.winId()))
-        self._sync_overlay()
+        self._live_tick()
 
     def resizeEvent(self, event):
         QTimer.singleShot(0, self._sync_overlay)
@@ -410,7 +445,7 @@ class SafeLiveWall(QWidget):
         self._sync_overlay()
 
     def closeEvent(self, event):
-        self._sync_timer.stop()
+        self._live_timer.stop()
         if self._overlay is not None:
             self._overlay.close()
             self._overlay.deleteLater()
