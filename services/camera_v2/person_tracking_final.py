@@ -51,6 +51,9 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.detector_result_age_ms = 0.0
         self.detector_times: dict[str, deque[float]] = {}
         super().__init__()
+        # nvdsosd must have text enabled for the compact name/Unknown_ID chips
+        # attached to NvDsObjectMeta.text_params by the native label styler.
+        self._set_if(self.osd, "display-text", True)
         self.detector_target_hz = max(self.detector_min_hz, min(self.detector_max_hz, self.detector_target_hz))
         self.detector_times = {cid: deque(maxlen=100) for cid in self.camera_index}
         self.latency_compensator = DetectorLatencyCompensator(self.frame_width, self.frame_height)
