@@ -10,8 +10,9 @@ import numpy as np
 import yaml
 
 from .person_tracking_final import CameraPersonTrackingFinal
+from .reid_production import ProductionReIdIdentityEngine
 from .reid_quality import bbox_iou
-from .reid_runtime import CropJob, ReIdIdentityEngine
+from .reid_runtime import CropJob
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,7 +40,7 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
     """
 
     def __init__(self) -> None:
-        self.identity: ReIdIdentityEngine | None = None
+        self.identity: ProductionReIdIdentityEngine | None = None
         self._reid_lock = threading.RLock()
         self._track_history: dict[str, deque[tuple[float, list[dict]]]] = {}
         self._sample_versions: dict[str, int] = {}
@@ -56,7 +57,9 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
             camera.camera_id: str(getattr(camera, "room", "") or "")
             for camera in self.cameras
         }
-        self.identity = ReIdIdentityEngine(camera_rooms, cfg, root=ROOT)
+        self.identity = ProductionReIdIdentityEngine(
+            camera_rooms, cfg, root=ROOT
+        )
         self._track_history = {
             camera.camera_id: deque(maxlen=36) for camera in self.cameras
         }
@@ -64,6 +67,7 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
         print(
             "CAMERA_GLOBAL_ID ready architecture=async-tracklet-reid "
             "crop_bank=10 top3_diverse=1 qwen_async=1 topology=config/cameras.yaml "
+            "independent_gallery_check=1 gallery_poison_guard=1 rollback=1 "
             "same_camera_fragment_reconnect=1 sticky_display_hold=1 "
             "false_merge_policy=conservative",
             flush=True,
@@ -118,7 +122,7 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
         result = super()._tracker_probe(pad, info)
 
         # Replace local Unknown_Cx_y for real current tracks and for the short
-        # display-hold interval only. Do not apply six-hour LOST bindings blindly:
+        # display-hold interval only. Do not apply long LOST bindings blindly:
         # that would be unsafe if a tracker ID were ever recycled later.
         if buffer is not None and self.identity is not None:
             try:
@@ -131,7 +135,10 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
                 for (camera_id, object_id), binding in bindings.items():
                     key = (camera_id, int(object_id))
                     last_real = self._last_real_track_seen.get(key, -1e9)
-                    if key not in current_keys and now - last_real > DISPLAY_HOLD_BINDING_SEC:
+                    if (
+                        key not in current_keys
+                        and now - last_real > DISPLAY_HOLD_BINDING_SEC
+                    ):
                         continue
                     source_id = source_by_camera.get(camera_id)
                     if source_id is None:
@@ -153,7 +160,9 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
                 )
         return result
 
-    def _closest_track_snapshot(self, cid: str, captured_t: float) -> list[dict] | None:
+    def _closest_track_snapshot(
+        self, cid: str, captured_t: float
+    ) -> list[dict] | None:
         with self._reid_lock:
             history = list(self._track_history.get(cid, ()))
         if not history:
@@ -275,7 +284,10 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
                 "CAMERA_GLOBAL_ID "
                 f"globals={ident.get('globals',0)} "
                 f"confirmed={ident.get('confirmed_globals',0)} "
-                f"states={ident.get('states',{})} crops={self._reid_crop_submitted} "
+                f"states={ident.get('states',{})} "
+                f"rollbacks={ident.get('rollbacks',0)} "
+                f"gallery_skips={ident.get('gallery_update_skips',0)} "
+                f"crops={self._reid_crop_submitted} "
                 f"embedded={metrics.get('embedded',0)} "
                 f"quality_rejects={metrics.get('quality_rejects',0)} "
                 f"duplicates={metrics.get('duplicate_rejects',0)} "
