@@ -13,12 +13,17 @@ SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 # The detector remains high resolution; NvDCF itself is intentionally lightweight.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
-    "enableBboxUnClipping": "1",
+    # Do not extrapolate a full bbox outside the camera FOV. New partial people at
+    # the image edge are admission-gated before NvDCF, and existing tracks can rely
+    # on normal shadow tracking while they leave the frame.
+    "enableBboxUnClipping": "0",
     "maxTargetsPerStream": "24",
-    "minIouDiff4NewTarget": "0.14",
-    "minTrackerConfidence": "0.18",
+    # NVIDIA's 0.5 default is much safer for two nearby people. 0.14 treated many
+    # overlapping person detections as duplicates of an existing target.
+    "minIouDiff4NewTarget": "0.50",
+    "minTrackerConfidence": "0.14",
     "probationAge": "1",
-    "maxShadowTrackingAge": "28",
+    "maxShadowTrackingAge": "38",
     "earlyTerminationAge": "2",
 }
 
@@ -39,7 +44,7 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4Iou": "0.02",
     "minMatchingScore4VisualSimilarity": "0.05",
     "usePrediction4Assoc": "1",
-    "minTrackingConfidenceDuringInactive": "0.35",
+    "minTrackingConfidenceDuringInactive": "0.28",
 }
 
 
@@ -122,6 +127,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
         f"# Auto-generated from {stock.name}.",
         "# Camera V2 low-memory NvDCF profile for GTX 1050 Ti 4GB.",
         "# maxTargetsPerStream=24; no synthetic/shadow OSD boxes.",
+        "# Partial edge detections are gated before tracker admission; bbox unclipping is disabled.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
