@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "description": "Manual image-to-room homography calibration for cross-camera ReID. Fill image_points_norm and room_points_m yourself; runtime never auto-calibrates these values.",
+  "rooms": {
+    "0": {
+      "name": "dev-room",
+      "match_distance_m": 0.70,
+      "veto_distance_m": 1.60,
+      "max_time_delta_s": 0.90,
+      "min_common_points": 3
+    },
+    "1": {
+      "name": "entrance",
+      "match_distance_m": 0.70,
+      "veto_distance_m": 1.60,
+      "max_time_delta_s": 0.90,
+      "min_common_points": 3
+    },
+    "2": {
+      "name": "main-room",
+      "match_distance_m": 0.70,
+      "veto_distance_m": 1.60,
+      "max_time_delta_s": 0.90,
+      "min_common_points": 3
+    }
+  },
+  "cameras": {
+    "CAM-01": {
+      "source_id": 0,
+      "room_id": 0,
+      "enabled": false,
+      "image_points_norm": [],
+      "room_points_m": []
+    },
+    "CAM-04": {
+      "source_id": 3,
+      "room_id": 0,
+      "enabled": false,
+      "image_points_norm": [],
+      "room_points_m": []
+    },
+    "CAM-02": {
+      "source_id": 1,
+      "room_id": 1,
+      "enabled": false,
+      "image_points_norm": [],
+      "room_points_m": []
+    },
+    "CAM-05": {
+      "source_id": 4,
+      "room_id": 1,
+      "enabled": false,
+      "image_points_norm": [],
+      "room_points_m": []
+    },
+    "CAM-03": {
+      "source_id": 2,
+      "room_id": 2,
+      "enabled": false,
+      "image_points_norm": [],
+      "room_points_m": []
+    },
+    "CAM-06": {
+      "source_id": 5,
+      "room_id": 2,
+      "enabled": false,
+      "image_points_norm": [],
+      "room_points_m": []
+    }
+  }
+}
