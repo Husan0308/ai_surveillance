@@ -6,12 +6,13 @@ from .person_tracking_final import CameraPersonTrackingFinal
 
 
 class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
-    """Production tracking runtime plus a smooth camera-space foot heatmap.
+    """Production tracking runtime plus a smooth camera-space person heatmap.
 
     Heatmap is isolated from detector/tracker/ReID logic:
       * accumulation happens on raw current NvDCF boxes before display smoothing;
       * the anchor is lifted slightly above bbox bottom-center;
-      * only confirmed motion deposits heat, so seated jitter does not paint;
+      * every real tracked person contributes a faint presence pulse;
+      * confirmed motion adds a denser continuous trail;
       * rendering happens after the tiler and before nvdsosd;
       * the native renderer blends overlapping heat cells into a continuous field.
     """
@@ -43,11 +44,9 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         decay = hour_remaining ** (1.0 / max(1.0, float(self.source_fps) * cool_seconds))
 
         # Reference-like traffic density palette:
-        #   one/few passes -> blue/cyan
+        #   one/few people -> blue/cyan
         #   repeated path  -> green/yellow
         #   heavy traffic  -> orange/red
-        # The broader native kernel is compensated with a lower deposit so one
-        # person's single walk does not instantly become a hot spot.
         deposit = float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0030"))
         low = float(os.environ.get("CAMERA_V2_HEATMAP_LOW", "0.00050"))
         yellow = float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.070"))
@@ -74,7 +73,8 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
 
         print(
             "CAMERA_HEATMAP ready "
-            f"anchor=feet-lifted-8pct motion_only=1 grid=48x27 points={max_points}/cam "
+            f"anchor=feet-lifted-8pct all_tracks=1 presence_pulse=1 motion_trail=1 "
+            f"grid=48x27 points={max_points}/cam "
             f"deposit={deposit:.5f} decay={decay:.8f} cool={cool_seconds:.0f}s "
             f"remain={hour_remaining:.2f} yellow={yellow:.3f} red={red:.3f} "
             "style=continuous-field palette=blue-cyan-yellow-red overlay=post-tiler/pre-osd",
