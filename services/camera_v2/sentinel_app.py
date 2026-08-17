@@ -43,29 +43,33 @@ def _install_reference_contract() -> None:
 
     BaseCameraTile = ui.CameraTile
     BaseLiveWall = ui.LiveWall
+    BaseMonitoringPage = ui.MonitoringPage
 
     class ExactCameraTile(BaseCameraTile):
-        """Realtime overlay with the supplied CameraView chrome only.
+        """Realtime overlay with lightweight Sentinel hover feedback.
 
-        The temporary realtime fork added Heatmap/Fullscreen hover controls inside
-        every camera. The uploaded reference does not contain them, so keep those
-        children permanently hidden. Double-click fullscreen remains, matching the
-        supplied CameraView.clicked behavior.
+        The camera pixels stay owned by the native DeepStream/EGL surface. Qt only
+        paints a tiny transparent chrome layer, so hover feedback never copies or
+        rescales a video frame and cannot reduce the camera pipeline FPS.
         """
 
         def __init__(self, source_id: int, parent=None):
             super().__init__(source_id, parent)
             self.controls.hide()
             self.controls.setEnabled(False)
+            self._hovered = False
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
             self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
 
         def enterEvent(self, event):
-            # Deliberately do not reveal the historical hover controls.
+            self._hovered = True
+            self.update()
             QWidget.enterEvent(self, event)
 
         def leaveEvent(self, event):
+            self._hovered = False
             self.controls.hide()
+            self.update()
             QWidget.leaveEvent(self, event)
 
         def resizeEvent(self, event):
@@ -75,14 +79,30 @@ def _install_reference_contract() -> None:
 
         def paintEvent(self, event):
             super().paintEvent(event)
-            # The supplied Monitoring grid has 10 px gutters between cards. The
-            # native DeepStream wall has no physical gap, so mask only a 5 px edge
-            # on each tile. Total visible camera area stays large while the exact
-            # card separation is restored without copying a video frame into Qt.
             painter = QPainter(self)
-            painter.setPen(QPen(QColor(ui.C["bg"]), 5))
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            # Keep a compact visual gutter between native tiler cells. 4 px on each
+            # tile side gives the camera wall a little more usable image area than
+            # the previous 5 px mask while preserving clear card separation.
+            painter.setPen(QPen(QColor(ui.C["bg"]), 4))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self.rect().adjusted(2, 2, -3, -3))
+
+            if self._hovered and not self.focused:
+                # Inner shadow/glow: visible enough to show which camera is active,
+                # but intentionally subtle so it does not cover detections or faces.
+                glow_rect = self.rect().adjusted(7, 7, -7, -7)
+                tint = QColor(ui.C["primary"])
+                tint.setAlpha(10)
+                painter.fillRect(glow_rect, tint)
+                for width, alpha, inset in ((9, 24, 8), (5, 55, 7), (2, 210, 6)):
+                    color = QColor(ui.C["primary"])
+                    color.setAlpha(alpha)
+                    painter.setPen(QPen(color, width))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRoundedRect(self.rect().adjusted(inset, inset, -inset, -inset), 7, 7)
+
             painter.end()
 
     class ExactLiveWall(BaseLiveWall):
@@ -115,10 +135,31 @@ def _install_reference_contract() -> None:
                     pass
             return result
 
+    class ExactMonitoringPage(BaseMonitoringPage):
+        """Give the six-camera wall slightly more room without changing structure."""
+
+        def __init__(self, controller):
+            super().__init__(controller)
+            # Recover pixels from empty page chrome first; do not resize/copy video.
+            self.layout.setContentsMargins(14, 8, 14, 10)
+            self.layout.setSpacing(12)
+            self.layout.setStretch(0, 4)
+            self.layout.setStretch(1, 1)
+
+            # Keep the identity rail useful but compact so the camera wall remains
+            # the visual priority on the 1280-ish AnyDesk/operator window.
+            self.known_card.setMinimumWidth(112)
+            self.unknown_card.setMinimumWidth(112)
+            self.known_card.setMaximumWidth(145)
+            self.unknown_card.setMaximumWidth(145)
+            self.recent_panel.setMinimumWidth(258)
+            self.recent_panel.setMaximumWidth(300)
+
     # MainWindow -> MonitoringPage resolves these names at instantiation time, so
     # this keeps the historical exact shell intact and swaps only video integration.
     ui.CameraTile = ExactCameraTile
     ui.LiveWall = ExactLiveWall
+    ui.MonitoringPage = ExactMonitoringPage
 
 
 def main() -> int:

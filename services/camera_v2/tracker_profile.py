@@ -10,12 +10,15 @@ SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 #
 # NvMultiObjectTracker pre-allocates GPU memory from
 # streams * maxTargetsPerStream, so keep the target pool realistic for an office.
-# The detector remains high resolution; NvDCF itself is intentionally lightweight.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "1",
     "maxTargetsPerStream": "24",
-    "minIouDiff4NewTarget": "0.14",
+    # A very low value suppresses a new target whenever it overlaps an existing
+    # target even modestly. That is bad for shoulder-to-shoulder office scenes.
+    # 0.50 keeps obvious duplicates suppressed while allowing a second nearby
+    # person to become a separate NvDCF target.
+    "minIouDiff4NewTarget": "0.50",
     "minTrackerConfidence": "0.18",
     "probationAge": "1",
     "maxShadowTrackingAge": "28",
@@ -32,7 +35,9 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "featureImgSizeLevel": "3",
     "searchRegionPaddingScale": "1",
     "associationMatcherType": "1",
-    "tentativeDetectorConfidence": "0.22",
+    # Occluded/nearby persons often have a lower detector score than isolated
+    # persons. Keep tentative association aligned with our low-score detector path.
+    "tentativeDetectorConfidence": "0.10",
     "minMatchingScore4TentativeIou": "0.10",
     "minMatchingScore4Overall": "0.06",
     "minMatchingScore4SizeSimilarity": "0.05",
@@ -40,6 +45,9 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4VisualSimilarity": "0.05",
     "usePrediction4Assoc": "1",
     "minTrackingConfidenceDuringInactive": "0.35",
+    # If the stock profile exposes duplicate-target cleanup, require almost exact
+    # overlap before deleting one tracker. Two close people must not be collapsed.
+    "minIou4TargetDuplicate": "0.94",
 }
 
 
@@ -121,7 +129,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     header = [
         f"# Auto-generated from {stock.name}.",
         "# Camera V2 low-memory NvDCF profile for GTX 1050 Ti 4GB.",
-        "# maxTargetsPerStream=24; no synthetic/shadow OSD boxes.",
+        "# maxTargetsPerStream=24; close-person separation tuned; no synthetic/shadow OSD boxes.",
         "# Optional patches applied: " + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]

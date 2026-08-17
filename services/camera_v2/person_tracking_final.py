@@ -13,15 +13,20 @@ os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "640")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.08")
-os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.50")
+# Keep heavily-overlapping person candidates alive. 0.50 was too aggressive for
+# shoulder-to-shoulder/occluded office scenes and could suppress the second person
+# before NvDCF ever saw it.
+os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.72")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
 os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "480")
 os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
-os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.62")
-os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.88")
+# Ultralytics already runs NMS. The second pass must only remove near-identical
+# duplicate boxes; it must not collapse two real people whose boxes overlap.
+os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.88")
+os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.97")
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
 from .detector_latency import DetectorLatencyCompensator, PreparedDetection
