@@ -11,13 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.camera_v2.global_identity import GlobalIdentityCore, STATE_CONFIRMED
+from services.camera_v2.global_identity import STATE_CONFIRMED
 from services.camera_v2.native_bridge import _GlobalLabel, _TrackRow, ensure_bridge
 from services.camera_v2.person_tracking_reid import CameraPersonTrackingReID
 from services.camera_v2.qwen_reid import QwenReIdVerifier
 from services.camera_v2.reid_embedder import AutoReIdEmbedder
+from services.camera_v2.reid_production import (
+    ProductionGlobalIdentityCore,
+    ProductionReIdIdentityEngine,
+)
 from services.camera_v2.reid_quality import evaluate_crop_quality
-from services.camera_v2.reid_runtime import ReIdIdentityEngine
 from services.ml_service.app.config import load_settings
 
 
@@ -57,9 +60,9 @@ def main() -> int:
     cfg = dict(raw.get("reid") or raw)
     cfg["camera_rooms"] = rooms
 
-    # Pure identity smoke: same-room second camera must reuse G-ID; simultaneous
-    # different-room track must not; local fragmentation must reconnect.
-    core = GlobalIdentityCore(cfg)
+    # Production state-machine smoke: same-room paired cameras reuse one Global ID,
+    # different rooms cannot use it simultaneously, and a local-ID break reconnects.
+    core = ProductionGlobalIdentityCore(cfg)
     a = _vec(1.0, 0.0, 0.0, 0.0)
     a2 = _vec(0.98, 0.10, 0.0, 0.0)
     a3 = _vec(0.96, -0.12, 0.0, 0.0)
@@ -78,13 +81,24 @@ def main() -> int:
     if third and third["global_id"] == first["global_id"]:
         raise RuntimeError("different-room simultaneous track illegally reused Global ID")
 
-    core2 = GlobalIdentityCore(cfg)
+    core2 = ProductionGlobalIdentityCore(cfg)
     _feed(core2, "CAM-02", 7, [a, a2, a3, a], 20.0, "Entrance")
     core2.observe_camera_snapshot("CAM-02", [], seen_at=21.6)
     _feed(core2, "CAM-02", 8, [a3, a2, a], 21.7, "Entrance")
     reconnect = core2.binding_for_track("CAM-02", 8)
     if not reconnect or reconnect["global_id"] != 1:
         raise RuntimeError(f"same-camera occlusion reconnect failed: {reconnect}")
+
+    # Low-confidence Qwen-only confirmation may reuse an identity, but must not
+    # write that uncertain viewpoint into the canonical ReID gallery.
+    core3 = ProductionGlobalIdentityCore(cfg)
+    _feed(core3, "CAM-01", 1, [a, a2, a3, a], 30.0, "Devs")
+    gray = _vec(0.65, 0.76, 0.0, 0.0)
+    _feed(core3, "CAM-04", 2, [gray, gray, gray], 31.4, "Devs")
+    core3.apply_qwen_result("CAM-04", 2, 1, "SAME", 0.97, now=32.5)
+    origins = {row.origin_key for row in core3._globals[1].gallery}
+    if ("CAM-04", 2) in origins:
+        raise RuntimeError("Qwen gray-zone track poisoned canonical gallery")
 
     # ABI is fixed deliberately; if ctypes changes, native C must change with it.
     if ctypes.sizeof(_TrackRow) != 48 or ctypes.sizeof(_GlobalLabel) != 24:
@@ -99,7 +113,6 @@ def main() -> int:
     if not native_path.exists():
         raise RuntimeError(f"native bridge build did not produce library: {native_path}")
 
-    # Clear synthetic crop should pass the quality gate.
     crop = np.random.default_rng(4).integers(0, 255, (220, 90, 3), dtype=np.uint8)
     quality = evaluate_crop_quality(
         crop,
@@ -112,14 +125,16 @@ def main() -> int:
     if not quality.accepted:
         raise RuntimeError(f"quality gate rejected clear synthetic crop: {quality}")
 
-    # Import checks protect full production wiring without opening RTSP cameras.
-    if not issubclass(CameraPersonTrackingReID, object) or not callable(ReIdIdentityEngine):
-        raise RuntimeError("ReID runtime imports failed")
+    if not issubclass(CameraPersonTrackingReID, object) or not callable(
+        ProductionReIdIdentityEngine
+    ):
+        raise RuntimeError("production ReID runtime imports failed")
     embedder = AutoReIdEmbedder(cfg, ROOT)
     qwen = QwenReIdVerifier(cfg)
 
     print("CAMERA_V2_REID_PREFLIGHT topology=PASS pairs=01-04,02-05,03-06")
     print("CAMERA_V2_REID_PREFLIGHT identity=PASS same-room+conflict+occlusion-reconnect")
+    print("CAMERA_V2_REID_PREFLIGHT gallery_guard=PASS independent-self-check+qwen-quarantine")
     print("CAMERA_V2_REID_PREFLIGHT crop=PASS quality+duplicate+top3-diversity")
     print(
         "CAMERA_V2_REID_PREFLIGHT native=PASS "
