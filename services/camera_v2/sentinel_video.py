@@ -44,9 +44,9 @@ def _pipeline_process(window_id: int, command_q, status_q) -> None:
         gi.require_version("GstVideo", "1.0")
         from gi.repository import Gst, GstVideo
 
-        from .person_tracking_final import CameraPersonTrackingFinal
+        from .person_tracking_reid import CameraPersonTrackingReID
 
-        runtime = CameraPersonTrackingFinal()
+        runtime = CameraPersonTrackingReID()
         if len(runtime.cameras) != CAMERA_COUNT:
             raise RuntimeError(
                 f"Sentinel Monitoring expects {CAMERA_COUNT} enabled cameras, "
@@ -109,7 +109,7 @@ def _pipeline_process(window_id: int, command_q, status_q) -> None:
                         _put_status(
                             status_q,
                             "LIVE",
-                            "6-camera detector/tracker pipeline PLAYING",
+                            "6-camera YOLO/NvDCF + async Global ReID pipeline PLAYING",
                         )
                 except Exception:
                     pass
@@ -191,12 +191,20 @@ def _pipeline_process(window_id: int, command_q, status_q) -> None:
                         "online": online,
                     }
                 )
+            identity_metrics = {}
+            identity = getattr(runtime, "identity", None)
+            if identity is not None:
+                try:
+                    identity_metrics = identity.metrics()
+                except Exception:
+                    identity_metrics = {}
             _put_status(
                 status_q,
                 "METRICS",
                 {
                     "cameras": rows,
                     "total_people": int(getattr(runtime, "tracked_now", 0)),
+                    "global_identity": identity_metrics,
                 },
             )
             return True
@@ -206,7 +214,7 @@ def _pipeline_process(window_id: int, command_q, status_q) -> None:
         _put_status(
             status_q,
             "STARTING",
-            "2 columns x 3 rows; live DeepStream wall; detector/tracker unchanged",
+            "2 columns x 3 rows; YOLO/NvDCF unchanged; Global ReID/Qwen bounded async",
         )
         rc = runtime.run()
         _put_status(status_q, "STOPPED", f"exit={rc}")
