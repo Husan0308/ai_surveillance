@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 
+MAX_CAMERAS = 16
+
 
 @dataclass(frozen=True)
 class CameraConfig:
@@ -18,6 +20,9 @@ class CameraConfig:
     codec: str
     username: str
     password: str
+    name: str = ""
+    room: str = ""
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -54,12 +59,20 @@ def _as_bool(value) -> bool:
     return bool(value)
 
 
-def _credential(camera_id: str, suffix: str, global_name: str) -> str:
+def _credential(
+    camera_id: str,
+    suffix: str,
+    global_name: str,
+    row_value: str = "",
+) -> str:
     per_camera_name = f"{camera_id.replace('-', '_')}_RTSP_{suffix}"
     per_camera = os.getenv(per_camera_name)
     if per_camera is not None and per_camera != "":
         return per_camera
-    return os.getenv(global_name, "")
+    global_value = os.getenv(global_name)
+    if global_value is not None and global_value != "":
+        return global_value
+    return str(row_value or "")
 
 
 def load_settings(path: str | Path | None = None) -> Settings:
@@ -71,23 +84,30 @@ def load_settings(path: str | Path | None = None) -> Settings:
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     camera_rows = raw.get("cameras") or []
-    if len(camera_rows) != 6:
-        raise ValueError(f"Expected exactly 6 cameras, got {len(camera_rows)}")
+    if not camera_rows:
+        raise ValueError("At least one camera must be configured")
+    if len(camera_rows) > MAX_CAMERAS:
+        raise ValueError(f"At most {MAX_CAMERAS} cameras are supported, got {len(camera_rows)}")
 
     cameras: list[CameraConfig] = []
     seen: set[str] = set()
     for row in camera_rows:
+        if not _as_bool(row.get("enabled", True)):
+            continue
+
         camera_id = str(row["id"]).strip()
+        if not camera_id:
+            raise ValueError("Camera id cannot be empty")
         if camera_id in seen:
             raise ValueError(f"Duplicate camera id: {camera_id}")
         seen.add(camera_id)
 
         env_uri = str(row.get("env_uri", "")).strip()
-        uri = os.getenv(env_uri, str(row["uri"]).strip()) if env_uri else str(row["uri"]).strip()
+        uri = os.getenv(env_uri, str(row.get("uri", "")).strip()) if env_uri else str(row.get("uri", "")).strip()
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
 
-        codec = str(row.get("codec", "")).strip().lower()
+        codec = str(row.get("codec", "h264")).strip().lower()
         if codec not in {"h264", "h265"}:
             raise ValueError(f"{camera_id}: codec must be h264 or h265")
 
@@ -96,10 +116,26 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 camera_id=camera_id,
                 uri=uri,
                 codec=codec,
-                username=_credential(camera_id, "USERNAME", "SURVEILLANCE_RTSP_USERNAME"),
-                password=_credential(camera_id, "PASSWORD", "SURVEILLANCE_RTSP_PASSWORD"),
+                username=_credential(
+                    camera_id,
+                    "USERNAME",
+                    "SURVEILLANCE_RTSP_USERNAME",
+                    str(row.get("username", "")),
+                ),
+                password=_credential(
+                    camera_id,
+                    "PASSWORD",
+                    "SURVEILLANCE_RTSP_PASSWORD",
+                    str(row.get("password", "")),
+                ),
+                name=str(row.get("name", camera_id)).strip() or camera_id,
+                room=str(row.get("room", "")).strip(),
+                enabled=True,
             )
         )
+
+    if not cameras:
+        raise ValueError("At least one camera must be enabled")
 
     ds = raw.get("deepstream") or {}
     display = raw.get("display") or {}
