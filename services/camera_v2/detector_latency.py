@@ -46,25 +46,20 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
 
 
 class DetectorLatencyCompensator:
-    """Project only stale detector observations to the live injection timestamp.
+    """Project stale asynchronous YOLO observations to live injection time.
 
-    External YOLO runs asynchronously from the live DeepStream wall. The bbox was
-    measured on the captured frame, while nvtracker receives it roughly 100-220ms
-    later. For a walking target, injecting the old coordinates makes the detector
-    correction pull NvDCF behind the person. We estimate center velocity from two
-    detector observations and project only by the measured result age. NvDCF remains
-    the sole temporal tracker.
+    NvDCF remains the temporal tracker. This helper only removes the measured
+    detector-result age before a fresh detector observation is injected.
     """
 
     def __init__(self, frame_width: int, frame_height: int) -> None:
         self.frame_width = float(frame_width)
         self.frame_height = float(frame_height)
         self.history: dict[str, list[_HistoryDetection]] = {}
-        # Logs on the GTX 1050 Ti show detector result age commonly around
-        # 160-200ms. Allow the whole observed age to be compensated, with a slight
-        # >1 gain because the previous 0.88 gain still visibly trailed walkers.
-        self.max_projection_s = 0.28
-        self.projection_gain = 1.08
+        # Real logs have reached ~290 ms. Cover that whole observed age rather than
+        # leaving the correction visibly behind the person.
+        self.max_projection_s = 0.34
+        self.projection_gain = 1.02
         self.max_speed_x = self.frame_width * 1.25
         self.max_speed_y = self.frame_height * 1.25
 
@@ -74,6 +69,11 @@ class DetectorLatencyCompensator:
         captured_t: float,
         boxes: list[tuple[float, float, float, float, float]],
     ) -> list[PreparedDetection]:
+        # A single YOLO miss must not erase velocity history. Otherwise the first
+        # recovered detection cannot be projected and visibly snaps behind motion.
+        if not boxes:
+            return []
+
         previous = self.history.get(cid, [])
         current_plain = [(float(x1), float(y1), float(x2), float(y2)) for x1, y1, x2, y2, _ in boxes]
 
