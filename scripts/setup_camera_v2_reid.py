@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import sys
 import tempfile
@@ -14,6 +15,15 @@ MODEL_URL = (
     "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/tao/"
     "reidentificationnet/deployable_v1.2/files/resnet50_market1501_aicity156.onnx"
 )
+MODEL_SHA256 = "0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _download(url: str, destination: Path) -> None:
@@ -26,11 +36,17 @@ def _download(url: str, destination: Path) -> None:
     ) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "camera-v2-reid-setup/1.0"})
+        request = urllib.request.Request(url, headers={"User-Agent": "camera-v2-reid-setup/1.1"})
         with urllib.request.urlopen(request, timeout=120) as response, tmp_path.open("wb") as out:
             shutil.copyfileobj(response, out, length=1024 * 1024)
-        if tmp_path.stat().st_size < 1024 * 1024:
+        if tmp_path.stat().st_size < 80 * 1024 * 1024:
             raise RuntimeError(f"downloaded file is unexpectedly small: {tmp_path.stat().st_size} bytes")
+        digest = _sha256(tmp_path)
+        if digest != MODEL_SHA256:
+            raise RuntimeError(
+                "SHA256 verification failed: "
+                f"expected={MODEL_SHA256} got={digest}"
+            )
         tmp_path.replace(destination)
     finally:
         if tmp_path.exists():
@@ -45,9 +61,12 @@ def main() -> int:
 
     destination = args.output.expanduser().resolve()
     if destination.exists() and not args.force:
-        print(f"ReID model already exists: {destination}")
-        print(f"size={destination.stat().st_size / (1024 * 1024):.1f} MiB")
-        return 0
+        digest = _sha256(destination)
+        if digest == MODEL_SHA256:
+            print(f"ReID model already exists and is verified: {destination}")
+            print(f"size={destination.stat().st_size / (1024 * 1024):.1f} MiB")
+            return 0
+        print("Existing ReID model failed SHA256 verification; downloading a clean copy.")
 
     print("Downloading NVIDIA TAO ReIdentificationNet v1.2...")
     print(f"source={MODEL_URL}")
@@ -60,6 +79,7 @@ def main() -> int:
 
     print(f"OK: {destination}")
     print(f"size={destination.stat().st_size / (1024 * 1024):.1f} MiB")
+    print(f"sha256={MODEL_SHA256}")
     print("Camera V2 will build and cache the FP16 TensorRT engine on first start.")
     return 0
 
