@@ -6,9 +6,10 @@ from .person_tracking_final import CameraPersonTrackingFinal
 
 
 class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
-    """Production tracking runtime plus a smooth camera-space person heatmap.
+    """Production local tracking runtime plus a smooth camera-space heatmap.
 
-    Heatmap is isolated from detector/tracker/ReID logic:
+    Cross-camera ReID is intentionally absent. Heatmap is isolated from detector
+    scheduling and uses only current NvDCF boxes:
       * accumulation happens on raw current NvDCF boxes before display smoothing;
       * the anchor is lifted slightly above bbox bottom-center;
       * every real tracked person contributes a faint presence pulse;
