@@ -3,18 +3,18 @@ from __future__ import annotations
 import os
 import time
 
-from .annotated_geometry_reid import AnnotatedGeometryAdaptiveTrackletReID
 from .person_tracking_heatmap import CameraPersonTrackingHeatmap
+from .stable_adaptive_reid import StableAdaptiveTrackletReID
 from .stable_global_reid import StableGlobalReIDManager
 
 
 class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
-    """Production camera wall with frozen ReID + user-annotated room geometry.
+    """Production camera wall with frozen appearance ReID only.
 
-    No Qwen and no automatic seat calibration are used here. The colored room
-    landmarks supplied by the user define a shared normalized ground plane for each
-    peer-camera pair. NvDCF local identities remain sticky and one tracklet-level
-    controller fuses appearance with same-time calibrated foot positions.
+    Geometry/calibration, auto-seat mapping and Qwen are intentionally disabled.
+    NvDCF owns local identities; one sticky tracklet-level controller owns all
+    cross-camera Global-ID decisions. This runtime is the clean baseline that will
+    host the stronger part-based ReID backend without introducing location priors.
     """
 
     def __init__(self) -> None:
@@ -28,42 +28,23 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
         os.environ.setdefault("CAMERA_V2_REID_COVISIBLE", "0.52")
         os.environ.setdefault("CAMERA_V2_REID_CONFIRM_VOTES", "4")
 
-        os.environ.setdefault("CAMERA_V2_WORLD_WINDOW", "16")
-        os.environ.setdefault("CAMERA_V2_WORLD_TTL", "5.0")
-        os.environ.setdefault("CAMERA_V2_GEOMETRY_WEIGHT", "0.40")
-        os.environ.setdefault("CAMERA_V2_GEOMETRY_MIN_REID", "0.24")
-        os.environ.setdefault("CAMERA_V2_WORLD_FOOT_LIFT", "0.04")
-
-        self.adaptive_reid: AnnotatedGeometryAdaptiveTrackletReID | None = None
+        self.adaptive_reid: StableAdaptiveTrackletReID | None = None
         super().__init__()
 
         if self.reid_mode == "external":
             self.global_reid = StableGlobalReIDManager()
-            self.adaptive_reid = AnnotatedGeometryAdaptiveTrackletReID(
-                self.global_reid,
-                frame_width=self.frame_width,
-                frame_height=self.frame_height,
-            )
-            calib = self.adaptive_reid.calibration.snapshot()
+            self.adaptive_reid = StableAdaptiveTrackletReID(self.global_reid)
             print(
                 "CAMERA_ADAPTIVE_REID ready "
                 "frozen_model=1 online_training=0 single_controller=1 sticky_local_id=1 "
                 "diverse_bank=1 fresh_both_cameras_votes=1 tracklet_multi_frame=1 "
                 "camera_pair_adaptive=1 mutual_best=1 temporal_votes=1 "
                 "peer_identity_lease=1 hysteresis=1 late_reassoc=1 "
-                "annotated_room_geometry=1 auto_calibration=0 same_time_world_gate=1 "
-                "same_camera_unique=1 qwen=0 "
-                f"calibrated_cameras={calib['ready_cameras']} "
-                f"calibration_sources={calib['camera_sources']} "
-                f"calibration_models={calib.get('models', {})} "
+                "geometry=0 calibration=0 auto_seat=0 qwen=0 "
+                "same_camera_unique=1 "
                 f"room_map={self.global_reid.room_map}",
                 flush=True,
             )
-            if calib["errors"]:
-                print(
-                    "CAMERA_CALIBRATION warning=" + " | ".join(calib["errors"]),
-                    flush=True,
-                )
 
     def _consume_external_reid(self) -> None:
         worker = self.external_reid
@@ -94,14 +75,9 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
         adaptive = self.adaptive_reid
         if adaptive is not None:
             row = adaptive.snapshot()
-            calib = adaptive.calibration.snapshot()
             thresholds = row.get("thresholds", {})
             threshold_text = ",".join(
                 f"{pair}:{float(value):.3f}" for pair, value in thresholds.items()
-            ) or "none"
-            errors = row.get("calibration_errors", [])
-            model_text = ",".join(
-                f"{source}:{model}" for source, model in sorted(calib.get("models", {}).items())
             ) or "none"
             print(
                 "CAMERA_ADAPTIVE_REID "
@@ -115,14 +91,6 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
                 f"lock_releases={row.get('lock_releases', 0)} "
                 f"lock_corrections={row.get('lock_corrections', 0)} "
                 f"fresh_vote_skip={row.get('fresh_vote_skip', 0)} "
-                f"calib={row.get('calibration_ready_cameras', 0)}/6 "
-                f"calib_models={model_text} "
-                f"world_tracks={row.get('world_tracks', 0)} "
-                f"geo_pairs={row.get('geometry_pairs', 0)} "
-                f"geo_match={row.get('geometry_matches', 0)} "
-                f"geo_veto={row.get('geometry_vetoes', 0)} "
-                f"world_dist={float(row.get('world_rmse_m', -1.0)):.3f} "
-                f"world_common={row.get('world_common', 0)} "
                 f"samecam_collisions={row['samecam_collisions']} "
                 f"samecam_repairs={row['samecam_repairs']} "
                 f"pair={row['last_camera_pair']} "
@@ -130,8 +98,7 @@ class CameraPersonTrackingAdaptiveHeatmap(CameraPersonTrackingHeatmap):
                 f"margin={float(row['last_pair_margin']):.3f} "
                 f"thr={float(row['last_threshold']):.3f} "
                 f"release={float(row.get('release_floor', -1.0)):.3f} "
-                f"adaptive_thresholds={threshold_text} "
-                f"calib_error={'none' if not errors else errors[0]}",
+                f"adaptive_thresholds={threshold_text}",
                 flush=True,
             )
         return keep
