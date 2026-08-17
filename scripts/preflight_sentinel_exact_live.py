@@ -17,6 +17,7 @@ FILES = (
     ROOT / "services/camera_v2/qt_runtime.py",
     ROOT / "services/camera_v2/sentinel_live_runtime.py",
     ROOT / "services/camera_v2/ui_bridge.py",
+    ROOT / "services/camera_v2/person_tracking_final.py",
 )
 
 
@@ -102,8 +103,9 @@ def main() -> int:
         safe = FILES[2].read_text(encoding="utf-8")
         runtime = FILES[3].read_text(encoding="utf-8")
         live = FILES[4].read_text(encoding="utf-8")
+        tracking = FILES[6].read_text(encoding="utf-8")
 
-        # Uploaded Sentinel visual contract.
+        # Supplied Sentinel visual contract stays the shell of the application.
         require_text(exact, 'setFixedWidth(224)', "sidebar_224")
         require_text(exact, 'setFixedHeight(70)', "header_70")
         require_text(exact, 'self.layout.addLayout(camera_column, 3)', "camera_column_3")
@@ -116,31 +118,43 @@ def main() -> int:
         require_text(exact, 'profile_index', "enrollment_profile_photo")
         require_text(exact, 'self.setMinimumSize(1180, 720)', "window_minimum")
 
-        # Native-video integration: never composite normal child backing stores
-        # directly on the WA_PaintOnScreen GstVideoOverlay target.
+        # Native-video integration: normal child backing stores must never be
+        # composited directly on the WA_PaintOnScreen GstVideoOverlay target.
         require_text(app, 'ui.LiveWall = SafeLiveWall', "safe_live_wall_installed")
         require_text(safe, 'class SafeLiveWall(QWidget)', "safe_live_wall")
         require_text(safe, 'Qt.WindowType.Tool', "separate_overlay_window")
         require_text(safe, 'WA_TranslucentBackground', "translucent_overlay")
         require_text(safe, 'WA_PaintOnScreen', "native_video_surface")
         require_text(safe, 'def paintEngine(self):', "native_paint_engine_disabled")
-        require_text(safe, 'CameraWallOverlay', "overlay_chrome")
+        require_text(safe, 'GRID_ASPECT = 1280.0 / 1080.0', "grid_aspect")
+        require_text(safe, 'FOCUS_ASPECT = 16.0 / 9.0', "focus_aspect")
+        require_text(safe, 'self._live_timer.setInterval(50)', "overlay_20hz")
         require_text(safe, 'self.fullscreenRequested.emit', "camera_fullscreen")
         require_text(safe, 'self._hover_source', "camera_hover")
         forbid_text(safe, 'CameraTile(', "no_child_camera_backing_store")
 
-        # Realtime architecture contract.
+        # Realtime architecture and aspect-ratio contract.
         require_text(runtime, 'mp.get_context("spawn")', "process_isolation")
         require_text(runtime, 'GstVideo.VideoOverlay.set_window_handle', "native_video_overlay")
-        require_text(runtime, 'WALL_WIDTH = 1024', "wall_width")
-        require_text(runtime, 'WALL_HEIGHT = 864', "wall_height")
+        require_text(runtime, 'WALL_WIDTH = 1280', "wall_width")
+        require_text(runtime, 'WALL_HEIGHT = 1080', "wall_height")
+        require_text(runtime, 'FOCUS_HEIGHT = 720', "focus_16_9")
         require_text(runtime, 'GRID_ROWS = 3', "rows_3")
         require_text(runtime, 'GRID_COLUMNS = 2', "columns_2")
+        require_text(runtime, 'runtime.GLib.timeout_add(50, publish_snapshot)', "metadata_publish_20hz")
         require_text(live, 'class SentinelLiveRuntime(CameraPersonHeatmap)', "working_pipeline_inherited")
         require_text(live, 'self.ui_bridge.snapshot_tracks(buffer)', "nvdcf_realtime_metadata")
+        require_text(live, 'self._set_if(self.sink, "force-aspect-ratio", True)', "no_camera_stretch")
+        require_text(live, 'self._visible_grace = 0.30', "no_long_stale_bbox")
         require_text(live, 'self.stats[camera.camera_id]', "realtime_camera_metrics")
 
-        # Camera frames must stay zero-copy/native across the Qt boundary.
+        # Detector/tracker latency contract.
+        require_text(tracking, 'CAMERA_V2_DETECT_HEIGHT", "360"', "detector_16_9_input")
+        require_text(tracking, 'CAMERA_V2_DETECT_TARGET_HZ", "3.8"', "detector_target_rate")
+        require_text(tracking, 'CAMERA_V2_TRACKER_WIDTH", "576"', "tracker_width")
+        require_text(tracking, 'if not prepared:', "skip_single_empty_detector_miss")
+
+        # Camera frames stay zero-copy/native across the Qt boundary.
         forbidden_runtime = (
             "cv2.",
             "QImage(",
@@ -158,12 +172,12 @@ def main() -> int:
     except Exception as exc:
         return fail(str(exc))
 
-    print("layout=uploaded Sentinel shell + realtime overlay")
+    print("layout=uploaded Sentinel shell + realtime native wall")
     print("monitoring=2 columns x 3 rows + Total/Known/Unknown + Recent Views")
-    print("video=GstVideoOverlay/nveglglessink")
-    print("overlay=separate translucent top-level Qt window")
-    print("metadata=NvDCF current-frame snapshots")
-    print("camera_pipeline_core=UNCHANGED")
+    print("camera_tile=640x360 16:9")
+    print("video=GstVideoOverlay/nveglglessink force-aspect-ratio=1")
+    print("overlay=20Hz fresh NvDCF metadata; stale bbox hold capped at 300ms")
+    print("detector=640x360 target~3.8Hz/camera with adaptive wall governor")
     print("SENTINEL_EXACT_LIVE_PREFLIGHT=PASS")
     return 0
 
