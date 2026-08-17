@@ -13,15 +13,25 @@ os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "640")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.08")
-os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.50")
+# Keep overlapping people alive. A low NMS IoU can suppress the second person in
+# shoulder-to-shoulder/occluded office scenes before NvDCF ever sees it.
+os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.72")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
 os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "480")
 os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
-os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.62")
-os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.88")
+# Ultralytics already performs its own suppression. The second pass should remove
+# only near-identical duplicates, not two real people whose boxes overlap.
+os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.88")
+os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.97")
+# A brand-new person must be fully inside the camera FOV before being handed to
+# NvDCF. This suppresses the half-person boxes that appear while somebody is only
+# entering from a frame edge, without rejecting distant people that are fully in view.
+os.environ.setdefault("CAMERA_V2_ADMISSION_EDGE_X_FRAC", "0.012")
+os.environ.setdefault("CAMERA_V2_ADMISSION_EDGE_TOP_FRAC", "0.008")
+os.environ.setdefault("CAMERA_V2_ADMISSION_EDGE_BOTTOM_FRAC", "0.020")
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
 from .detector_latency import DetectorLatencyCompensator, PreparedDetection
@@ -46,6 +56,16 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.detector_min_idle = float(os.environ.get("CAMERA_V2_DETECT_MIN_IDLE_MS", "8")) / 1000.0
         self.detector_result_age_ms = 0.0
         self.detector_times: dict[str, deque[float]] = {}
+        self.admission_edge_x_frac = max(
+            0.0, min(0.08, float(os.environ.get("CAMERA_V2_ADMISSION_EDGE_X_FRAC", "0.012")))
+        )
+        self.admission_edge_top_frac = max(
+            0.0, min(0.08, float(os.environ.get("CAMERA_V2_ADMISSION_EDGE_TOP_FRAC", "0.008")))
+        )
+        self.admission_edge_bottom_frac = max(
+            0.0, min(0.12, float(os.environ.get("CAMERA_V2_ADMISSION_EDGE_BOTTOM_FRAC", "0.020")))
+        )
+        self.admission_rejected = 0
         super().__init__()
         self.detector_target_hz = max(self.detector_min_hz, min(self.detector_max_hz, self.detector_target_hz))
         self.detector_times = {cid: deque(maxlen=100) for cid in self.camera_index}
@@ -57,6 +77,46 @@ class CameraPersonTrackingFinal(_BaseTracking):
         # profile; tracker_profile.py then applies only the pedestrian association
         # and realistic target-pool tuning we need.
         return lib, prepare_sparse_tracker_config(stock_max_perf)
+
+    def _dedup_and_expand(self, rows):
+        """Keep close people separate and reject only frame-clipped new candidates.
+
+        This is deliberately *not* a generic "full body visible" classifier. A seated
+        person or somebody occluded by a desk can still be a valid person and must not
+        be thrown away. We only reject a detector box that is clipped by the camera
+        frame itself, which is the reliable signal that a new entrant is only partly
+        inside the FOV. Existing NvDCF tracks can continue through the edge using the
+        tracker's normal shadow/recovery logic.
+        """
+        detections = super()._dedup_and_expand(rows)
+        if not detections:
+            return detections
+
+        right = float(self.frame_width - 1)
+        bottom = float(self.frame_height - 1)
+        margin_x = max(2.0, float(self.frame_width) * self.admission_edge_x_frac)
+        margin_top = max(2.0, float(self.frame_height) * self.admission_edge_top_frac)
+        margin_bottom = max(2.0, float(self.frame_height) * self.admission_edge_bottom_frac)
+
+        admitted = []
+        rejected = 0
+        for detection in detections:
+            x1, y1, x2, y2, _conf = detection
+            clipped_by_fov = (
+                x1 <= margin_x
+                or x2 >= right - margin_x
+                or y1 <= margin_top
+                or y2 >= bottom - margin_bottom
+            )
+            if clipped_by_fov:
+                rejected += 1
+                continue
+            admitted.append(detection)
+
+        if rejected:
+            with self.det_lock:
+                self.admission_rejected += rejected
+        return admitted
 
     def _publish_prepared(
         self,
@@ -136,12 +196,13 @@ class CameraPersonTrackingFinal(_BaseTracking):
             "CAMERA_TRACK_FINAL ready: "
             f"YOLO26m micro_batch={MICRO_BATCH} input={INFER_WIDTH}x{INFER_HEIGHT} "
             f"conf={os.environ.get('CAMERA_V2_DETECT_CONF')} "
+            f"iou={os.environ.get('CAMERA_V2_DETECT_IOU')} "
             f"target={self.detector_target_hz:.1f}Hz/cam "
             f"range={self.detector_min_hz:.1f}-{self.detector_max_hz:.1f}Hz/cam "
             f"NvDCF={self.tracker_width}x{self.tracker_height} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
             "profile=max_perf memory_profile=4gb max_targets=24 "
-            "cascaded_assoc=1 low_score_recovery=1 synthetic_boxes=0",
+            "close_person=1 edge_admission=1 synthetic_boxes=0",
             flush=True,
         )
 
@@ -262,6 +323,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             tracked = self.tracked_now
             age_ms = self.detector_result_age_ms
             target_hz = self.detector_target_hz
+            admission_rejected = self.admission_rejected
 
         rates = {cid: self._recent_rate(rows, now) for cid, rows in self.detector_times.items()}
         rate_text = " ".join(f"{cid}:{rates.get(cid, 0.0):.1f}" for cid in self.camera_index)
@@ -272,6 +334,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"detector={INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
             f"target_hz={target_hz:.1f}/cam approx_skip={expected_skip:.1f}frames "
             f"actual_hz=[{rate_text}] result_age={age_ms:.0f}ms "
+            f"edge_rejected={admission_rejected} "
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"config={self.tracker_config} profile=max_perf max_targets=24 "
             "cascaded_assoc=1 synthetic_boxes=0",
