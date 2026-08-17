@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .qt_live import main
+from .sentinel_exact import main
 
 
 if __name__ == "__main__":
