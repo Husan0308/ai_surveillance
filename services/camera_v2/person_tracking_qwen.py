@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections import defaultdict
 
 from .person_tracking_final import CameraPersonTrackingFinal
 from .qwen_reid_verifier import QwenRoomReIDVerifier
@@ -16,19 +17,30 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
     """
 
     def __init__(self) -> None:
-        # IMPORTANT: source IDs follow the 3x2 live wall in cameras.yaml order:
-        #   top:    CAM-01=dev-room-2, CAM-02=entrance-2, CAM-03=main-room-1
-        #   bottom: CAM-04=dev-room-1, CAM-05=entrance-1, CAM-06=main-room-2
-        # Therefore the physical peer-camera pairs are vertical columns, not
-        # adjacent source IDs. A wrong room map makes both TAO room memory and Qwen
-        # compare people from different rooms and is catastrophic for Global IDs.
+        # Live 3x2 wall / physical room pairing:
+        #   CAM-01 dev-room-2   <-> CAM-04 dev-room-1
+        #   CAM-02 entrance-2   <-> CAM-05 entrance-1
+        #   CAM-03 main-room-1  <-> CAM-06 main-room-2
         os.environ.setdefault(
             "CAMERA_V2_REID_ROOM_MAP",
             "0:0,3:0,1:1,4:1,2:2,5:2",
         )
 
+        # TAO is only a candidate generator for Qwen. Cross-view TAO similarity can
+        # be modest even for the same person, so let mutual-best room candidates as
+        # low as 0.24 reach the visual judge. Hard same-camera/cross-room constraints
+        # still veto impossible matches.
+        os.environ.setdefault("CAMERA_V2_QWEN_MIN_PEER_REID", "0.24")
+        os.environ.setdefault("CAMERA_V2_QWEN_AUDIT_SAME_GID_BELOW", "0.68")
+        os.environ.setdefault("CAMERA_V2_QWEN_TIMEOUT", "18")
+        os.environ.setdefault("CAMERA_V2_QWEN_MAX_RESULT_AGE", "18")
+        os.environ.setdefault("CAMERA_V2_QWEN_MAX_PENDING", "1")
+
         self.qwen_reid: QwenRoomReIDVerifier | None = None
+        self.same_camera_repairs = 0
+        self.same_camera_collisions = 0
         super().__init__()
+
         if self.reid_mode != "off":
             self.qwen_reid = QwenRoomReIDVerifier()
             q = self.qwen_reid
@@ -36,6 +48,7 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
                 "CAMERA_QWEN_REID "
                 f"enabled={int(q.enabled)} url={q.url} model={q.model} "
                 "scope=same-room-peer-cameras async=1 reversible=1 votes=2 "
+                "same_camera_unique=1 "
                 "pairs=CAM01+CAM04,CAM02+CAM05,CAM03+CAM06 "
                 f"room_map={self.global_reid.room_map}",
                 flush=True,
@@ -92,8 +105,6 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
             used_tracks.add(ti)
             dx1, dy1, dx2, dy2, det_conf = [float(v) for v in detections[di]]
 
-            # Keep Qwen memory cleaner than the detector display: partial border
-            # crops are allowed for tracking but are poor identity evidence.
             if (
                 dx1 <= 2.0
                 or dy1 <= 2.0
@@ -101,6 +112,7 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
                 or dy2 >= float(self.frame_height - 2)
             ):
                 continue
+
             bw = max(1.0, dx2 - dx1)
             bh = max(1.0, dy2 - dy1)
             x1 = max(0, min(fw - 1, int(round((dx1 - 0.025 * bw) * sx))))
@@ -120,19 +132,145 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
             )
 
     def _submit_external_reid(self, cid, frame, detections, match_boxes=None) -> None:
-        # Fast TAO ReID remains unchanged. Qwen gets a separate visual memory and
-        # never blocks or alters detector/tracker scheduling.
         super()._submit_external_reid(cid, frame, detections, match_boxes)
         self._remember_qwen_visuals(cid, frame, detections, match_boxes)
+
+    @staticmethod
+    def _identity_strength(manager, key) -> tuple[int, int, int, float]:
+        binding = manager.bindings.get(key)
+        if binding is None:
+            return (-1, -1, -1, 0.0)
+        gid = manager._resolve(binding.global_id)
+        profile = manager.profiles.get(gid)
+        known = int(bool(profile is not None and profile.known_name))
+        state_rank = {"provisional": 0, "confirmed": 1, "anchor": 2}.get(
+            binding.state, 0
+        )
+        _vec, _color, evidence = manager._track_prototype(key)
+        # Older established track wins only after known/state/evidence quality.
+        age_rank = -float(binding.first_seen)
+        return (known, state_rank, int(evidence), age_rank)
+
+    def _detach_to_fresh_profile(self, manager, key, now: float) -> None:
+        """Give a colliding local track a private Global ID without guessing."""
+        binding = manager.bindings.get(key)
+        if binding is None:
+            return
+
+        old_gid = manager._resolve(binding.global_id)
+        vector, color, count = manager._track_prototype(key)
+        if vector is not None and count >= 2:
+            # First try a different already-existing identity. The manager's hard
+            # conflict rules reject any ID already active in this same camera.
+            (
+                alt_gid,
+                _score,
+                _second,
+                _threshold,
+                _reid,
+                _color_score,
+                _room,
+                _covis,
+                _context,
+                accepted,
+            ) = manager._candidate_decision(
+                vector,
+                color,
+                key,
+                now,
+                exclude_gid=old_gid,
+            )
+            if accepted and alt_gid is not None:
+                manager._switch_binding(
+                    binding,
+                    key,
+                    int(alt_gid),
+                    now,
+                    provisional=True,
+                )
+                return
+
+            quality = max(
+                (item.quality for item in manager._evidence(key)),
+                default=0.5,
+            )
+            manager._correct_to_new_anchor(
+                binding,
+                key,
+                vector,
+                color,
+                binding.last_bbox,
+                now,
+                quality,
+            )
+            return
+
+        # A binding normally has ReID evidence, but if a tracker ID races ahead of
+        # the sidecar, still enforce uniqueness immediately with an empty provisional
+        # profile. Later observations will reassess/correct it normally.
+        manager._remove_owner_contributions(old_gid, key)
+        profile = manager._new_profile(key[0], now)
+        binding.global_id = profile.global_id
+        binding.state = "provisional"
+        binding.confirm_votes = 0
+        binding.bad_votes = 0
+        binding.switch_candidate = None
+        binding.switch_votes = 0
+        binding.last_committed_at = 0.0
+
+    def _repair_same_camera_identity_collisions(self, now: float) -> int:
+        """Hard invariant: two active tracks in one camera cannot share Global ID."""
+        manager = self.global_reid
+        groups = defaultdict(list)
+        for key, binding in manager.bindings.items():
+            if not manager._is_active(key, now):
+                continue
+            groups[(key[0], manager._resolve(binding.global_id))].append(key)
+
+        repaired = 0
+        for (_source_id, _gid), keys in groups.items():
+            if len(keys) <= 1:
+                continue
+            self.same_camera_collisions += len(keys) - 1
+            keys.sort(
+                key=lambda key: self._identity_strength(manager, key),
+                reverse=True,
+            )
+            keeper = keys[0]
+            for loser in keys[1:]:
+                manager.cannot_link[frozenset((keeper, loser))] = now + 30.0
+                self._detach_to_fresh_profile(manager, loser, now)
+                repaired += 1
+
+        if repaired:
+            self.same_camera_repairs += repaired
+            manager.stats["same_camera_repairs"] = (
+                int(manager.stats.get("same_camera_repairs", 0)) + repaired
+            )
+        return repaired
 
     def _tracker_probe(self, pad, info):
         result = super()._tracker_probe(pad, info)
         verifier = self.qwen_reid
-        if verifier is not None and verifier.enabled and self.reid_mode != "off":
-            try:
-                with self.reid_lock:
-                    verifier.service(self.global_reid, time.monotonic())
-            except Exception as exc:
+        if self.reid_mode == "off":
+            return result
+
+        buffer = info.get_buffer()
+        try:
+            now = time.monotonic()
+            with self.reid_lock:
+                if verifier is not None and verifier.enabled:
+                    verifier.service(self.global_reid, now)
+
+                # Run after both fast ReID and Qwen corrections. This is a final
+                # safety net, not a heuristic: same-camera duplicate Global IDs are
+                # physically impossible and must never reach the UI.
+                repaired = self._repair_same_camera_identity_collisions(now)
+                if repaired and buffer is not None:
+                    assignments = self.global_reid.label_assignments()
+                    self.bridge.apply_global_identity(buffer, assignments)
+        except Exception as exc:
+            if verifier is not None:
                 verifier.last_error = f"service:{type(exc).__name__}: {exc}"
         return result
 
@@ -147,6 +285,8 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
                 f"requests={q['requests']} responses={q['responses']} pending={q['pending']} "
                 f"same={q['same']} different={q['different']} uncertain={q['uncertain']} "
                 f"merges={q['merges']} splits={q['splits']} cannot_links={q['cannot_links']} "
+                f"samecam_collisions={self.same_camera_collisions} "
+                f"samecam_repairs={self.same_camera_repairs} "
                 f"stale={q.get('stale', 0)} latency_ms={float(q['latency_ms']):.0f} "
                 f"failed={q['failed']} dropped={q['dropped']} "
                 f"last={q['last_verdict']} error={q['error'] or 'none'}",
@@ -156,8 +296,6 @@ class CameraPersonTrackingQwen(CameraPersonTrackingFinal):
 
 
 def main() -> int:
-    # Qwen verifier is intentionally optional. If server is unavailable the fast
-    # TAO/room-memory ReID continues running and the verifier reports errors only.
     os.environ.setdefault("CAMERA_V2_QWEN_VERIFY", "1")
     return CameraPersonTrackingQwen().run()
 
