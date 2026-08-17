@@ -28,18 +28,19 @@ os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.995")
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
 from .detector_latency import DetectorLatencyCompensator, PreparedDetection
+from .global_reid import GlobalReIDManager
 from .person_tracking import CameraPersonTrackingV2 as _BaseTracking
 from .tracker_profile import prepare_sparse_tracker_config
 
 
 class CameraPersonTrackingFinal(_BaseTracking):
-    """YOLO26m low-score recovery + low-memory NvDCF pedestrian tracking.
+    """YOLO26m + NvDCF + DeepStream ReID + conservative global identities.
 
-    The detector keeps the higher resolution needed by distant office pedestrians.
-    NvDCF is deliberately kept small enough to coexist with six NVDEC streams and
-    YOLO26m on a 4 GB Pascal GPU. The detector/tracker own identity and geometry;
-    the native display stage is allowed to bridge only short OSD gaps so boxes do
-    not visibly blink between sparse detector updates.
+    NvDCF owns local per-camera tracking. NVIDIA's TensorRT ReID module emits an
+    appearance embedding for each target at a throttled interval. GlobalReIDManager
+    maps local (camera, tracker-id) pairs onto session-level IDs so the same person
+    can keep Unknown_03 when seen from another camera. The global layer never feeds
+    synthetic geometry back into NvDCF; it changes identity labels only.
     """
 
     def __init__(self) -> None:
@@ -50,9 +51,13 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.detector_min_idle = float(os.environ.get("CAMERA_V2_DETECT_MIN_IDLE_MS", "8")) / 1000.0
         self.detector_result_age_ms = 0.0
         self.detector_times: dict[str, deque[float]] = {}
+        self.global_reid = GlobalReIDManager()
+        self.reid_vectors_seen = 0
+        self.reid_last_batch = 0
+        self.reid_error = ""
         super().__init__()
-        # nvdsosd must have text enabled for the compact name/Unknown_ID chips
-        # attached to NvDsObjectMeta.text_params by the native label styler.
+        # nvdsosd must have text enabled for compact name/Unknown_ID chips attached
+        # to NvDsObjectMeta.text_params after global ReID assignment.
         self._set_if(self.osd, "display-text", True)
         self.detector_target_hz = max(self.detector_min_hz, min(self.detector_max_hz, self.detector_target_hz))
         self.detector_times = {cid: deque(maxlen=100) for cid in self.camera_index}
@@ -60,9 +65,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
     def _resolve_tracker_files(self):
         lib, stock_max_perf = super()._resolve_tracker_files()
-        # GTX 1050 Ti has only 4 GB. Use NVIDIA's lowest-resource NvDCF reference
-        # profile; tracker_profile.py then applies only the pedestrian association
-        # and realistic target-pool tuning we need.
+        # Keep NVIDIA's max-perf NvDCF base for the 4 GB card. tracker_profile.py
+        # adds a small-batch FP16 ReID network and outputReidTensor metadata.
         return lib, prepare_sparse_tracker_config(stock_max_perf)
 
     def _publish_prepared(
@@ -116,12 +120,35 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
     def _tracker_probe(self, _pad, info):
         buffer = info.get_buffer()
-        if buffer is not None:
-            count = self.bridge.style_and_count_tracked(buffer)
-            if count >= 0:
-                with self.det_lock:
-                    self.tracked_now = count
-                    self.tracker_frames += 1
+        if buffer is None:
+            return self.Gst.PadProbeReturn.OK
+
+        count = self.bridge.style_and_count_tracked(buffer)
+        if count >= 0:
+            with self.det_lock:
+                self.tracked_now = count
+                self.tracker_frames += 1
+
+        # ReID extraction/matching runs only when tracker metadata contains a fresh
+        # embedding. On the other video frames the cached local->global binding is
+        # simply re-applied, so Python never performs image inference or frame copy.
+        try:
+            rows = self.bridge.snapshot_reid(buffer)
+            self.reid_last_batch = len(rows)
+            if rows:
+                self.global_reid.observe(rows, time.monotonic())
+                self.reid_vectors_seen += len(rows)
+            self.bridge.apply_global_identity(buffer, self.global_reid.label_assignments())
+            self.reid_error = ""
+        except Exception as exc:
+            # Identity enrichment must never take the camera wall down. Preserve
+            # tracking and render local Unknown fallbacks if the ReID sidecar fails.
+            self.reid_error = f"{type(exc).__name__}: {exc}"
+            try:
+                self.bridge.apply_global_identity(buffer, [])
+            except Exception:
+                pass
+
         return self.Gst.PadProbeReturn.OK
 
     def _scheduler(self) -> None:
@@ -149,7 +176,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"NvDCF={self.tracker_width}x{self.tracker_height} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
             "profile=max_perf memory_profile=4gb max_targets=24 "
-            "close_person=1 edge_gate=0 display_gap_bridge=1 synthetic_tracker_boxes=0",
+            "deepstream_reid=1 global_reid=1 close_person=1 display_gap_bridge=1",
             flush=True,
         )
 
@@ -283,6 +310,18 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"config={self.tracker_config} profile=max_perf max_targets=24 "
             "cascaded_assoc=1 display_gap_bridge=1 synthetic_tracker_boxes=0",
+            flush=True,
+        )
+
+        reid = self.global_reid.snapshot()
+        stats = reid["stats"]
+        print(
+            "CAMERA_REID "
+            f"vectors={self.reid_vectors_seen} last_batch={self.reid_last_batch} "
+            f"globals={reid['global_count']} bindings={reid['local_bindings']} "
+            f"strong={stats['strong_match']} merged={stats['merged']} "
+            f"conflicts={stats['rejected_conflict']} "
+            f"error={self.reid_error or 'none'}",
             flush=True,
         )
         return keep
