@@ -29,7 +29,13 @@ def _load_reid_config() -> dict:
 
 
 class CameraPersonTrackingReID(CameraPersonTrackingFinal):
-    """Stable Camera V2 local tracking plus an isolated Global-ID side path."""
+    """Stable Camera V2 local tracking plus an isolated Global-ID side path.
+
+    The existing YOLO/NvDCF/display pipeline remains authoritative. ReID samples
+    the already-existing sparse detector frame mailbox, pairs each frame with the
+    nearest NvDCF metadata snapshot, and sends crops to bounded CPU workers. Slow
+    or failing ReID/Qwen therefore cannot stall RTSP, YOLO, NvDCF or display.
+    """
 
     def __init__(self) -> None:
         self.identity: ReIdIdentityEngine | None = None
@@ -56,7 +62,8 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
         print(
             "CAMERA_GLOBAL_ID ready architecture=async-tracklet-reid "
             "crop_bank=10 top3_diverse=1 qwen_async=1 topology=config/cameras.yaml "
-            "same_camera_fragment_reconnect=1 false_merge_policy=conservative",
+            "same_camera_fragment_reconnect=1 sticky_display_hold=1 "
+            "false_merge_policy=conservative",
             flush=True,
         )
 
@@ -66,6 +73,8 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
         now = time.monotonic()
         if buffer is not None:
             try:
+                # Snapshot only real current NvDCF targets BEFORE downstream display
+                # hold/smoothing adds any visual-only objects.
                 rows = self.bridge.copy_tracks(buffer, max_rows=128)
                 grouped: dict[int, list[dict]] = {}
                 for row in rows:
@@ -91,24 +100,30 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
                     flush=True,
                 )
 
+        # Preserve the exact stable local NvDCF styling/counting path first. The
+        # smoother may append a short display-only hold object using the old local
+        # ID while a person is briefly hidden behind a chair/desk.
         result = super()._tracker_probe(pad, info)
 
-        if buffer is not None and rows and self.identity is not None:
+        # Replace local Unknown_Cx_y text for every currently known binding, not
+        # just objects present in the pre-smoother snapshot. This also relabels the
+        # bounded display-hold object with the sticky Global ID during an occlusion.
+        if buffer is not None and self.identity is not None:
             try:
                 bindings = self.identity.bindings()
+                source_by_camera = {
+                    camera.camera_id: source_id
+                    for source_id, camera in enumerate(self.cameras)
+                }
                 mappings = []
-                for row in rows:
-                    source_id = int(row.get("source_id", -1))
-                    if not 0 <= source_id < len(self.cameras):
-                        continue
-                    camera_id = self.cameras[source_id].camera_id
-                    binding = bindings.get((camera_id, int(row["object_id"])))
-                    if not binding:
+                for (camera_id, object_id), binding in bindings.items():
+                    source_id = source_by_camera.get(camera_id)
+                    if source_id is None:
                         continue
                     mappings.append(
                         {
                             "source_id": source_id,
-                            "object_id": int(row["object_id"]),
+                            "object_id": int(object_id),
                             "global_id": int(binding["global_id"]),
                             "state": binding.get("state", "TENTATIVE"),
                         }
@@ -148,6 +163,7 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
         y2 = (float(row["top"]) + float(row["height"])) * sy
         bw = max(1.0, x2 - x1)
         bh = max(1.0, y2 - y1)
+        # Small full-body context helps clothing ReID without pulling neighbours in.
         x1 -= bw * 0.035
         x2 += bw * 0.035
         y1 -= bh * 0.020
@@ -241,12 +257,17 @@ class CameraPersonTrackingReID(CameraPersonTrackingFinal):
             qwen = metrics.get("qwen", {})
             print(
                 "CAMERA_GLOBAL_ID "
-                f"globals={ident.get('globals',0)} confirmed={ident.get('confirmed_globals',0)} "
+                f"globals={ident.get('globals',0)} "
+                f"confirmed={ident.get('confirmed_globals',0)} "
                 f"states={ident.get('states',{})} crops={self._reid_crop_submitted} "
-                f"embedded={metrics.get('embedded',0)} quality_rejects={metrics.get('quality_rejects',0)} "
-                f"duplicates={metrics.get('duplicate_rejects',0)} snapshot_miss={self._reid_snapshot_misses} "
-                f"backend={embed.get('backend','pending')} embed_ms={float(embed.get('last_batch_ms',0.0)):.1f} "
-                f"qwen={int(bool(qwen.get('enabled')))} qwen_calls={qwen.get('calls',0)} "
+                f"embedded={metrics.get('embedded',0)} "
+                f"quality_rejects={metrics.get('quality_rejects',0)} "
+                f"duplicates={metrics.get('duplicate_rejects',0)} "
+                f"snapshot_miss={self._reid_snapshot_misses} "
+                f"backend={embed.get('backend','pending')} "
+                f"embed_ms={float(embed.get('last_batch_ms',0.0)):.1f} "
+                f"qwen={int(bool(qwen.get('enabled')))} "
+                f"qwen_calls={qwen.get('calls',0)} "
                 f"qwen_ms={float(qwen.get('last_latency_ms',0.0)):.0f} "
                 f"error={metrics.get('last_error') or 'none'}",
                 flush=True,
