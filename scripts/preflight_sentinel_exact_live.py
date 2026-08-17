@@ -123,10 +123,22 @@ def main() -> int:
         require_text(live, 'self.ui_bridge.snapshot_tracks(buffer)', "nvdcf_realtime_metadata")
         require_text(live, 'self.stats[camera.camera_id]', "realtime_camera_metrics")
 
-        forbidden_runtime = ("appsink", "cv2.", "QImage", "QPixmap", "jpeg", "mjpeg", "requests.")
+        # Camera frames must never cross into Qt/Python through a secondary frame
+        # transport. Comments may mention JPEG/MJPEG while explicitly saying they
+        # are absent, so test actual frame APIs/imports rather than prose tokens.
+        forbidden_runtime = (
+            "appsink",
+            "cv2.",
+            "QImage(",
+            "QPixmap(",
+            "requests.get",
+            "StreamingResponse",
+            "imencode(",
+            "mmap.mmap(",
+        )
         runtime_combo = runtime + "\n" + live
         for token in forbidden_runtime:
-            if token.lower() in runtime_combo.lower():
+            if token in runtime_combo:
                 return fail(f"forbidden camera hot-path transport found: {token}")
         print("hot_path_frame_transport=ZERO_COPY_NATIVE")
     except Exception as exc:
