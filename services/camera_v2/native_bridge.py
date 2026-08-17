@@ -11,56 +11,33 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("native_meta_bridge.c")
 SMOOTHER_SOURCE = Path(__file__).with_name("native_display_smoother.c")
 LABEL_SOURCE = Path(__file__).with_name("native_label_style.c")
-REID_SOURCE = Path(__file__).with_name("native_reid_bridge.c")
 HEATMAP_SOURCE = Path(__file__).with_name("native_heatmap.c")
 BUILD_DIR = ROOT / ".runtime" / "camera_v2"
 LIB_PATH = BUILD_DIR / "libcamera_v2_meta.so"
-MAX_REID_FEATURE = 512
-MAX_REID_ROWS = 48
-MAX_LABEL_SIZE = 128
-
-
-class _ReIDRow(ctypes.Structure):
-    _fields_ = [
-        ("source_id", ctypes.c_uint32),
-        ("feature_size", ctypes.c_uint32),
-        ("object_id", ctypes.c_uint64),
-        ("left", ctypes.c_float),
-        ("top", ctypes.c_float),
-        ("width", ctypes.c_float),
-        ("height", ctypes.c_float),
-        ("confidence", ctypes.c_float),
-        ("tracker_confidence", ctypes.c_float),
-        ("feature", ctypes.c_float * MAX_REID_FEATURE),
-    ]
-
-
-class _TrackLabel(ctypes.Structure):
-    _fields_ = [
-        ("source_id", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
-        ("object_id", ctypes.c_uint64),
-        ("label", ctypes.c_char * MAX_LABEL_SIZE),
-    ]
 
 
 def _deepstream_root() -> Path:
     env = os.getenv("DEEPSTREAM_ROOT")
     if env:
-        p = Path(env)
-        if (p / "sources/includes/gstnvdsmeta.h").exists():
-            return p
+        path = Path(env)
+        if (path / "sources/includes/gstnvdsmeta.h").exists():
+            return path
 
     candidates = [Path("/opt/nvidia/deepstream/deepstream")]
     candidates.extend(sorted(Path("/opt/nvidia/deepstream").glob("deepstream-*"), reverse=True))
-    for p in candidates:
-        if (p / "sources/includes/gstnvdsmeta.h").exists() and (p / "lib").exists():
-            return p
+    for path in candidates:
+        if (path / "sources/includes/gstnvdsmeta.h").exists() and (path / "lib").exists():
+            return path
     raise RuntimeError("DeepStream headers were not found under /opt/nvidia/deepstream")
 
 
 def ensure_bridge() -> Path:
-    sources = (SOURCE, SMOOTHER_SOURCE, LABEL_SOURCE, REID_SOURCE, HEATMAP_SOURCE)
+    """Build only metadata helpers required by detection/tracking/heatmap.
+
+    ReID snapshot/label code is intentionally not compiled into the live native
+    bridge. This keeps the baseline independent from every abandoned identity path.
+    """
+    sources = (SOURCE, SMOOTHER_SOURCE, LABEL_SOURCE, HEATMAP_SOURCE)
     for src in sources:
         if not src.exists():
             raise RuntimeError(f"metadata bridge source missing: {src}")
@@ -95,7 +72,6 @@ def ensure_bridge() -> Path:
         str(SOURCE),
         str(SMOOTHER_SOURCE),
         str(LABEL_SOURCE),
-        str(REID_SOURCE),
         str(HEATMAP_SOURCE),
         "-o",
         str(LIB_PATH),
@@ -143,37 +119,13 @@ class NativeMetaBridge:
 
         self.lib.camera_v2_style_and_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_style_and_count_tracked.restype = ctypes.c_int
-
         self.lib.camera_v2_smooth_display_boxes.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_smooth_display_boxes.restype = ctypes.c_int
-
-        self.lib.camera_v2_apply_identity_style.argtypes = [ctypes.c_uint64]
-        self.lib.camera_v2_apply_identity_style.restype = ctypes.c_int
-
-        self.lib.camera_v2_snapshot_tracks.argtypes = [
-            ctypes.c_uint64,
-            ctypes.POINTER(_ReIDRow),
-            ctypes.c_int,
-        ]
-        self.lib.camera_v2_snapshot_tracks.restype = ctypes.c_int
-
-        self.lib.camera_v2_snapshot_reid.argtypes = [
-            ctypes.c_uint64,
-            ctypes.POINTER(_ReIDRow),
-            ctypes.c_int,
-        ]
-        self.lib.camera_v2_snapshot_reid.restype = ctypes.c_int
-
-        self.lib.camera_v2_apply_track_labels.argtypes = [
-            ctypes.c_uint64,
-            ctypes.POINTER(_TrackLabel),
-            ctypes.c_int,
-        ]
-        self.lib.camera_v2_apply_track_labels.restype = ctypes.c_int
+        self.lib.camera_v2_apply_local_track_style.argtypes = [ctypes.c_uint64]
+        self.lib.camera_v2_apply_local_track_style.restype = ctypes.c_int
 
         self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_count_tracked.restype = ctypes.c_int
-
         self.lib.camera_v2_shadow_promoted_total.argtypes = []
         self.lib.camera_v2_shadow_promoted_total.restype = ctypes.c_uint64
 
@@ -214,7 +166,12 @@ class NativeMetaBridge:
         payload = array_type(*flat)
         return payload, ctypes.cast(payload, ctypes.POINTER(ctypes.c_float))
 
-    def add_boxes(self, gst_buffer, source_id: int, boxes: list[tuple[float, float, float, float, float]]) -> int:
+    def add_boxes(
+        self,
+        gst_buffer,
+        source_id: int,
+        boxes: list[tuple[float, float, float, float, float]],
+    ) -> int:
         if not boxes:
             return 0
         payload, pointer = self._payload(boxes)
@@ -254,69 +211,12 @@ class NativeMetaBridge:
             self.lib.camera_v2_smooth_display_boxes(buffer_ptr)
         return count
 
-    def _snapshot_rows(self, gst_buffer, function_name: str, max_rows: int, include_feature: bool) -> list[dict]:
-        max_rows = max(1, min(int(max_rows), 128))
-        array_type = _ReIDRow * max_rows
-        rows = array_type()
-        func = getattr(self.lib, function_name)
-        count = int(
-            func(
-                ctypes.c_uint64(hash(gst_buffer)),
-                rows,
-                ctypes.c_int(max_rows),
+    def apply_local_track_style(self, gst_buffer) -> int:
+        return int(
+            self.lib.camera_v2_apply_local_track_style(
+                ctypes.c_uint64(hash(gst_buffer))
             )
         )
-        if count <= 0:
-            return []
-
-        output: list[dict] = []
-        for index in range(min(count, max_rows)):
-            row = rows[index]
-            item = {
-                "source_id": int(row.source_id),
-                "object_id": int(row.object_id),
-                "left": float(row.left),
-                "top": float(row.top),
-                "width": float(row.width),
-                "height": float(row.height),
-                "confidence": float(row.confidence),
-                "tracker_confidence": float(row.tracker_confidence),
-            }
-            if include_feature:
-                size = max(0, min(int(row.feature_size), MAX_REID_FEATURE))
-                if size <= 0:
-                    continue
-                item["feature"] = tuple(float(row.feature[i]) for i in range(size))
-            output.append(item)
-        return output
-
-    def snapshot_tracks(self, gst_buffer, max_rows: int = MAX_REID_ROWS) -> list[dict]:
-        return self._snapshot_rows(gst_buffer, "camera_v2_snapshot_tracks", max_rows, False)
-
-    def snapshot_reid(self, gst_buffer, max_rows: int = MAX_REID_ROWS) -> list[dict]:
-        return self._snapshot_rows(gst_buffer, "camera_v2_snapshot_reid", max_rows, True)
-
-    def apply_global_identity(self, gst_buffer, assignments: list[tuple[int, int, str]]) -> int:
-        buffer_ptr = ctypes.c_uint64(hash(gst_buffer))
-        applied = 0
-        if assignments:
-            array_type = _TrackLabel * len(assignments)
-            payload = array_type()
-            for index, (source_id, object_id, label) in enumerate(assignments):
-                payload[index].source_id = int(source_id)
-                payload[index].reserved = 0
-                payload[index].object_id = int(object_id)
-                encoded = str(label).encode("utf-8", errors="ignore")[: MAX_LABEL_SIZE - 1]
-                payload[index].label = encoded
-            applied = int(
-                self.lib.camera_v2_apply_track_labels(
-                    buffer_ptr,
-                    payload,
-                    ctypes.c_int(len(assignments)),
-                )
-            )
-        self.lib.camera_v2_apply_identity_style(buffer_ptr)
-        return applied
 
     def configure_heatmap(
         self,
