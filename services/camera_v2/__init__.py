@@ -1,8 +1,10 @@
 """Camera V2 production defaults.
 
-The active production path is intentionally limited to camera ingest, YOLO person
-metadata, per-camera NvDCF tracking and camera-space heatmap. Cross-camera ReID,
-Qwen/KPR verification and room calibration are not part of the live runtime.
+The hot path remains camera ingest -> YOLO person metadata -> per-camera NvDCF.
+Cross-camera Global ReID is layered on top as a bounded asynchronous side path:
+quality/diversity crop bank -> CPU ReID gallery -> room/time constraints -> optional
+Qwen visual verification -> reversible Global ID state machine. ReID/Qwen never own
+or block the local tracker/display path.
 """
 
 from __future__ import annotations
