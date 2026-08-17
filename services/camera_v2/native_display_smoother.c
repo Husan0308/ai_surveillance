@@ -6,13 +6,14 @@
 
 #define MAX_SMOOTH_STATES 512
 /*
- * The production detector runs sparsely (~2-3 Hz/camera) while the wall is ~20 FPS.
- * DeepStream can omit realtime tracker metadata between inferenced frames even though
- * NvDCF keeps tracking internally. Bridge only that short display gap downstream of
- * nvtracker. 12 frames is ~0.6 s at 20 FPS: enough to cover the slowest normal detector
- * cadence without leaving multi-second ghost boxes after a person exits.
+ * The production detector runs sparsely (~2.6-3.1 Hz/camera) while the wall is
+ * ~20 FPS. A single YOLO miss can therefore leave roughly 7-8 display frames
+ * before the next observation; two consecutive misses can exceed the old 12-frame
+ * hold. Keep the last authoritative NvDCF box visible for at most 18 frames
+ * (~0.9 s @ 20 FPS). This is downstream of nvtracker, so it never creates/changes
+ * a tracker target and still expires quickly when a person really leaves.
  */
-#define DISPLAY_HOLD_FRAMES 12
+#define DISPLAY_HOLD_FRAMES 18
 
 typedef struct {
     int valid;
@@ -140,7 +141,7 @@ static int add_display_hold(NvDsBatchMeta *batch_meta,
  */
 int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
-    GstBuffer *buffer = (GstBuffer *) buffer_ptr;
+    GstBuffer *buffer = (GstBuffer *)buffer_ptr;
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
     if (!batch_meta) return -1;
 
@@ -152,21 +153,20 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
     int smoothed = 0;
 
     for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
-        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) fnode->data;
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)fnode->data;
         if (!frame_meta) continue;
 
         unsigned int source_id = frame_meta->source_id;
-        uint64_t frame_num = (uint64_t) frame_meta->frame_num;
-        float frame_w = (float) frame_meta->source_frame_width;
-        float frame_h = (float) frame_meta->source_frame_height;
-        if (frame_w <= 1.0f) frame_w = (float) frame_meta->pipeline_width;
-        if (frame_h <= 1.0f) frame_h = (float) frame_meta->pipeline_height;
+        uint64_t frame_num = (uint64_t)frame_meta->frame_num;
+        float frame_w = (float)frame_meta->source_frame_width;
+        float frame_h = (float)frame_meta->source_frame_height;
+        if (frame_w <= 1.0f) frame_w = (float)frame_meta->pipeline_width;
+        if (frame_h <= 1.0f) frame_h = (float)frame_meta->pipeline_height;
         if (frame_w <= 1.0f || frame_h <= 1.0f) continue;
 
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
-            NvDsObjectMeta *obj = (NvDsObjectMeta *) onode->data;
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)onode->data;
             if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
-            /* Ignore our own downstream-only hold boxes if this helper is ever called twice. */
             if (obj->unique_component_id == 191) continue;
 
             float left = obj->rect_params.left;
@@ -177,15 +177,15 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
 
             float target_cx = left + width * 0.5f;
             float target_cy = top + height * 0.5f;
-            int idx = find_state(source_id, (uint64_t) obj->object_id);
+            int idx = find_state(source_id, (uint64_t)obj->object_id);
             SmoothBoxState *s = &g_smooth_states[idx];
 
-            if (!s->valid || s->source_id != source_id || s->object_id != (uint64_t) obj->object_id ||
+            if (!s->valid || s->source_id != source_id || s->object_id != (uint64_t)obj->object_id ||
                 (frame_num > s->last_frame_num && frame_num - s->last_frame_num > 20)) {
                 memset(s, 0, sizeof(*s));
                 s->valid = 1;
                 s->source_id = source_id;
-                s->object_id = (uint64_t) obj->object_id;
+                s->object_id = (uint64_t)obj->object_id;
                 s->last_frame_num = frame_num;
                 s->target_cx = target_cx;
                 s->target_cy = target_cy;
@@ -201,8 +201,8 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
             uint64_t delta_frames = frame_num > s->last_frame_num ? frame_num - s->last_frame_num : 1;
             if (delta_frames > 6) delta_frames = 6;
 
-            float measured_vx = (target_cx - s->target_cx) / (float) delta_frames;
-            float measured_vy = (target_cy - s->target_cy) / (float) delta_frames;
+            float measured_vx = (target_cx - s->target_cx) / (float)delta_frames;
+            float measured_vy = (target_cy - s->target_cy) / (float)delta_frames;
             float max_vx = width * 0.30f + 3.0f;
             float max_vy = height * 0.30f + 3.0f;
             measured_vx = clampf_smooth(measured_vx, -max_vx, max_vx);
@@ -228,7 +228,6 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
             ++smoothed;
         }
 
-        /* Fill only short downstream OSD gaps for states not present on this frame. */
         for (int i = 0; i < MAX_SMOOTH_STATES; ++i) {
             SmoothBoxState *s = &g_smooth_states[i];
             if (!s->valid || s->source_id != source_id) continue;
