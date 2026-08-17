@@ -8,15 +8,9 @@ from .person_tracking_final import CameraPersonTrackingFinal
 class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
     """Production local tracking runtime plus a camera-space occupancy heatmap.
 
-    Cross-camera ReID is intentionally absent. Heatmap is isolated from detector
-    scheduling and uses only current NvDCF boxes:
-      * accumulation happens on raw current NvDCF boxes before display smoothing;
-      * floor anchor follows bbox bottom-center with a small edge-safety lift;
-      * short unstable tracks are ignored before they can contaminate analytics;
-      * stationary dwell grows gradually while confirmed motion paints a trail;
-      * splat/render footprint scales with image depth for a more natural CCTV view;
-      * rendering happens after the tiler and before nvdsosd;
-      * the camera pixels remain visible under the translucent density field.
+    Cross-camera ReID is intentionally absent. Heatmap accumulation keeps running
+    even when the UI hides the overlay, so reopening Heatmap shows the real recent
+    history instead of starting from zero.
     """
 
     def __init__(self) -> None:
@@ -26,6 +20,7 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             "no",
             "off",
         }
+        self.heatmap_render_enabled = self.heatmap_enabled
         self.heatmap_updates = 0
         self.heatmap_render_frames = 0
         self.heatmap_visible_points = 0
@@ -36,27 +31,26 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             print("CAMERA_HEATMAP disabled", flush=True)
             return
 
-        # Rolling-density cooling. About 10% of a cell remains after one hour by
-        # default. This keeps recent traffic meaningful without letting yesterday's
-        # occupancy permanently dominate the camera.
-        cool_seconds = max(300.0, float(os.environ.get("CAMERA_V2_HEATMAP_COOL_SEC", "3600")))
+        cool_seconds = max(
+            300.0,
+            float(os.environ.get("CAMERA_V2_HEATMAP_COOL_SEC", "3600")),
+        )
         hour_remaining = min(
             0.60,
             max(0.01, float(os.environ.get("CAMERA_V2_HEATMAP_REMAIN", "0.10"))),
         )
-        decay = hour_remaining ** (1.0 / max(1.0, float(self.source_fps) * cool_seconds))
+        decay = hour_remaining ** (
+            1.0 / max(1.0, float(self.source_fps) * cool_seconds)
+        )
 
-        # Production-style density palette:
-        #   brief/new presence -> transparent blue/cyan
-        #   repeated traffic   -> green/yellow
-        #   sustained hotspot  -> orange/red
-        # Thresholds are deliberately conservative so one person is not instantly
-        # presented as a red hotspot.
         deposit = float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0022"))
         low = float(os.environ.get("CAMERA_V2_HEATMAP_LOW", "0.00028"))
         yellow = float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.100"))
         red = float(os.environ.get("CAMERA_V2_HEATMAP_RED", "0.300"))
-        max_points = max(12, min(96, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "84"))))
+        max_points = max(
+            12,
+            min(96, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "84"))),
+        )
 
         self.bridge.configure_heatmap(
             deposit=deposit,
@@ -68,14 +62,13 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         )
         self.bridge.reset_heatmap()
 
-        # Accumulator uses source-camera coordinates before tiling. Rendering runs
-        # after the 3x2 tiler and immediately before nvdsosd so the translucent heat
-        # field is painted directly over each live camera tile without a CPU frame
-        # copy or Python per-frame drawing.
         osd_sink = self.osd.get_static_pad("sink")
         if osd_sink is None:
             raise RuntimeError("CAMERA_HEATMAP could not get nvdsosd sink pad")
-        osd_sink.add_probe(self.Gst.PadProbeType.BUFFER, self._heatmap_render_probe)
+        osd_sink.add_probe(
+            self.Gst.PadProbeType.BUFFER,
+            self._heatmap_render_probe,
+        )
 
         print(
             "CAMERA_HEATMAP ready "
@@ -84,16 +77,17 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             f"deposit={deposit:.5f} decay={decay:.8f} cool={cool_seconds:.0f}s "
             f"remain={hour_remaining:.2f} yellow={yellow:.3f} red={red:.3f} "
             "style=rolling-density palette=blue-cyan-green-yellow-red "
-            "overlay=post-tiler/pre-osd cross_camera=0 reid=0",
+            "overlay=post-tiler/pre-osd cross_camera=0 reid=0 ui_toggle=1",
             flush=True,
         )
+
+    def set_heatmap_render_enabled(self, enabled: bool) -> None:
+        self.heatmap_render_enabled = bool(enabled) and self.heatmap_enabled
 
     def _tracker_probe(self, pad, info):
         buffer = info.get_buffer()
         if self.heatmap_enabled and buffer is not None:
             try:
-                # Run BEFORE parent style/smoothing. Synthetic display-hold boxes
-                # therefore never add fake heat; only real NvDCF tracks paint.
                 updates = self.bridge.heatmap_update(buffer)
                 if updates > 0:
                     self.heatmap_updates += int(updates)
@@ -104,15 +98,19 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
 
     def _heatmap_render_probe(self, _pad, info):
         buffer = info.get_buffer()
-        if not self.heatmap_enabled or buffer is None:
+        if (
+            not self.heatmap_enabled
+            or not self.heatmap_render_enabled
+            or buffer is None
+        ):
             return self.Gst.PadProbeReturn.OK
         try:
             rendered = self.bridge.heatmap_render(
                 buffer,
                 wall_width=self.wall_width,
                 wall_height=self.wall_height,
-                rows=2,
-                columns=3,
+                rows=int(getattr(self, "tiler_rows", 2)),
+                columns=int(getattr(self, "tiler_columns", 3)),
                 source_count=len(self.cameras),
             )
             if rendered >= 0:
@@ -131,6 +129,7 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
                 f"updates={self.heatmap_updates} "
                 f"render_frames={self.heatmap_render_frames} "
                 f"visible_points={self.heatmap_visible_points} "
+                f"visible={int(self.heatmap_render_enabled)} "
                 f"rendered_total={self.bridge.heatmap_rendered_points_total()} "
                 f"error={self.heatmap_error or 'none'}",
                 flush=True,
