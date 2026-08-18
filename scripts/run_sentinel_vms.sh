@@ -5,21 +5,15 @@ cd "$(dirname "$0")/.."
 
 HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
-echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.18-r3"
+echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.18-r4"
 
-# Fail immediately if the checkout still contains the old Camera dialog or if
-# Known/Unknown/fullscreen/ankle-heatmap wiring regressed. This runs before any
-# model warmup or six-camera RTSP startup so stale local code cannot hide behind
-# a long initialization sequence.
+# Fail immediately if the checkout contains a stale camera dialog, fake tile
+# occupancy badges, broken fullscreen/hover behavior or regressed ankle heatmap.
 python scripts/preflight_sentinel_ui.py
 
-# Resolve/warm the bounded CPU side paths (pose + ReID) only after the UI/source
-# schema contract is known-good.
+# Resolve/warm bounded side paths only after the UI/source-schema contract passes.
 python scripts/setup_camera_v2_reid.py
 
-# The original ReID smoke test contains assertions for the fixed six-camera
-# office pairing. Keep that stronger preflight when all six are enabled, but do
-# not block Settings users who intentionally disable/delete a camera.
 ACTIVE_CAMERAS="$(python - <<'PY'
 import yaml
 raw = yaml.safe_load(open('config/cameras.yaml', encoding='utf-8')) or {}
