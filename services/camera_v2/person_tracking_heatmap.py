@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import os
+import threading
 
 from .heatmap_filter import NativeHeatmapFilter
 from .person_tracking_final import CameraPersonTrackingFinal
+from .pose_heatmap_bridge import PoseHeatmapBridge
 
 
 class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
-    """Production local tracking runtime plus camera-space occupancy heatmaps.
+    """Production camera-space heatmap driven only by tracked pose ankles.
 
-    Heat accumulation always keeps running for all cameras. The UI controls only
-    rendering, so hiding/reopening a camera heatmap never destroys its history.
+    Bounding-box bottom-center is intentionally not accepted as a production heat
+    anchor. A pose sidecar supplies left/right ankle keypoints matched to an active
+    NvDCF track; if neither ankle is reliable, that sample contributes no heat.
     """
 
     def __init__(self) -> None:
@@ -33,7 +36,10 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         self.heatmap_filtered_points = 0
         self.heatmap_error = ""
         self.heatmap_filter: NativeHeatmapFilter | None = None
+        self.pose_heatmap: PoseHeatmapBridge | None = None
         self._heatmap_sources: dict[int, bool] = {}
+        self._heatmap_lock = threading.RLock()
+        self.focus_source = -1
         super().__init__()
 
         self._heatmap_sources = {
@@ -57,7 +63,7 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             1.0 / max(1.0, float(self.source_fps) * cool_seconds)
         )
 
-        deposit = float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0022"))
+        deposit = float(os.environ.get("CAMERA_V2_HEATMAP_DEPOSIT", "0.0028"))
         low = float(os.environ.get("CAMERA_V2_HEATMAP_LOW", "0.00028"))
         yellow = float(os.environ.get("CAMERA_V2_HEATMAP_YELLOW", "0.100"))
         red = float(os.environ.get("CAMERA_V2_HEATMAP_RED", "0.300"))
@@ -66,7 +72,8 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             min(96, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "84"))),
         )
 
-        self.bridge.configure_heatmap(
+        self.pose_heatmap = PoseHeatmapBridge()
+        self.pose_heatmap.configure(
             deposit=deposit,
             decay=decay,
             low_threshold=low,
@@ -74,7 +81,7 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             red_threshold=red,
             max_points_per_source=max_points,
         )
-        self.bridge.reset_heatmap()
+        self.pose_heatmap.reset()
         self.heatmap_filter = NativeHeatmapFilter()
 
         osd_sink = self.osd.get_static_pad("sink")
@@ -87,12 +94,11 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
 
         print(
             "CAMERA_HEATMAP ready "
-            f"anchor=bottom-center-lift3pct probation=4 dwell_weighted=1 motion_trail=1 "
-            f"perspective_splat=1 grid=48x27 points={max_points}/cam "
+            f"anchor=pose-ankle-only bbox_anchor=disabled ankle_missing=skip "
+            f"tracked_match=NvDCF grid=48x27 points={max_points}/cam "
             f"deposit={deposit:.5f} decay={decay:.8f} cool={cool_seconds:.0f}s "
             f"remain={hour_remaining:.2f} yellow={yellow:.3f} red={red:.3f} "
-            "style=rolling-density palette=blue-cyan-green-yellow-red "
-            "overlay=post-tiler/pre-osd per_camera_toggle=1 history_always_on=1",
+            "style=rolling-density fullscreen_focus_aware=1 per_camera_toggle=1",
             flush=True,
         )
 
@@ -119,16 +125,42 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
                 mask |= 1 << source_id
         return mask
 
+    def deposit_pose_ankle(
+        self,
+        *,
+        source_id: int,
+        object_id: int,
+        captured_at: float,
+        nx: float,
+        ny: float,
+        confidence: float,
+    ) -> int:
+        """Deposit one ankle observation; there is deliberately no bbox fallback."""
+        if not self.heatmap_enabled or self.pose_heatmap is None:
+            return 0
+        tick = max(1, int(float(captured_at) * max(1.0, float(self.source_fps))))
+        try:
+            with self._heatmap_lock:
+                updates = self.pose_heatmap.update_ankle(
+                    source_id=int(source_id),
+                    object_id=int(object_id),
+                    tick=tick,
+                    nx=float(nx),
+                    ny=float(ny),
+                    confidence=float(confidence),
+                )
+            if updates > 0:
+                self.heatmap_updates += int(updates)
+            self.heatmap_error = ""
+            return max(0, int(updates))
+        except Exception as exc:
+            self.heatmap_error = f"ankle:{type(exc).__name__}:{exc}"
+            return 0
+
     def _tracker_probe(self, pad, info):
-        buffer = info.get_buffer()
-        if self.heatmap_enabled and buffer is not None:
-            try:
-                updates = self.bridge.heatmap_update(buffer)
-                if updates > 0:
-                    self.heatmap_updates += int(updates)
-                self.heatmap_error = ""
-            except Exception as exc:
-                self.heatmap_error = f"update:{type(exc).__name__}:{exc}"
+        # Tracking remains authoritative for identity and bbox display, but heat is
+        # NOT generated here. Pose ankle observations arrive asynchronously through
+        # deposit_pose_ankle().
         return super()._tracker_probe(pad, info)
 
     def _heatmap_render_probe(self, _pad, info):
@@ -138,28 +170,32 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             not self.heatmap_enabled
             or enabled_mask == 0
             or buffer is None
+            or self.pose_heatmap is None
         ):
             return self.Gst.PadProbeReturn.OK
         try:
-            rows = int(getattr(self, "tiler_rows", 2))
-            columns = int(getattr(self, "tiler_columns", 3))
-            rendered = self.bridge.heatmap_render(
-                buffer,
-                wall_width=self.wall_width,
-                wall_height=self.wall_height,
-                rows=rows,
-                columns=columns,
-                source_count=len(self.cameras),
-            )
+            rows = int(getattr(self, "tiler_rows", 3))
+            columns = int(getattr(self, "tiler_columns", 2))
+            focus_source = int(getattr(self, "focus_source", -1))
+            with self._heatmap_lock:
+                rendered = self.pose_heatmap.render(
+                    buffer,
+                    wall_width=self.wall_width,
+                    wall_height=self.wall_height,
+                    rows=rows,
+                    columns=columns,
+                    source_count=len(self.cameras),
+                    focus_source=focus_source,
+                )
             filtered = 0
             if self.heatmap_filter is not None:
                 filtered = self.heatmap_filter.apply(
                     buffer,
                     wall_width=self.wall_width,
                     wall_height=self.wall_height,
-                    rows=rows,
-                    columns=columns,
-                    enabled_mask=enabled_mask,
+                    rows=1 if focus_source >= 0 else rows,
+                    columns=1 if focus_source >= 0 else columns,
+                    enabled_mask=(1 if focus_source >= 0 else enabled_mask),
                 )
             if rendered >= 0:
                 self.heatmap_render_frames += 1
@@ -174,14 +210,20 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         keep = super()._print_stats()
         if self.heatmap_enabled:
             enabled = [sid for sid, state in self._heatmap_sources.items() if state]
+            rendered_total = 0
+            if self.pose_heatmap is not None:
+                try:
+                    rendered_total = self.pose_heatmap.rendered_points_total()
+                except Exception:
+                    rendered_total = 0
             print(
                 "CAMERA_HEATMAP "
-                f"updates={self.heatmap_updates} "
+                f"anchor=ankle updates={self.heatmap_updates} "
                 f"render_frames={self.heatmap_render_frames} "
                 f"visible_points={self.heatmap_visible_points} "
                 f"filtered_points={self.heatmap_filtered_points} "
-                f"sources={enabled} "
-                f"rendered_total={self.bridge.heatmap_rendered_points_total()} "
+                f"sources={enabled} focus={self.focus_source} "
+                f"rendered_total={rendered_total} "
                 f"error={self.heatmap_error or 'none'}",
                 flush=True,
             )
