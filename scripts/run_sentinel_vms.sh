@@ -3,6 +3,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
+echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.18-r3"
+
+# Fail immediately if the checkout still contains the old Camera dialog or if
+# Known/Unknown/fullscreen/ankle-heatmap wiring regressed. This runs before any
+# model warmup or six-camera RTSP startup so stale local code cannot hide behind
+# a long initialization sequence.
+python scripts/preflight_sentinel_ui.py
+
+# Resolve/warm the bounded CPU side paths (pose + ReID) only after the UI/source
+# schema contract is known-good.
 python scripts/setup_camera_v2_reid.py
 
 # The original ReID smoke test contains assertions for the fixed six-camera
@@ -20,12 +32,13 @@ if [[ "$ACTIVE_CAMERAS" == "6" ]]; then
 else
   python - <<'PY'
 from services.camera_v2.native_bridge import ensure_bridge
-path = ensure_bridge()
-print(f"CAMERA_V2_DYNAMIC_PREFLIGHT native=PASS path={path}")
+from services.camera_v2.pose_heatmap_bridge import ensure_pose_heatmap_bridge
+native = ensure_bridge()
+pose = ensure_pose_heatmap_bridge()
+print(f"CAMERA_V2_DYNAMIC_PREFLIGHT native=PASS path={native}")
+print(f"CAMERA_V2_DYNAMIC_PREFLIGHT pose_heatmap=PASS path={pose} bbox_anchor=OFF")
 PY
   echo "CAMERA_V2_DYNAMIC_PREFLIGHT active_cameras=${ACTIVE_CAMERAS} strict_pair_topology=SKIP"
 fi
-
-python scripts/preflight_sentinel_ui.py
 
 exec python -m services.camera_v2.monitor_ui
