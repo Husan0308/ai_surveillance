@@ -6,7 +6,15 @@ import sys
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
-from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QLabel, QMainWindow, QSizePolicy, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGridLayout,
+    QLabel,
+    QMainWindow,
+    QSizePolicy,
+    QWidget,
+)
 
 BASE_URL = "http://127.0.0.1:8001"
 CAMERAS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
@@ -21,12 +29,17 @@ class CameraTile(QFrame):
         self._buffer = bytearray()
         self._reply = None
         self._pixmap: QPixmap | None = None
+        self._fullscreen_quality = False
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("QFrame{background:#03060b;border:1px solid #202936;border-radius:8px;}")
+        self.setStyleSheet(
+            "QFrame{background:#03060b;border:1px solid #202936;border-radius:8px;}"
+        )
 
         self.image = QLabel("CONNECTING…", self)
         self.image.setAlignment(Qt.AlignCenter)
-        self.image.setStyleSheet("QLabel{background:#03060b;color:#7c8798;border:none;}")
+        self.image.setStyleSheet(
+            "QLabel{background:#03060b;color:#7c8798;border:none;}"
+        )
 
         self.title = QLabel(camera_id, self)
         self.title.setStyleSheet(
@@ -37,6 +50,10 @@ class CameraTile(QFrame):
 
         self.network = QNetworkAccessManager(self)
         QTimer.singleShot(50, self._connect)
+
+    def set_fullscreen_quality(self, enabled: bool) -> None:
+        self._fullscreen_quality = bool(enabled)
+        self._render()
 
     def _connect(self) -> None:
         self._buffer.clear()
@@ -50,32 +67,44 @@ class CameraTile(QFrame):
         if self._reply is None:
             return
         self._buffer.extend(bytes(self._reply.readAll()))
-        while True:
-            start = self._buffer.find(b"\xff\xd8")
-            if start < 0:
-                if len(self._buffer) > 2_000_000:
-                    self._buffer.clear()
-                return
-            end = self._buffer.find(b"\xff\xd9", start + 2)
-            if end < 0:
-                if start:
-                    del self._buffer[:start]
-                return
-            jpeg = bytes(self._buffer[start : end + 2])
+
+        # Latest-frame-only client path: if several MJPEG frames arrived before
+        # Qt got CPU time, decode only the newest complete JPEG instead of
+        # replaying stale frames and creating visible catch-up/jitter.
+        end = self._buffer.rfind(b"\xff\xd9")
+        if end < 0:
+            start = self._buffer.rfind(b"\xff\xd8")
+            if start > 0:
+                del self._buffer[:start]
+            elif len(self._buffer) > 3_000_000:
+                self._buffer.clear()
+            return
+
+        start = self._buffer.rfind(b"\xff\xd8", 0, end + 2)
+        if start < 0:
             del self._buffer[: end + 2]
-            image = QImage.fromData(jpeg, "JPG")
-            if not image.isNull():
-                self._pixmap = QPixmap.fromImage(image)
-                self._render()
+            return
+
+        jpeg = bytes(self._buffer[start : end + 2])
+        del self._buffer[: end + 2]
+        image = QImage.fromData(jpeg, "JPG")
+        if not image.isNull():
+            self._pixmap = QPixmap.fromImage(image)
+            self._render()
 
     def _render(self) -> None:
         if self._pixmap is None or self.image.width() < 2 or self.image.height() < 2:
             return
+        transform = (
+            Qt.SmoothTransformation
+            if self._fullscreen_quality
+            else Qt.FastTransformation
+        )
         self.image.setPixmap(
             self._pixmap.scaled(
                 self.image.size(),
                 Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
+                transform,
             )
         )
 
@@ -125,11 +154,13 @@ class CameraWall(QMainWindow):
     def toggle_tile(self, tile: CameraTile) -> None:
         if self._fullscreen_tile is None:
             self._fullscreen_tile = tile
+            tile.set_fullscreen_quality(True)
             for other in self.tiles:
                 if other is not tile:
                     other.hide()
             self.grid.addWidget(tile, 0, 0, 3, 2)
         else:
+            self._fullscreen_tile.set_fullscreen_quality(False)
             self._fullscreen_tile = None
             for index, other in enumerate(self.tiles):
                 self.grid.addWidget(other, index // 2, index % 2)
