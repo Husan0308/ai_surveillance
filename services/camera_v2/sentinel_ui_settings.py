@@ -77,8 +77,8 @@ class CameraConfigStore:
                 f"Monitoring 2x3 wall maksimum {MAX_ACTIVE_CAMERAS} ta active camera qo'llaydi"
             )
 
-        # Canonical source schema. Codec/decoder and any environment-URI selector
-        # are intentionally absent; DeepStream negotiates the RTSP stream itself.
+        # Canonical source schema contains only identity, room, enabled state and
+        # RTSP URI. Stream format/decoder selection belongs to DeepStream.
         payload["cameras"] = cleaned
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -165,8 +165,8 @@ class CameraEditorDialog(QDialog):
         root.addLayout(status_row)
 
         note = QLabel(
-            "Codec va decoder tanlanmaydi. DeepStream RTSP streamni avtomatik aniqlaydi; "
-            "login/parol .env dagi SURVEILLANCE_RTSP_USERNAME va "
+            "Stream formati va decoder DeepStream tomonidan avtomatik aniqlanadi. "
+            "Login/parol .env dagi SURVEILLANCE_RTSP_USERNAME va "
             "SURVEILLANCE_RTSP_PASSWORD dan olinadi."
         )
         note.setWordWrap(True)
@@ -265,7 +265,7 @@ class CameraSettingsRow(Panel):
         uri.setStyleSheet(f"color:{C['muted']};font:10px 'DejaVu Sans Mono';")
         info.addWidget(uri)
 
-        source_note = QLabel("DeepStream · auto codec · RTSP")
+        source_note = QLabel("DeepStream · automatic stream · RTSP")
         source_note.setStyleSheet(f"color:#5f7080;font:9px 'DejaVu Sans Mono';")
         info.addWidget(source_note)
         row.addLayout(info, 1)
@@ -315,7 +315,7 @@ class SettingsPage(QWidget):
         outer.addLayout(controls)
 
         self.banner = QLabel(
-            "Camera ID, name, room va RTSP URL yetarli. Codec va decoder DeepStream tomonidan avtomatik tanlanadi."
+            "Camera ID, name, room va RTSP URL yetarli. Stream formati va decoder avtomatik tanlanadi."
         )
         self.banner.setWordWrap(True)
         self.banner.setStyleSheet(
