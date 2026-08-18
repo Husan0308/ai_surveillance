@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -14,7 +16,7 @@ from services.camera_v2.sentinel_ui_monitoring import MonitoringPage
 from services.camera_v2.sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from services.camera_v2.sentinel_ui_settings import SettingsPage
 from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_ROWS
-from services.ml_service.app.config import load_settings
+from services.ml_service.app.config import CameraConfig, load_settings
 
 
 EXPECTED_NAV = [
@@ -65,6 +67,17 @@ def main_preflight() -> int:
             f"enabled camera count must be 1..{CAMERA_COUNT}, got {len(settings.cameras)}"
         )
 
+    # Camera source contract is deliberately simple: ID/name/room/enabled/RTSP.
+    # Codec and env_uri are not camera settings; DeepStream negotiates the stream.
+    fields = set(CameraConfig.__dataclass_fields__)
+    if "codec" in fields:
+        _fail("CameraConfig still exposes codec")
+    raw = yaml.safe_load((ROOT / "config" / "cameras.yaml").read_text(encoding="utf-8")) or {}
+    for row in raw.get("cameras") or []:
+        forbidden = {"codec", "env_uri"}.intersection(row)
+        if forbidden:
+            _fail(f"{row.get('id','camera')} contains forbidden source fields: {sorted(forbidden)}")
+
     if len(ROOMS) != 3:
         _fail(f"supplied demo model expects 3 rooms, got {len(ROOMS)}")
     if not PEOPLE:
@@ -79,7 +92,7 @@ def main_preflight() -> int:
         "SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream "
         f"active_cameras={len(settings.cameras)} in_place_fullscreen=1"
     )
-    print("SENTINEL_PREFLIGHT settings=camera-crud active-limit=6")
+    print("SENTINEL_PREFLIGHT settings=camera-crud source-schema=rtsp-only codec=auto")
     print("SENTINEL_PREFLIGHT enrollment=10-images profile-required")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
