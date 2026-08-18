@@ -16,7 +16,7 @@ from .sentinel_video_pro import ProLiveVideoWall, ProPipelineController
 
 
 class MonitoringPage(QWidget):
-    """Monitoring page that never reparents/rebinds the native DeepStream surface."""
+    """Live Monitoring page backed only by current pipeline occupancy metrics."""
 
     def __init__(self):
         super().__init__()
@@ -29,10 +29,6 @@ class MonitoringPage(QWidget):
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(18, 10, 18, 12)
         self.layout.setSpacing(14)
-
-        inside = [p for p in PEOPLE if p.in_building]
-        self.known_count = len([p for p in inside if p.known])
-        self.unknown_count = len(inside) - self.known_count
 
         self.camera_panel = QWidget(self)
         camera_column = QVBoxLayout(self.camera_panel)
@@ -76,7 +72,7 @@ class MonitoringPage(QWidget):
 
         total_row = QHBoxLayout()
         total_row.setSpacing(8)
-        self.total_value = QLabel(str(len(inside)))
+        self.total_value = QLabel("0")
         self.total_value.setStyleSheet(
             f"color:{C['primary']};font-size:34px;font-weight:800;"
         )
@@ -87,7 +83,7 @@ class MonitoringPage(QWidget):
         )
         total_row.addWidget(people_text)
         total_row.addStretch()
-        self.pending_value = QLabel("")
+        self.pending_value = QLabel("live")
         self.pending_value.setStyleSheet(
             f"color:{C['muted']};font:10px 'DejaVu Sans Mono';"
         )
@@ -96,12 +92,8 @@ class MonitoringPage(QWidget):
 
         split = QHBoxLayout()
         split.setSpacing(8)
-        self.known_value, known_box = self._summary_metric(
-            "KNOWN", self.known_count, C["known"]
-        )
-        self.unknown_value, unknown_box = self._summary_metric(
-            "UNKNOWN", self.unknown_count, C["unknown"]
-        )
+        self.known_value, known_box = self._summary_metric("KNOWN", 0, C["known"])
+        self.unknown_value, unknown_box = self._summary_metric("UNKNOWN", 0, C["unknown"])
         split.addWidget(known_box, 1)
         split.addWidget(unknown_box, 1)
         summary_layout.addLayout(split)
@@ -113,11 +105,13 @@ class MonitoringPage(QWidget):
         recent_head = QHBoxLayout()
         recent_head.addWidget(label("Recent Views", "sectionTitle"))
         recent_head.addStretch()
-        self.active_count = label(f"{len(inside)} active", "mono")
+        self.active_count = label("0 active", "mono")
         recent_head.addWidget(self.active_count)
         recent_layout.addLayout(recent_head)
         recent_layout.addSpacing(8)
 
+        # Recent Views is still populated by the current People data source; the
+        # occupancy cards above are intentionally independent and fully live.
         for person in sorted(PEOPLE, key=lambda p: p.last_seen, reverse=True)[:6]:
             recent_layout.addWidget(self.recent_view(person))
         recent_layout.addStretch()
@@ -153,11 +147,22 @@ class MonitoringPage(QWidget):
         if event.timerId() == self.poll_timer:
             _status, metrics = self.controller.poll()
             self.wall.update_metrics(metrics)
-            total = max(0, int(metrics.get("total_people", 0) or 0))
+
+            known = max(0, int(metrics.get("known_people", 0) or 0))
+            unknown = max(0, int(metrics.get("unknown_people", 0) or 0))
+            total = max(0, int(metrics.get("total_people", known + unknown) or 0))
+            # The runtime is designed so total == known + unknown. Keep the UI
+            # consistent even during one metrics tick of transition.
+            classified = known + unknown
+            if total < classified:
+                total = classified
+
             self.total_value.setText(str(total))
+            self.known_value.setText(str(known))
+            self.unknown_value.setText(str(unknown))
             self.active_count.setText(f"{total} active")
-            pending = max(0, total - self.known_count - self.unknown_count)
-            self.pending_value.setText(f"{pending} pending" if pending else "classified")
+            pending = max(0, total - classified)
+            self.pending_value.setText(f"{pending} pending" if pending else "live")
             return
         super().timerEvent(event)
 
@@ -173,8 +178,8 @@ class MonitoringPage(QWidget):
         self._fullscreen_active = True
         self._focused_source = None if source_id is None else int(source_id)
 
-        # Critical: keep the exact same LiveVideoWall native XID. Only ask
-        # nvmultistreamtiler to show one source. No EGL window rebind occurs.
+        # Keep the same native DeepStream XID; only nvmultistreamtiler focus and
+        # geometry change. This avoids EGL rebind races.
         self.controller.focus(self._focused_source)
         self.identity_panel.hide()
         self.layout.setContentsMargins(0, 0, 0, 0)
