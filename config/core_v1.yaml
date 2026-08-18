@@ -6,10 +6,12 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
+  # Keep the camera wall sharp. Detection remains on its own 736x416 canvas
+  # below, but the decoded/display frame is 1280x720 and JPEG quality is high.
   display_fps: 20
-  jpeg_quality: 70
-  max_display_width: 736
-  max_display_height: 416
+  jpeg_quality: 88
+  max_display_width: 1280
+  max_display_height: 720
   publisher_start_stagger_ms: 10
 
   startup_grace_sec: 8.0
@@ -31,8 +33,10 @@ core_v1:
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
-  capture_output_width: 736
-  capture_output_height: 416
+  # GPU scales the original RTSP frame to 720p before the host copy. The
+  # detector worker downsizes only its selected latest frames to 736x416.
+  capture_output_width: 1280
+  capture_output_height: 720
   capture_metrics_interval_sec: 5.0
 
   max_pipeline_lag_ms: 900
