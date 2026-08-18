@@ -39,6 +39,7 @@ manager = CameraManager(camera_cfg, core_cfg)
 
 detector_cfg = dict(core_cfg.get("detector") or {})
 visual_cfg = dict(core_cfg.get("visual_tracker") or {})
+heatmap_cfg = dict(core_cfg.get("camera_heatmap") or {})
 
 detector = (
     StableYoloDetectorWorker(manager.stores, detector_cfg, ROOT)
@@ -57,16 +58,17 @@ publishers = {
         detections=(detector.results if detector else None),
         overlay_max_age_ms=detector_cfg.get("overlay_max_age_ms", 700),
         tracker_config=visual_cfg,
+        heatmap_config=heatmap_cfg,
         identity_provider=None,
     )
     for cid, store in manager.stores.items()
 }
 
-app = FastAPI(title="AI Surveillance Detection + Tracking Core", version="1.1-local-tracking")
+app = FastAPI(title="AI Surveillance Detection + Tracking Core", version="1.2-footpoint-heatmap")
 
 
 def _mode() -> str:
-    return "camera+yolo-detect+local-bytetrack" if detector is not None else "camera-only"
+    return "camera+yolo-detect+local-bytetrack+footpoint-heatmap" if detector is not None else "camera-only"
 
 
 @app.on_event("startup")
@@ -155,6 +157,7 @@ def tracks():
             "count": len(items),
             "tracks": items,
             "metrics": publisher.visual_tracker.metrics(),
+            "heatmap": publisher.foot_heatmap.metrics(),
         }
         total += len(items)
     return {
