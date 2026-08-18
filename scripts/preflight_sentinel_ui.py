@@ -34,6 +34,10 @@ def _fail(message: str) -> None:
     raise RuntimeError(f"Sentinel UI contract failed: {message}")
 
 
+def _source(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
 def main_preflight() -> int:
     if not callable(main):
         _fail("main entry point is missing")
@@ -67,16 +71,39 @@ def main_preflight() -> int:
             f"enabled camera count must be 1..{CAMERA_COUNT}, got {len(settings.cameras)}"
         )
 
-    # Camera source contract is deliberately simple: ID/name/room/enabled/RTSP.
-    # Codec and env_uri are not camera settings; DeepStream negotiates the stream.
+    # Hard source-schema guard. A stale Settings implementation like the old build
+    # from Aug 18 must fail before the desktop starts instead of silently showing
+    # Environment URI / Codec again.
     fields = set(CameraConfig.__dataclass_fields__)
     if "codec" in fields:
         _fail("CameraConfig still exposes codec")
     raw = yaml.safe_load((ROOT / "config" / "cameras.yaml").read_text(encoding="utf-8")) or {}
     for row in raw.get("cameras") or []:
-        forbidden = {"codec", "env_uri"}.intersection(row)
+        forbidden = {"codec", "env_uri", "environment_uri"}.intersection(row)
         if forbidden:
             _fail(f"{row.get('id','camera')} contains forbidden source fields: {sorted(forbidden)}")
+
+    settings_source = _source("services/camera_v2/sentinel_ui_settings.py")
+    for forbidden_text in ("Environment URI", 'form.addRow("Codec"', 'self.codec =', 'self.env_uri ='):
+        if forbidden_text in settings_source:
+            _fail(f"stale Settings source still contains {forbidden_text!r}")
+
+    monitoring_source = _source("services/camera_v2/sentinel_ui_monitoring.py")
+    if 'metrics.get("known_people"' not in monitoring_source:
+        _fail("Monitoring Known counter is not wired to live metrics")
+    if 'metrics.get("unknown_people"' not in monitoring_source:
+        _fail("Monitoring Unknown counter is not wired to live metrics")
+
+    video_source = _source("services/camera_v2/sentinel_video_pro.py")
+    if 'force-aspect-ratio' not in video_source or "FOCUS_WIDTH = 1920" not in video_source or "FOCUS_HEIGHT = 1080" not in video_source:
+        _fail("fullscreen aspect-safe source path is missing")
+
+    heat_source = _source("services/camera_v2/person_tracking_heatmap.py")
+    pose_source = _source("services/camera_v2/pose_ankle.py")
+    if "anchor=pose-ankle-only" not in heat_source or "bbox_anchor=disabled" not in heat_source:
+        _fail("heatmap is not ankle-only")
+    if "LEFT_ANKLE = 15" not in pose_source or "RIGHT_ANKLE = 16" not in pose_source:
+        _fail("COCO ankle keypoint mapping is missing")
 
     if len(ROOMS) != 3:
         _fail(f"supplied demo model expects 3 rooms, got {len(ROOMS)}")
@@ -87,12 +114,13 @@ def main_preflight() -> int:
 
     print("SENTINEL_PREFLIGHT ui_import=PASS")
     print("SENTINEL_PREFLIGHT nav=" + ",".join(nav_titles))
-    print("SENTINEL_PREFLIGHT forbidden_nav=none")
+    print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status legacy_fields=none")
     print(
         "SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream "
-        f"active_cameras={len(settings.cameras)} in_place_fullscreen=1"
+        f"active_cameras={len(settings.cameras)} fullscreen_aspect=16:9"
     )
-    print("SENTINEL_PREFLIGHT settings=camera-crud source-schema=rtsp-only codec=auto")
+    print("SENTINEL_PREFLIGHT occupancy=total+known+unknown live_metrics=PASS")
+    print("SENTINEL_PREFLIGHT heatmap=pose-ankle-only bbox_anchor=OFF")
     print("SENTINEL_PREFLIGHT enrollment=10-images profile-required")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
