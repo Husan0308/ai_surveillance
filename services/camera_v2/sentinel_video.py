@@ -326,12 +326,14 @@ class LiveVideoWall(QFrame):
 
         self.camera_labels: list[QLabel] = []
         self.status_labels: list[QLabel] = []
+        # Kept as an empty compatibility list for ProLiveVideoWall. Old demo
+        # per-tile occupancy pills are intentionally removed from the base UI.
         self.occupancy_labels: list[QLabel] = []
-        inside = [person for person in self.people if getattr(person, "in_building", False)]
-        for index, camera in enumerate(self.cameras[:CAMERA_COUNT]):
+
+        for index, _camera in enumerate(self.cameras[:CAMERA_COUNT]):
             camera_label = QLabel(f"CAM-{index + 1:02d}", self)
             camera_label.setStyleSheet(
-                "background:rgba(8,14,20,220);color:#e7edf3;"
+                "background:rgba(8,14,20,224);color:#e7edf3;"
                 "border:1px solid rgba(80,105,125,120);border-radius:4px;"
                 "padding:3px 7px;font-weight:700;"
             )
@@ -340,24 +342,11 @@ class LiveVideoWall(QFrame):
 
             status_label = QLabel("CONNECTING", self)
             status_label.setStyleSheet(
-                "background:rgba(8,14,20,205);color:#7e8c99;"
+                "background:rgba(8,14,20,210);color:#7e8c99;"
                 "border-radius:4px;padding:3px 6px;font:10px 'DejaVu Sans Mono';"
             )
             status_label.adjustSize()
             self.status_labels.append(status_label)
-
-            room_id = getattr(camera, "room_id", None)
-            occupancy = len(
-                [person for person in inside if getattr(person, "room_id", None) == room_id]
-            )
-            occupancy_label = QLabel(f"●  {occupancy}", self)
-            occupancy_label.setStyleSheet(
-                "background:rgba(8,14,20,220);color:#39d9c5;"
-                "border:1px solid rgba(57,217,197,75);border-radius:4px;"
-                "padding:3px 7px;font:700 10px 'DejaVu Sans Mono';"
-            )
-            occupancy_label.adjustSize()
-            self.occupancy_labels.append(occupancy_label)
 
         self._layout_overlays()
 
@@ -389,17 +378,14 @@ class LiveVideoWall(QFrame):
 
     def _layout_overlays(self) -> None:
         for sid in range(min(CAMERA_COUNT, len(self.camera_labels))):
-            left, top, width, height = self._tile_rect(sid)
+            left, top, width, _height = self._tile_rect(sid)
             cam = self.camera_labels[sid]
             stat = self.status_labels[sid]
-            occ = self.occupancy_labels[sid]
             cam.move(left + 10, top + 10)
             stat.adjustSize()
             stat.move(left + width - stat.width() - 10, top + 10)
-            occ.move(left + 10, top + height - occ.height() - 10)
             cam.raise_()
             stat.raise_()
-            occ.raise_()
 
     def source_at(self, pos: QPoint) -> int | None:
         if self.width() <= 0 or self.height() <= 0:
@@ -440,7 +426,7 @@ class LiveVideoWall(QFrame):
                 color = "#f06464"
             status.setText(text)
             status.setStyleSheet(
-                f"background:rgba(8,14,20,205);color:{color};"
+                f"background:rgba(8,14,20,210);color:{color};"
                 "border-radius:4px;padding:3px 6px;font:10px 'DejaVu Sans Mono';"
             )
             status.adjustSize()
