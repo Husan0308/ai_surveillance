@@ -102,20 +102,18 @@ def load_settings(path: str | Path | None = None) -> Settings:
             raise ValueError(f"Duplicate camera id: {camera_id}")
         seen.add(camera_id)
 
-        env_uri = str(row.get("env_uri", "")).strip()
-        uri = os.getenv(env_uri, str(row.get("uri", "")).strip()) if env_uri else str(row.get("uri", "")).strip()
+        # One canonical source field only. nvurisrcbin/rtspsrc discovers the
+        # actual H.264/H.265 stream from RTSP caps, so users never have to select
+        # a codec manually and there is no second env_uri source to get out of sync.
+        uri = str(row.get("uri", "")).strip()
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
-
-        codec = str(row.get("codec", "h264")).strip().lower()
-        if codec not in {"h264", "h265"}:
-            raise ValueError(f"{camera_id}: codec must be h264 or h265")
 
         cameras.append(
             CameraConfig(
                 camera_id=camera_id,
                 uri=uri,
-                codec=codec,
+                codec="auto",
                 username=_credential(
                     camera_id,
                     "USERNAME",
