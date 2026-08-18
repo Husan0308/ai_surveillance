@@ -43,6 +43,18 @@ class CameraPersonTrackingReIDHeatmap(
                 active.add(("local", str(key[0]), int(key[1])))
         return len(active)
 
+    def _tracker_probe(self, pad, info):
+        result = super()._tracker_probe(pad, info)
+        # The parent stable tracker temporarily writes the raw local-track count.
+        # Replace it with the live Global-ID-aware count before UI metrics read it.
+        try:
+            unique_now = self.active_people_count()
+            with self.det_lock:
+                self.tracked_now = unique_now
+        except Exception:
+            pass
+        return result
+
 
 def main() -> int:
     return CameraPersonTrackingReIDHeatmap().run()
