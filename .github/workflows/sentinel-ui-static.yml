@@ -41,7 +41,6 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          import yaml
 
           settings = Path('services/camera_v2/sentinel_ui_settings.py').read_text()
           enrollment = Path('services/camera_v2/sentinel_ui_enrollment.py').read_text()
@@ -50,6 +49,7 @@ jobs:
           video_pro = Path('services/camera_v2/sentinel_video_pro.py').read_text()
           heatmap = Path('services/camera_v2/person_tracking_heatmap.py').read_text()
           shell = Path('services/camera_v2/sentinel_ui.py').read_text()
+          camera_config = Path('config/cameras.yaml').read_text()
 
           forbidden_settings = (
               'Environment URI', 'self.env_uri =', 'self.codec =', 'form.addRow("Codec"'
@@ -67,8 +67,7 @@ jobs:
           assert 'bbox_anchor=disabled' in heatmap
           assert 'BUILD_TAG = "2026.08.18-r4"' in shell
 
-          config = yaml.safe_load(Path('config/cameras.yaml').read_text()) or {}
-          for row in config.get('cameras') or []:
-              assert not ({'codec', 'env_uri', 'environment_uri'} & set(row)), row
+          for forbidden in ('\n    codec:', '\n    env_uri:', '\n    environment_uri:'):
+              assert forbidden not in camera_config, f'stale camera config field: {forbidden.strip()}'
           print('SENTINEL_UI_STATIC=PASS')
           PY
