@@ -46,23 +46,26 @@ def _feed(core, camera, track_id, vectors, start, room):
 
 def main() -> int:
     settings = load_settings()
-    rooms = {camera.camera_id: camera.room for camera in settings.cameras}
-    expected = {
-        "CAM-01": "Devs", "CAM-04": "Devs",
-        "CAM-02": "Entrance", "CAM-05": "Entrance",
-        "CAM-03": "Main Rooms", "CAM-06": "Main Rooms",
-    }
-    if rooms != expected:
-        raise RuntimeError(f"camera room topology mismatch: {rooms!r}")
+    active_rooms = {camera.camera_id: camera.room for camera in settings.cameras}
+    if not 1 <= len(active_rooms) <= 6:
+        raise RuntimeError(f"enabled camera count must be 1..6, got {len(active_rooms)}")
 
     cfg_path = ROOT / "config" / "reid.yaml"
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     cfg = dict(raw.get("reid") or raw)
-    cfg["camera_rooms"] = rooms
 
-    # Production state-machine smoke: same-room paired cameras reuse one Global ID,
-    # different rooms cannot use it simultaneously, and a local-ID break reconnects.
-    core = ProductionGlobalIdentityCore(cfg)
+    # Keep the deterministic identity smoke independent from the user's editable
+    # live camera inventory. Settings may disable/delete one of the original six,
+    # but the identity state-machine contract still needs a stable synthetic test.
+    smoke_rooms = {
+        "CAM-01": "Devs", "CAM-04": "Devs",
+        "CAM-02": "Entrance", "CAM-05": "Entrance",
+        "CAM-03": "Main Rooms", "CAM-06": "Main Rooms",
+    }
+    smoke_cfg = dict(cfg)
+    smoke_cfg["camera_rooms"] = smoke_rooms
+
+    core = ProductionGlobalIdentityCore(smoke_cfg)
     a = _vec(1.0, 0.0, 0.0, 0.0)
     a2 = _vec(0.98, 0.10, 0.0, 0.0)
     a3 = _vec(0.96, -0.12, 0.0, 0.0)
@@ -73,15 +76,13 @@ def main() -> int:
     _feed(core, "CAM-04", 20, [a3, a2, a], 11.2, "Devs")
     second = core.binding_for_track("CAM-04", 20)
     if not second or second["global_id"] != first["global_id"]:
-        raise RuntimeError(
-            f"same-room pair did not reuse Global ID: {first} vs {second}"
-        )
+        raise RuntimeError(f"same-room pair did not reuse Global ID: {first} vs {second}")
     _feed(core, "CAM-03", 30, [a, a2, a3], 11.4, "Main Rooms")
     third = core.binding_for_track("CAM-03", 30)
     if third and third["global_id"] == first["global_id"]:
         raise RuntimeError("different-room simultaneous track illegally reused Global ID")
 
-    core2 = ProductionGlobalIdentityCore(cfg)
+    core2 = ProductionGlobalIdentityCore(smoke_cfg)
     _feed(core2, "CAM-02", 7, [a, a2, a3, a], 20.0, "Entrance")
     core2.observe_camera_snapshot("CAM-02", [], seen_at=21.6)
     _feed(core2, "CAM-02", 8, [a3, a2, a], 21.7, "Entrance")
@@ -89,9 +90,7 @@ def main() -> int:
     if not reconnect or reconnect["global_id"] != 1:
         raise RuntimeError(f"same-camera occlusion reconnect failed: {reconnect}")
 
-    # Low-confidence Qwen-only confirmation may reuse an identity, but must not
-    # write that uncertain viewpoint into the canonical ReID gallery.
-    core3 = ProductionGlobalIdentityCore(cfg)
+    core3 = ProductionGlobalIdentityCore(smoke_cfg)
     _feed(core3, "CAM-01", 1, [a, a2, a3, a], 30.0, "Devs")
     gray = _vec(0.65, 0.76, 0.0, 0.0)
     _feed(core3, "CAM-04", 2, [gray, gray, gray], 31.4, "Devs")
@@ -100,15 +99,12 @@ def main() -> int:
     if ("CAM-04", 2) in origins:
         raise RuntimeError("Qwen gray-zone track poisoned canonical gallery")
 
-    # ABI is fixed deliberately; if ctypes changes, native C must change with it.
     if ctypes.sizeof(_TrackRow) != 48 or ctypes.sizeof(_GlobalLabel) != 24:
         raise RuntimeError(
             "native ReID ABI mismatch: "
             f"track={ctypes.sizeof(_TrackRow)} label={ctypes.sizeof(_GlobalLabel)}"
         )
 
-    # Build/load native DeepStream bridge now, before the live process is started.
-    # This catches C ABI/header/link regressions deterministically on the target PC.
     native_path = ensure_bridge()
     if not native_path.exists():
         raise RuntimeError(f"native bridge build did not produce library: {native_path}")
@@ -132,8 +128,11 @@ def main() -> int:
     embedder = AutoReIdEmbedder(cfg, ROOT)
     qwen = QwenReIdVerifier(cfg)
 
-    print("CAMERA_V2_REID_PREFLIGHT topology=PASS pairs=01-04,02-05,03-06")
-    print("CAMERA_V2_REID_PREFLIGHT identity=PASS same-room+conflict+occlusion-reconnect")
+    print(
+        "CAMERA_V2_REID_PREFLIGHT inventory=PASS "
+        f"active={len(active_rooms)} rooms={active_rooms}"
+    )
+    print("CAMERA_V2_REID_PREFLIGHT identity=PASS synthetic-topology+conflict+occlusion-reconnect")
     print("CAMERA_V2_REID_PREFLIGHT gallery_guard=PASS independent-self-check+qwen-quarantine")
     print("CAMERA_V2_REID_PREFLIGHT crop=PASS quality+duplicate+top3-diversity")
     print(
