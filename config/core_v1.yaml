@@ -6,10 +6,9 @@ core_v1:
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # Keep the camera wall sharp. Detection remains on its own 736x416 canvas
-  # below, but the decoded/display frame is 1280x720 and JPEG quality is high.
+  # Sharp camera wall. Detection still uses its own 736x416 inference canvas.
   display_fps: 20
-  jpeg_quality: 88
+  jpeg_quality: 92
   max_display_width: 1280
   max_display_height: 720
   publisher_start_stagger_ms: 10
@@ -33,10 +32,10 @@ core_v1:
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
-  # GPU scales the original RTSP frame to 720p before the host copy. The
-  # detector worker downsizes only its selected latest frames to 736x416.
+  # DeepStream GPU scaling. 2 = GPU cubic in nvvideoconvert.
   capture_output_width: 1280
   capture_output_height: 720
+  capture_interpolation_method: 2
   capture_metrics_interval_sec: 5.0
 
   max_pipeline_lag_ms: 900
@@ -75,6 +74,19 @@ core_v1:
     roi_second_pass:
       enabled: false
       cameras: {}
+
+  # Camera-space heatmap only. It records real detector observations at the
+  # bbox bottom-center (estimated foot/floor-contact point), never prediction boxes.
+  camera_heatmap:
+    enabled: true
+    grid_width: 320
+    grid_height: 180
+    sigma: 7.0
+    half_life_sec: 12.0
+    saturation: 3.5
+    alpha: 0.30
+    render_interval_sec: 0.35
+    min_confidence_weight: 0.35
 
   visual_tracker:
     tracker_type: "bytetrack-hungarian-ownership"
