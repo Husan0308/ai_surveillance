@@ -92,7 +92,7 @@ def main_preflight() -> int:
     ):
         if forbidden_text in settings_source:
             _fail(f"stale Settings source still contains {forbidden_text!r}")
-    if "DeepStream RTSP streamni avtomatik aniqlaydi" not in settings_source:
+    if "Stream formati va decoder DeepStream tomonidan avtomatik aniqlanadi" not in settings_source:
         _fail("Settings no longer states automatic stream negotiation")
 
     monitoring_source = _source("services/camera_v2/sentinel_ui_monitoring.py")
@@ -102,15 +102,20 @@ def main_preflight() -> int:
         _fail("Monitoring Unknown counter is not wired to live metrics")
     if "self.identity_panel.setMaximumWidth(336)" not in monitoring_source:
         _fail("Monitoring right rail responsive width guard is missing")
+    if "Demo ism yoki fake avatar ko'rsatilmaydi" not in monitoring_source:
+        _fail("Monitoring recent-view panel can regress to fake identities")
+
+    base_video_source = _source("services/camera_v2/sentinel_video.py")
+    if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
+        _fail("base video wall still creates demo per-camera occupancy badges")
 
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
     required_video_guards = (
-        'runtime.focus_source = sid',
-        'force-aspect-ratio',
-        'FOCUS_WIDTH = 1920',
-        'FOCUS_HEIGHT = 1080',
-        'badge.hide()',
-        'mapFromGlobal(QCursor.pos())',
+        "runtime.focus_source = sid",
+        "force-aspect-ratio",
+        "FOCUS_WIDTH = 1920",
+        "FOCUS_HEIGHT = 1080",
+        "mapFromGlobal(QCursor.pos())",
     )
     for guard in required_video_guards:
         if guard not in video_source:
@@ -142,7 +147,7 @@ def main_preflight() -> int:
     print(
         "SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream "
         f"active_cameras={len(settings.cameras)} fullscreen_aspect=16:9 "
-        "hover_controls=stable demo_tile_counts=hidden"
+        "hover_controls=stable demo_tile_counts=removed recent_fake_data=removed"
     )
     print("SENTINEL_PREFLIGHT occupancy=total+known+unknown live_metrics=PASS")
     print("SENTINEL_PREFLIGHT heatmap=pose-ankle-only bbox_anchor=OFF per_camera=PASS")
