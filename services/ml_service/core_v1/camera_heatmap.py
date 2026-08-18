@@ -9,39 +9,49 @@ import numpy as np
 
 
 class FootpointHeatmap:
-    """Smooth recent camera-space heatmap from real detector footpoints only.
+    """Professional camera-space occupancy heatmap from observed track footpoints.
 
-    A detector bbox bottom-center is treated as the floor-contact point. Heat is
-    accumulated by elapsed observation time rather than detector frame count, so
-    different detector FPS values do not change the meaning of the map. A quick
-    pass remains cool/blue while repeated occupancy or dwell heats toward red.
-    Tracker prediction/hold boxes never add heat.
+    Heat is accumulated in *seconds of observed occupancy* at each track's
+    bbox bottom-center. Consecutive observed positions for the same track are
+    interpolated into a continuous path, so walking produces a smooth trail
+    instead of isolated circular blobs. Only fresh tracker states produced by a
+    real detector observation are accepted; presentation prediction never adds
+    heat.
     """
 
     def __init__(self, config: dict | None = None):
         cfg = dict(config or {})
         self.enabled = bool(cfg.get("enabled", True))
-        self.grid_width = max(64, int(cfg.get("grid_width", 320)))
-        self.grid_height = max(36, int(cfg.get("grid_height", 180)))
-        self.sigma = max(1.0, float(cfg.get("sigma", 6.5)))
-        self.half_life_sec = max(1.0, float(cfg.get("half_life_sec", 18.0)))
-        self.alpha = max(0.0, min(0.75, float(cfg.get("alpha", 0.34))))
-        self.saturation = max(0.25, float(cfg.get("saturation", 4.0)))
-        self.render_interval_sec = max(0.05, float(cfg.get("render_interval_sec", 0.12)))
+        self.grid_width = max(96, int(cfg.get("grid_width", 320)))
+        self.grid_height = max(54, int(cfg.get("grid_height", 180)))
+        self.sigma = max(1.0, float(cfg.get("sigma", 5.5)))
+        self.half_life_sec = max(30.0, float(cfg.get("half_life_sec", 3600.0)))
+        self.alpha = max(0.0, min(0.70, float(cfg.get("alpha", 0.42))))
+
+        # Fixed physical meaning: roughly this many observed seconds in the same
+        # area are required to reach full red. We intentionally do NOT normalize
+        # each frame by the current maximum, because that would make a single
+        # person instantly red.
+        self.red_seconds = max(1.0, float(cfg.get("red_seconds", 18.0)))
+        self.blue_seconds = max(0.05, float(cfg.get("blue_seconds", 0.45)))
+
+        self.render_interval_sec = max(0.05, float(cfg.get("render_interval_sec", 0.10)))
+        self.spatial_blur_sigma = max(0.0, float(cfg.get("spatial_blur_sigma", 2.0)))
+        self.temporal_smoothing_sec = max(0.05, float(cfg.get("temporal_smoothing_sec", 0.30)))
         self.min_confidence_weight = max(
-            0.05, min(1.0, float(cfg.get("min_confidence_weight", 0.40)))
+            0.05, min(1.0, float(cfg.get("min_confidence_weight", 0.35)))
         )
         self.initial_observation_sec = max(
-            0.02, float(cfg.get("initial_observation_sec", 0.25))
+            0.02, float(cfg.get("initial_observation_sec", 0.08))
         )
         self.max_observation_sec = max(
             self.initial_observation_sec,
-            float(cfg.get("max_observation_sec", 0.50)),
+            float(cfg.get("max_observation_sec", 0.45)),
         )
-        self.spatial_blur_sigma = max(0.0, float(cfg.get("spatial_blur_sigma", 1.0)))
-        self.temporal_smoothing_sec = max(
-            0.05, float(cfg.get("temporal_smoothing_sec", 0.28))
-        )
+        self.max_track_gap_sec = max(0.20, float(cfg.get("max_track_gap_sec", 1.0)))
+        self.max_jump_ratio = max(0.05, float(cfg.get("max_jump_ratio", 0.25)))
+        self.trail_step_sigma = max(0.20, float(cfg.get("trail_step_sigma", 0.55)))
+
         self.color_map_name = str(cfg.get("color_map", "jet")).strip().lower()
         self.color_map = {
             "jet": cv2.COLORMAP_JET,
@@ -55,13 +65,16 @@ class FootpointHeatmap:
         now = time.monotonic()
         self._last_decay = now
         self._last_render = now
-        self._last_observation: float | None = None
         self._cached_shape: tuple[int, int] | None = None
         self._cached_color: np.ndarray | None = None
         self._cached_mask: np.ndarray | None = None
         self._dirty = True
         self._samples = 0
+        self._segments = 0
         self._observed_seconds = 0.0
+
+        # track_id -> (grid_x, grid_y, observation_time)
+        self._track_points: dict[int, tuple[float, float, float]] = {}
 
         radius = max(2, int(math.ceil(self.sigma * 3.0)))
         yy, xx = np.mgrid[-radius : radius + 1, -radius : radius + 1]
@@ -74,106 +87,147 @@ class FootpointHeatmap:
 
     def _decay_locked(self, now: float) -> None:
         dt = max(0.0, now - self._last_decay)
-        if dt < 0.10:
+        if dt < 0.50:
             return
         factor = 0.5 ** (dt / self.half_life_sec)
         self._grid *= float(factor)
         self._last_decay = now
         self._dirty = True
 
-    def _splat_locked(self, gx: int, gy: int, weight: float) -> None:
+    def _splat_locked(self, gx: float, gy: float, weight: float) -> None:
+        cx = int(round(gx))
+        cy = int(round(gy))
         r = self._radius
-        x1 = max(0, gx - r)
-        y1 = max(0, gy - r)
-        x2 = min(self.grid_width, gx + r + 1)
-        y2 = min(self.grid_height, gy + r + 1)
+        x1 = max(0, cx - r)
+        y1 = max(0, cy - r)
+        x2 = min(self.grid_width, cx + r + 1)
+        y2 = min(self.grid_height, cy + r + 1)
         if x2 <= x1 or y2 <= y1:
             return
 
-        kx1 = x1 - (gx - r)
-        ky1 = y1 - (gy - r)
+        kx1 = x1 - (cx - r)
+        ky1 = y1 - (cy - r)
         kx2 = kx1 + (x2 - x1)
         ky2 = ky1 + (y2 - y1)
         self._grid[y1:y2, x1:x2] += (
             self._kernel[ky1:ky2, kx1:kx2] * float(weight)
         )
 
-    def _observation_dt_locked(self, now: float) -> float:
-        if self._last_observation is None or now - self._last_observation > 1.0:
-            return self.initial_observation_sec
-        return max(
-            0.02,
-            min(self.max_observation_sec, now - self._last_observation),
-        )
+    def _map_footpoint(self, box, source_width: int, source_height: int):
+        try:
+            x1 = float(box.x1)
+            y1 = float(box.y1)
+            x2 = float(box.x2)
+            y2 = float(box.y2)
+            confidence = float(getattr(box, "confidence", 1.0))
+            track_id = int(getattr(box, "track_id", 0) or 0)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+        if track_id <= 0:
+            return None
+        if not all(math.isfinite(v) for v in (x1, y1, x2, y2, confidence)):
+            return None
+        if x2 <= x1 or y2 <= y1:
+            return None
 
-    def observe_boxes(
+        foot_x = (x1 + x2) * 0.5
+        foot_y = y2
+        if (
+            foot_x < 0.0
+            or foot_x > source_width
+            or foot_y < 0.0
+            or foot_y > source_height
+        ):
+            return None
+
+        gx = (
+            foot_x / max(1.0, float(source_width))
+        ) * (self.grid_width - 1)
+        gy = (
+            foot_y / max(1.0, float(source_height))
+        ) * (self.grid_height - 1)
+        confidence_weight = max(
+            self.min_confidence_weight,
+            min(1.0, confidence),
+        )
+        return track_id, gx, gy, confidence_weight
+
+    def observe_tracks(
         self,
         boxes,
         source_width: int,
         source_height: int,
-        now: float | None = None,
+        observation_time: float | None = None,
     ) -> None:
         if not self.enabled or source_width <= 1 or source_height <= 1:
             return
-        now = time.monotonic() if now is None else float(now)
+
+        observed_at = (
+            time.monotonic() if observation_time is None else float(observation_time)
+        )
+        diagonal = math.hypot(self.grid_width, self.grid_height)
+
         with self._lock:
-            self._decay_locked(now)
-            observation_dt = self._observation_dt_locked(now)
-            accepted = 0
+            self._decay_locked(observed_at)
+            seen_ids: set[int] = set()
 
             for box in boxes:
-                try:
-                    x1 = float(box.x1)
-                    y1 = float(box.y1)
-                    x2 = float(box.x2)
-                    y2 = float(box.y2)
-                    confidence = float(getattr(box, "confidence", 1.0))
-                except (AttributeError, TypeError, ValueError, OverflowError):
+                mapped = self._map_footpoint(box, source_width, source_height)
+                if mapped is None:
                     continue
-                if not all(
-                    math.isfinite(v) for v in (x1, y1, x2, y2, confidence)
-                ):
-                    continue
-                if x2 <= x1 or y2 <= y1:
-                    continue
+                track_id, gx, gy, confidence_weight = mapped
+                seen_ids.add(track_id)
 
-                # Estimated floor-contact point of the person.
-                foot_x = (x1 + x2) * 0.5
-                foot_y = y2
-                if (
-                    foot_x < 0.0
-                    or foot_x > source_width
-                    or foot_y < 0.0
-                    or foot_y > source_height
-                ):
-                    continue
+                previous = self._track_points.get(track_id)
+                if previous is None:
+                    dt = self.initial_observation_sec
+                    self._splat_locked(gx, gy, dt * confidence_weight)
+                    self._observed_seconds += dt
+                else:
+                    px, py, previous_time = previous
+                    raw_dt = max(0.0, observed_at - previous_time)
+                    dt = max(
+                        0.02,
+                        min(self.max_observation_sec, raw_dt),
+                    )
+                    distance = math.hypot(gx - px, gy - py)
+                    jump_ratio = distance / max(1.0, diagonal)
 
-                gx = int(
-                    round(
-                        (foot_x / max(1.0, float(source_width)))
-                        * (self.grid_width - 1)
-                    )
-                )
-                gy = int(
-                    round(
-                        (foot_y / max(1.0, float(source_height)))
-                        * (self.grid_height - 1)
-                    )
-                )
-                confidence_weight = max(
-                    self.min_confidence_weight,
-                    min(1.0, confidence),
-                )
-                # Units are approximately observed seconds. This makes a quick
-                # walk-through cool, while dwell/repeated visits become hot.
-                weight = observation_dt * confidence_weight
-                self._splat_locked(gx, gy, weight)
-                accepted += 1
+                    if (
+                        raw_dt > self.max_track_gap_sec
+                        or jump_ratio > self.max_jump_ratio
+                    ):
+                        # Do not paint a long line across the room after a lost
+                        # track / ID switch. Restart the trail at the new point.
+                        self._splat_locked(
+                            gx,
+                            gy,
+                            self.initial_observation_sec * confidence_weight,
+                        )
+                        self._observed_seconds += self.initial_observation_sec
+                    else:
+                        step_px = max(1.0, self.sigma * self.trail_step_sigma)
+                        steps = max(1, int(math.ceil(distance / step_px)))
+                        weight_per_step = (dt * confidence_weight) / steps
+                        for index in range(1, steps + 1):
+                            t = index / steps
+                            ix = px + (gx - px) * t
+                            iy = py + (gy - py) * t
+                            self._splat_locked(ix, iy, weight_per_step)
+                        self._segments += 1
+                        self._observed_seconds += dt
+
+                self._track_points[track_id] = (gx, gy, observed_at)
                 self._samples += 1
-                self._observed_seconds += observation_dt
 
-            if accepted:
-                self._last_observation = now
+            # Keep the track-history dictionary bounded and prevent an old ID
+            # from connecting to a future re-used ID after a long absence.
+            stale_before = observed_at - max(2.0, self.max_track_gap_sec * 2.0)
+            for track_id, (_x, _y, ts) in list(self._track_points.items()):
+                if ts < stale_before:
+                    self._track_points.pop(track_id, None)
+
+            if seen_ids:
                 self._dirty = True
 
     def overlay(self, image: np.ndarray, now: float | None = None) -> np.ndarray:
@@ -206,41 +260,43 @@ class FootpointHeatmap:
                     self._grid - self._display_grid
                 ) * float(blend)
 
-                intensity = np.clip(
-                    self._display_grid / self.saturation,
-                    0.0,
-                    1.0,
-                )
+                field = self._display_grid
                 if self.spatial_blur_sigma > 0.0:
-                    intensity = cv2.GaussianBlur(
-                        intensity,
+                    field = cv2.GaussianBlur(
+                        field,
                         (0, 0),
                         sigmaX=self.spatial_blur_sigma,
                         sigmaY=self.spatial_blur_sigma,
                         borderType=cv2.BORDER_REPLICATE,
                     )
-                    intensity = np.clip(intensity, 0.0, 1.0)
 
+                # Fixed scale: quick/rare movement stays blue, repeated use and
+                # dwell move through cyan/green/yellow and eventually red.
+                color_intensity = np.clip(field / self.red_seconds, 0.0, 1.0)
                 gray = np.asarray(
-                    np.rint(intensity * 255.0),
+                    np.rint(color_intensity * 255.0),
                     dtype=np.uint8,
                 )
                 color_small = cv2.applyColorMap(gray, self.color_map)
+
+                # Presence mask is separate from color intensity. This keeps the
+                # untouched camera image clean instead of tinting the whole frame
+                # blue, while making a single pass visible as a soft blue trail.
+                presence = np.clip(field / self.blue_seconds, 0.0, 1.0)
+                alpha_small = (
+                    np.power(presence, 0.70) * self.alpha
+                ).astype(np.float32)
+
                 color = cv2.resize(
                     color_small,
                     (w, h),
                     interpolation=cv2.INTER_LINEAR,
                 )
                 mask = cv2.resize(
-                    intensity,
+                    alpha_small,
                     (w, h),
                     interpolation=cv2.INTER_LINEAR,
                 )
-                # sqrt makes low/cool occupancy gently visible without making
-                # the empty image blue. High dwell still receives full alpha.
-                mask = (
-                    np.sqrt(np.clip(mask, 0.0, 1.0)) * self.alpha
-                ).astype(np.float32)
 
                 self._cached_color = color
                 self._cached_mask = mask
@@ -251,9 +307,7 @@ class FootpointHeatmap:
             color = self._cached_color
             mask = self._cached_mask
 
-        if color is None or mask is None:
-            return image
-        if float(np.max(mask)) <= 0.002:
+        if color is None or mask is None or float(np.max(mask)) <= 0.002:
             return image
 
         mask3 = mask[..., None]
@@ -267,15 +321,18 @@ class FootpointHeatmap:
         with self._lock:
             return {
                 "enabled": self.enabled,
-                "source": "detector_bbox_bottom_center",
+                "source": "observed_track_bbox_bottom_center",
                 "prediction_boxes_recorded": False,
-                "accumulation": "time_weighted_dwell",
+                "accumulation": "track_interpolated_dwell_seconds",
                 "samples": int(self._samples),
+                "segments": int(self._segments),
                 "observed_seconds": float(self._observed_seconds),
                 "grid": [self.grid_width, self.grid_height],
                 "half_life_sec": self.half_life_sec,
-                "saturation_seconds": self.saturation,
+                "red_seconds": self.red_seconds,
+                "blue_seconds": self.blue_seconds,
                 "alpha": self.alpha,
                 "color_map": self.color_map_name,
                 "peak_seconds": float(np.max(self._grid)),
+                "active_track_trails": len(self._track_points),
             }
