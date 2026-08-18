@@ -19,6 +19,9 @@ from .sentinel_video import (
     _put_status,
 )
 
+FOCUS_WIDTH = 1920
+FOCUS_HEIGHT = 1080
+
 
 def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
     runtime = None
@@ -46,8 +49,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 f"Sentinel Monitoring supports 1..{CAMERA_COUNT} active cameras, found {camera_count}"
             )
 
-        # Keep the wall contract stable even with fewer than six active sources.
-        # Empty tiles simply remain blank.
         runtime.wall_width = WALL_WIDTH
         runtime.wall_height = WALL_HEIGHT
         runtime.tiler_rows = GRID_ROWS
@@ -58,6 +59,9 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
         runtime.tiler.set_property("height", WALL_HEIGHT)
         if runtime.tiler.find_property("show-source") is not None:
             runtime.tiler.set_property("show-source", -1)
+        # Preserve the selected source aspect inside the native Qt surface.
+        if runtime.sink.find_property("force-aspect-ratio") is not None:
+            runtime.sink.set_property("force-aspect-ratio", True)
 
         current_xid = int(window_id)
         current_focus = -1
@@ -75,6 +79,12 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 pass
 
         def set_focus(source_id: int | None) -> None:
+            """Switch source and output geometry in one GLib iteration.
+
+            The 2x3 wall is 1280x1080 so each tile is 640x360 (16:9). A focused
+            source must not inherit that 1280x1080 aspect; it gets its own 16:9
+            1920x1080 tiler output before show-source is applied.
+            """
             nonlocal current_focus
             if runtime.tiler.find_property("show-source") is None:
                 return
@@ -84,8 +94,20 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 else -1
             )
             current_focus = sid
+            if sid >= 0:
+                width, height = FOCUS_WIDTH, FOCUS_HEIGHT
+            else:
+                width, height = WALL_WIDTH, WALL_HEIGHT
+            runtime.tiler.set_property("width", int(width))
+            runtime.tiler.set_property("height", int(height))
+            runtime.wall_width = int(width)
+            runtime.wall_height = int(height)
             runtime.tiler.set_property("show-source", sid)
-            _put_status(status_q, "FOCUS", str(sid))
+            _put_status(
+                status_q,
+                "FOCUS",
+                f"source={sid} output={width}x{height}",
+            )
 
         bind_overlay(runtime.sink, current_xid)
 
@@ -99,7 +121,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 return Gst.BusSyncReply.PASS
             try:
                 bind_overlay(message.src)
-                set_focus(current_focus)
                 _put_status(status_q, "VIDEO_BOUND", f"xid={current_xid}")
                 return Gst.BusSyncReply.DROP
             except Exception as exc:
@@ -216,6 +237,14 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 except Exception:
                     identity_metrics = {}
 
+            counts = {"total": int(getattr(runtime, "tracked_now", 0)), "known": 0, "unknown": 0}
+            counter = getattr(runtime, "live_people_counts", None)
+            if callable(counter):
+                try:
+                    counts.update({k: int(v) for k, v in counter().items()})
+                except Exception:
+                    pass
+
             heatmap_sources = {}
             source_states = getattr(runtime, "heatmap_source_states", None)
             if callable(source_states):
@@ -231,7 +260,9 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 "METRICS",
                 {
                     "cameras": rows,
-                    "total_people": int(getattr(runtime, "tracked_now", 0)),
+                    "total_people": int(counts.get("total", 0)),
+                    "known_people": int(counts.get("known", 0)),
+                    "unknown_people": int(counts.get("unknown", 0)),
                     "global_identity": identity_metrics,
                     "heatmap_sources": heatmap_sources,
                 },
@@ -243,7 +274,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
         _put_status(
             status_q,
             "STARTING",
-            f"professional 2x3 wall; active_cameras={camera_count}; in-place focus",
+            f"professional 2x3 wall; active_cameras={camera_count}; aspect-safe focus",
         )
         rc = runtime.run()
         _put_status(status_q, "STOPPED", f"exit={rc}")
@@ -263,7 +294,6 @@ class ProPipelineController(PipelineController):
         if xid <= 0:
             return
         if self.process is not None and self.process.is_alive():
-            # Do not rebind while the same live wall is already active.
             return
         self.process = self.ctx.Process(
             target=_pipeline_process_pro,
@@ -295,7 +325,6 @@ class ProLiveVideoWall(LiveVideoWall):
         self.fullscreen_buttons: list[QToolButton] = []
         self.tile_borders: list[tuple[QFrame, QFrame, QFrame, QFrame]] = []
 
-        # Use real config IDs rather than assuming CAM-01..CAM-06 ordering.
         for sid, camera in enumerate(self.cameras[:CAMERA_COUNT]):
             camera_id = str(
                 getattr(camera, "camera_id", getattr(camera, "id", f"CAM-{sid + 1:02d}"))
@@ -326,9 +355,9 @@ class ProLiveVideoWall(LiveVideoWall):
 
             heat = QToolButton(actions)
             heat.setText("Heatmap")
-            heat.setToolTip("Shu camera heatmapini yoqish/o'chirish")
             heat.setCheckable(True)
             heat.setCursor(Qt.PointingHandCursor)
+            heat.setToolTip("Shu camera heatmapini yoqish/o'chirish")
             heat.toggled.connect(
                 lambda checked, sid=source_id: self.heatmapToggled.emit(sid, checked)
             )
@@ -336,8 +365,8 @@ class ProLiveVideoWall(LiveVideoWall):
 
             full = QToolButton(actions)
             full.setText("⛶")
-            full.setToolTip("Shu camerani fullscreen ochish")
             full.setCursor(Qt.PointingHandCursor)
+            full.setToolTip("Shu camerani fullscreen ochish")
             full.clicked.connect(
                 lambda _checked=False, sid=source_id: self.cameraDoubleClicked.emit(sid)
             )
@@ -437,14 +466,11 @@ class ProLiveVideoWall(LiveVideoWall):
             right_b.setGeometry(left + width - t, top, t, height)
             bottom_b.setGeometry(left, top + height - t, width, t)
             left_b.setGeometry(left, top, t, height)
-            if sid < len(self.action_frames):
-                actions = self.action_frames[sid]
-                actions.adjustSize()
-                actions.move(left + width - actions.width() - 10, top + 38)
+            actions = self.action_frames[sid]
+            actions.adjustSize()
+            actions.move(left + width - actions.width() - 10, top + 38)
 
     def _set_hover_source(self, source_id: int | None) -> None:
-        if self._fullscreen_active:
-            return
         if source_id == self._hover_source:
             return
         self._hover_source = source_id
@@ -452,7 +478,8 @@ class ProLiveVideoWall(LiveVideoWall):
         self._layout_overlays()
 
     def mouseMoveEvent(self, event) -> None:
-        self._set_hover_source(self.source_at(event.position().toPoint()))
+        if not self._fullscreen_active:
+            self._set_hover_source(self.source_at(event.position().toPoint()))
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:
@@ -463,8 +490,7 @@ class ProLiveVideoWall(LiveVideoWall):
         super().update_metrics(metrics)
         states = dict((metrics or {}).get("heatmap_sources") or {})
         for sid, button in enumerate(self.heatmap_buttons):
-            state = states.get(sid, states.get(str(sid), button.isChecked()))
-            state = bool(state)
+            state = bool(states.get(sid, states.get(str(sid), button.isChecked())))
             if button.isChecked() != state:
                 button.blockSignals(True)
                 button.setChecked(state)
