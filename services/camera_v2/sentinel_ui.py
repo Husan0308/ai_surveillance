@@ -23,23 +23,23 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.18-r3"
+BUILD_TAG = "2026.08.18-r4"
 
 
 class MainWindow(QMainWindow):
     NAV = [
-        ("▣", "Monitoring", "Jonli DeepStream camera wall · tracking · ankle heatmap", MonitoringPage),
-        ("♙", "People", f"{len(PEOPLE)} ta global ID", PeoplePage),
+        ("▣", "Monitoring", "DeepStream live wall · tracking · ankle heatmap", MonitoringPage),
+        ("♙", "People", f"{len(PEOPLE)} ta identity", PeoplePage),
         ("⌁", "Events", f"{len(EVENTS)} ta hodisa", EventsPage),
-        ("▥", "Rooms", "Kameralar orasidagi global identity holati", RoomsPage),
-        ("♙+", "Enrollment", "10 ta yuz rasmi va profile photo bilan ro'yxatga olish", EnrollmentPage),
-        ("⚙", "Settings", "Camera sources · RTSP · enable/disable · add/edit/delete", SettingsPage),
+        ("▥", "Rooms", "Xonalar va camera topology", RoomsPage),
+        ("♙+", "Enrollment", "10 ta yuz rasmi orqali ro'yxatga olish", EnrollmentPage),
+        ("⚙", "Settings", "Camera source management", SettingsPage),
     ]
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SENTINEL VMS")
-        self.resize(1440, 900)
+        self.setWindowTitle("Sentinel VMS")
+        self.resize(1500, 920)
         self.setMinimumSize(1180, 720)
         self._monitoring_fullscreen = False
         self._restore_maximized = False
@@ -53,21 +53,21 @@ class MainWindow(QMainWindow):
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(224)
+        self.sidebar.setFixedWidth(198)
         side = QVBoxLayout(self.sidebar)
         side.setContentsMargins(0, 0, 0, 0)
         side.setSpacing(0)
 
         brand = QFrame()
-        brand.setFixedHeight(70)
+        brand.setFixedHeight(64)
         brand.setStyleSheet(f"border-bottom:1px solid {C['border']};")
         bl = QHBoxLayout(brand)
-        bl.setContentsMargins(16, 0, 12, 0)
+        bl.setContentsMargins(15, 0, 12, 0)
         shield = label("◇", color=C["primary"])
-        shield.setStyleSheet(f"color:{C['primary']};font-size:24px;")
+        shield.setStyleSheet(f"color:{C['primary']};font-size:22px;")
         bl.addWidget(shield)
         bt = QVBoxLayout()
-        bt.setSpacing(1)
+        bt.setSpacing(0)
         bt.addWidget(label("SENTINEL VMS", "brand"))
         bt.addWidget(label("edge ai · deepstream", "mono"))
         bl.addLayout(bt)
@@ -79,10 +79,10 @@ class MainWindow(QMainWindow):
         self.nav_buttons = []
         navwrap = QWidget()
         nl = QVBoxLayout(navwrap)
-        nl.setContentsMargins(8, 8, 8, 8)
-        nl.setSpacing(2)
+        nl.setContentsMargins(8, 9, 8, 8)
+        nl.setSpacing(3)
         for i, (icon, title, _, _) in enumerate(self.NAV):
-            button = make_button(f"{icon:>2}   {title}")
+            button = make_button(f"{icon}   {title}")
             button.setObjectName("nav")
             button.setCheckable(True)
             button.setFixedHeight(38)
@@ -92,9 +92,10 @@ class MainWindow(QMainWindow):
             nl.addWidget(button)
         nl.addStretch()
         side.addWidget(navwrap, 1)
-        build = label(f"build {BUILD_TAG} · ankle pose", "mono")
+
+        build = label(f"build {BUILD_TAG}\nankle pose · camera v2", "mono")
         build.setStyleSheet(
-            f"border-top:1px solid {C['border']};padding:14px;color:{C['muted']};"
+            f"border-top:1px solid {C['border']};padding:12px 14px;color:{C['muted']};"
         )
         side.addWidget(build)
         main.addWidget(self.sidebar)
@@ -106,11 +107,11 @@ class MainWindow(QMainWindow):
 
         self.header = QFrame()
         self.header.setObjectName("header")
-        self.header.setFixedHeight(70)
+        self.header.setFixedHeight(64)
         hl = QHBoxLayout(self.header)
-        hl.setContentsMargins(24, 0, 24, 0)
+        hl.setContentsMargins(20, 0, 18, 0)
         titles = QVBoxLayout()
-        titles.setSpacing(2)
+        titles.setSpacing(1)
         self.title = label("Monitoring", "title")
         self.subtitle = label(self.NAV[0][2], "subtitle")
         titles.addWidget(self.title)
@@ -119,8 +120,9 @@ class MainWindow(QMainWindow):
         hl.addStretch()
 
         self.camera_fullscreen = QToolButton()
-        self.camera_fullscreen.setText("⛶  Fullscreen")
-        self.camera_fullscreen.setToolTip("Camera wallni fullscreen ko'rish")
+        self.camera_fullscreen.setText("⛶  Wall fullscreen")
+        self.camera_fullscreen.setToolTip("6-camera wallni fullscreen ko'rish")
+        self.camera_fullscreen.setCursor(Qt.PointingHandCursor)
         self.camera_fullscreen.clicked.connect(self.open_camera_fullscreen)
         hl.addWidget(self.camera_fullscreen)
         content_l.addWidget(self.header)
@@ -139,9 +141,10 @@ class MainWindow(QMainWindow):
         self.nav_buttons[0].setChecked(True)
 
     def switch_page(self, index: int) -> None:
+        if not (0 <= index < len(self.NAV)):
+            return
         if self._monitoring_fullscreen:
-            monitoring = self.pages[0]
-            monitoring.exit_fullscreen()
+            self.pages[0].exit_fullscreen()
         self.stack.setCurrentIndex(index)
         _, title, subtitle, _ = self.NAV[index]
         self.title.setText(title)
@@ -168,8 +171,7 @@ class MainWindow(QMainWindow):
                 self.showNormal()
 
     def open_camera_fullscreen(self) -> None:
-        monitoring = self.pages[0]
-        monitoring.open_fullscreen_grid()
+        self.pages[0].open_fullscreen_grid()
 
     def apply_camera_settings(self) -> None:
         settings_page = next(
@@ -185,10 +187,10 @@ class MainWindow(QMainWindow):
         new_monitoring = MonitoringPage()
         self.stack.insertWidget(0, new_monitoring)
         self.pages[0] = new_monitoring
-        if current is not old_monitoring:
-            self.stack.setCurrentWidget(current)
-        else:
+        if current is old_monitoring:
             self.stack.setCurrentWidget(new_monitoring)
+        else:
+            self.stack.setCurrentWidget(current)
 
         if settings_page is not None:
             settings_page.mark_applied()
