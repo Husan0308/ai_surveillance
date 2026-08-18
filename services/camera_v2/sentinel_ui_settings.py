@@ -60,9 +60,7 @@ class CameraConfigStore:
                 raise ValueError(f"{camera_id}: RTSP URL rtsp:// bilan boshlanishi kerak")
 
             enabled = bool(row.get("enabled", True))
-            if enabled:
-                active += 1
-
+            active += int(enabled)
             cleaned.append(
                 {
                     "id": camera_id,
@@ -80,6 +78,7 @@ class CameraConfigStore:
                 f"Monitoring 2x3 wall maksimum {MAX_ACTIVE_CAMERAS} ta active camera qo'llaydi"
             )
 
+        # Canonical camera schema: no codec and no environment-URI fields.
         payload["cameras"] = cleaned
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -126,9 +125,9 @@ class CameraEditorDialog(QDialog):
         root.addLayout(form)
 
         note = QLabel(
-            "Codec tanlanmaydi: DeepStream RTSP streamdan H.264/H.265 ni avtomatik aniqlaydi. "
-            "RTSP username/password .env dagi SURVEILLANCE_RTSP_USERNAME / "
-            "SURVEILLANCE_RTSP_PASSWORD orqali olinadi."
+            "Faqat RTSP URL yetarli. Stream formati va decoder DeepStream tomonidan "
+            "avtomatik aniqlanadi. Login/parol .env dagi "
+            "SURVEILLANCE_RTSP_USERNAME / SURVEILLANCE_RTSP_PASSWORD dan olinadi."
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{C['muted']};font-size:10px;")
@@ -158,10 +157,10 @@ class CameraSettingsRow(Panel):
         super().__init__(parent)
         self.index = int(index)
         self.camera = dict(camera)
-        self.setMinimumHeight(94)
+        self.setMinimumHeight(90)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(14, 12, 12, 12)
+        row.setContentsMargins(14, 11, 12, 11)
         row.setSpacing(12)
 
         dot = QLabel("●")
@@ -187,11 +186,9 @@ class CameraSettingsRow(Panel):
         uri.setStyleSheet(f"color:{C['muted']};font:10px 'DejaVu Sans Mono';")
         info.addWidget(uri)
 
-        meta = QLabel(
-            f"{str(camera.get('room', '') or 'No room')}  ·  Codec AUTO (DeepStream)"
-        )
-        meta.setStyleSheet(f"color:{C['muted']};font-size:10px;")
-        info.addWidget(meta)
+        room = QLabel(str(camera.get("room", "") or "No room"))
+        room.setStyleSheet(f"color:{C['muted']};font-size:10px;")
+        info.addWidget(room)
         row.addLayout(info, 1)
 
         enabled = QCheckBox("Enabled")
@@ -250,7 +247,7 @@ class SettingsPage(QWidget):
         outer.addLayout(header)
 
         self.banner = QLabel(
-            "Camera ID, name, room va RTSP URL yetarli. Codec DeepStream tomonidan avtomatik aniqlanadi."
+            "Camera ID, name, room va RTSP URL yetarli. Qolgan stream parametrlarini pipeline avtomatik aniqlaydi."
         )
         self.banner.setStyleSheet(
             f"color:{C['muted']};background:#0b1219;border:1px solid {C['border']};"
@@ -380,9 +377,8 @@ class SettingsPage(QWidget):
             cameras.insert(index, removed)
 
     def _apply(self) -> None:
-        if not self.dirty:
-            return
-        self.applyRequested.emit()
+        if self.dirty:
+            self.applyRequested.emit()
 
     def mark_applied(self) -> None:
         self.dirty = False
