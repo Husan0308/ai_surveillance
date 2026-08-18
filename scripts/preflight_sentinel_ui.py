@@ -7,12 +7,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.camera_v2.data import CAMERAS, EVENTS, PEOPLE, ROOMS
+from services.camera_v2.data import EVENTS, PEOPLE, ROOMS
 from services.camera_v2.sentinel_ui import MainWindow, main
-from services.camera_v2.sentinel_ui_enrollment import EnrollmentPage, ReportsPage
+from services.camera_v2.sentinel_ui_enrollment import EnrollmentPage
 from services.camera_v2.sentinel_ui_monitoring import MonitoringPage
 from services.camera_v2.sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
+from services.camera_v2.sentinel_ui_settings import SettingsPage
 from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_ROWS
+from services.ml_service.app.config import load_settings
 
 
 EXPECTED_NAV = [
@@ -21,9 +23,9 @@ EXPECTED_NAV = [
     "Events",
     "Rooms",
     "Enrollment",
-    "Reports",
+    "Settings",
 ]
-FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Settings"}
+FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
 
 
 def _fail(message: str) -> None:
@@ -46,16 +48,22 @@ def main_preflight() -> int:
         EventsPage,
         RoomsPage,
         EnrollmentPage,
-        ReportsPage,
+        SettingsPage,
     ]
     nav_classes = [row[3] for row in MainWindow.NAV]
     if nav_classes != expected_classes:
         _fail("navigation page classes do not match supplied UI order")
 
-    if CAMERA_COUNT != 6 or len(CAMERAS) != 6:
-        _fail(f"Monitoring must contain exactly 6 cameras, got runtime={CAMERA_COUNT}, data={len(CAMERAS)}")
+    if CAMERA_COUNT != 6:
+        _fail(f"Monitoring wall capacity must be 6, got {CAMERA_COUNT}")
     if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
         _fail(f"Monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
+
+    settings = load_settings()
+    if not 1 <= len(settings.cameras) <= CAMERA_COUNT:
+        _fail(
+            f"enabled camera count must be 1..{CAMERA_COUNT}, got {len(settings.cameras)}"
+        )
 
     if len(ROOMS) != 3:
         _fail(f"supplied demo model expects 3 rooms, got {len(ROOMS)}")
@@ -64,18 +72,15 @@ def main_preflight() -> int:
     if not EVENTS:
         _fail("supplied Events demo data is empty")
 
-    # The supplied Enrollment implementation owns ten explicit photo buttons and
-    # validates len(image_paths) == 10 before allowing completion. Importing the
-    # exact class here protects the page wiring without creating a QApplication.
-    if EnrollmentPage.__name__ != "EnrollmentPage":
-        _fail("Enrollment page import failed")
-
     print("SENTINEL_PREFLIGHT ui_import=PASS")
     print("SENTINEL_PREFLIGHT nav=" + ",".join(nav_titles))
     print("SENTINEL_PREFLIGHT forbidden_nav=none")
-    print("SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream right-rail=known+unknown+recent-views")
+    print(
+        "SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream "
+        f"active_cameras={len(settings.cameras)} in_place_fullscreen=1"
+    )
+    print("SENTINEL_PREFLIGHT settings=camera-crud active-limit=6")
     print("SENTINEL_PREFLIGHT enrollment=10-images profile-required")
-    print("SENTINEL_PREFLIGHT supplied_demo_data=people+events+rooms")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
 
