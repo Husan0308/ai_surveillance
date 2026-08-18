@@ -60,6 +60,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
             runtime.tiler.set_property("show-source", -1)
 
         current_xid = int(window_id)
+        current_focus = -1
 
         def bind_overlay(overlay, xid: int | None = None) -> None:
             nonlocal current_xid
@@ -72,6 +73,19 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 GstVideo.VideoOverlay.handle_events(overlay, False)
             except Exception:
                 pass
+
+        def set_focus(source_id: int | None) -> None:
+            nonlocal current_focus
+            if runtime.tiler.find_property("show-source") is None:
+                return
+            sid = (
+                int(source_id)
+                if source_id is not None and 0 <= int(source_id) < CAMERA_COUNT
+                else -1
+            )
+            current_focus = sid
+            runtime.tiler.set_property("show-source", sid)
+            _put_status(status_q, "FOCUS", str(sid))
 
         bind_overlay(runtime.sink, current_xid)
 
@@ -87,6 +101,10 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 return Gst.BusSyncReply.PASS
             try:
                 bind_overlay(message.src)
+                # Window-handle preparation can happen again after a rebind.
+                # Preserve the selected source instead of silently returning to
+                # the tiled wall.
+                set_focus(current_focus)
                 _put_status(status_q, "VIDEO_BOUND", f"xid={current_xid}")
                 return Gst.BusSyncReply.DROP
             except Exception as exc:
@@ -122,6 +140,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
             latest_focus = None
             got_focus = False
             latest_bind = None
+            latest_bind_focus = None
             heatmap_changes: dict[int, bool] = {}
 
             while True:
@@ -137,6 +156,12 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                     got_focus = True
                 elif command == "bind":
                     latest_bind = int(value)
+                elif command == "bind_focus":
+                    try:
+                        xid, source_id = value
+                        latest_bind_focus = (int(xid), int(source_id))
+                    except Exception:
+                        pass
                 elif command == "heatmap":
                     try:
                         source_id, enabled = value
@@ -144,18 +169,29 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                     except Exception:
                         pass
 
+            # A per-camera fullscreen transition must be atomic: first bind the
+            # EGL overlay to the new native Qt surface, then set show-source on
+            # the same GLib iteration. This avoids a tiled frame being rebound
+            # without the requested camera focus.
+            if latest_bind_focus is not None:
+                xid, source_id = latest_bind_focus
+                if xid > 0:
+                    bind_overlay(runtime.sink, xid)
+                    set_focus(source_id)
+                    _put_status(
+                        status_q,
+                        "VIDEO_BOUND",
+                        f"xid={xid} focus={source_id}",
+                    )
+                latest_bind = None
+                got_focus = False
+
             if latest_bind is not None and latest_bind > 0:
                 bind_overlay(runtime.sink, latest_bind)
                 _put_status(status_q, "VIDEO_BOUND", f"xid={latest_bind}")
 
-            if got_focus and runtime.tiler.find_property("show-source") is not None:
-                source_id = (
-                    latest_focus
-                    if latest_focus is not None and 0 <= latest_focus < CAMERA_COUNT
-                    else -1
-                )
-                runtime.tiler.set_property("show-source", source_id)
-                _put_status(status_q, "FOCUS", str(source_id))
+            if got_focus:
+                set_focus(latest_focus)
 
             setter = getattr(runtime, "set_heatmap_source_enabled", None)
             if callable(setter):
@@ -267,6 +303,16 @@ class ProPipelineController(PipelineController):
         )
         self.process.start()
         self.last_status = UiStatus("STARTING")
+
+    def bind_focus(self, window_id: int, source_id: int | None) -> None:
+        xid = int(window_id)
+        if xid <= 0:
+            return
+        sid = -1 if source_id is None else int(source_id)
+        try:
+            self.command_q.put_nowait(("bind_focus", (xid, sid)))
+        except queue.Full:
+            pass
 
     def set_heatmap(self, source_id: int, enabled: bool) -> None:
         try:
