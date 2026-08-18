@@ -14,6 +14,8 @@ if str(ROOT) not in sys.path:
 from services.camera_v2.global_identity import STATE_CONFIRMED
 from services.camera_v2.native_bridge import _GlobalLabel, _TrackRow, ensure_bridge
 from services.camera_v2.person_tracking_reid import CameraPersonTrackingReID
+from services.camera_v2.pose_ankle import LEFT_ANKLE, RIGHT_ANKLE, POSE_MIN_VISIBLE
+from services.camera_v2.pose_heatmap_bridge import ensure_pose_heatmap_bridge
 from services.camera_v2.qwen_reid import QwenReIdVerifier
 from services.camera_v2.reid_embedder import AutoReIdEmbedder
 from services.camera_v2.reid_production import (
@@ -54,9 +56,6 @@ def main() -> int:
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     cfg = dict(raw.get("reid") or raw)
 
-    # Keep the deterministic identity smoke independent from the user's editable
-    # live camera inventory. Settings may disable/delete one of the original six,
-    # but the identity state-machine contract still needs a stable synthetic test.
     smoke_rooms = {
         "CAM-01": "Devs", "CAM-04": "Devs",
         "CAM-02": "Entrance", "CAM-05": "Entrance",
@@ -108,6 +107,11 @@ def main() -> int:
     native_path = ensure_bridge()
     if not native_path.exists():
         raise RuntimeError(f"native bridge build did not produce library: {native_path}")
+    pose_heatmap_path = ensure_pose_heatmap_bridge()
+    if not pose_heatmap_path.exists():
+        raise RuntimeError(f"pose heatmap bridge build failed: {pose_heatmap_path}")
+    if (LEFT_ANKLE, RIGHT_ANKLE) != (15, 16) or POSE_MIN_VISIBLE < 3:
+        raise RuntimeError("pose ankle contract is invalid")
 
     crop = np.random.default_rng(4).integers(0, 255, (220, 90, 3), dtype=np.uint8)
     quality = evaluate_crop_quality(
@@ -141,11 +145,15 @@ def main() -> int:
         f"label_abi={ctypes.sizeof(_GlobalLabel)}"
     )
     print(
+        "CAMERA_V2_REID_PREFLIGHT pose_heatmap=PASS "
+        f"path={pose_heatmap_path} ankle_indices={LEFT_ANKLE},{RIGHT_ANKLE} bbox_anchor=OFF"
+    )
+    print(
         "CAMERA_V2_REID_PREFLIGHT embedder="
         f"{embedder.metrics().get('requested','auto')} lazy=PASS"
     )
     print(f"CAMERA_V2_REID_PREFLIGHT qwen_configured={int(qwen.enabled)} async=PASS")
-    print("CAMERA_V2_REID_PREFLIGHT hot_path=YOLO+NvDCF unchanged identity_sidepath=bounded-async")
+    print("CAMERA_V2_REID_PREFLIGHT hot_path=YOLO26m+NvDCF pose=CPU-low-rate recovery=bounded")
     print("CAMERA_V2_REID_PREFLIGHT=PASS")
     return 0
 
