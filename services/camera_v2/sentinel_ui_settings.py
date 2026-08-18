@@ -7,7 +7,6 @@ import yaml
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -16,7 +15,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -48,6 +46,7 @@ class CameraConfigStore:
 
         ids: set[str] = set()
         active = 0
+        cleaned: list[dict] = []
         for row in cameras:
             camera_id = str(row.get("id", "")).strip()
             if not camera_id:
@@ -55,22 +54,33 @@ class CameraConfigStore:
             if camera_id in ids:
                 raise ValueError(f"Duplicate Camera ID: {camera_id}")
             ids.add(camera_id)
+
             uri = str(row.get("uri", "")).strip()
             if not uri.startswith("rtsp://"):
                 raise ValueError(f"{camera_id}: RTSP URL rtsp:// bilan boshlanishi kerak")
-            codec = str(row.get("codec", "h264")).lower().strip()
-            if codec not in {"h264", "h265"}:
-                raise ValueError(f"{camera_id}: codec h264 yoki h265 bo'lishi kerak")
-            if bool(row.get("enabled", True)):
+
+            enabled = bool(row.get("enabled", True))
+            if enabled:
                 active += 1
+
+            cleaned.append(
+                {
+                    "id": camera_id,
+                    "name": str(row.get("name", camera_id)).strip() or camera_id,
+                    "room": str(row.get("room", "")).strip(),
+                    "enabled": enabled,
+                    "uri": uri,
+                }
+            )
 
         if active < 1:
             raise ValueError("Kamida bitta camera yoqilgan bo'lishi kerak")
         if active > MAX_ACTIVE_CAMERAS:
             raise ValueError(
-                f"Monitoring 2x3 wall hozir maksimum {MAX_ACTIVE_CAMERAS} ta active camera qo'llaydi"
+                f"Monitoring 2x3 wall maksimum {MAX_ACTIVE_CAMERAS} ta active camera qo'llaydi"
             )
 
+        payload["cameras"] = cleaned
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(
@@ -81,7 +91,13 @@ class CameraConfigStore:
 
 
 class CameraEditorDialog(QDialog):
-    def __init__(self, camera: dict | None = None, *, suggested_id: str = "CAM-01", parent=None):
+    def __init__(
+        self,
+        camera: dict | None = None,
+        *,
+        suggested_id: str = "CAM-01",
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Camera qo'shish" if camera is None else "Camerani tahrirlash")
         self.setMinimumWidth(540)
@@ -99,10 +115,6 @@ class CameraEditorDialog(QDialog):
         self.name = QLineEdit(str(self.original.get("name", "")))
         self.room = QLineEdit(str(self.original.get("room", "")))
         self.uri = QLineEdit(str(self.original.get("uri", "rtsp://")))
-        self.env_uri = QLineEdit(str(self.original.get("env_uri", "")))
-        self.codec = QComboBox()
-        self.codec.addItems(["h264", "h265"])
-        self.codec.setCurrentText(str(self.original.get("codec", "h264")).lower())
         self.enabled = QCheckBox("Camera active")
         self.enabled.setChecked(bool(self.original.get("enabled", True)))
 
@@ -110,14 +122,13 @@ class CameraEditorDialog(QDialog):
         form.addRow("Name", self.name)
         form.addRow("Room", self.room)
         form.addRow("RTSP URL", self.uri)
-        form.addRow("Environment URI", self.env_uri)
-        form.addRow("Codec", self.codec)
         form.addRow("Status", self.enabled)
         root.addLayout(form)
 
         note = QLabel(
-            "RTSP username/password bu yerda saqlanmaydi. Pipeline .env dagi "
-            "SURVEILLANCE_RTSP_USERNAME / SURVEILLANCE_RTSP_PASSWORD ni ishlatadi."
+            "Codec tanlanmaydi: DeepStream RTSP streamdan H.264/H.265 ni avtomatik aniqlaydi. "
+            "RTSP username/password .env dagi SURVEILLANCE_RTSP_USERNAME / "
+            "SURVEILLANCE_RTSP_PASSWORD orqali olinadi."
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{C['muted']};font-size:10px;")
@@ -129,19 +140,13 @@ class CameraEditorDialog(QDialog):
         root.addWidget(buttons)
 
     def camera_row(self) -> dict:
-        row = dict(self.original)
-        row.update(
-            {
-                "id": self.camera_id.text().strip(),
-                "name": self.name.text().strip() or self.camera_id.text().strip(),
-                "room": self.room.text().strip(),
-                "enabled": self.enabled.isChecked(),
-                "env_uri": self.env_uri.text().strip(),
-                "uri": self.uri.text().strip(),
-                "codec": self.codec.currentText().strip().lower(),
-            }
-        )
-        return row
+        return {
+            "id": self.camera_id.text().strip(),
+            "name": self.name.text().strip() or self.camera_id.text().strip(),
+            "room": self.room.text().strip(),
+            "enabled": self.enabled.isChecked(),
+            "uri": self.uri.text().strip(),
+        }
 
 
 class CameraSettingsRow(Panel):
@@ -183,7 +188,7 @@ class CameraSettingsRow(Panel):
         info.addWidget(uri)
 
         meta = QLabel(
-            f"{str(camera.get('room', '') or 'No room')}  ·  {str(camera.get('codec', 'h264')).upper()}"
+            f"{str(camera.get('room', '') or 'No room')}  ·  Codec AUTO (DeepStream)"
         )
         meta.setStyleSheet(f"color:{C['muted']};font-size:10px;")
         info.addWidget(meta)
@@ -227,7 +232,7 @@ class SettingsPage(QWidget):
         titles.addWidget(label("Camera Settings", "title"))
         titles.addWidget(
             label(
-                "RTSP sources · enable/disable · edit · delete · add new camera",
+                "RTSP cameras · enable/disable · edit · delete · add",
                 "subtitle",
             )
         )
@@ -244,7 +249,9 @@ class SettingsPage(QWidget):
         header.addWidget(add)
         outer.addLayout(header)
 
-        self.banner = QLabel("Changes are saved to config/cameras.yaml")
+        self.banner = QLabel(
+            "Camera ID, name, room va RTSP URL yetarli. Codec DeepStream tomonidan avtomatik aniqlanadi."
+        )
         self.banner.setStyleSheet(
             f"color:{C['muted']};background:#0b1219;border:1px solid {C['border']};"
             "border-radius:6px;padding:9px 12px;"
@@ -273,7 +280,9 @@ class SettingsPage(QWidget):
     def _set_dirty(self, message: str) -> None:
         self.dirty = True
         self.apply_button.setEnabled(True)
-        self.banner.setText(message + "  ·  Apply cameras bosilganda live pipeline restart bo'ladi.")
+        self.banner.setText(
+            message + "  ·  Apply cameras bosilganda live pipeline restart bo'ladi."
+        )
         self.banner.setStyleSheet(
             "color:#f6d98a;background:#211c0e;border:1px solid #5b4921;"
             "border-radius:6px;padding:9px 12px;"
@@ -287,6 +296,7 @@ class SettingsPage(QWidget):
             self.payload = self.store.load()
             self.refresh()
             return False
+        self.payload = self.store.load()
         self._set_dirty(message)
         self.refresh()
         return True
@@ -319,7 +329,9 @@ class SettingsPage(QWidget):
             return
         previous = bool(cameras[index].get("enabled", True))
         cameras[index]["enabled"] = bool(enabled)
-        if not self._save(f"{cameras[index].get('id')} {'enabled' if enabled else 'disabled'}"):
+        if not self._save(
+            f"{cameras[index].get('id')} {'enabled' if enabled else 'disabled'}"
+        ):
             cameras[index]["enabled"] = previous
 
     def edit_camera(self, index: int) -> None:
@@ -337,7 +349,11 @@ class SettingsPage(QWidget):
         if len(cameras) >= MAX_CONFIGURED_CAMERAS:
             QMessageBox.warning(self, "Camera Settings", "Camera config limiti to'lgan")
             return
-        dialog = CameraEditorDialog(None, suggested_id=self._next_camera_id(), parent=self)
+        dialog = CameraEditorDialog(
+            None,
+            suggested_id=self._next_camera_id(),
+            parent=self,
+        )
         if sum(1 for row in cameras if bool(row.get("enabled", True))) >= MAX_ACTIVE_CAMERAS:
             dialog.enabled.setChecked(False)
         if dialog.exec() != QDialog.Accepted:
@@ -372,7 +388,9 @@ class SettingsPage(QWidget):
         self.dirty = False
         self.apply_button.setEnabled(False)
         self.payload = self.store.load()
-        self.banner.setText("Camera config applied. Monitoring pipeline yangi config bilan qayta ishga tushadi.")
+        self.banner.setText(
+            "Camera config applied. Monitoring pipeline yangi config bilan qayta ishga tushadi."
+        )
         self.banner.setStyleSheet(
             f"color:{C['known']};background:#0b1c19;border:1px solid #174238;"
             "border-radius:6px;padding:9px 12px;"
