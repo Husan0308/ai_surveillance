@@ -17,7 +17,6 @@ MAX_CAMERAS = 16
 class CameraConfig:
     camera_id: str
     uri: str
-    codec: str
     username: str
     password: str
     name: str = ""
@@ -102,9 +101,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
             raise ValueError(f"Duplicate camera id: {camera_id}")
         seen.add(camera_id)
 
-        # One canonical source field only. nvurisrcbin/rtspsrc discovers the
-        # actual H.264/H.265 stream from RTSP caps, so users never have to select
-        # a codec manually and there is no second env_uri source to get out of sync.
+        # A camera has one source only: the RTSP URI. nvurisrcbin/rtspsrc and the
+        # downstream decode chain negotiate the actual stream format from caps.
+        # There is deliberately no user-facing or config-level codec/env_uri knob.
         uri = str(row.get("uri", "")).strip()
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
@@ -113,7 +112,6 @@ def load_settings(path: str | Path | None = None) -> Settings:
             CameraConfig(
                 camera_id=camera_id,
                 uri=uri,
-                codec="auto",
                 username=_credential(
                     camera_id,
                     "USERNAME",
