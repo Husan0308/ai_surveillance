@@ -163,6 +163,15 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         # deposit_pose_ankle().
         return super()._tracker_probe(pad, info)
 
+    def _current_focus_source(self) -> int:
+        try:
+            if self.tiler.find_property("show-source") is not None:
+                value = int(self.tiler.get_property("show-source"))
+                return value if 0 <= value < len(self.cameras) else -1
+        except Exception:
+            pass
+        return -1
+
     def _heatmap_render_probe(self, _pad, info):
         buffer = info.get_buffer()
         enabled_mask = self._enabled_mask()
@@ -176,7 +185,10 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         try:
             rows = int(getattr(self, "tiler_rows", 3))
             columns = int(getattr(self, "tiler_columns", 2))
-            focus_source = int(getattr(self, "focus_source", -1))
+            focus_source = self._current_focus_source()
+            self.focus_source = focus_source
+            if focus_source >= 0 and not self._heatmap_sources.get(focus_source, False):
+                return self.Gst.PadProbeReturn.OK
             with self._heatmap_lock:
                 rendered = self.pose_heatmap.render(
                     buffer,
