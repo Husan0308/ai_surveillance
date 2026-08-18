@@ -77,6 +77,7 @@ class CameraWorker:
             "deepstream_reconnect_attempts":int(self.core_config.get("deepstream_reconnect_attempts",-1)),
             "capture_output_width":int(self.core_config.get("capture_output_width",0) or 0),
             "capture_output_height":int(self.core_config.get("capture_output_height",0) or 0),
+            "capture_interpolation_method":int(self.core_config.get("capture_interpolation_method",2)),
         }
     def _open(self):
         cfg=self._capture_cfg();backend=self.capture_backend
