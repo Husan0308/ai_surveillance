@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
+import time
 
-# Slightly more detector detail helps reclined/foreshortened people without
-# changing the camera decode/display path. These values are applied before the
-# detector modules are imported, so their own setdefault() calls keep them.
+# Keep the proven 736x416 detector canvas so the GTX-class GPU remains smooth,
+# but admit lower-confidence person observations. This specifically helps hard
+# poses (reclining, foreshortening, partial occlusion) without increasing pixel
+# cost. NvDCF still owns temporal stability after a detection is accepted.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
-os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.06")
+os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.04")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
 
 from .person_tracking_heatmap import CameraPersonTrackingHeatmap
@@ -20,33 +21,24 @@ class CameraPersonTrackingReIDHeatmap(
     CameraPersonTrackingReID,
     CameraPersonTrackingHeatmap,
 ):
-    """ReID runtime with native heatmap, stable focus geometry and track hold."""
-
-    def __init__(self) -> None:
-        self._focus_geometry_state: bool | None = None
-        super().__init__()
-        # show-source can be changed by the Qt controller while PLAYING. Keep the
-        # tiler output geometry synchronized with the mode: 2x3 grid uses the
-        # historical 1280x1080 wall (640x360 tiles), single-camera focus uses a
-        # true 16:9 output so the camera is never stretched vertically.
-        self.GLib.timeout_add(100, self._sync_focus_geometry)
+    """ReID runtime with native heatmap and live unique occupancy counters."""
 
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
-        """Keep a visible NvDCF box through short detector misses.
+        """Tune NvDCF for difficult poses without exposing unreliable shadow data.
 
-        YOLO already sees the reclining person intermittently; the distracting
-        failure is the box disappearing between those detections. Let NvDCF emit
-        a bounded shadow prediction for up to ~3.5 s at 20 FPS, with a conservative
-        inactive confidence floor. A fresh detector observation immediately takes
-        ownership again.
+        Shadow tracking keeps an internal target alive between detector matches,
+        but NVIDIA does not report shadow targets as normal downstream objects.
+        Visual gap bridging therefore stays in native_display_smoother.c; here we
+        only keep NvDCF's internal target alive long enough to reacquire it.
         """
         stabilized = CameraPersonTrackingReID._stabilize_tracker_config(path)
         replacements = {
-            "maxShadowTrackingAge": "70",
+            "minDetectorConfidence": "0.04",
+            "maxShadowTrackingAge": "50",
             "earlyTerminationAge": "3",
             "minTrackingConfidenceDuringInactive": "0.15",
-            "outputShadowTracks": "1",
+            "outputShadowTracks": "0",
         }
         lines = stabilized.read_text(encoding="utf-8").splitlines()
         found: set[str] = set()
@@ -76,43 +68,17 @@ class CameraPersonTrackingReIDHeatmap(
         stabilized.write_text("\n".join(output) + "\n", encoding="utf-8")
         return stabilized
 
-    def _sync_focus_geometry(self) -> bool:
-        try:
-            prop = self.tiler.find_property("show-source")
-            if prop is None:
-                return True
-            focused = int(self.tiler.get_property("show-source")) >= 0
-            if focused == self._focus_geometry_state:
-                return True
+    def live_people_counts(self) -> dict[str, int]:
+        """Return live unique Total/Known/Unknown counts used by the Qt cards.
 
-            if focused:
-                width = max(1280, int(os.environ.get("CAMERA_V2_FOCUS_WIDTH", "1920")))
-                height = max(720, int(os.environ.get("CAMERA_V2_FOCUS_HEIGHT", "1080")))
-            else:
-                width = max(640, int(os.environ.get("CAMERA_V2_WALL_WIDTH", "1280")))
-                height = max(540, int(os.environ.get("CAMERA_V2_WALL_HEIGHT", "1080")))
-
-            self.tiler.set_property("width", width)
-            self.tiler.set_property("height", height)
-            self.wall_width = width
-            self.wall_height = height
-            self._focus_geometry_state = focused
-            print(
-                f"CAMERA_FOCUS_GEOMETRY focused={int(focused)} output={width}x{height}",
-                flush=True,
-            )
-        except Exception as exc:
-            print(
-                f"CAMERA_FOCUS_GEOMETRY warning={type(exc).__name__}:{exc}",
-                flush=True,
-            )
-        return True
-
-    def active_people_count(self) -> int:
-        """Count currently visible people once per Global ID."""
+        A positive Global ID is shown in green by the live overlay and counts as
+        Known. A currently visible track without a Global ID is shown as Unknown.
+        Multiple camera-local tracks bound to the same Global ID count once.
+        """
         now = time.monotonic()
         bindings = self.identity.bindings() if self.identity is not None else {}
-        active: set[tuple] = set()
+        known_globals: set[int] = set()
+        unknown_tracks: set[tuple[str, int]] = set()
         max_age = max(0.75, float(DISPLAY_HOLD_BINDING_SEC))
 
         with self._reid_lock:
@@ -122,18 +88,29 @@ class CameraPersonTrackingReIDHeatmap(
             if now - float(seen_at) > max_age:
                 continue
             binding = bindings.get(key)
-            if binding and int(binding.get("global_id") or 0) > 0:
-                active.add(("global", int(binding["global_id"])))
+            global_id = int((binding or {}).get("global_id") or 0)
+            if global_id > 0:
+                known_globals.add(global_id)
             else:
-                active.add(("local", str(key[0]), int(key[1])))
-        return len(active)
+                unknown_tracks.add((str(key[0]), int(key[1])))
+
+        known = len(known_globals)
+        unknown = len(unknown_tracks)
+        return {
+            "total": known + unknown,
+            "known": known,
+            "unknown": unknown,
+        }
+
+    def active_people_count(self) -> int:
+        return int(self.live_people_counts()["total"])
 
     def _tracker_probe(self, pad, info):
         result = super()._tracker_probe(pad, info)
         try:
-            unique_now = self.active_people_count()
+            counts = self.live_people_counts()
             with self.det_lock:
-                self.tracked_now = unique_now
+                self.tracked_now = int(counts["total"])
         except Exception:
             pass
         return result
