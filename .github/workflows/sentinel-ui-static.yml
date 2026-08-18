@@ -1,0 +1,74 @@
+name: Sentinel UI Static
+
+on:
+  push:
+    branches: [rebuild/gpu-v2-clean]
+  pull_request:
+    paths:
+      - 'services/camera_v2/sentinel_*.py'
+      - 'services/camera_v2/person_tracking_heatmap.py'
+      - 'services/camera_v2/pose_ankle.py'
+      - 'scripts/preflight_sentinel_ui.py'
+      - 'scripts/run_sentinel_vms.sh'
+      - 'config/cameras.yaml'
+      - '.github/workflows/sentinel-ui-static.yml'
+
+jobs:
+  static-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile Sentinel Python sources
+        run: |
+          python -m py_compile \
+            services/camera_v2/sentinel_ui.py \
+            services/camera_v2/sentinel_ui_base.py \
+            services/camera_v2/sentinel_ui_monitoring.py \
+            services/camera_v2/sentinel_ui_settings.py \
+            services/camera_v2/sentinel_ui_enrollment.py \
+            services/camera_v2/sentinel_ui_pages.py \
+            services/camera_v2/sentinel_video.py \
+            services/camera_v2/sentinel_video_pro.py \
+            services/camera_v2/person_tracking_heatmap.py \
+            services/camera_v2/pose_ankle.py \
+            scripts/preflight_sentinel_ui.py
+
+      - name: Enforce UI source contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          settings = Path('services/camera_v2/sentinel_ui_settings.py').read_text()
+          enrollment = Path('services/camera_v2/sentinel_ui_enrollment.py').read_text()
+          monitoring = Path('services/camera_v2/sentinel_ui_monitoring.py').read_text()
+          video = Path('services/camera_v2/sentinel_video.py').read_text()
+          video_pro = Path('services/camera_v2/sentinel_video_pro.py').read_text()
+          heatmap = Path('services/camera_v2/person_tracking_heatmap.py').read_text()
+          shell = Path('services/camera_v2/sentinel_ui.py').read_text()
+
+          forbidden_settings = (
+              'Environment URI', 'self.env_uri =', 'self.codec =', 'form.addRow("Codec"'
+          )
+          for text in forbidden_settings:
+              assert text not in settings, f'stale Settings field: {text}'
+          assert 'class ReportsPage' not in enrollment
+          assert 'occupancy_label' not in video
+          assert 'occupancy = len' not in video
+          assert 'metrics.get("known_people"' in monitoring
+          assert 'metrics.get("unknown_people"' in monitoring
+          assert 'runtime.focus_source = sid' in video_pro
+          assert 'mapFromGlobal(QCursor.pos())' in video_pro
+          assert 'anchor=pose-ankle-only' in heatmap
+          assert 'bbox_anchor=disabled' in heatmap
+          assert 'BUILD_TAG = "2026.08.18-r4"' in shell
+
+          config = yaml.safe_load(Path('config/cameras.yaml').read_text()) or {}
+          for row in config.get('cameras') or []:
+              assert not ({'codec', 'env_uri', 'environment_uri'} & set(row)), row
+          print('SENTINEL_UI_STATIC=PASS')
+          PY
