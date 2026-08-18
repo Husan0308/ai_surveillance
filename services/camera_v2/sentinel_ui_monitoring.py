@@ -11,8 +11,7 @@ from PySide6.QtWidgets import (
 
 from services.ml_service.app.config import load_settings
 
-from .data import PEOPLE
-from .sentinel_ui_base import C, FaceAvatar, Panel, label, panel_layout
+from .sentinel_ui_base import C, Panel, label, panel_layout
 from .sentinel_video_pro import ProLiveVideoWall, ProPipelineController
 
 
@@ -37,7 +36,9 @@ class MonitoringPage(QWidget):
         camera_column.setContentsMargins(0, 0, 0, 0)
         camera_column.setSpacing(0)
 
-        self.wall = ProLiveVideoWall(self.camera_configs, PEOPLE, self.camera_panel)
+        # No demo people are injected into the native wall. Tile counts are live
+        # only and rendered in the right occupancy rail.
+        self.wall = ProLiveVideoWall(self.camera_configs, [], self.camera_panel)
         self.wall.nativeReady.connect(self._start_or_bind)
         self.wall.cameraDoubleClicked.connect(self.expand)
         self.wall.heatmapToggled.connect(self.controller.set_heatmap)
@@ -102,12 +103,26 @@ class MonitoringPage(QWidget):
         self.active_count = label("0 active", "mono")
         recent_head.addWidget(self.active_count)
         recent_layout.addLayout(recent_head)
-        recent_layout.addSpacing(8)
+        recent_layout.addSpacing(14)
 
-        # This list is presentation-only until the live recent-view crop feed is
-        # wired. Occupancy above never depends on these sample rows.
-        for person in sorted(PEOPLE, key=lambda p: p.last_seen, reverse=True)[:6]:
-            recent_layout.addWidget(self.recent_view(person))
+        empty = QFrame()
+        empty.setStyleSheet(
+            "QFrame{background:#091018;border:1px dashed #22313f;border-radius:7px;}"
+        )
+        empty_layout = QVBoxLayout(empty)
+        empty_layout.setContentsMargins(14, 18, 14, 18)
+        empty_layout.setSpacing(5)
+        empty_title = QLabel("Live recent-view feed")
+        empty_title.setStyleSheet("font-weight:700;")
+        empty_layout.addWidget(empty_title)
+        empty_text = QLabel(
+            "Face crop/event source hali bu live wall metricsiga ulanmagan. "
+            "Demo ism yoki fake avatar ko'rsatilmaydi."
+        )
+        empty_text.setWordWrap(True)
+        empty_text.setStyleSheet(f"color:{C['muted']};font-size:10px;")
+        empty_layout.addWidget(empty_text)
+        recent_layout.addWidget(empty)
         recent_layout.addStretch()
         identity_rail.addWidget(recent_panel, 1)
         self.layout.addWidget(self.identity_panel, 0)
@@ -200,8 +215,6 @@ class MonitoringPage(QWidget):
         self._fullscreen_active = True
         self._focused_source = None if source_id is None else int(source_id)
 
-        # Same native DeepStream surface, no XID rebind. Only tiler focus/aspect
-        # changes, which avoids black/empty fullscreen windows.
         self.controller.focus(self._focused_source)
         self.identity_panel.hide()
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -223,22 +236,6 @@ class MonitoringPage(QWidget):
 
     def open_fullscreen_grid(self) -> None:
         self.enter_fullscreen(None)
-
-    def recent_view(self, person):
-        item = QFrame()
-        item.setStyleSheet(
-            f"QFrame{{border-bottom:1px solid {C['border']};background:transparent;}}"
-        )
-        item.setMinimumHeight(58)
-        row = QHBoxLayout(item)
-        row.setContentsMargins(0, 5, 0, 5)
-        info = QVBoxLayout()
-        info.setSpacing(3)
-        info.addWidget(label(person.label, "sectionTitle"))
-        info.addWidget(label(person.last_seen.astimezone().strftime("%H:%M:%S"), "mono"))
-        row.addLayout(info, 1)
-        row.addWidget(FaceAvatar(person, 42))
-        return item
 
     def expand(self, source_id: int) -> None:
         self.enter_fullscreen(int(source_id))
