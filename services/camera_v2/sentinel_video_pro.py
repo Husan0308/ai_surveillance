@@ -5,6 +5,7 @@ import queue
 import time
 
 from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QToolButton, QWidget
 
 from .sentinel_video import (
@@ -53,13 +54,13 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
         runtime.wall_height = WALL_HEIGHT
         runtime.tiler_rows = GRID_ROWS
         runtime.tiler_columns = GRID_COLUMNS
+        runtime.focus_source = -1
         runtime.tiler.set_property("rows", GRID_ROWS)
         runtime.tiler.set_property("columns", GRID_COLUMNS)
         runtime.tiler.set_property("width", WALL_WIDTH)
         runtime.tiler.set_property("height", WALL_HEIGHT)
         if runtime.tiler.find_property("show-source") is not None:
             runtime.tiler.set_property("show-source", -1)
-        # Preserve the selected source aspect inside the native Qt surface.
         if runtime.sink.find_property("force-aspect-ratio") is not None:
             runtime.sink.set_property("force-aspect-ratio", True)
 
@@ -79,12 +80,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 pass
 
         def set_focus(source_id: int | None) -> None:
-            """Switch source and output geometry in one GLib iteration.
-
-            The 2x3 wall is 1280x1080 so each tile is 640x360 (16:9). A focused
-            source must not inherit that 1280x1080 aspect; it gets its own 16:9
-            1920x1080 tiler output before show-source is applied.
-            """
+            """Atomically switch tiler source and output aspect on the same XID."""
             nonlocal current_focus
             if runtime.tiler.find_property("show-source") is None:
                 return
@@ -102,12 +98,9 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
             runtime.tiler.set_property("height", int(height))
             runtime.wall_width = int(width)
             runtime.wall_height = int(height)
+            runtime.focus_source = sid
             runtime.tiler.set_property("show-source", sid)
-            _put_status(
-                status_q,
-                "FOCUS",
-                f"source={sid} output={width}x{height}",
-            )
+            _put_status(status_q, "FOCUS", f"source={sid} output={width}x{height}")
 
         bind_overlay(runtime.sink, current_xid)
 
@@ -137,7 +130,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                         _put_status(
                             status_q,
                             "LIVE",
-                            f"{camera_count}-camera DeepStream/NvDCF + ReID + heatmap PLAYING",
+                            f"{camera_count}-camera DeepStream/NvDCF + ReID + ankle heatmap PLAYING",
                         )
                 except Exception:
                     pass
@@ -237,7 +230,11 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 except Exception:
                     identity_metrics = {}
 
-            counts = {"total": int(getattr(runtime, "tracked_now", 0)), "known": 0, "unknown": 0}
+            counts = {
+                "total": int(getattr(runtime, "tracked_now", 0)),
+                "known": 0,
+                "unknown": 0,
+            }
             counter = getattr(runtime, "live_people_counts", None)
             if callable(counter):
                 try:
@@ -255,6 +252,14 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 except Exception:
                     heatmap_sources = {}
 
+            pose_metrics = {}
+            pose_sidecar = getattr(runtime, "pose_sidecar", None)
+            if pose_sidecar is not None:
+                try:
+                    pose_metrics = dict(pose_sidecar.metrics())
+                except Exception:
+                    pose_metrics = {}
+
             _put_status(
                 status_q,
                 "METRICS",
@@ -265,6 +270,8 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                     "unknown_people": int(counts.get("unknown", 0)),
                     "global_identity": identity_metrics,
                     "heatmap_sources": heatmap_sources,
+                    "pose": pose_metrics,
+                    "focus_source": int(current_focus),
                 },
             )
             return True
@@ -294,6 +301,7 @@ class ProPipelineController(PipelineController):
         if xid <= 0:
             return
         if self.process is not None and self.process.is_alive():
+            self.bind(xid)
             return
         self.process = self.ctx.Process(
             target=_pipeline_process_pro,
@@ -325,6 +333,11 @@ class ProLiveVideoWall(LiveVideoWall):
         self.fullscreen_buttons: list[QToolButton] = []
         self.tile_borders: list[tuple[QFrame, QFrame, QFrame, QFrame]] = []
 
+        # The old bottom-left occupancy pills were demo room counts, not live
+        # camera analytics. Keep only CAM-ID and live FPS on the video itself.
+        for badge in self.occupancy_labels:
+            badge.hide()
+
         for sid, camera in enumerate(self.cameras[:CAMERA_COUNT]):
             camera_id = str(
                 getattr(camera, "camera_id", getattr(camera, "id", f"CAM-{sid + 1:02d}"))
@@ -341,13 +354,14 @@ class ProLiveVideoWall(LiveVideoWall):
 
             actions = QFrame(self)
             actions.setObjectName("cameraHoverActions")
+            actions.setMouseTracking(True)
             actions.setStyleSheet(
-                "QFrame#cameraHoverActions{background:rgba(7,12,18,225);"
-                "border:1px solid rgba(74,96,116,175);border-radius:6px;}"
+                "QFrame#cameraHoverActions{background:rgba(7,12,18,232);"
+                "border:1px solid rgba(72,96,116,190);border-radius:6px;}"
                 "QToolButton{background:transparent;color:#dce6ee;border:0;"
-                "border-radius:4px;padding:5px 8px;font-weight:600;}"
+                "border-radius:4px;padding:5px 8px;font-weight:700;}"
                 "QToolButton:hover{background:#182632;color:#ffffff;}"
-                "QToolButton:checked{background:#11352f;color:#39d9c5;}"
+                "QToolButton:checked{background:#10372f;color:#39d9c5;}"
             )
             row = QHBoxLayout(actions)
             row.setContentsMargins(3, 3, 3, 3)
@@ -382,7 +396,7 @@ class ProLiveVideoWall(LiveVideoWall):
         self.exit_button.setText("⛶  Exit Fullscreen")
         self.exit_button.setCursor(Qt.PointingHandCursor)
         self.exit_button.setStyleSheet(
-            "QToolButton{background:rgba(7,12,18,235);color:#f1f5f8;"
+            "QToolButton{background:rgba(7,12,18,238);color:#f1f5f8;"
             "border:1px solid #34495a;border-radius:6px;padding:8px 12px;font-weight:700;}"
             "QToolButton:hover{background:#172532;border-color:#4f6a7f;}"
         )
@@ -408,7 +422,7 @@ class ProLiveVideoWall(LiveVideoWall):
         for sid, widget in enumerate(self.status_labels):
             widget.setVisible(not active or self._focused_source is None or sid == self._focused_source)
         for widget in self.occupancy_labels:
-            widget.setVisible(not active)
+            widget.hide()
         for action in self.action_frames:
             action.hide()
         for borders in self.tile_borders:
@@ -423,7 +437,7 @@ class ProLiveVideoWall(LiveVideoWall):
         for sid, borders in enumerate(self.tile_borders):
             visible = not self._fullscreen_active
             hovered = visible and sid == self._hover_source
-            color = "#39d9c5" if hovered else "rgba(45,62,78,205)"
+            color = "#39d9c5" if hovered else "rgba(43,59,73,210)"
             for border in borders:
                 border.setVisible(visible)
                 border.setStyleSheet(f"background:{color};border:0;")
@@ -440,19 +454,22 @@ class ProLiveVideoWall(LiveVideoWall):
         if not hasattr(self, "tile_borders"):
             return
 
+        for badge in self.occupancy_labels:
+            badge.hide()
+
         if self._fullscreen_active:
             if self._focused_source is not None and self._focused_source < len(self.camera_labels):
                 cam = self.camera_labels[self._focused_source]
                 stat = self.status_labels[self._focused_source]
                 cam.move(14, 14)
-                stat.adjustSize()
-                stat.move(14 + cam.width() + 8, 14)
                 cam.raise_()
+                stat.adjustSize()
+                stat.move(max(14, self.width() - stat.width() - 16), 14)
                 stat.raise_()
             self.exit_button.adjustSize()
             self.exit_button.move(
                 max(12, self.width() - self.exit_button.width() - 16),
-                14,
+                50,
             )
             self.exit_button.raise_()
             return
@@ -460,15 +477,17 @@ class ProLiveVideoWall(LiveVideoWall):
         for sid, borders in enumerate(self.tile_borders):
             left, top, width, height = self._tile_rect(sid)
             hovered = sid == self._hover_source
-            t = 2 if hovered else 1
+            thickness = 2 if hovered else 1
             top_b, right_b, bottom_b, left_b = borders
-            top_b.setGeometry(left, top, width, t)
-            right_b.setGeometry(left + width - t, top, t, height)
-            bottom_b.setGeometry(left, top + height - t, width, t)
-            left_b.setGeometry(left, top, t, height)
+            top_b.setGeometry(left, top, width, thickness)
+            right_b.setGeometry(left + width - thickness, top, thickness, height)
+            bottom_b.setGeometry(left, top + height - thickness, width, thickness)
+            left_b.setGeometry(left, top, thickness, height)
+
             actions = self.action_frames[sid]
             actions.adjustSize()
-            actions.move(left + width - actions.width() - 10, top + 38)
+            action_x = max(left + 10, left + width - actions.width() - 10)
+            actions.move(action_x, top + 40)
 
     def _set_hover_source(self, source_id: int | None) -> None:
         if source_id == self._hover_source:
@@ -483,11 +502,17 @@ class ProLiveVideoWall(LiveVideoWall):
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:
-        self._set_hover_source(None)
+        # Moving from the native wall onto our child action frame is still inside
+        # this widget. Do not hide the controls under the cursor.
+        local = self.mapFromGlobal(QCursor.pos())
+        if not self.rect().contains(local):
+            self._set_hover_source(None)
         super().leaveEvent(event)
 
     def update_metrics(self, metrics: dict) -> None:
         super().update_metrics(metrics)
+        for badge in self.occupancy_labels:
+            badge.hide()
         states = dict((metrics or {}).get("heatmap_sources") or {})
         for sid, button in enumerate(self.heatmap_buttons):
             state = bool(states.get(sid, states.get(str(sid), button.isChecked())))
