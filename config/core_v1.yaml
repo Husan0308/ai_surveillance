@@ -1,29 +1,29 @@
 core_v1:
-  profile: "deepstream-smooth-footheat-v4"
+  profile: "deepstream-live-sync-heatmap-v5"
 
   ml_host: "0.0.0.0"
   ml_port: 8001
   api_host: "0.0.0.0"
   api_port: 8000
 
-  # 20 FPS presentation stays smooth, but 1024x576 + quality 88 avoids the
-  # heavy six-camera 1280x720/Q92 JPEG load. Detector remains 736x416.
-  display_fps: 20
-  jpeg_quality: 88
-  max_display_width: 1024
-  max_display_height: 576
-  publisher_start_stagger_ms: 20
+  # Keep the camera wall sharp while avoiding a JPEG backlog. The source is
+  # decoded/scaled by DeepStream; Qt receives only the newest encoded frame.
+  display_fps: 18
+  jpeg_quality: 90
+  max_display_width: 1280
+  max_display_height: 720
+  publisher_start_stagger_ms: 15
 
   startup_grace_sec: 8.0
-  startup_stagger_sec: 0.20
-  capture_timeout_ms: 900
+  startup_stagger_sec: 0.18
+  capture_timeout_ms: 800
   max_read_timeouts: 3
   reconnect_delay_sec: 1.0
 
-  # Do not silently fall back: this profile is intentionally DeepStream/NVDEC.
+  # This profile is DeepStream/NVDEC-only. No silent OpenCV/GStreamer fallback.
   capture_backend: "deepstream"
   rtsp_transport: "tcp"
-  rtsp_latency_ms: 180
+  rtsp_latency_ms: 120
   rtsp_buffer_mode: "auto"
   drop_on_latency: true
   tcp_timestamp: false
@@ -34,37 +34,40 @@ core_v1:
   deepstream_reconnect_interval_sec: 2
   deepstream_reconnect_attempts: -1
 
-  # Resize on NVIDIA hardware before the host copy.
-  # interpolation-method=2 is GPU cubic on dGPU.
-  capture_output_width: 1024
-  capture_output_height: 576
+  # NVIDIA GPU scaling before host copy. 2 = GPU Cubic on dGPU.
+  capture_output_width: 1280
+  capture_output_height: 720
   capture_interpolation_method: 2
   capture_metrics_interval_sec: 5.0
 
-  # Latest-frame pipeline should recover instead of accumulating old frames.
-  max_pipeline_lag_ms: 700
-  max_pipeline_lag_samples: 12
+  # Never let an old camera frame queue grow into visible catch-up latency.
+  max_pipeline_lag_ms: 650
+  max_pipeline_lag_samples: 10
 
   detector:
     enabled: true
     model: "yolo26m.pt"
     model_fallback: "yolo26m.pt"
     device: "cuda:0"
-    imgsz: [416, 736]
+
+    # Restore the old all-camera fresh-batch idea: every inference launch sees
+    # the newest frame from all six cameras. Smaller inference canvas lowers
+    # wall time; display remains independent at 1280x720.
+    imgsz: [320, 576]
     quantize: 32
     classes: [0]
-
-    conf: 0.08
+    conf: 0.07
     iou: 0.50
     max_det: 30
+    batch_size: 6
+    poll_interval_ms: 2
+    start_delay_sec: 0.6
 
-    batch_size: 2
-    poll_interval_ms: 4
-    start_delay_sec: 1.0
-
-    max_submit_age_ms: 260
-    max_result_age_ms: 700
-    overlay_max_age_ms: 700
+    # Freshness is more important than replaying a late result. Tracker bridges
+    # the short detector interval and predicts to the display-frame timestamp.
+    max_submit_age_ms: 180
+    max_result_age_ms: 500
+    overlay_max_age_ms: 480
 
     duplicate_iou: 0.58
     fusion_containment: 0.84
@@ -79,21 +82,27 @@ core_v1:
       enabled: false
       cameras: {}
 
-  # Camera-space heatmap. Only real detector observations are recorded.
-  # One brief pass stays cool/blue; dwell/repeated occupancy heats toward red.
+  # Professional movement/dwell heatmap. A quick pass is blue/cyan; repeated
+  # walking or standing in the same area builds green/yellow/red. History fades
+  # very slowly (60 minute half-life) instead of disappearing after seconds.
   camera_heatmap:
     enabled: true
     grid_width: 320
     grid_height: 180
-    sigma: 6.5
-    half_life_sec: 18.0
-    saturation: 4.0
-    alpha: 0.34
-    render_interval_sec: 0.12
-    min_confidence_weight: 0.40
-    initial_observation_sec: 0.25
-    max_observation_sec: 0.50
-    spatial_blur_sigma: 1.0
+    sigma: 5.5
+    half_life_sec: 3600.0
+    red_seconds: 18.0
+    blue_seconds: 0.45
+    alpha: 0.42
+    render_interval_sec: 0.10
+    spatial_blur_sigma: 2.0
+    temporal_smoothing_sec: 0.30
+    min_confidence_weight: 0.35
+    initial_observation_sec: 0.08
+    max_observation_sec: 0.45
+    max_track_gap_sec: 1.0
+    max_jump_ratio: 0.25
+    trail_step_sigma: 0.55
     color_map: "jet"
 
   visual_tracker:
@@ -109,42 +118,45 @@ core_v1:
     ownership_overlap_iou: 0.08
     ownership_iou_advantage: 0.14
     ownership_distance_advantage: 0.14
-    ownership_max_competitor_age_ms: 700
+    ownership_max_competitor_age_ms: 600
 
     id_namespace_stride: 10000
 
-    hold_ms: 850
-    memory_ms: 2800
-    prediction_ms: 340
+    # The tracker renders at the newest display-frame timestamp rather than at
+    # the older detector timestamp. More responsive measurement correction keeps
+    # the corner box visually attached to the person while remaining bounded.
+    hold_ms: 650
+    memory_ms: 2200
+    prediction_ms: 420
 
     match_iou: 0.12
-    reacquire_distance: 0.78
-    byte_match_center: 0.66
+    reacquire_distance: 0.74
+    byte_match_center: 0.64
     byte_second_match_iou: 0.05
-    byte_second_match_center: 0.46
-    low_match_max_age_ms: 600
+    byte_second_match_center: 0.44
+    low_match_max_age_ms: 500
 
-    byte_high_conf: 0.25
-    byte_low_conf: 0.08
-    low_conf_confirm: 0.08
-    start_conf: 0.25
-    new_track_min_conf: 0.25
+    byte_high_conf: 0.24
+    byte_low_conf: 0.07
+    low_conf_confirm: 0.07
+    start_conf: 0.24
+    new_track_min_conf: 0.24
     strong_confirm_hits: 2
     weak_confirm_hits: 3
 
-    process_noise: 0.82
-    measurement_noise: 0.88
-    velocity_damping: 0.95
+    process_noise: 0.92
+    measurement_noise: 0.72
+    velocity_damping: 0.94
     size_velocity_damping: 0.60
-    max_prediction_shift_boxes: 0.55
+    max_prediction_shift_boxes: 0.50
     max_prediction_size_ratio: 0.06
-    adaptive_error_low: 0.08
-    adaptive_error_high: 0.25
-    center_response_slow: 0.42
-    center_response_fast: 0.84
-    size_response: 0.30
-    snap_distance_boxes: 0.62
-    reversal_damping: 0.15
+    adaptive_error_low: 0.06
+    adaptive_error_high: 0.22
+    center_response_slow: 0.58
+    center_response_fast: 0.94
+    size_response: 0.38
+    snap_distance_boxes: 0.55
+    reversal_damping: 0.12
 
     duplicate_iou: 0.68
     duplicate_containment: 0.90
