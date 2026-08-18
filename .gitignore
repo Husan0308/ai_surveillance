@@ -9,3 +9,14 @@ venv/
 .vscode/
 *.log
 .DS_Store
+
+# Local Python environments
+.venv/
+.venv-*/
+venv/
+venv-*/
+
+# Runtime/cache
+.runtime/
+__pycache__/
+*.pyc
