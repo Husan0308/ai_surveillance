@@ -48,6 +48,7 @@ def deepstream_rtsp_pipeline(config: dict) -> str:
     postdecode_queue_buffers = max(1, int(config.get("postdecode_queue_buffers", 1)))
     output_width = max(0, int(config.get("capture_output_width", 0) or 0))
     output_height = max(0, int(config.get("capture_output_height", 0) or 0))
+    interpolation_method = max(0, min(6, int(config.get("capture_interpolation_method", 2))))
 
     transport = str(config.get("rtsp_transport", "auto")).strip().lower()
     select_rtp_protocol = 4 if transport == "tcp" else 0
@@ -74,12 +75,13 @@ def deepstream_rtsp_pipeline(config: dict) -> str:
         raw_caps = f"video/x-raw,width={output_width},height={output_height},format=BGRx"
 
     # nvurisrcbin decodes into NVIDIA surfaces. nvvideoconvert performs the
-    # resize/color conversion before the final RAW host mapping, dramatically
-    # reducing six-camera host-copy bandwidth compared with full-HD BGRx.
+    # resize/color conversion before the final RAW host mapping. Explicit cubic
+    # interpolation avoids the default nearest-neighbour GPU scaler when the
+    # camera is reduced for display.
     return (
         f"nvurisrcbin name=source {' '.join(source_options)} ! "
         f"{postdecode_queue} ! "
-        f"nvvideoconvert name=converter ! {raw_caps} ! "
+        f"nvvideoconvert name=converter interpolation-method={interpolation_method} ! {raw_caps} ! "
         "appsink name=sink drop=true max-buffers=1 sync=false "
         "wait-on-eos=false enable-last-sample=false"
     )
@@ -117,6 +119,7 @@ class DeepStreamCapture:
             "rtsp_reconnect_interval_sec": int(config.get("deepstream_reconnect_interval_sec", 2)),
             "capture_output_width": int(config.get("capture_output_width", 0) or 0),
             "capture_output_height": int(config.get("capture_output_height", 0) or 0),
+            "interpolation_method": int(config.get("capture_interpolation_method", 2)),
             "gpu_scale_before_host_copy": bool(
                 int(config.get("capture_output_width", 0) or 0)
                 and int(config.get("capture_output_height", 0) or 0)
