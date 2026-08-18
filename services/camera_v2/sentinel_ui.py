@@ -23,9 +23,12 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
+BUILD_TAG = "2026.08.18-r3"
+
+
 class MainWindow(QMainWindow):
     NAV = [
-        ("▣", "Monitoring", "Jonli DeepStream camera wall · tracking · heatmap", MonitoringPage),
+        ("▣", "Monitoring", "Jonli DeepStream camera wall · tracking · ankle heatmap", MonitoringPage),
         ("♙", "People", f"{len(PEOPLE)} ta global ID", PeoplePage),
         ("⌁", "Events", f"{len(EVENTS)} ta hodisa", EventsPage),
         ("▥", "Rooms", "Kameralar orasidagi global identity holati", RoomsPage),
@@ -89,7 +92,7 @@ class MainWindow(QMainWindow):
             nl.addWidget(button)
         nl.addStretch()
         side.addWidget(navwrap, 1)
-        build = label("build 2026.08 · edge worker", "mono")
+        build = label(f"build {BUILD_TAG} · ankle pose", "mono")
         build.setStyleSheet(
             f"border-top:1px solid {C['border']};padding:14px;color:{C['muted']};"
         )
