@@ -14,7 +14,13 @@ os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.04")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
 
 from .person_tracking_heatmap import CameraPersonTrackingHeatmap
-from .person_tracking_reid import CameraPersonTrackingReID, DISPLAY_HOLD_BINDING_SEC
+from . import person_tracking_reid as _reid_module
+
+# The native display smoother bridges up to ~1.8 s of sparse-detector misses.
+# Keep Global-ID styling/counters alive for the same bounded visual interval.
+_reid_module.DISPLAY_HOLD_BINDING_SEC = 1.90
+CameraPersonTrackingReID = _reid_module.CameraPersonTrackingReID
+DISPLAY_HOLD_BINDING_SEC = _reid_module.DISPLAY_HOLD_BINDING_SEC
 
 
 class CameraPersonTrackingReIDHeatmap(
@@ -79,7 +85,7 @@ class CameraPersonTrackingReIDHeatmap(
         bindings = self.identity.bindings() if self.identity is not None else {}
         known_globals: set[int] = set()
         unknown_tracks: set[tuple[str, int]] = set()
-        max_age = max(0.75, float(DISPLAY_HOLD_BINDING_SEC))
+        max_age = max(1.90, float(DISPLAY_HOLD_BINDING_SEC))
 
         with self._reid_lock:
             last_seen = dict(self._last_real_track_seen)
