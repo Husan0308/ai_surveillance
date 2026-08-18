@@ -6,14 +6,13 @@
 
 #define MAX_SMOOTH_STATES 512
 /*
- * The production detector runs sparsely (~2.6-3.1 Hz/camera) while the wall is
- * ~20 FPS. A single YOLO miss can therefore leave roughly 7-8 display frames
- * before the next observation; two consecutive misses can exceed the old 12-frame
- * hold. Keep the last authoritative NvDCF box visible for at most 18 frames
- * (~0.9 s @ 20 FPS). This is downstream of nvtracker, so it never creates/changes
- * a tracker target and still expires quickly when a person really leaves.
+ * Detector inference is intentionally sparse to keep all six live cameras smooth.
+ * Difficult poses such as reclining people can miss more than one detector cycle.
+ * Keep the last authoritative NvDCF box visible for at most 36 display frames
+ * (~1.8 s @ 20 FPS). This probe is downstream of nvtracker: held metadata is
+ * presentation-only and can never create/change a tracker target.
  */
-#define DISPLAY_HOLD_FRAMES 18
+#define DISPLAY_HOLD_FRAMES 36
 
 typedef struct {
     int valid;
@@ -181,7 +180,7 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
             SmoothBoxState *s = &g_smooth_states[idx];
 
             if (!s->valid || s->source_id != source_id || s->object_id != (uint64_t)obj->object_id ||
-                (frame_num > s->last_frame_num && frame_num - s->last_frame_num > 20)) {
+                (frame_num > s->last_frame_num && frame_num - s->last_frame_num > 40)) {
                 memset(s, 0, sizeof(*s));
                 s->valid = 1;
                 s->source_id = source_id;
@@ -235,7 +234,7 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
             uint64_t gap = frame_num - s->last_frame_num;
             if (gap <= DISPLAY_HOLD_FRAMES) {
                 smoothed += add_display_hold(batch_meta, frame_meta, s, gap, frame_w, frame_h);
-            } else if (gap > 40) {
+            } else if (gap > DISPLAY_HOLD_FRAMES + 8) {
                 s->valid = 0;
             }
         }
