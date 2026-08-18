@@ -3,11 +3,20 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QSizePolicy, QTextEdit, QVBoxLayout,
+    QButtonGroup,
+    QFileDialog,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
 )
 
-from .sentinel_ui_base import C, BarChart, Panel, ScrollPage, label, make_button, panel_layout
+from .sentinel_ui_base import C, Panel, ScrollPage, label, make_button, panel_layout
 
 
 class EnrollmentPage(ScrollPage):
@@ -18,6 +27,7 @@ class EnrollmentPage(ScrollPage):
 
         body = QHBoxLayout()
         body.setSpacing(16)
+
         form = Panel()
         form.setMaximumWidth(370)
         form_layout = panel_layout(form, (18, 18, 18, 18), 10)
@@ -40,7 +50,8 @@ class EnrollmentPage(ScrollPage):
         self.profile_preview.setAlignment(Qt.AlignCenter)
         self.profile_preview.setFixedSize(170, 170)
         self.profile_preview.setStyleSheet(
-            f"background:{C['field']};border:1px dashed {C['border']};border-radius:7px;color:{C['muted']};"
+            f"background:{C['field']};border:1px dashed {C['border']};"
+            f"border-radius:7px;color:{C['muted']};"
         )
         profile_layout.addWidget(self.profile_preview, 0, Qt.AlignCenter)
         self.profile_name = label("Rasmlardan birini tanlang", "muted")
@@ -64,7 +75,9 @@ class EnrollmentPage(ScrollPage):
         photos_header = QHBoxLayout()
         header_text = QVBoxLayout()
         header_text.addWidget(label("10 ta yuz rasmi", "sectionTitle"))
-        header_text.addWidget(label("Bitta odamning aniq, turli burchakdan olingan rasmlarini tanlang.", "muted"))
+        header_text.addWidget(
+            label("Bitta odamning aniq, turli burchakdan olingan rasmlarini tanlang.", "muted")
+        )
         photos_header.addLayout(header_text)
         photos_header.addStretch()
         choose = make_button("＋  10 ta rasm tanlash", "primary")
@@ -96,7 +109,11 @@ class EnrollmentPage(ScrollPage):
             grid.addLayout(cell, index // 5, index % 5)
             grid.setColumnStretch(index % 5, 1)
         photos_layout.addLayout(grid)
-        hint = label("10 ta rasm yuklang, keyin eng yaxshi tushgan rasm ustiga bosib profile photo sifatida tanlang.", "muted")
+
+        hint = label(
+            "10 ta rasm yuklang, keyin eng yaxshi tushgan rasm ustiga bosib profile photo sifatida tanlang.",
+            "muted",
+        )
         hint.setWordWrap(True)
         photos_layout.addWidget(hint)
         photos_layout.addStretch()
@@ -118,8 +135,13 @@ class EnrollmentPage(ScrollPage):
             return
         valid_paths = [path for path in paths if not QPixmap(path).isNull()]
         if len(valid_paths) != 10:
-            QMessageBox.warning(self, "Noto'g'ri fayl", "Tanlangan fayllarning barchasi ochiladigan rasm bo'lishi kerak.")
+            QMessageBox.warning(
+                self,
+                "Noto'g'ri fayl",
+                "Tanlangan fayllarning barchasi ochiladigan rasm bo'lishi kerak.",
+            )
             return
+
         self.image_paths = valid_paths
         self.profile_index = None
         self.profile_preview.clear()
@@ -132,7 +154,9 @@ class EnrollmentPage(ScrollPage):
             button.setText("")
             button.setIcon(QIcon(path))
             button.setIconSize(QSize(160, 104))
-            button.setStyleSheet(f"border:1px solid {C['border']};border-radius:6px;padding:3px;")
+            button.setStyleSheet(
+                f"border:1px solid {C['border']};border-radius:6px;padding:3px;"
+            )
             self.photo_labels[index].setText(f"Rasm {index + 1}")
         self.update_enrollment_status()
 
@@ -143,49 +167,61 @@ class EnrollmentPage(ScrollPage):
         for current, button in enumerate(self.photo_buttons):
             selected = current == index
             button.setChecked(selected)
-            border = C['primary'] if selected else C['border']
+            border = C["primary"] if selected else C["border"]
             width = 3 if selected else 1
-            button.setStyleSheet(f"border:{width}px solid {border};border-radius:6px;padding:3px;")
+            button.setStyleSheet(
+                f"border:{width}px solid {border};border-radius:6px;padding:3px;"
+            )
             self.photo_labels[current].setText(
                 f"Rasm {current + 1} · PROFILE" if selected else f"Rasm {current + 1}"
             )
             self.photo_labels[current].setStyleSheet(
-                f"color:{C['primary'] if selected else C['muted']};font:10px 'DejaVu Sans Mono';"
+                f"color:{C['primary'] if selected else C['muted']};"
+                "font:10px 'DejaVu Sans Mono';"
             )
+
         pixmap = QPixmap(self.image_paths[index])
         self.profile_preview.setPixmap(
-            pixmap.scaled(self.profile_preview.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            pixmap.scaled(
+                self.profile_preview.size(),
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation,
+            )
         )
         self.profile_name.setText(f"Rasm {index + 1} tanlandi")
         self.update_enrollment_status()
 
     def update_enrollment_status(self):
-        profile = f"Rasm {self.profile_index + 1}" if self.profile_index is not None else "tanlanmagan"
-        self.count.setText(f"Rasmlar: {len(self.image_paths)}/10 · Profile photo: {profile}")
+        profile = (
+            f"Rasm {self.profile_index + 1}"
+            if self.profile_index is not None
+            else "tanlanmagan"
+        )
+        self.count.setText(
+            f"Rasmlar: {len(self.image_paths)}/10 · Profile photo: {profile}"
+        )
 
     def finish(self):
         if not self.name.text().strip():
             QMessageBox.warning(self, "Enrollment", "Shaxsning to'liq ismini kiriting.")
             return
         if len(self.image_paths) != 10:
-            QMessageBox.warning(self, "Enrollment", "Enrollment uchun aynan 10 ta yuz rasmi kerak.")
+            QMessageBox.warning(
+                self,
+                "Enrollment",
+                "Enrollment uchun aynan 10 ta yuz rasmi kerak.",
+            )
             return
         if self.profile_index is None:
-            QMessageBox.warning(self, "Enrollment", "Eng yaxshi rasmni profile photo sifatida tanlang.")
+            QMessageBox.warning(
+                self,
+                "Enrollment",
+                "Eng yaxshi rasmni profile photo sifatida tanlang.",
+            )
             return
         QMessageBox.information(
             self,
             "Enrollment",
-            f"{self.name.text().strip()} bazaga qo'shildi.\nProfile photo: Rasm {self.profile_index + 1}",
+            f"{self.name.text().strip()} bazaga qo'shildi.\n"
+            f"Profile photo: Rasm {self.profile_index + 1}",
         )
-
-
-class ReportsPage(ScrollPage):
-    def __init__(self):
-        super().__init__(); top=QHBoxLayout(); top.addStretch(); top.addWidget(make_button("⇩  CSV")); top.addWidget(make_button("⇩  PDF","primary")); self.layout.addLayout(top)
-        first=QHBoxLayout(); panel=Panel(); pl=panel_layout(panel); pl.addWidget(label("Soatlik kirish va chiqish","sectionTitle")); pl.addWidget(BarChart([("Kirish",[2,4,8,12,10,7,4],C['known']),("Chiqish",[0,1,3,4,6,9,8],C['unknown'])],["08","10","12","14","16","18","20"])); first.addWidget(panel,2)
-        pie=Panel(); pil=panel_layout(pie); pil.addWidget(label("Known / Unknown","sectionTitle")); chart=BarChart([("Odam",[68,32],C['primary'])],["Known","Unknown"]); pil.addWidget(chart); first.addWidget(pie,1); self.layout.addLayout(first)
-        second=QHBoxLayout(); room=Panel(); rl=panel_layout(room); rl.addWidget(label("Xonalar bo'yicha bandlik","sectionTitle")); rl.addWidget(BarChart([("Bandlik",[22,14,9],C['blue'])],["Lobbi","Ofis","Ombor"])); second.addWidget(room,2)
-        summary=Panel(); sl=panel_layout(summary); sl.addWidget(label("Bugungi xulosa","sectionTitle"));
-        for k,v in [("Jami tashrif","46"),("Known","31"),("Unknown","15"),("Restricted hodisa","3"),("O'rtacha qolish","1s 42d")]: row=QHBoxLayout(); row.addWidget(label(k)); row.addStretch(); row.addWidget(label(v,"mono")); sl.addLayout(row)
-        sl.addStretch(); second.addWidget(summary,1); self.layout.addLayout(second); self.layout.addStretch()
