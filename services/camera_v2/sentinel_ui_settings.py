@@ -8,14 +8,13 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
-    QDialogButtonBox,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -48,7 +47,7 @@ class CameraConfigStore:
         active = 0
         cleaned: list[dict] = []
         for row in cameras:
-            camera_id = str(row.get("id", "")).strip()
+            camera_id = str(row.get("id", "")).strip().upper()
             if not camera_id:
                 raise ValueError("Camera ID bo'sh bo'lmasligi kerak")
             if camera_id in ids:
@@ -56,7 +55,7 @@ class CameraConfigStore:
             ids.add(camera_id)
 
             uri = str(row.get("uri", "")).strip()
-            if not uri.startswith("rtsp://"):
+            if not uri.lower().startswith("rtsp://"):
                 raise ValueError(f"{camera_id}: RTSP URL rtsp:// bilan boshlanishi kerak")
 
             enabled = bool(row.get("enabled", True))
@@ -78,7 +77,8 @@ class CameraConfigStore:
                 f"Monitoring 2x3 wall maksimum {MAX_ACTIVE_CAMERAS} ta active camera qo'llaydi"
             )
 
-        # Canonical camera schema: no codec and no environment-URI fields.
+        # Canonical source schema. Codec/decoder and any environment-URI selector
+        # are intentionally absent; DeepStream negotiates the RTSP stream itself.
         payload["cameras"] = cleaned
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -90,6 +90,8 @@ class CameraConfigStore:
 
 
 class CameraEditorDialog(QDialog):
+    """Dark in-app camera editor with only the fields a user should choose."""
+
     def __init__(
         self,
         camera: dict | None = None,
@@ -98,50 +100,120 @@ class CameraEditorDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Camera qo'shish" if camera is None else "Camerani tahrirlash")
-        self.setMinimumWidth(540)
         self.original = dict(camera or {})
+        self.setModal(True)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMinimumWidth(520)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 18)
+        shell = QFrame(self)
+        shell.setObjectName("cameraDialog")
+        shell.setStyleSheet(
+            "QFrame#cameraDialog{background:#0d141c;border:1px solid #2a3a49;"
+            "border-radius:10px;}"
+        )
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(shell)
+
+        root = QVBoxLayout(shell)
+        root.setContentsMargins(18, 14, 18, 18)
         root.setSpacing(14)
 
-        form = QFormLayout()
-        form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(11)
+        header = QHBoxLayout()
+        header_text = QVBoxLayout()
+        header_text.setSpacing(2)
+        header_text.addWidget(
+            label("Yangi camera" if camera is None else "Camerani tahrirlash", "sectionTitle")
+        )
+        header_text.addWidget(label("RTSP source", "mono"))
+        header.addLayout(header_text)
+        header.addStretch()
+        close = QToolButton()
+        close.setText("×")
+        close.setCursor(Qt.PointingHandCursor)
+        close.setFixedSize(30, 30)
+        close.clicked.connect(self.reject)
+        header.addWidget(close)
+        root.addLayout(header)
 
-        self.camera_id = QLineEdit(str(self.original.get("id", suggested_id)))
-        self.name = QLineEdit(str(self.original.get("name", "")))
-        self.room = QLineEdit(str(self.original.get("room", "")))
-        self.uri = QLineEdit(str(self.original.get("uri", "rtsp://")))
-        self.enabled = QCheckBox("Camera active")
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background:{C['border']};border:0;")
+        root.addWidget(divider)
+
+        self.camera_id = self._field(root, "Camera ID", str(self.original.get("id", suggested_id)))
+        self.name = self._field(root, "Name", str(self.original.get("name", "")), "Masalan: Entrance 1")
+        self.room = self._field(root, "Room", str(self.original.get("room", "")), "Masalan: Entrance")
+        self.uri = self._field(
+            root,
+            "RTSP URL",
+            str(self.original.get("uri", "rtsp://")),
+            "rtsp://192.168.1.210:554/Streaming/Channels/101",
+        )
+
+        status_row = QHBoxLayout()
+        status_text = QVBoxLayout()
+        status_text.setSpacing(1)
+        status_text.addWidget(label("Camera status", "sectionTitle"))
+        status_text.addWidget(label("Monitoring wallga source qo'shilsin", "muted"))
+        status_row.addLayout(status_text)
+        status_row.addStretch()
+        self.enabled = QCheckBox("Enabled")
         self.enabled.setChecked(bool(self.original.get("enabled", True)))
-
-        form.addRow("Camera ID", self.camera_id)
-        form.addRow("Name", self.name)
-        form.addRow("Room", self.room)
-        form.addRow("RTSP URL", self.uri)
-        form.addRow("Status", self.enabled)
-        root.addLayout(form)
+        status_row.addWidget(self.enabled)
+        root.addLayout(status_row)
 
         note = QLabel(
-            "Faqat RTSP URL yetarli. Stream formati va decoder DeepStream tomonidan "
-            "avtomatik aniqlanadi. Login/parol .env dagi "
-            "SURVEILLANCE_RTSP_USERNAME / SURVEILLANCE_RTSP_PASSWORD dan olinadi."
+            "Codec va decoder tanlanmaydi. DeepStream RTSP streamni avtomatik aniqlaydi; "
+            "login/parol .env dagi SURVEILLANCE_RTSP_USERNAME va "
+            "SURVEILLANCE_RTSP_PASSWORD dan olinadi."
         )
         note.setWordWrap(True)
-        note.setStyleSheet(f"color:{C['muted']};font-size:10px;")
+        note.setStyleSheet(
+            f"color:{C['muted']};background:#091017;border:1px solid {C['border']};"
+            "border-radius:6px;padding:9px 10px;font-size:10px;"
+        )
         root.addWidget(note)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = make_button("Cancel")
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        save = make_button("Save camera", "primary")
+        save.clicked.connect(self._validate_and_accept)
+        actions.addWidget(save)
+        root.addLayout(actions)
+
+    @staticmethod
+    def _field(layout: QVBoxLayout, title: str, value: str, placeholder: str = "") -> QLineEdit:
+        layout.addWidget(label(title, "muted"))
+        field = QLineEdit(value)
+        if placeholder:
+            field.setPlaceholderText(placeholder)
+        field.setMinimumHeight(36)
+        layout.addWidget(field)
+        return field
+
+    def _validate_and_accept(self) -> None:
+        camera_id = self.camera_id.text().strip()
+        uri = self.uri.text().strip()
+        if not camera_id:
+            QMessageBox.warning(self, "Camera", "Camera ID kiriting.")
+            self.camera_id.setFocus()
+            return
+        if not uri.lower().startswith("rtsp://"):
+            QMessageBox.warning(self, "Camera", "RTSP URL rtsp:// bilan boshlanishi kerak.")
+            self.uri.setFocus()
+            return
+        self.accept()
 
     def camera_row(self) -> dict:
+        camera_id = self.camera_id.text().strip().upper()
         return {
-            "id": self.camera_id.text().strip(),
-            "name": self.name.text().strip() or self.camera_id.text().strip(),
+            "id": camera_id,
+            "name": self.name.text().strip() or camera_id,
             "room": self.room.text().strip(),
             "enabled": self.enabled.isChecked(),
             "uri": self.uri.text().strip(),
@@ -157,28 +229,35 @@ class CameraSettingsRow(Panel):
         super().__init__(parent)
         self.index = int(index)
         self.camera = dict(camera)
-        self.setMinimumHeight(90)
+        self.setMinimumHeight(94)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 11, 12, 11)
         row.setSpacing(12)
 
+        enabled_state = bool(camera.get("enabled", True))
         dot = QLabel("●")
+        dot.setFixedWidth(14)
         dot.setStyleSheet(
-            f"color:{C['known'] if camera.get('enabled', True) else C['muted']};font-size:14px;"
+            f"color:{C['known'] if enabled_state else C['muted']};font-size:14px;"
         )
         row.addWidget(dot)
 
         info = QVBoxLayout()
-        info.setSpacing(3)
+        info.setSpacing(4)
         heading = QHBoxLayout()
         cid = QLabel(str(camera.get("id", "CAM")))
-        cid.setStyleSheet("font-weight:800;font-size:13px;")
+        cid.setStyleSheet("font-weight:800;font-size:12px;")
         heading.addWidget(cid)
         name = QLabel(str(camera.get("name", "")))
-        name.setStyleSheet(f"color:{C['muted']};")
+        name.setStyleSheet(f"color:{C['muted']};font-size:11px;")
         heading.addWidget(name)
         heading.addStretch()
+        room = QLabel(str(camera.get("room", "") or "No room"))
+        room.setStyleSheet(
+            f"color:{C['blue']};background:#0c1823;border-radius:4px;padding:2px 6px;font-size:9px;"
+        )
+        heading.addWidget(room)
         info.addLayout(heading)
 
         uri = QLabel(str(camera.get("uri", "")))
@@ -186,13 +265,13 @@ class CameraSettingsRow(Panel):
         uri.setStyleSheet(f"color:{C['muted']};font:10px 'DejaVu Sans Mono';")
         info.addWidget(uri)
 
-        room = QLabel(str(camera.get("room", "") or "No room"))
-        room.setStyleSheet(f"color:{C['muted']};font-size:10px;")
-        info.addWidget(room)
+        source_note = QLabel("DeepStream · auto codec · RTSP")
+        source_note.setStyleSheet(f"color:#5f7080;font:9px 'DejaVu Sans Mono';")
+        info.addWidget(source_note)
         row.addLayout(info, 1)
 
         enabled = QCheckBox("Enabled")
-        enabled.setChecked(bool(camera.get("enabled", True)))
+        enabled.setChecked(enabled_state)
         enabled.toggled.connect(lambda checked: self.toggled.emit(self.index, checked))
         row.addWidget(enabled)
 
@@ -220,35 +299,25 @@ class SettingsPage(QWidget):
         self.dirty = False
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 20, 24, 22)
-        outer.setSpacing(14)
+        outer.setContentsMargins(20, 18, 20, 20)
+        outer.setSpacing(12)
 
-        header = QHBoxLayout()
-        titles = QVBoxLayout()
-        titles.setSpacing(2)
-        titles.addWidget(label("Camera Settings", "title"))
-        titles.addWidget(
-            label(
-                "RTSP cameras · enable/disable · edit · delete · add",
-                "subtitle",
-            )
-        )
-        header.addLayout(titles)
-        header.addStretch()
-
-        self.apply_button = make_button("Apply cameras", "primary")
+        controls = QHBoxLayout()
+        controls.addWidget(label("Camera sources", "sectionTitle"))
+        controls.addStretch()
+        self.apply_button = make_button("Apply changes", "primary")
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self._apply)
-        header.addWidget(self.apply_button)
-
+        controls.addWidget(self.apply_button)
         add = make_button("+ Add camera")
         add.clicked.connect(self.add_camera)
-        header.addWidget(add)
-        outer.addLayout(header)
+        controls.addWidget(add)
+        outer.addLayout(controls)
 
         self.banner = QLabel(
-            "Camera ID, name, room va RTSP URL yetarli. Qolgan stream parametrlarini pipeline avtomatik aniqlaydi."
+            "Camera ID, name, room va RTSP URL yetarli. Codec va decoder DeepStream tomonidan avtomatik tanlanadi."
         )
+        self.banner.setWordWrap(True)
         self.banner.setStyleSheet(
             f"color:{C['muted']};background:#0b1219;border:1px solid {C['border']};"
             "border-radius:6px;padding:9px 12px;"
@@ -259,6 +328,7 @@ class SettingsPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
+        body.setObjectName("pageRoot")
         self.rows_layout = QVBoxLayout(body)
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(9)
@@ -278,7 +348,7 @@ class SettingsPage(QWidget):
         self.dirty = True
         self.apply_button.setEnabled(True)
         self.banner.setText(
-            message + "  ·  Apply cameras bosilganda live pipeline restart bo'ladi."
+            message + " · Apply changes bosilganda live camera pipeline qayta ishga tushadi."
         )
         self.banner.setStyleSheet(
             "color:#f6d98a;background:#211c0e;border:1px solid #5b4921;"
@@ -385,7 +455,7 @@ class SettingsPage(QWidget):
         self.apply_button.setEnabled(False)
         self.payload = self.store.load()
         self.banner.setText(
-            "Camera config applied. Monitoring pipeline yangi config bilan qayta ishga tushadi."
+            "Camera config applied. Monitoring pipeline yangi source list bilan qayta ishga tushdi."
         )
         self.banner.setStyleSheet(
             f"color:{C['known']};background:#0b1c19;border:1px solid #174238;"
