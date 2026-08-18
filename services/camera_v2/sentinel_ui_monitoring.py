@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -16,7 +17,7 @@ from .sentinel_video_pro import ProLiveVideoWall, ProPipelineController
 
 
 class MonitoringPage(QWidget):
-    """Live Monitoring page backed only by current pipeline occupancy metrics."""
+    """Professional live Monitoring page backed by current pipeline metrics."""
 
     def __init__(self):
         super().__init__()
@@ -27,10 +28,11 @@ class MonitoringPage(QWidget):
         self.camera_configs = list(load_settings().cameras)
 
         self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(18, 10, 18, 12)
-        self.layout.setSpacing(14)
+        self.layout.setContentsMargins(12, 10, 12, 12)
+        self.layout.setSpacing(12)
 
         self.camera_panel = QWidget(self)
+        self.camera_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         camera_column = QVBoxLayout(self.camera_panel)
         camera_column.setContentsMargins(0, 0, 0, 0)
         camera_column.setSpacing(0)
@@ -41,66 +43,58 @@ class MonitoringPage(QWidget):
         self.wall.heatmapToggled.connect(self.controller.set_heatmap)
         self.wall.exitFullscreenRequested.connect(self.exit_fullscreen)
         camera_column.addWidget(self.wall, 1)
-        self.layout.addWidget(self.camera_panel, 3)
+        self.layout.addWidget(self.camera_panel, 1)
 
         self.identity_panel = QWidget(self)
+        self.identity_panel.setMinimumWidth(292)
+        self.identity_panel.setMaximumWidth(336)
         identity_rail = QVBoxLayout(self.identity_panel)
         identity_rail.setContentsMargins(0, 0, 0, 0)
         identity_rail.setSpacing(10)
 
         summary = Panel()
-        summary.setMinimumWidth(315)
-        summary.setMinimumHeight(154)
+        summary.setMinimumHeight(178)
         summary_layout = QVBoxLayout(summary)
         summary_layout.setContentsMargins(16, 14, 16, 14)
-        summary_layout.setSpacing(8)
+        summary_layout.setSpacing(10)
 
-        summary_top = QHBoxLayout()
-        title_col = QVBoxLayout()
-        title_col.setSpacing(2)
-        title_col.addWidget(label("LIVE OCCUPANCY", "eyebrow"))
-        title_col.addWidget(label("Current people in building", "muted"))
-        summary_top.addLayout(title_col)
-        summary_top.addStretch()
-        live_badge = QLabel("● LIVE")
-        live_badge.setStyleSheet(
-            f"color:{C['known']};background:#0b1c19;border:1px solid #174238;"
-            "border-radius:5px;padding:4px 7px;font:700 9px 'DejaVu Sans Mono';"
-        )
-        summary_top.addWidget(live_badge)
-        summary_layout.addLayout(summary_top)
+        summary_head = QHBoxLayout()
+        heading = QVBoxLayout()
+        heading.setSpacing(2)
+        heading.addWidget(label("OCCUPANCY", "eyebrow"))
+        heading.addWidget(label("Hozir binoda", "muted"))
+        summary_head.addLayout(heading)
+        summary_head.addStretch()
+        self.live_badge = QLabel("STARTING")
+        self.live_badge.setStyleSheet(self._status_style("starting"))
+        summary_head.addWidget(self.live_badge)
+        summary_layout.addLayout(summary_head)
 
         total_row = QHBoxLayout()
-        total_row.setSpacing(8)
+        total_row.setSpacing(7)
         self.total_value = QLabel("0")
         self.total_value.setStyleSheet(
-            f"color:{C['primary']};font-size:34px;font-weight:800;"
+            f"color:{C['text']};font-size:40px;font-weight:800;letter-spacing:-1px;"
         )
         total_row.addWidget(self.total_value)
-        people_text = QLabel("people")
-        people_text.setStyleSheet(
-            f"color:{C['muted']};font-size:12px;padding-top:12px;"
+        total_caption = QLabel("people")
+        total_caption.setStyleSheet(
+            f"color:{C['muted']};font-size:11px;padding-top:18px;"
         )
-        total_row.addWidget(people_text)
+        total_row.addWidget(total_caption)
         total_row.addStretch()
-        self.pending_value = QLabel("live")
-        self.pending_value.setStyleSheet(
-            f"color:{C['muted']};font:10px 'DejaVu Sans Mono';"
-        )
-        total_row.addWidget(self.pending_value)
         summary_layout.addLayout(total_row)
 
         split = QHBoxLayout()
         split.setSpacing(8)
-        self.known_value, known_box = self._summary_metric("KNOWN", 0, C["known"])
-        self.unknown_value, unknown_box = self._summary_metric("UNKNOWN", 0, C["unknown"])
+        self.known_value, known_box = self._summary_metric("KNOWN", C["known"])
+        self.unknown_value, unknown_box = self._summary_metric("UNKNOWN", C["unknown"])
         split.addWidget(known_box, 1)
         split.addWidget(unknown_box, 1)
         summary_layout.addLayout(split)
         identity_rail.addWidget(summary)
 
         recent_panel = Panel()
-        recent_panel.setMinimumWidth(315)
         recent_layout = panel_layout(recent_panel, (14, 14, 14, 14), 0)
         recent_head = QHBoxLayout()
         recent_head.addWidget(label("Recent Views", "sectionTitle"))
@@ -110,34 +104,53 @@ class MonitoringPage(QWidget):
         recent_layout.addLayout(recent_head)
         recent_layout.addSpacing(8)
 
-        # Recent Views is still populated by the current People data source; the
-        # occupancy cards above are intentionally independent and fully live.
+        # This list is presentation-only until the live recent-view crop feed is
+        # wired. Occupancy above never depends on these sample rows.
         for person in sorted(PEOPLE, key=lambda p: p.last_seen, reverse=True)[:6]:
             recent_layout.addWidget(self.recent_view(person))
         recent_layout.addStretch()
         identity_rail.addWidget(recent_panel, 1)
-        self.layout.addWidget(self.identity_panel, 1)
+        self.layout.addWidget(self.identity_panel, 0)
 
         self.poll_timer = self.startTimer(250)
 
     @staticmethod
-    def _summary_metric(heading: str, value: int, color: str):
+    def _status_style(state: str) -> str:
+        state = str(state or "").lower()
+        if state == "live":
+            color = C["known"]
+            bg = "#0b1c19"
+            border = "#174238"
+        elif state in {"error", "offline"}:
+            color = C["offline"]
+            bg = "#211215"
+            border = "#4a2529"
+        else:
+            color = C["unknown"]
+            bg = "#201a0e"
+            border = "#4b3b1d"
+        return (
+            f"color:{color};background:{bg};border:1px solid {border};"
+            "border-radius:5px;padding:4px 7px;font:700 9px 'DejaVu Sans Mono';"
+        )
+
+    @staticmethod
+    def _summary_metric(heading: str, color: str):
         box = QFrame()
         box.setStyleSheet(
-            "QFrame{background:#0b1219;border:1px solid #1d2a36;border-radius:6px;}"
+            "QFrame{background:#0a1118;border:1px solid #1b2935;border-radius:6px;}"
         )
-        row = QHBoxLayout(box)
-        row.setContentsMargins(10, 7, 10, 7)
-        row.setSpacing(8)
-        heading_label = QLabel(heading)
-        heading_label.setStyleSheet(
-            f"color:{C['muted']};font:700 9px 'DejaVu Sans Mono';"
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(2)
+        title = QLabel(heading)
+        title.setStyleSheet(
+            f"color:{C['muted']};font:700 9px 'DejaVu Sans Mono';letter-spacing:1px;"
         )
-        metric = QLabel(str(value))
-        metric.setStyleSheet(f"color:{color};font-size:19px;font-weight:800;")
-        row.addWidget(heading_label)
-        row.addStretch()
-        row.addWidget(metric)
+        metric = QLabel("0")
+        metric.setStyleSheet(f"color:{color};font-size:22px;font-weight:800;")
+        lay.addWidget(title)
+        lay.addWidget(metric)
         return metric, box
 
     def _start_or_bind(self, xid: int) -> None:
@@ -145,14 +158,25 @@ class MonitoringPage(QWidget):
 
     def timerEvent(self, event):
         if event.timerId() == self.poll_timer:
-            _status, metrics = self.controller.poll()
+            status, metrics = self.controller.poll()
             self.wall.update_metrics(metrics)
+
+            state = str(getattr(status, "state", "STARTING") or "STARTING").upper()
+            if state in {"LIVE", "VIDEO_BOUND", "FOCUS", "HEATMAP"}:
+                badge_state = "live"
+                badge_text = "● LIVE"
+            elif state in {"ERROR", "STOPPED"}:
+                badge_state = "error"
+                badge_text = state
+            else:
+                badge_state = "starting"
+                badge_text = "STARTING"
+            self.live_badge.setText(badge_text)
+            self.live_badge.setStyleSheet(self._status_style(badge_state))
 
             known = max(0, int(metrics.get("known_people", 0) or 0))
             unknown = max(0, int(metrics.get("unknown_people", 0) or 0))
             total = max(0, int(metrics.get("total_people", known + unknown) or 0))
-            # The runtime is designed so total == known + unknown. Keep the UI
-            # consistent even during one metrics tick of transition.
             classified = known + unknown
             if total < classified:
                 total = classified
@@ -161,8 +185,6 @@ class MonitoringPage(QWidget):
             self.known_value.setText(str(known))
             self.unknown_value.setText(str(unknown))
             self.active_count.setText(f"{total} active")
-            pending = max(0, total - classified)
-            self.pending_value.setText(f"{pending} pending" if pending else "live")
             return
         super().timerEvent(event)
 
@@ -178,8 +200,8 @@ class MonitoringPage(QWidget):
         self._fullscreen_active = True
         self._focused_source = None if source_id is None else int(source_id)
 
-        # Keep the same native DeepStream XID; only nvmultistreamtiler focus and
-        # geometry change. This avoids EGL rebind races.
+        # Same native DeepStream surface, no XID rebind. Only tiler focus/aspect
+        # changes, which avoids black/empty fullscreen windows.
         self.controller.focus(self._focused_source)
         self.identity_panel.hide()
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -195,8 +217,8 @@ class MonitoringPage(QWidget):
         self._focused_source = None
         self.wall.set_fullscreen_mode(False, None)
         self.identity_panel.show()
-        self.layout.setContentsMargins(18, 10, 18, 12)
-        self.layout.setSpacing(14)
+        self.layout.setContentsMargins(12, 10, 12, 12)
+        self.layout.setSpacing(12)
         self._set_app_fullscreen_shell(False)
 
     def open_fullscreen_grid(self) -> None:
@@ -213,9 +235,7 @@ class MonitoringPage(QWidget):
         info = QVBoxLayout()
         info.setSpacing(3)
         info.addWidget(label(person.label, "sectionTitle"))
-        info.addWidget(
-            label(person.last_seen.astimezone().strftime("%H:%M:%S"), "mono")
-        )
+        info.addWidget(label(person.last_seen.astimezone().strftime("%H:%M:%S"), "mono"))
         row.addLayout(info, 1)
         row.addWidget(FaceAvatar(person, 42))
         return item
