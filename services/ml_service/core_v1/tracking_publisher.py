@@ -1,7 +1,17 @@
 from __future__ import annotations
 
+import math
+
+import cv2
+
+from .camera_heatmap import FootpointHeatmap
 from .event_publisher import EventDrivenJpegPublisher
+from .jpeg_publisher import _identity_label
 from .ownership_tracker import OwnershipLockedTracker
+
+_BOX_COLOR = (255, 190, 35)
+_LABEL_BG = (7, 12, 20)
+_LABEL_TEXT = (245, 248, 252)
 
 
 def _build_tracker(camera_id: str, config: dict) -> OwnershipLockedTracker:
@@ -70,12 +80,52 @@ def _build_tracker(camera_id: str, config: dict) -> OwnershipLockedTracker:
     )
 
 
-class TrackingJpegPublisher(EventDrivenJpegPublisher):
-    """Event-driven latest-frame publisher with ownership-locked camera IDs."""
+def _draw_corner_box(image, x1: int, y1: int, x2: int, y2: int, label: str) -> None:
+    h, w = image.shape[:2]
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    corner = max(12, min(34, int(round(min(box_w, box_h) * 0.24))))
+    thickness = 2 if max(w, h) < 1100 else 3
 
-    def __init__(self, *args, tracker_config=None, **kwargs):
+    # Four clean L-shaped corners instead of a heavy full rectangle.
+    segments = (
+        ((x1, y1), (x1 + corner, y1)), ((x1, y1), (x1, y1 + corner)),
+        ((x2, y1), (x2 - corner, y1)), ((x2, y1), (x2, y1 + corner)),
+        ((x1, y2), (x1 + corner, y2)), ((x1, y2), (x1, y2 - corner)),
+        ((x2, y2), (x2 - corner, y2)), ((x2, y2), (x2, y2 - corner)),
+    )
+    for start, end in segments:
+        cv2.line(image, start, end, _BOX_COLOR, thickness, cv2.LINE_AA)
+
+    # Small floor-contact marker: this is also the point used by the heatmap.
+    foot = (int(round((x1 + x2) * 0.5)), y2)
+    cv2.circle(image, foot, 4 if thickness == 2 else 5, _BOX_COLOR, -1, cv2.LINE_AA)
+    cv2.circle(image, foot, 7 if thickness == 2 else 8, _BOX_COLOR, 1, cv2.LINE_AA)
+
+    scale = 0.48 if w < 1100 else 0.55
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_thickness = 1
+    (tw, th), baseline = cv2.getTextSize(label, font, scale, text_thickness)
+    pad_x, pad_y = 7, 4
+    pill_h = th + baseline + pad_y * 2
+    pill_w = min(max(1, w - x1), tw + pad_x * 2)
+    top = max(0, y1 - pill_h - 3)
+    bottom = min(h - 1, top + pill_h)
+    right = min(w - 1, x1 + pill_w)
+    cv2.rectangle(image, (x1, top), (right, bottom), _LABEL_BG, -1, cv2.LINE_AA)
+    cv2.line(image, (x1, bottom), (right, bottom), _BOX_COLOR, 2, cv2.LINE_AA)
+    text_y = max(top + th + pad_y, bottom - baseline - pad_y)
+    cv2.putText(image, label, (x1 + pad_x, text_y), font, scale, _LABEL_TEXT, text_thickness, cv2.LINE_AA)
+
+
+class TrackingJpegPublisher(EventDrivenJpegPublisher):
+    """Latest-frame camera publisher with local tracking and footpoint heatmap."""
+
+    def __init__(self, *args, tracker_config=None, heatmap_config=None, **kwargs):
         super().__init__(*args, tracker_config=tracker_config, **kwargs)
         self.visual_tracker = _build_tracker(self.camera_id, dict(tracker_config or {}))
+        self.foot_heatmap = FootpointHeatmap(heatmap_config)
+        self._heatmap_recorded_key = None
 
     def _identity_for_box(self, box):
         track_id = int(getattr(box, "track_id", 0) or 0)
@@ -83,5 +133,90 @@ class TrackingJpegPublisher(EventDrivenJpegPublisher):
             return {"global_id": self.visual_tracker.display_label(track_id)}
         return super()._identity_for_box(box)
 
+    def _draw_detection(self, image, source_width, source_height, now, display_frame_id, display_frame_time):
+        max_age_sec = (self.overlay_max_age_ms / 1000.0) if self.overlay_max_age_ms > 0 else None
+        if self.detections is not None:
+            result = self.detections.get(self.camera_id)
+            if result is not None:
+                key = self._detection_key(result)
+                with self._lock:
+                    if key != self._current_detection_key:
+                        self._current_detection_key = key
+                        self._current_detection_accepted = False
+                        self._current_future_counted = False
+                        self._current_stale_counted = False
+
+                result_time = float(result.frame_captured_monotonic)
+                is_future = int(result.frame_id) > int(display_frame_id) or result_time > float(display_frame_time)
+                if is_future:
+                    with self._lock:
+                        if not self._current_future_counted:
+                            self.future_detection_deferrals += 1
+                            self._current_future_counted = True
+                else:
+                    source_age = max(0.0, float(display_frame_time) - result_time)
+                    if max_age_sec is None or source_age <= max_age_sec:
+                        self.visual_tracker.update(result, now, source_width, source_height)
+                        with self._lock:
+                            self._current_detection_accepted = True
+                        if key != self._heatmap_recorded_key:
+                            self.foot_heatmap.observe_boxes(result.boxes, int(source_width), int(source_height), now)
+                            self._heatmap_recorded_key = key
+                    else:
+                        with self._lock:
+                            if not self._current_detection_accepted and not self._current_stale_counted:
+                                self.stale_detection_rejects += 1
+                                self._current_stale_counted = True
+
+        # Heat goes under the tracking overlay so IDs and corners stay crisp.
+        image = self.foot_heatmap.overlay(image, now)
+
+        boxes = self.visual_tracker.visible(
+            now,
+            target_time=display_frame_time,
+            max_observation_age_sec=max_age_sec,
+        )
+        if not boxes:
+            return image
+
+        h, w = image.shape[:2]
+        try:
+            source_w = float(source_width)
+            source_h = float(source_height)
+        except (TypeError, ValueError, OverflowError):
+            return image
+        if not math.isfinite(source_w) or not math.isfinite(source_h) or source_w <= 0.0 or source_h <= 0.0:
+            return image
+        sx = w / source_w
+        sy = h / source_h
+
+        for box in boxes:
+            try:
+                values = [float(box.x1), float(box.y1), float(box.x2), float(box.y2), float(box.confidence)]
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            if not all(math.isfinite(v) for v in values):
+                continue
+            bx1, by1, bx2, by2, confidence = values
+            bx1 = max(0.0, min(source_w, bx1)); bx2 = max(0.0, min(source_w, bx2))
+            by1 = max(0.0, min(source_h, by1)); by2 = max(0.0, min(source_h, by2))
+            if bx2 <= bx1 or by2 <= by1:
+                continue
+            x1 = max(0, min(w - 1, int(round(bx1 * sx))))
+            y1 = max(0, min(h - 1, int(round(by1 * sy))))
+            x2 = max(0, min(w - 1, int(round(bx2 * sx))))
+            y2 = max(0, min(h - 1, int(round(by2 * sy))))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            identity = self._identity_for_box(box)
+            label, _known = _identity_label(identity, confidence)
+            _draw_corner_box(image, x1, y1, x2, y2, label)
+        return image
+
     def track_snapshot(self):
         return self.visual_tracker.snapshot()
+
+    def metrics(self):
+        payload = super().metrics()
+        payload["heatmap"] = self.foot_heatmap.metrics()
+        return payload
