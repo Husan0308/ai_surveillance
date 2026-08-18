@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.camera_v2.data import EVENTS, PEOPLE, ROOMS
-from services.camera_v2.sentinel_ui import MainWindow, main
+from services.camera_v2.sentinel_ui import BUILD_TAG, MainWindow, main
 from services.camera_v2.sentinel_ui_enrollment import EnrollmentPage
 from services.camera_v2.sentinel_ui_monitoring import MonitoringPage
 from services.camera_v2.sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
@@ -28,6 +28,7 @@ EXPECTED_NAV = [
     "Settings",
 ]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
+EXPECTED_BUILD = "2026.08.18-r4"
 
 
 def _fail(message: str) -> None:
@@ -41,6 +42,8 @@ def _source(path: str) -> str:
 def main_preflight() -> int:
     if not callable(main):
         _fail("main entry point is missing")
+    if BUILD_TAG != EXPECTED_BUILD:
+        _fail(f"build tag={BUILD_TAG!r}, expected={EXPECTED_BUILD!r}")
 
     nav_titles = [str(row[1]) for row in MainWindow.NAV]
     if nav_titles != EXPECTED_NAV:
@@ -71,9 +74,6 @@ def main_preflight() -> int:
             f"enabled camera count must be 1..{CAMERA_COUNT}, got {len(settings.cameras)}"
         )
 
-    # Hard source-schema guard. A stale Settings implementation like the old build
-    # from Aug 18 must fail before the desktop starts instead of silently showing
-    # Environment URI / Codec again.
     fields = set(CameraConfig.__dataclass_fields__)
     if "codec" in fields:
         _fail("CameraConfig still exposes codec")
@@ -84,19 +84,37 @@ def main_preflight() -> int:
             _fail(f"{row.get('id','camera')} contains forbidden source fields: {sorted(forbidden)}")
 
     settings_source = _source("services/camera_v2/sentinel_ui_settings.py")
-    for forbidden_text in ("Environment URI", 'form.addRow("Codec"', 'self.codec =', 'self.env_uri ='):
+    for forbidden_text in (
+        "Environment URI",
+        'form.addRow("Codec"',
+        "self.codec =",
+        "self.env_uri =",
+    ):
         if forbidden_text in settings_source:
             _fail(f"stale Settings source still contains {forbidden_text!r}")
+    if "DeepStream RTSP streamni avtomatik aniqlaydi" not in settings_source:
+        _fail("Settings no longer states automatic stream negotiation")
 
     monitoring_source = _source("services/camera_v2/sentinel_ui_monitoring.py")
     if 'metrics.get("known_people"' not in monitoring_source:
         _fail("Monitoring Known counter is not wired to live metrics")
     if 'metrics.get("unknown_people"' not in monitoring_source:
         _fail("Monitoring Unknown counter is not wired to live metrics")
+    if "self.identity_panel.setMaximumWidth(336)" not in monitoring_source:
+        _fail("Monitoring right rail responsive width guard is missing")
 
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
-    if 'force-aspect-ratio' not in video_source or "FOCUS_WIDTH = 1920" not in video_source or "FOCUS_HEIGHT = 1080" not in video_source:
-        _fail("fullscreen aspect-safe source path is missing")
+    required_video_guards = (
+        'runtime.focus_source = sid',
+        'force-aspect-ratio',
+        'FOCUS_WIDTH = 1920',
+        'FOCUS_HEIGHT = 1080',
+        'badge.hide()',
+        'mapFromGlobal(QCursor.pos())',
+    )
+    for guard in required_video_guards:
+        if guard not in video_source:
+            _fail(f"professional video-wall guard missing: {guard}")
 
     heat_source = _source("services/camera_v2/person_tracking_heatmap.py")
     pose_source = _source("services/camera_v2/pose_ankle.py")
@@ -104,6 +122,12 @@ def main_preflight() -> int:
         _fail("heatmap is not ankle-only")
     if "LEFT_ANKLE = 15" not in pose_source or "RIGHT_ANKLE = 16" not in pose_source:
         _fail("COCO ankle keypoint mapping is missing")
+    if "focus_source >= 0 and not self._heatmap_sources.get" not in heat_source:
+        _fail("focused camera heatmap toggle is not isolated")
+
+    enrollment_source = _source("services/camera_v2/sentinel_ui_enrollment.py")
+    if "class ReportsPage" in enrollment_source:
+        _fail("stale ReportsPage still exists")
 
     if len(ROOMS) != 3:
         _fail(f"supplied demo model expects 3 rooms, got {len(ROOMS)}")
@@ -112,15 +136,17 @@ def main_preflight() -> int:
     if not EVENTS:
         _fail("supplied Events demo data is empty")
 
-    print("SENTINEL_PREFLIGHT ui_import=PASS")
+    print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui_import=PASS")
     print("SENTINEL_PREFLIGHT nav=" + ",".join(nav_titles))
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status legacy_fields=none")
     print(
         "SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream "
-        f"active_cameras={len(settings.cameras)} fullscreen_aspect=16:9"
+        f"active_cameras={len(settings.cameras)} fullscreen_aspect=16:9 "
+        "hover_controls=stable demo_tile_counts=hidden"
     )
     print("SENTINEL_PREFLIGHT occupancy=total+known+unknown live_metrics=PASS")
-    print("SENTINEL_PREFLIGHT heatmap=pose-ankle-only bbox_anchor=OFF")
+    print("SENTINEL_PREFLIGHT heatmap=pose-ankle-only bbox_anchor=OFF per_camera=PASS")
+    print("SENTINEL_PREFLIGHT reports=REMOVED settings=production-camera-crud")
     print("SENTINEL_PREFLIGHT enrollment=10-images profile-required")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
