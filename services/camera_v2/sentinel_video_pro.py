@@ -28,8 +28,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
 
         os.environ["CAMERA_V2_WALL_WIDTH"] = str(WALL_WIDTH)
         os.environ["CAMERA_V2_WALL_HEIGHT"] = str(WALL_HEIGHT)
-        # Sentinel starts visually clean. Heat history still accumulates and each
-        # camera can be enabled independently from its hover action.
         os.environ.setdefault("CAMERA_V2_HEATMAP", "1")
         os.environ.setdefault("CAMERA_V2_HEATMAP_VISIBLE", "0")
 
@@ -42,12 +40,14 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
         from .person_tracking_reid_heatmap import CameraPersonTrackingReIDHeatmap
 
         runtime = CameraPersonTrackingReIDHeatmap()
-        if len(runtime.cameras) != CAMERA_COUNT:
+        camera_count = len(runtime.cameras)
+        if not 1 <= camera_count <= CAMERA_COUNT:
             raise RuntimeError(
-                f"Sentinel Monitoring expects {CAMERA_COUNT} enabled cameras, "
-                f"found {len(runtime.cameras)}"
+                f"Sentinel Monitoring supports 1..{CAMERA_COUNT} active cameras, found {camera_count}"
             )
 
+        # Keep the wall contract stable even with fewer than six active sources.
+        # Empty tiles simply remain blank.
         runtime.wall_width = WALL_WIDTH
         runtime.wall_height = WALL_HEIGHT
         runtime.tiler_rows = GRID_ROWS
@@ -80,7 +80,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 return
             sid = (
                 int(source_id)
-                if source_id is not None and 0 <= int(source_id) < CAMERA_COUNT
+                if source_id is not None and 0 <= int(source_id) < camera_count
                 else -1
             )
             current_focus = sid
@@ -94,16 +94,11 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 prepare = GstVideo.is_video_overlay_prepare_window_handle_message(message)
             except Exception:
                 structure = message.get_structure()
-                prepare = bool(
-                    structure and structure.get_name() == "prepare-window-handle"
-                )
+                prepare = bool(structure and structure.get_name() == "prepare-window-handle")
             if not prepare:
                 return Gst.BusSyncReply.PASS
             try:
                 bind_overlay(message.src)
-                # Window-handle preparation can happen again after a rebind.
-                # Preserve the selected source instead of silently returning to
-                # the tiled wall.
                 set_focus(current_focus)
                 _put_status(status_q, "VIDEO_BOUND", f"xid={current_xid}")
                 return Gst.BusSyncReply.DROP
@@ -121,7 +116,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                         _put_status(
                             status_q,
                             "LIVE",
-                            "6-camera DeepStream/NvDCF + ReID + native heatmap PLAYING",
+                            f"{camera_count}-camera DeepStream/NvDCF + ReID + heatmap PLAYING",
                         )
                 except Exception:
                     pass
@@ -140,7 +135,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
             latest_focus = None
             got_focus = False
             latest_bind = None
-            latest_bind_focus = None
             heatmap_changes: dict[int, bool] = {}
 
             while True:
@@ -148,7 +142,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                     command, value = command_q.get_nowait()
                 except queue.Empty:
                     break
-
                 if command == "stop":
                     stop_requested = True
                 elif command == "focus":
@@ -156,35 +149,12 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                     got_focus = True
                 elif command == "bind":
                     latest_bind = int(value)
-                elif command == "bind_focus":
-                    try:
-                        xid, source_id = value
-                        latest_bind_focus = (int(xid), int(source_id))
-                    except Exception:
-                        pass
                 elif command == "heatmap":
                     try:
                         source_id, enabled = value
                         heatmap_changes[int(source_id)] = bool(enabled)
                     except Exception:
                         pass
-
-            # A per-camera fullscreen transition must be atomic: first bind the
-            # EGL overlay to the new native Qt surface, then set show-source on
-            # the same GLib iteration. This avoids a tiled frame being rebound
-            # without the requested camera focus.
-            if latest_bind_focus is not None:
-                xid, source_id = latest_bind_focus
-                if xid > 0:
-                    bind_overlay(runtime.sink, xid)
-                    set_focus(source_id)
-                    _put_status(
-                        status_q,
-                        "VIDEO_BOUND",
-                        f"xid={xid} focus={source_id}",
-                    )
-                latest_bind = None
-                got_focus = False
 
             if latest_bind is not None and latest_bind > 0:
                 bind_overlay(runtime.sink, latest_bind)
@@ -196,7 +166,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
             setter = getattr(runtime, "set_heatmap_source_enabled", None)
             if callable(setter):
                 for source_id, enabled in heatmap_changes.items():
-                    if 0 <= source_id < CAMERA_COUNT:
+                    if 0 <= source_id < camera_count:
                         setter(source_id, enabled)
                         _put_status(
                             status_q,
@@ -273,7 +243,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
         _put_status(
             status_q,
             "STARTING",
-            "professional 2x3 wall; per-camera heatmap; DeepStream hot path unchanged",
+            f"professional 2x3 wall; active_cameras={camera_count}; in-place focus",
         )
         rc = runtime.run()
         _put_status(status_q, "STOPPED", f"exit={rc}")
@@ -293,7 +263,7 @@ class ProPipelineController(PipelineController):
         if xid <= 0:
             return
         if self.process is not None and self.process.is_alive():
-            self.bind(xid)
+            # Do not rebind while the same live wall is already active.
             return
         self.process = self.ctx.Process(
             target=_pipeline_process_pro,
@@ -304,16 +274,6 @@ class ProPipelineController(PipelineController):
         self.process.start()
         self.last_status = UiStatus("STARTING")
 
-    def bind_focus(self, window_id: int, source_id: int | None) -> None:
-        xid = int(window_id)
-        if xid <= 0:
-            return
-        sid = -1 if source_id is None else int(source_id)
-        try:
-            self.command_q.put_nowait(("bind_focus", (xid, sid)))
-        except queue.Full:
-            pass
-
     def set_heatmap(self, source_id: int, enabled: bool) -> None:
         try:
             self.command_q.put_nowait(("heatmap", (int(source_id), bool(enabled))))
@@ -323,14 +283,26 @@ class ProPipelineController(PipelineController):
 
 class ProLiveVideoWall(LiveVideoWall):
     heatmapToggled = Signal(int, bool)
+    exitFullscreenRequested = Signal()
 
     def __init__(self, cameras, people, parent: QWidget | None = None) -> None:
         super().__init__(cameras, people, parent)
         self._hover_source: int | None = None
+        self._fullscreen_active = False
+        self._focused_source: int | None = None
         self.action_frames: list[QFrame] = []
         self.heatmap_buttons: list[QToolButton] = []
         self.fullscreen_buttons: list[QToolButton] = []
         self.tile_borders: list[tuple[QFrame, QFrame, QFrame, QFrame]] = []
+
+        # Use real config IDs rather than assuming CAM-01..CAM-06 ordering.
+        for sid, camera in enumerate(self.cameras[:CAMERA_COUNT]):
+            camera_id = str(
+                getattr(camera, "camera_id", getattr(camera, "id", f"CAM-{sid + 1:02d}"))
+            )
+            if sid < len(self.camera_labels):
+                self.camera_labels[sid].setText(camera_id)
+                self.camera_labels[sid].adjustSize()
 
         for source_id in range(min(CAMERA_COUNT, len(self.cameras))):
             borders = tuple(QFrame(self) for _ in range(4))
@@ -341,12 +313,10 @@ class ProLiveVideoWall(LiveVideoWall):
             actions = QFrame(self)
             actions.setObjectName("cameraHoverActions")
             actions.setStyleSheet(
-                "QFrame#cameraHoverActions{"
-                "background:rgba(7,12,18,225);"
-                "border:1px solid rgba(74,96,116,175);"
-                "border-radius:6px;}"
-                "QToolButton{background:transparent;color:#dce6ee;"
-                "border:0;border-radius:4px;padding:5px 8px;font-weight:600;}"
+                "QFrame#cameraHoverActions{background:rgba(7,12,18,225);"
+                "border:1px solid rgba(74,96,116,175);border-radius:6px;}"
+                "QToolButton{background:transparent;color:#dce6ee;border:0;"
+                "border-radius:4px;padding:5px 8px;font-weight:600;}"
                 "QToolButton:hover{background:#182632;color:#ffffff;}"
                 "QToolButton:checked{background:#11352f;color:#39d9c5;}"
             )
@@ -379,27 +349,85 @@ class ProLiveVideoWall(LiveVideoWall):
             self.heatmap_buttons.append(heat)
             self.fullscreen_buttons.append(full)
 
+        self.exit_button = QToolButton(self)
+        self.exit_button.setText("⛶  Exit Fullscreen")
+        self.exit_button.setCursor(Qt.PointingHandCursor)
+        self.exit_button.setStyleSheet(
+            "QToolButton{background:rgba(7,12,18,235);color:#f1f5f8;"
+            "border:1px solid #34495a;border-radius:6px;padding:8px 12px;font-weight:700;}"
+            "QToolButton:hover{background:#172532;border-color:#4f6a7f;}"
+        )
+        self.exit_button.clicked.connect(self.exitFullscreenRequested.emit)
+        self.exit_button.hide()
+
+        self._layout_overlays()
+        self._refresh_tile_frames()
+
+    def source_at(self, pos: QPoint) -> int | None:
+        if self._fullscreen_active and self._focused_source is not None:
+            return self._focused_source
+        sid = super().source_at(pos)
+        return sid if sid is not None and sid < len(self.cameras) else None
+
+    def set_fullscreen_mode(self, active: bool, source_id: int | None = None) -> None:
+        self._fullscreen_active = bool(active)
+        self._focused_source = int(source_id) if active and source_id is not None else None
+        self._hover_source = None
+
+        for sid, widget in enumerate(self.camera_labels):
+            widget.setVisible(not active or self._focused_source is None or sid == self._focused_source)
+        for sid, widget in enumerate(self.status_labels):
+            widget.setVisible(not active or self._focused_source is None or sid == self._focused_source)
+        for widget in self.occupancy_labels:
+            widget.setVisible(not active)
+        for action in self.action_frames:
+            action.hide()
+        for borders in self.tile_borders:
+            for border in borders:
+                border.setVisible(not active)
+
+        self.exit_button.setVisible(active)
         self._layout_overlays()
         self._refresh_tile_frames()
 
     def _refresh_tile_frames(self) -> None:
         for sid, borders in enumerate(self.tile_borders):
-            hovered = sid == self._hover_source
+            visible = not self._fullscreen_active
+            hovered = visible and sid == self._hover_source
             color = "#39d9c5" if hovered else "rgba(45,62,78,205)"
-            thickness = 2 if hovered else 1
             for border in borders:
+                border.setVisible(visible)
                 border.setStyleSheet(f"background:{color};border:0;")
-                border.setProperty("tileThickness", thickness)
                 border.raise_()
         for sid, action in enumerate(self.action_frames):
-            action.setVisible(sid == self._hover_source)
+            action.setVisible(not self._fullscreen_active and sid == self._hover_source)
             if action.isVisible():
                 action.raise_()
+        if self.exit_button.isVisible():
+            self.exit_button.raise_()
 
     def _layout_overlays(self) -> None:
         super()._layout_overlays()
         if not hasattr(self, "tile_borders"):
             return
+
+        if self._fullscreen_active:
+            if self._focused_source is not None and self._focused_source < len(self.camera_labels):
+                cam = self.camera_labels[self._focused_source]
+                stat = self.status_labels[self._focused_source]
+                cam.move(14, 14)
+                stat.adjustSize()
+                stat.move(14 + cam.width() + 8, 14)
+                cam.raise_()
+                stat.raise_()
+            self.exit_button.adjustSize()
+            self.exit_button.move(
+                max(12, self.width() - self.exit_button.width() - 16),
+                14,
+            )
+            self.exit_button.raise_()
+            return
+
         for sid, borders in enumerate(self.tile_borders):
             left, top, width, height = self._tile_rect(sid)
             hovered = sid == self._hover_source
@@ -409,16 +437,14 @@ class ProLiveVideoWall(LiveVideoWall):
             right_b.setGeometry(left + width - t, top, t, height)
             bottom_b.setGeometry(left, top + height - t, width, t)
             left_b.setGeometry(left, top, t, height)
-
             if sid < len(self.action_frames):
                 actions = self.action_frames[sid]
                 actions.adjustSize()
-                actions.move(
-                    left + width - actions.width() - 10,
-                    top + 38,
-                )
+                actions.move(left + width - actions.width() - 10, top + 38)
 
     def _set_hover_source(self, source_id: int | None) -> None:
+        if self._fullscreen_active:
+            return
         if source_id == self._hover_source:
             return
         self._hover_source = source_id
