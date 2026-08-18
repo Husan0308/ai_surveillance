@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import sys
 from pathlib import Path
@@ -56,6 +57,41 @@ def _qwen_tcp_check(qwen: QwenReIdVerifier) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _setup_pose_model() -> bool:
+    """Resolve the small pose model before the live process starts.
+
+    Ultralytics resolves official model names such as yolo26n-pose.pt on first use.
+    Doing that here means a missing network/model is reported before six RTSP
+    streams are opened, not later as a silent heatmap failure.
+    """
+    model_spec = os.environ.get("CAMERA_V2_POSE_MODEL", "yolo26n-pose.pt").strip()
+    try:
+        from ultralytics import YOLO
+
+        model = YOLO(model_spec)
+        task = str(getattr(model, "task", "") or "")
+        if task and task != "pose":
+            raise RuntimeError(f"model task is {task!r}, expected 'pose'")
+        print(
+            "POSE_SETUP model=PASS "
+            f"spec={model_spec} task={task or 'pose'} "
+            "anchor=left/right-ankle keypoints=15,16 device=cpu-low-rate"
+        )
+        return True
+    except BaseException as exc:
+        print(
+            f"POSE_SETUP model=FAIL spec={model_spec} "
+            f"error={type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        print(
+            "POSE_SETUP action=FIX_MODEL_OR_NETWORK "
+            "hint='yolo26n-pose.pt must resolve before ankle heatmap starts'",
+            file=sys.stderr,
+        )
+        return False
+
+
 def main() -> int:
     cfg_path = ROOT / "config" / "reid.yaml"
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
@@ -63,6 +99,9 @@ def main() -> int:
     settings = load_settings()
     rooms = {camera.camera_id: camera.room for camera in settings.cameras}
     print("REID_SETUP rooms=" + ",".join(f"{k}:{v}" for k, v in rooms.items()))
+
+    if not _setup_pose_model():
+        return 5
 
     # Force one real CPU embedding. This downloads/checks the selected model now,
     # not when a person first enters the camera. Production must not silently start
