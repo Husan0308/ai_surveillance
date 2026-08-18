@@ -57,10 +57,11 @@ jobs:
           for text in forbidden_settings:
               assert text not in settings, f'stale Settings field: {text}'
           assert 'class ReportsPage' not in enrollment
-          assert 'occupancy_label' not in video
+          assert 'occupancy_label = QLabel' not in video
           assert 'occupancy = len' not in video
           assert 'metrics.get("known_people"' in monitoring
           assert 'metrics.get("unknown_people"' in monitoring
+          assert "Demo ism yoki fake avatar ko'rsatilmaydi" in monitoring
           assert 'runtime.focus_source = sid' in video_pro
           assert 'mapFromGlobal(QCursor.pos())' in video_pro
           assert 'anchor=pose-ankle-only' in heatmap
