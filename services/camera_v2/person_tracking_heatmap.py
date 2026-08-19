@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import os
 
-# Sentinel's active runtime is intentionally deterministic.  The shell can retain
-# old CAMERA_V2_* variables from earlier experiments (for example 704x384).  Using
-# setdefault() here allowed those stale values to silently override the production
-# detector/tracker geometry.  Force the canonical profile before importing the
-# detector modules so preflight and the real UI child process use identical values.
+# Keep the mux at the known 4MP main-stream geometry. DeepStream recommends
+# matching streammux to the input resolution to avoid an unnecessary scale before
+# tracker/tiler. The detector and NvDCF keep their own lightweight resolutions.
 _CANONICAL_RUNTIME = {
-    "CAMERA_V2_FRAME_WIDTH": "1920",
-    "CAMERA_V2_FRAME_HEIGHT": "1080",
+    "CAMERA_V2_FRAME_WIDTH": "2560",
+    "CAMERA_V2_FRAME_HEIGHT": "1440",
     "CAMERA_V2_DETECT_WIDTH": "736",
     "CAMERA_V2_DETECT_HEIGHT": "416",
     "CAMERA_V2_DETECT_CONF": "0.05",
@@ -30,7 +28,7 @@ if _stale_runtime_values:
     print(
         "CAMERA_RUNTIME_PROFILE stale_env_overridden="
         + ",".join(_stale_runtime_values)
-        + " canonical=display:1920x1080,detector:736x416,tracker:512x288",
+        + " canonical=mux:2560x1440,detector:736x416,tracker:512x288",
         flush=True,
     )
 
