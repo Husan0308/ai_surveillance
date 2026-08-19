@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -23,37 +24,106 @@ from services.frontend.app.config import load_settings
 
 
 C = {
-    "bg": "#071018",
-    "sidebar": "#09131c",
-    "panel": "#0b151e",
-    "panel2": "#0e1a24",
+    "bg": "#070b11",
+    "sidebar": "#0a1118",
+    "surface": "#0c141d",
+    "surface2": "#101b26",
+    "surface3": "#132231",
     "border": "#1b2b38",
-    "border2": "#233847",
-    "text": "#e7eef5",
-    "muted": "#8394a4",
-    "faint": "#596b79",
-    "accent": "#2f86f6",
-    "accent2": "#5aa2ff",
-    "known": "#38d996",
+    "border2": "#294052",
+    "text": "#eef4f8",
+    "muted": "#8b9baa",
+    "faint": "#566775",
+    "accent": "#3797ff",
+    "accent_soft": "#102a42",
+    "known": "#37d99a",
     "unknown": "#ffbf4b",
-    "danger": "#ff6b6b",
+    "danger": "#ff6b73",
 }
+
+PAGE_META = [
+    ("Monitoring", "Live cameras and active people"),
+    ("People", "Current camera-local tracks"),
+    ("Events", "Detection and identity events"),
+    ("Enrollment", "Register people from face images"),
+    ("Settings", "Application and service settings"),
+]
 
 
 APP_QSS = f"""
-QMainWindow, QWidget#appRoot {{ background:{C['bg']}; color:{C['text']}; }}
-QFrame#sidebar {{ background:{C['sidebar']}; border-right:1px solid {C['border']}; }}
-QFrame#topbar {{ background:{C['sidebar']}; border-bottom:1px solid {C['border']}; }}
-QFrame#panel {{ background:{C['panel']}; border:1px solid {C['border']}; border-radius:8px; }}
-QPushButton#nav {{
-    text-align:left; padding:10px 12px; border:0; border-radius:7px;
-    color:{C['muted']}; background:transparent; font-size:11px; font-weight:650;
+* {{
+    color:{C['text']};
+    font-family:'DejaVu Sans';
+    font-size:12px;
 }}
-QPushButton#nav:hover {{ background:#101f2b; color:{C['text']}; }}
-QPushButton#nav:checked {{ background:#10263a; color:#ffffff; border-left:3px solid {C['accent']}; }}
-QScrollArea {{ border:0; background:transparent; }}
-QScrollBar:vertical {{ width:8px; background:transparent; }}
-QScrollBar::handle:vertical {{ background:#294051; border-radius:4px; min-height:30px; }}
+QMainWindow, QWidget#appRoot, QWidget#page {{
+    background:{C['bg']};
+}}
+QFrame#sidebar {{
+    background:{C['sidebar']};
+    border-right:1px solid {C['border']};
+}}
+QFrame#brandBlock {{
+    background:transparent;
+    border-bottom:1px solid {C['border']};
+}}
+QFrame#topbar {{
+    background:{C['bg']};
+    border-bottom:1px solid {C['border']};
+}}
+QFrame#panel {{
+    background:{C['surface']};
+    border:1px solid {C['border']};
+    border-radius:10px;
+}}
+QFrame#metric {{
+    background:#09131c;
+    border:1px solid #1a2c3a;
+    border-radius:8px;
+}}
+QPushButton#nav {{
+    text-align:left;
+    padding:0 13px;
+    border:1px solid transparent;
+    border-radius:8px;
+    color:{C['muted']};
+    background:transparent;
+    font-size:11px;
+    font-weight:650;
+}}
+QPushButton#nav:hover {{
+    background:{C['surface2']};
+    color:{C['text']};
+}}
+QPushButton#nav:checked {{
+    background:{C['accent_soft']};
+    color:#ffffff;
+    border:1px solid #1f4d71;
+}}
+QPushButton#soft {{
+    background:{C['surface2']};
+    border:1px solid {C['border2']};
+    border-radius:7px;
+    padding:7px 10px;
+    color:{C['text']};
+}}
+QScrollArea {{
+    border:0;
+    background:transparent;
+}}
+QScrollBar:vertical {{
+    width:8px;
+    background:transparent;
+    margin:2px;
+}}
+QScrollBar::handle:vertical {{
+    background:#2a4051;
+    border-radius:4px;
+    min-height:32px;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height:0;
+}}
 """
 
 
@@ -63,44 +133,47 @@ class NavButton(QPushButton):
         self.setObjectName("nav")
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(40)
+        self.setFixedHeight(42)
 
 
-class Badge(QLabel):
-    def __init__(self, text: str = "STARTING") -> None:
-        super().__init__(text)
+class HealthChip(QLabel):
+    def __init__(self, prefix: str) -> None:
+        super().__init__()
+        self.prefix = prefix
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumWidth(74)
-        self.setFixedHeight(26)
-        self.set_state("starting", text)
+        self.setFixedHeight(27)
+        self.setMinimumWidth(62)
+        self.set_state("starting", "…")
 
-    def set_state(self, state: str, text: str) -> None:
+    def set_state(self, state: str, value: str) -> None:
         if state == "ok":
-            fg, bg, border = C["known"], "#0d211b", "#1d4a39"
+            fg, bg, border = C["known"], "#0b211a", "#1c4b39"
         elif state == "error":
-            fg, bg, border = C["danger"], "#251316", "#53262d"
+            fg, bg, border = C["danger"], "#261316", "#55282d"
         else:
-            fg, bg, border = C["unknown"], "#251e10", "#55431f"
-        self.setText(text)
+            fg, bg, border = C["unknown"], "#241d0f", "#59431d"
+        self.setText(f"{self.prefix}  {value}")
         self.setStyleSheet(
             f"color:{fg};background:{bg};border:1px solid {border};"
-            "border-radius:6px;padding:2px 8px;font:700 9px 'DejaVu Sans Mono';"
+            "border-radius:7px;padding:0 9px;font:700 9px 'DejaVu Sans Mono';"
         )
 
 
 class MetricBox(QFrame):
     def __init__(self, title: str, color: str) -> None:
         super().__init__()
-        self.setStyleSheet("QFrame{background:#09121a;border:1px solid #182936;border-radius:7px;}")
+        self.setObjectName("metric")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(1)
+        layout.setContentsMargins(12, 9, 12, 10)
+        layout.setSpacing(2)
+
         caption = QLabel(title)
         caption.setStyleSheet(
             f"color:{C['muted']};font:700 8px 'DejaVu Sans Mono';letter-spacing:1px;"
         )
         self.value = QLabel("0")
-        self.value.setStyleSheet(f"color:{color};font-size:23px;font-weight:850;")
+        self.value.setStyleSheet(f"color:{color};font-size:24px;font-weight:850;")
+
         layout.addWidget(caption)
         layout.addWidget(self.value)
 
@@ -109,12 +182,14 @@ class RecentViews(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("panel")
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 11, 12, 11)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 13, 14, 13)
+        layout.setSpacing(9)
+
         head = QHBoxLayout()
         title = QLabel("Recent Views")
-        title.setStyleSheet("font-size:11px;font-weight:750;")
+        title.setStyleSheet("font-size:12px;font-weight:800;")
         self.count = QLabel("0 active")
         self.count.setStyleSheet(f"color:{C['muted']};font-size:9px;")
         head.addWidget(title)
@@ -122,8 +197,13 @@ class RecentViews(QFrame):
         head.addWidget(self.count)
         layout.addLayout(head)
 
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background:{C['border']};border:0;")
+        layout.addWidget(divider)
+
         self.rows = QVBoxLayout()
-        self.rows.setSpacing(5)
+        self.rows.setSpacing(6)
         layout.addLayout(self.rows)
         layout.addStretch(1)
 
@@ -138,6 +218,7 @@ class RecentViews(QFrame):
     def update_tracks(self, payload: dict) -> None:
         self._clear(self.rows)
         active: list[tuple[str, int, float]] = []
+
         for camera in payload.get("tracks", []) if isinstance(payload, dict) else []:
             if not isinstance(camera, dict):
                 continue
@@ -152,76 +233,97 @@ class RecentViews(QFrame):
                         float(track.get("confidence") or 0.0),
                     )
                 )
+
         self.count.setText(f"{len(active)} active")
 
         if not active:
-            empty = QLabel("No active person tracks")
-            empty.setStyleSheet(
-                f"color:{C['faint']};background:#09121a;border:1px dashed #203442;"
-                "border-radius:6px;padding:14px;font-size:9px;"
-            )
+            empty = QLabel("No active tracks")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setMinimumHeight(72)
+            empty.setStyleSheet(
+                f"color:{C['faint']};background:#09121a;"
+                f"border:1px dashed {C['border2']};border-radius:8px;font-size:9px;"
+            )
             self.rows.addWidget(empty)
             return
 
-        for camera_id, track_id, confidence in active[:8]:
+        for camera_id, track_id, confidence in active[:7]:
             row = QFrame()
-            row.setStyleSheet("QFrame{background:#0a141d;border:1px solid #172a37;border-radius:6px;}")
+            row.setStyleSheet(
+                "QFrame{background:#09131c;border:1px solid #182c3a;border-radius:8px;}"
+                "QFrame:hover{background:#0d1a25;border-color:#29475c;}"
+            )
             line = QHBoxLayout(row)
-            line.setContentsMargins(8, 7, 8, 7)
-            avatar = QLabel("T")
-            avatar.setFixedSize(28, 28)
+            line.setContentsMargins(9, 8, 9, 8)
+            line.setSpacing(9)
+
+            avatar = QLabel(f"T{track_id}")
+            avatar.setFixedSize(32, 32)
             avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
             avatar.setStyleSheet(
-                f"background:#13283a;color:{C['accent2']};border:1px solid #24455c;"
-                "border-radius:14px;font-weight:800;"
+                f"background:#13283a;color:{C['accent']};border:1px solid #27506b;"
+                "border-radius:16px;font:800 9px 'DejaVu Sans Mono';"
             )
-            text = QVBoxLayout()
-            text.setSpacing(0)
+
+            info = QVBoxLayout()
+            info.setSpacing(2)
             name = QLabel(f"Person T{track_id}")
-            name.setStyleSheet("font-size:10px;font-weight:700;")
-            meta = QLabel(f"{camera_id}  ·  {confidence:.2f}")
-            meta.setStyleSheet(f"color:{C['muted']};font-size:8px;")
-            text.addWidget(name)
-            text.addWidget(meta)
+            name.setStyleSheet("font-size:10px;font-weight:750;")
+            meta = QLabel(f"{camera_id}   confidence {confidence:.2f}")
+            meta.setStyleSheet(f"color:{C['muted']};font:8px 'DejaVu Sans Mono';")
+            info.addWidget(name)
+            info.addWidget(meta)
+
             line.addWidget(avatar)
-            line.addLayout(text)
-            line.addStretch(1)
+            line.addLayout(info, 1)
+
+            dot = QLabel("●")
+            dot.setStyleSheet(f"color:{C['known']};font-size:10px;")
+            line.addWidget(dot)
             self.rows.addWidget(row)
 
 
 class MonitoringPage(QWidget):
     def __init__(self, settings) -> None:
         super().__init__()
+        self.setObjectName("page")
         self.camera_wall = CameraWall(settings, self)
         self.camera_wall.focusChanged.connect(self._on_focus)
 
         self.right = QWidget(self)
-        self.right.setFixedWidth(252)
+        self.right.setFixedWidth(286)
         rail = QVBoxLayout(self.right)
         rail.setContentsMargins(0, 0, 0, 0)
-        rail.setSpacing(8)
+        rail.setSpacing(10)
 
         summary = QFrame()
         summary.setObjectName("panel")
         summary_layout = QVBoxLayout(summary)
-        summary_layout.setContentsMargins(12, 11, 12, 12)
-        summary_layout.setSpacing(8)
+        summary_layout.setContentsMargins(15, 14, 15, 15)
+        summary_layout.setSpacing(10)
+
         head = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
         title = QLabel("People in Building")
-        title.setStyleSheet("font-size:11px;font-weight:750;")
-        self.live = Badge("STARTING")
-        head.addWidget(title)
+        title.setStyleSheet("font-size:12px;font-weight:800;")
+        caption = QLabel("Current local tracks")
+        caption.setStyleSheet(f"color:{C['muted']};font-size:9px;")
+        title_box.addWidget(title)
+        title_box.addWidget(caption)
+        head.addLayout(title_box)
         head.addStretch(1)
+        self.live = HealthChip("LIVE")
+        self.live.setMinimumWidth(76)
         head.addWidget(self.live)
         summary_layout.addLayout(head)
 
         self.total = QLabel("0")
-        self.total.setStyleSheet("font-size:34px;font-weight:850;letter-spacing:-1px;")
+        self.total.setStyleSheet("font-size:38px;font-weight:850;letter-spacing:-1px;")
         summary_layout.addWidget(self.total)
 
         metrics = QHBoxLayout()
-        metrics.setSpacing(6)
+        metrics.setSpacing(8)
         self.known = MetricBox("KNOWN", C["known"])
         self.unknown = MetricBox("UNKNOWN", C["unknown"])
         metrics.addWidget(self.known, 1)
@@ -233,8 +335,8 @@ class MonitoringPage(QWidget):
         rail.addWidget(self.recent, 1)
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(8, 7, 8, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(10)
         root.addWidget(self.camera_wall, 1)
         root.addWidget(self.right)
 
@@ -242,8 +344,12 @@ class MonitoringPage(QWidget):
         self.right.setVisible(not focused)
         layout = self.layout()
         if layout is not None:
-            layout.setContentsMargins(0, 0, 0, 0) if focused else layout.setContentsMargins(8, 7, 8, 8)
-            layout.setSpacing(0 if focused else 8)
+            if focused:
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(0)
+            else:
+                layout.setContentsMargins(12, 10, 12, 12)
+                layout.setSpacing(10)
 
     def update_ml_health(self, data: dict) -> None:
         online = int(data.get("online_camera_count") or 0)
@@ -251,22 +357,23 @@ class MonitoringPage(QWidget):
         detector = data.get("detector") or {}
         tracker = data.get("tracker") or {}
         ready = detector.get("state") == "ready" and tracker.get("state") == "ready"
+
         if ready and online == total and total:
-            self.live.set_state("ok", "● LIVE")
+            self.live.set_state("ok", "ON")
         elif online:
-            self.live.set_state("starting", f"● {online}/{total}")
+            self.live.set_state("starting", f"{online}/{total}")
         else:
-            self.live.set_state("error", "OFFLINE")
+            self.live.set_state("error", "OFF")
 
     def update_tracks(self, payload: dict) -> None:
         self.camera_wall.update_tracks(payload)
         self.recent.update_tracks(payload)
+
         total = 0
         for row in payload.get("tracks", []) if isinstance(payload, dict) else []:
             if isinstance(row, dict):
                 total += int(row.get("people") or len(row.get("tracks") or []))
-        # ReID/Face are intentionally not enabled yet, so every active local T-ID
-        # is Unknown. The counters are already wired for the later identity stage.
+
         self.total.setText(str(total))
         self.known.value.setText("0")
         self.unknown.value.setText(str(total))
@@ -275,18 +382,32 @@ class MonitoringPage(QWidget):
 class PeoplePage(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("page")
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setContentsMargins(22, 18, 22, 20)
+        layout.setSpacing(14)
+
+        top = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
         title = QLabel("People")
-        title.setStyleSheet("font-size:20px;font-weight:800;")
-        subtitle = QLabel("Active camera-local tracks")
+        title.setStyleSheet("font-size:19px;font-weight:850;")
+        subtitle = QLabel("Active camera-local person tracks")
         subtitle.setStyleSheet(f"color:{C['muted']};font-size:10px;")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        top.addLayout(title_box)
+        top.addStretch(1)
+        layout.addLayout(top)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.body = QWidget()
+        self.body.setObjectName("page")
         self.rows = QVBoxLayout(self.body)
+        self.rows.setContentsMargins(0, 0, 0, 0)
+        self.rows.setSpacing(8)
         self.rows.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.body)
         layout.addWidget(self.scroll, 1)
@@ -296,6 +417,7 @@ class PeoplePage(QWidget):
             item = self.rows.takeAt(0)
             if item.widget() is not None:
                 item.widget().deleteLater()
+
         count = 0
         for camera in payload.get("tracks", []) if isinstance(payload, dict) else []:
             if not isinstance(camera, dict):
@@ -305,47 +427,96 @@ class PeoplePage(QWidget):
                 if not isinstance(track, dict):
                     continue
                 count += 1
-                row = QLabel(
-                    f"Person T{int(track.get('track_id') or 0):02d}     {camera_id}     "
-                    f"confidence {float(track.get('confidence') or 0.0):.2f}"
+
+                row = QFrame()
+                row.setObjectName("panel")
+                row.setMinimumHeight(66)
+                line = QHBoxLayout(row)
+                line.setContentsMargins(12, 9, 12, 9)
+                line.setSpacing(11)
+
+                avatar = QLabel(f"T{int(track.get('track_id') or 0)}")
+                avatar.setFixedSize(38, 38)
+                avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                avatar.setStyleSheet(
+                    f"background:#13283a;color:{C['accent']};border:1px solid #27506b;"
+                    "border-radius:19px;font:800 10px 'DejaVu Sans Mono';"
                 )
-                row.setStyleSheet(
-                    "background:#0b151e;border:1px solid #1b2b38;border-radius:7px;"
-                    "padding:11px;color:#dce6ee;font-size:10px;"
+
+                info = QVBoxLayout()
+                info.setSpacing(2)
+                name = QLabel(f"Person T{int(track.get('track_id') or 0)}")
+                name.setStyleSheet("font-size:11px;font-weight:800;")
+                meta = QLabel(
+                    f"{camera_id}  ·  confidence {float(track.get('confidence') or 0.0):.2f}"
                 )
+                meta.setStyleSheet(f"color:{C['muted']};font:9px 'DejaVu Sans Mono';")
+                info.addWidget(name)
+                info.addWidget(meta)
+
+                state = QLabel("UNKNOWN")
+                state.setStyleSheet(
+                    f"color:{C['unknown']};background:#241d0f;border:1px solid #59431d;"
+                    "border-radius:6px;padding:4px 7px;font:700 8px 'DejaVu Sans Mono';"
+                )
+
+                line.addWidget(avatar)
+                line.addLayout(info, 1)
+                line.addWidget(state)
                 self.rows.addWidget(row)
+
         if not count:
-            empty = QLabel("No active tracks")
-            empty.setStyleSheet(f"color:{C['muted']};padding:20px;")
+            empty = QFrame()
+            empty.setObjectName("panel")
+            empty.setMinimumHeight(130)
+            e = QVBoxLayout(empty)
+            message = QLabel("No active tracks")
+            message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            message.setStyleSheet(f"color:{C['muted']};font-size:11px;")
+            e.addWidget(message)
             self.rows.addWidget(empty)
 
 
 class SimplePage(QWidget):
     def __init__(self, title: str, subtitle: str) -> None:
         super().__init__()
+        self.setObjectName("page")
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setContentsMargins(22, 18, 22, 20)
+        layout.setSpacing(14)
+
         heading = QLabel(title)
-        heading.setStyleSheet("font-size:20px;font-weight:800;")
+        heading.setStyleSheet("font-size:19px;font-weight:850;")
         text = QLabel(subtitle)
         text.setWordWrap(True)
         text.setStyleSheet(f"color:{C['muted']};font-size:10px;")
+
         panel = QFrame()
         panel.setObjectName("panel")
         inside = QVBoxLayout(panel)
-        inside.setContentsMargins(20, 20, 20, 20)
+        inside.setContentsMargins(24, 24, 24, 24)
+
+        icon = QLabel("◇")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet(f"color:{C['accent']};font-size:30px;")
         info = QLabel(subtitle)
         info.setWordWrap(True)
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info.setStyleSheet(f"color:{C['muted']};font-size:11px;")
-        inside.addWidget(info, 1)
+
+        inside.addStretch(1)
+        inside.addWidget(icon)
+        inside.addWidget(info)
+        inside.addStretch(1)
+
         layout.addWidget(heading)
         layout.addWidget(text)
         layout.addWidget(panel, 1)
 
 
 class OperatorWindow(QMainWindow):
-    PAGE_NAMES = ["Monitoring", "People", "Events", "Enrollment", "Settings"]
+    PAGE_NAMES = [item[0] for item in PAGE_META]
 
     def __init__(self) -> None:
         super().__init__()
@@ -364,28 +535,58 @@ class OperatorWindow(QMainWindow):
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(166)
+        self.sidebar.setFixedWidth(188)
         side = QVBoxLayout(self.sidebar)
-        side.setContentsMargins(10, 13, 10, 10)
-        side.setSpacing(5)
-        brand = QLabel("APS  Apsidal")
-        brand.setStyleSheet(
-            f"color:white;font-size:15px;font-weight:850;padding:8px 8px 15px 8px;"
+        side.setContentsMargins(10, 0, 10, 10)
+        side.setSpacing(4)
+
+        brand = QFrame()
+        brand.setObjectName("brandBlock")
+        brand.setFixedHeight(76)
+        brand_layout = QVBoxLayout(brand)
+        brand_layout.setContentsMargins(12, 13, 8, 12)
+        brand_layout.setSpacing(1)
+
+        brand_name = QLabel("Apsidal")
+        brand_name.setStyleSheet("color:#ffffff;font-size:17px;font-weight:900;")
+        brand_sub = QLabel("AI SURVEILLANCE")
+        brand_sub.setStyleSheet(
+            f"color:{C['accent']};font:700 8px 'DejaVu Sans Mono';letter-spacing:1.4px;"
         )
+        brand_layout.addWidget(brand_name)
+        brand_layout.addWidget(brand_sub)
         side.addWidget(brand)
+
+        nav_label = QLabel("WORKSPACE")
+        nav_label.setStyleSheet(
+            f"color:{C['faint']};font:700 8px 'DejaVu Sans Mono';"
+            "letter-spacing:1px;padding:12px 10px 5px 10px;"
+        )
+        side.addWidget(nav_label)
+
         self.nav: list[NavButton] = []
         icons = ["▦", "◉", "⚡", "＋", "⚙"]
         for index, (icon, name) in enumerate(zip(icons, self.PAGE_NAMES)):
-            button = NavButton(f"{icon}   {name}")
+            button = NavButton(f"{icon}    {name}")
             button.clicked.connect(lambda _checked=False, i=index: self.switch_page(i))
             side.addWidget(button)
             self.nav.append(button)
+
         side.addStretch(1)
-        version = QLabel("LOCAL  ·  mmap")
-        version.setStyleSheet(
-            f"color:{C['faint']};font:8px 'DejaVu Sans Mono';padding:8px;"
-        )
-        side.addWidget(version)
+
+        footer = QFrame()
+        footer.setStyleSheet(f"border-top:1px solid {C['border']};background:transparent;")
+        footer_l = QVBoxLayout(footer)
+        footer_l.setContentsMargins(10, 12, 10, 4)
+        footer_l.setSpacing(3)
+        local = QLabel("●  LOCAL SYSTEM")
+        local.setStyleSheet(f"color:{C['known']};font:700 8px 'DejaVu Sans Mono';")
+        build = QLabel("Apsidal Edge")
+        build.setStyleSheet(f"color:{C['faint']};font-size:8px;")
+        footer_l.addWidget(local)
+        footer_l.addWidget(build)
+        side.addWidget(footer)
+
         root.addWidget(self.sidebar)
 
         self.content = QWidget()
@@ -395,33 +596,64 @@ class OperatorWindow(QMainWindow):
 
         self.topbar = QFrame()
         self.topbar.setObjectName("topbar")
-        self.topbar.setFixedHeight(55)
+        self.topbar.setFixedHeight(66)
         top = QHBoxLayout(self.topbar)
-        top.setContentsMargins(14, 0, 14, 0)
-        top.setSpacing(9)
+        top.setContentsMargins(20, 0, 18, 0)
+        top.setSpacing(8)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(1)
         self.page_title = QLabel("Monitoring")
-        self.page_title.setStyleSheet("font-size:16px;font-weight:800;")
-        top.addWidget(self.page_title)
+        self.page_title.setStyleSheet("font-size:17px;font-weight:850;")
+        self.page_subtitle = QLabel(PAGE_META[0][1])
+        self.page_subtitle.setStyleSheet(f"color:{C['muted']};font-size:9px;")
+        title_box.addWidget(self.page_title)
+        title_box.addWidget(self.page_subtitle)
+        top.addLayout(title_box)
         top.addStretch(1)
-        self.api_badge = Badge("API")
-        self.ai_badge = Badge("AI")
-        self.cam_badge = Badge("0/6")
+
+        self.api_badge = HealthChip("API")
+        self.ai_badge = HealthChip("AI")
+        self.cam_badge = HealthChip("CAM")
+        self.cam_badge.setMinimumWidth(72)
         top.addWidget(self.api_badge)
         top.addWidget(self.ai_badge)
         top.addWidget(self.cam_badge)
+
         self.clock = QLabel()
-        self.clock.setStyleSheet(f"color:{C['muted']};font:9px 'DejaVu Sans Mono';margin-left:6px;")
+        self.clock.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.clock.setMinimumWidth(78)
+        self.clock.setStyleSheet(
+            f"color:{C['muted']};font:9px 'DejaVu Sans Mono';margin-left:5px;"
+        )
         top.addWidget(self.clock)
         content.addWidget(self.topbar)
 
         self.stack = QStackedWidget()
         self.monitoring = MonitoringPage(self.settings)
         self.people = PeoplePage()
-        self.events = SimplePage("Events", "Detection/event persistence will be connected through api_service; live tracking already remains independent.")
-        self.enrollment = SimplePage("Enrollment", "Face enrollment stays disabled until the Face stage is explicitly enabled.")
-        self.settings_page = SimplePage("Settings", f"API: {self.settings.api_base_url}\nML video fallback: {self.settings.ml_video_base_url}\nPrimary video: SIGBUS-safe mmap")
-        for page in (self.monitoring, self.people, self.events, self.enrollment, self.settings_page):
+        self.events = SimplePage(
+            "Events",
+            "Detection and event history will appear here through api_service.",
+        )
+        self.enrollment = SimplePage(
+            "Enrollment",
+            "Face enrollment remains disabled until the Face stage is explicitly enabled.",
+        )
+        self.settings_page = SimplePage(
+            "Settings",
+            "Application configuration and service connection settings.",
+        )
+
+        for page in (
+            self.monitoring,
+            self.people,
+            self.events,
+            self.enrollment,
+            self.settings_page,
+        ):
             self.stack.addWidget(page)
+
         content.addWidget(self.stack, 1)
         root.addWidget(self.content, 1)
 
@@ -470,7 +702,8 @@ class OperatorWindow(QMainWindow):
         if not 0 <= int(index) < self.stack.count():
             return
         self.stack.setCurrentIndex(index)
-        self.page_title.setText(self.PAGE_NAMES[index])
+        self.page_title.setText(PAGE_META[index][0])
+        self.page_subtitle.setText(PAGE_META[index][1])
         for i, button in enumerate(self.nav):
             button.setChecked(i == index)
 
@@ -480,17 +713,18 @@ class OperatorWindow(QMainWindow):
 
     def _on_api_health(self, data: dict) -> None:
         status = str(data.get("status") or "unknown")
-        self.api_badge.set_state("ok" if status == "ok" else "error", "API ●" if status == "ok" else "API ×")
+        self.api_badge.set_state("ok" if status == "ok" else "error", "●" if status == "ok" else "×")
 
     def _on_ml_health(self, data: dict) -> None:
         self.monitoring.update_ml_health(data)
         detector = data.get("detector") or {}
         tracker = data.get("tracker") or {}
         ready = detector.get("state") == "ready" and tracker.get("state") == "ready"
-        self.ai_badge.set_state("ok" if ready else "starting", "AI ●" if ready else "AI …")
+        self.ai_badge.set_state("ok" if ready else "starting", "●" if ready else "…")
         online = int(data.get("online_camera_count") or 0)
         total = int(data.get("camera_count") or 6)
-        self.cam_badge.set_state("ok" if online == total and total else "starting", f"{online}/{total}")
+        state = "ok" if online == total and total else ("starting" if online else "error")
+        self.cam_badge.set_state(state, f"{online}/{total}")
 
     def _on_cameras(self, data: dict) -> None:
         cameras = [row for row in data.get("cameras", []) if isinstance(row, dict)]
@@ -502,11 +736,11 @@ class OperatorWindow(QMainWindow):
 
     def _on_request_failed(self, request_name: str, _reason: str) -> None:
         if request_name == "api_health":
-            self.api_badge.set_state("error", "API ×")
+            self.api_badge.set_state("error", "×")
         elif request_name == "ml_health":
-            self.ai_badge.set_state("error", "AI ×")
+            self.ai_badge.set_state("error", "×")
         elif request_name == "cameras":
-            self.cam_badge.set_state("error", "CAM ×")
+            self.cam_badge.set_state("error", "×")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.monitoring.camera_wall.close_readers()
