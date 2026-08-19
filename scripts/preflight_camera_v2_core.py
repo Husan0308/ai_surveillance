@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Importing the active runtime module sets the production geometry defaults but
-# does not construct/start a GStreamer pipeline.
+# Importing the active runtime module sets production geometry defaults but does
+# not construct/start a GStreamer pipeline.
 import services.camera_v2.person_tracking_heatmap  # noqa: F401,E402
 from services.camera_v2.detection import INFER_HEIGHT, INFER_WIDTH  # noqa: E402
 from services.camera_v2.heatmap_filter import ensure_heatmap_filter  # noqa: E402
@@ -48,6 +48,18 @@ def main() -> int:
         if required not in sample_source:
             raise RuntimeError(f"stride-safe detector copy is missing: {required}")
 
+    tracker_source = (ROOT / "services/camera_v2/person_tracking_final.py").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        "CAMERA_V2_MAX_DETECT_RESULT_AGE_MS",
+        "self.latency_compensator.max_projection_s = 0.08",
+        "self.latency_compensator.projection_gain = 0.20",
+        '"interpolation-method", 2',
+    ):
+        if required not in tracker_source:
+            raise RuntimeError(f"fresh detector path guard missing: {required}")
+
     native_bridge_source = (ROOT / "services/camera_v2/native_bridge.py").read_text(
         encoding="utf-8"
     )
@@ -55,13 +67,36 @@ def main() -> int:
         if forbidden in native_bridge_source:
             raise RuntimeError(f"legacy display smoother is still active: {forbidden}")
 
+    label_source = (ROOT / "services/camera_v2/native_label_style.c").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        "sync_rect_from_tracker",
+        "const NvBbox_Coords *rect = &obj->tracker_bbox_info.org_bbox_coords",
+        "obj->rect_params.left = rect->left",
+        "obj->rect_params.top = rect->top",
+    ):
+        if required not in label_source:
+            raise RuntimeError(f"canonical NvDCF bbox guard missing: {required}")
+
+    display_source = (ROOT / "services/camera_v2/dynamic_wall.py").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        'self._set_if(self.mux, "interpolation-method", 2)',
+        'self._set_if(self.mux, "compute-hw", 1)',
+    ):
+        if required not in display_source:
+            raise RuntimeError(f"high-quality display scaling guard missing: {required}")
+
     ensure_bridge()
     ensure_heatmap_filter()
 
     print(
         f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=PASS "
         f"display={frame_width}x{frame_height} detector={INFER_WIDTH}x{INFER_HEIGHT} "
-        f"tracker={tracker_width}x{tracker_height} stride_safe=PASS custom_bbox_hold=OFF"
+        f"tracker={tracker_width}x{tracker_height} stride_safe=PASS "
+        "tracker_bbox=canonical scaling=cubic custom_bbox_hold=OFF"
     )
     print("CAMERA_PREFLIGHT=PASS")
     return 0
