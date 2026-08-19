@@ -34,6 +34,9 @@ class MLServiceClient:
     async def detections(self, camera_id: str) -> dict[str, Any]:
         return await self._get_json(f"/detections/{camera_id}")
 
+    async def tracks_all(self) -> dict[str, Any]:
+        return await self._get_json("/tracks")
+
     async def tracks(self, camera_id: str) -> dict[str, Any]:
         return await self._get_json(f"/tracks/{camera_id}")
 
