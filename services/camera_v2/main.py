@@ -12,7 +12,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 # It gives us deterministic width/height, live-source, GPU memory and pool knobs.
 os.environ.pop("USE_NEW_NVSTREAMMUX", None)
 
-from services.ml_service.app.config import CameraConfig, load_settings
+from .config import CameraConfig, load_settings
 
 
 @dataclass
