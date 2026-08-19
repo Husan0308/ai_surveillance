@@ -20,9 +20,10 @@ from .sentinel_video_wall_ui import ProLiveVideoWall, ProPipelineController
 class MonitoringPage(QWidget):
     """Compact production monitoring wall + occupancy rail.
 
-    The GStreamer sink renders into a native Qt child window. Qt documents that
-    QWidget.winId() may change at runtime, so the binding must be refreshed after
-    show/native-id/fullscreen transitions instead of being treated as one-shot.
+    The camera renderer owns one dedicated native Qt child window. The pipeline is
+    started once for that window and is rebound only if Qt actually gives the wall
+    a different native id. Rebinding the same live XID on a timer can disturb the
+    EGL surface, so routine polling never touches the video handle.
     """
 
     def __init__(self):
@@ -32,7 +33,6 @@ class MonitoringPage(QWidget):
         self._fullscreen_active = False
         self._focused_source: int | None = None
         self._last_bound_xid = 0
-        self._bind_watchdog_ticks = 0
         self.camera_configs = list(load_settings().cameras)
 
         self.layout = QHBoxLayout(self)
@@ -162,9 +162,7 @@ class MonitoringPage(QWidget):
         self.layout.addWidget(self.identity_panel, 0)
 
         self.poll_timer = self.startTimer(250)
-        QTimer.singleShot(0, lambda: self._ensure_video_binding(True, "startup-0"))
-        QTimer.singleShot(180, lambda: self._ensure_video_binding(True, "startup-180"))
-        QTimer.singleShot(500, lambda: self._ensure_video_binding(True, "startup-500"))
+        QTimer.singleShot(0, lambda: self._ensure_video_binding("startup"))
 
     @staticmethod
     def _status_style(state: str) -> str:
@@ -205,23 +203,18 @@ class MonitoringPage(QWidget):
         if callable(switcher):
             switcher(2)
 
-    def _pipeline_alive(self) -> bool:
-        process = self.controller.process
-        return process is not None and process.is_alive()
-
-    def _bind_window_id(self, xid: int, *, force: bool, reason: str) -> None:
+    def _bind_window_id(self, xid: int, *, reason: str) -> None:
         xid = int(xid)
         if xid <= 0:
             return
 
         process = self.controller.process
         if process is not None and not process.is_alive():
-            # Clear dead process/queues before a clean restart. Otherwise stale
-            # ERROR/STOPPED messages can survive into the new UI session.
             self.controller.stop()
             process = None
+            self._last_bound_xid = 0
 
-        if not force and process is not None and process.is_alive() and xid == self._last_bound_xid:
+        if process is not None and process.is_alive() and xid == self._last_bound_xid:
             return
 
         action = "start" if process is None else "rebind"
@@ -229,68 +222,48 @@ class MonitoringPage(QWidget):
         self.controller.start_or_bind(xid)
         self._last_bound_xid = xid
 
-    def _ensure_video_binding(self, force: bool = False, reason: str = "watchdog") -> None:
-        if reason.startswith("watchdog") and not self.isVisible():
-            return
+    def _ensure_video_binding(self, reason: str) -> None:
         try:
             xid = int(self.wall.winId())
         except Exception as exc:
             print(f"SENTINEL_UI_BIND_SKIP reason={reason} error={type(exc).__name__}", flush=True)
             return
-        self._bind_window_id(xid, force=bool(force), reason=reason)
+        self._bind_window_id(xid, reason=reason)
 
-    def _schedule_rebind(self, reason: str) -> None:
-        # Window-manager transitions are asynchronous. Rebind immediately and
-        # once again after the native child has settled on the new surface.
-        QTimer.singleShot(0, lambda r=reason: self._ensure_video_binding(True, f"{r}-0"))
-        QTimer.singleShot(180, lambda r=reason: self._ensure_video_binding(True, f"{r}-180"))
-        QTimer.singleShot(450, lambda r=reason: self._ensure_video_binding(True, f"{r}-450"))
+    def _schedule_binding_check(self, reason: str) -> None:
+        # Re-read the native id after window-manager transitions, but never resend
+        # the same XID to a live EGL sink. A genuine WinIdChange will trigger one
+        # deterministic rebind through _bind_window_id().
+        QTimer.singleShot(0, lambda r=reason: self._ensure_video_binding(f"{r}-0"))
+        QTimer.singleShot(250, lambda r=reason: self._ensure_video_binding(f"{r}-250"))
 
     def _start_or_bind(self, xid: int) -> None:
-        self._bind_window_id(int(xid), force=True, reason="native-ready")
+        self._bind_window_id(int(xid), reason="native-ready")
 
     def eventFilter(self, watched, event):
         if watched is self.wall:
             event_type = event.type()
             if event_type == QEvent.Type.WinIdChange:
-                QTimer.singleShot(
-                    0,
-                    lambda: self._ensure_video_binding(True, "wall-winid-change"),
-                )
+                self._schedule_binding_check("wall-winid-change")
             elif event_type == QEvent.Type.Show:
-                QTimer.singleShot(
-                    0,
-                    lambda: self._ensure_video_binding(True, "wall-show"),
-                )
+                self._schedule_binding_check("wall-show")
             elif event_type == QEvent.Type.ParentChange:
-                QTimer.singleShot(
-                    0,
-                    lambda: self._ensure_video_binding(True, "wall-parent-change"),
-                )
+                self._schedule_binding_check("wall-parent-change")
         return super().eventFilter(watched, event)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self._schedule_rebind("page-show")
+        self._schedule_binding_check("page-show")
 
     def timerEvent(self, event):
         if event.timerId() == self.poll_timer:
-            self._bind_watchdog_ticks += 1
             if self.controller.process is None:
-                self._ensure_video_binding(True, "poll-start")
-            elif self._bind_watchdog_ticks % 20 == 0:
-                # nveglglessink can lose the child surface across compositor/window
-                # state transitions even when the numerical XID stayed the same.
-                # A slow 5 s idempotent rebind keeps the video self-healing.
-                self._ensure_video_binding(True, "watchdog-5s")
+                self._ensure_video_binding("poll-start")
 
             status, metrics = self.controller.poll()
             self.wall.update_metrics(metrics)
             self.wall.set_pipeline_status(status)
 
-            # Camera metrics are the visual source of truth. A transient GStreamer
-            # warning from one source must not make the whole six-camera wall look
-            # dead while other cameras are actively producing frames.
             camera_rows = [row for row in metrics.get("cameras", []) if isinstance(row, dict)]
             online_count = sum(1 for row in camera_rows if bool(row.get("online")))
             configured_count = max(1, len(self.camera_configs))
@@ -340,7 +313,7 @@ class MonitoringPage(QWidget):
         self.layout.setSpacing(0)
         self.wall.set_fullscreen_mode(True, self._focused_source)
         self._set_app_fullscreen_shell(True)
-        self._schedule_rebind("fullscreen-enter")
+        self._schedule_binding_check("fullscreen-enter")
 
     def exit_fullscreen(self) -> None:
         if not self._fullscreen_active:
@@ -353,7 +326,7 @@ class MonitoringPage(QWidget):
         self.layout.setContentsMargins(7, 6, 7, 7)
         self.layout.setSpacing(8)
         self._set_app_fullscreen_shell(False)
-        self._schedule_rebind("fullscreen-exit")
+        self._schedule_binding_check("fullscreen-exit")
 
     def open_fullscreen_grid(self) -> None:
         self.enter_fullscreen(None)
