@@ -9,13 +9,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from services.camera_v2.config import CameraConfig, load_settings
 from services.camera_v2.sentinel_ui import BUILD_TAG, MainWindow, main
 from services.camera_v2.sentinel_ui_enrollment import EnrollmentPage
 from services.camera_v2.sentinel_ui_monitoring import MonitoringPage
 from services.camera_v2.sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from services.camera_v2.sentinel_ui_settings import SettingsPage
 from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_ROWS
-from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
@@ -104,7 +104,7 @@ def main_preflight() -> int:
         monitoring_source,
         (
             'self.identity_panel.setFixedWidth(262)',
-            'QLabel("People in Building")',
+            'QLabel("Estimated people")',
             'QLabel("Recent Views")',
             'metrics.get("known_people"',
             'metrics.get("total_people"',
@@ -113,6 +113,8 @@ def main_preflight() -> int:
         ),
         "monitoring",
     )
+    if 'QLabel("People in Building")' in monitoring_source:
+        _fail("occupancy estimate is mislabeled as an exact building count")
 
     # The EGL wall owns one native child XID. It is rebound only when Qt actually
     # changes that XID; periodic same-handle rebinding is forbidden because it can
@@ -258,7 +260,7 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT native_video=single-native-child no-stale-page-pixels PASS")
     print("SENTINEL_PREFLIGHT native_binding=xcb+rebind-only-on-new-xid PASS")
     print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
-    print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
+    print("SENTINEL_PREFLIGHT people_count=room-fused-estimate total+known+unknown wiring=PASS")
     print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
     print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
     print("SENTINEL_UI_PREFLIGHT=PASS")
