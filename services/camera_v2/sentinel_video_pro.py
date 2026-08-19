@@ -20,10 +20,11 @@ from .sentinel_video import (
     _put_status,
 )
 
-# Keep fullscreen at the exact native mux aspect/resolution. Upscaling to the
-# physical monitor is left to the EGL sink, avoiding a second unnecessary scale.
-FOCUS_WIDTH = 1280
-FOCUS_HEIGHT = 720
+# Fullscreen keeps a real 16:9 1080p presentation surface. The source streams are
+# 1440p, so this avoids enlarging a 720p intermediate while remaining lighter than
+# carrying 1440p through the whole six-camera wall.
+FOCUS_WIDTH = 1920
+FOCUS_HEIGHT = 1080
 
 
 def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
@@ -34,6 +35,8 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
 
         os.environ["CAMERA_V2_WALL_WIDTH"] = str(WALL_WIDTH)
         os.environ["CAMERA_V2_WALL_HEIGHT"] = str(WALL_HEIGHT)
+        os.environ.setdefault("CAMERA_V2_FRAME_WIDTH", str(FOCUS_WIDTH))
+        os.environ.setdefault("CAMERA_V2_FRAME_HEIGHT", str(FOCUS_HEIGHT))
         os.environ.setdefault("CAMERA_V2_HEATMAP", "1")
         os.environ.setdefault("CAMERA_V2_HEATMAP_VISIBLE", "0")
 
@@ -90,8 +93,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
             current_focus = sid
 
             if sid >= 0:
-                # A focused camera is a real 16:9 stream, not a zoomed source
-                # inside the old 2x3 1280x1080 wall canvas.
                 runtime.tiler.set_property("rows", 1)
                 runtime.tiler.set_property("columns", 1)
                 runtime.tiler_rows = 1
