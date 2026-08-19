@@ -24,7 +24,7 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.19-r10"
+BUILD_TAG = "2026.08.19-r11"
 
 
 class MainWindow(QMainWindow):
@@ -211,10 +211,6 @@ class MainWindow(QMainWindow):
 
 
 def run():
-    # GstVideoOverlay/nveglglessink is an X11 native-window path. Force this VMS
-    # shell onto XCB whenever an X display is available, including under XWayland.
-    # This also protects direct `python -m ...monitor_ui` launches that bypass the
-    # shell launcher.
     if os.environ.get("DISPLAY"):
         os.environ["QT_QPA_PLATFORM"] = "xcb"
 
