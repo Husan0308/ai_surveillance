@@ -23,12 +23,12 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.19-r5"
+BUILD_TAG = "2026.08.19-r6"
 
 
 class MainWindow(QMainWindow):
     NAV = [
-        ("▣", "Monitoring", "DeepStream live wall · tracking · ankle heatmap", MonitoringPage),
+        ("▣", "Monitoring", "DeepStream live wall · YOLO26m · NvDCF · heatmap", MonitoringPage),
         ("♙", "People", f"{len(PEOPLE)} ta identity", PeoplePage),
         ("⌁", "Events", f"{len(EVENTS)} ta hodisa", EventsPage),
         ("▥", "Rooms", "Xonalar va camera topology", RoomsPage),
@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         nl.addStretch()
         side.addWidget(navwrap, 1)
 
-        build = label(f"build {BUILD_TAG}\nankle pose · camera v2", "mono")
+        build = label(f"build {BUILD_TAG}\ncore camera · no pose/reid", "mono")
         build.setStyleSheet(
             f"border-top:1px solid {C['border']};padding:12px 14px;color:{C['muted']};"
         )
