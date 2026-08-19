@@ -133,6 +133,17 @@ def main_preflight() -> int:
         if guard not in video_source:
             _fail(f"runtime guard missing: {guard}")
 
+    wall_source = ui_files["wall"]
+    for guard in (
+        "fullscreen_camera_label",
+        "fullscreen_fps_label",
+        "grid labels therefore never move in fullscreen",
+        "widget.setVisible(not active)",
+        "Do not call the parent implementation",
+    ):
+        if guard not in wall_source:
+            _fail(f"fullscreen fixed-HUD guard missing: {guard}")
+
     base_video_source = _source("services/camera_v2/sentinel_video.py")
     if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
         _fail("demo per-camera occupancy badge returned")
@@ -143,6 +154,26 @@ def main_preflight() -> int:
     for forbidden_heat in ("PoseHeatmapBridge", "deposit_pose_ankle", "pose_sidecar"):
         if forbidden_heat in heat_source:
             _fail(f"active heatmap has optional dependency: {forbidden_heat}")
+
+    smoother_source = _source("services/camera_v2/native_display_smoother.c")
+    for guard in (
+        "#define DISPLAY_HOLD_FRAMES 8",
+        "center_alpha_1f = 0.96f",
+        "shrink_alpha_1f = 0.72f",
+        "jump_norm > 0.55f",
+    ):
+        if guard not in smoother_source:
+            _fail(f"tight bbox display guard missing: {guard}")
+
+    latency_source = _source("services/camera_v2/detector_latency.py")
+    for guard in (
+        "self.max_projection_s = 0.16",
+        "self.projection_gain = 0.62",
+        "geometry_stable",
+        "motion_plausible",
+    ):
+        if guard not in latency_source:
+            _fail(f"conservative detector projection guard missing: {guard}")
 
     enrollment_source = _source("services/camera_v2/sentinel_ui_enrollment.py")
     if "class ReportsPage" in enrollment_source:
@@ -155,7 +186,8 @@ def main_preflight() -> int:
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
-    print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=16:9-renegotiated hover=PASS")
+    print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=16:9-renegotiated fixed-hud=PASS")
+    print("SENTINEL_PREFLIGHT bbox=nvdcf-tight hold=8frames latency_projection=conservative")
     print("SENTINEL_PREFLIGHT people_count=per-camera->room-max->total known+unknown=consistent")
     print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
     print("SENTINEL_UI_PREFLIGHT=PASS")
