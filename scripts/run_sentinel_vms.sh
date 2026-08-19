@@ -7,6 +7,15 @@ HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
 echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r9"
 
+# nveglglessink's GstVideoOverlay path needs a stable X11 window handle. On a
+# Wayland desktop DISPLAY normally points at XWayland, so run this one native
+# video application through Qt's xcb backend unless the operator explicitly set
+# another platform. This keeps QWidget.winId() compatible with the EGL sink.
+if [[ -n "${DISPLAY:-}" && -z "${QT_QPA_PLATFORM:-}" ]]; then
+  export QT_QPA_PLATFORM=xcb
+fi
+echo "SENTINEL_DISPLAY session=${XDG_SESSION_TYPE:-unknown} qt_platform=${QT_QPA_PLATFORM:-auto} display=${DISPLAY:-unset}"
+
 # Old shells/.env files can retain CAMERA_V2_* values from earlier experiments.
 # Preserve the known 4MP main-stream geometry through nvstreammux. Detector and
 # NvDCF still use their own lightweight resolutions; fullscreen is rendered at
