@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from collections import deque
+import os
+from pathlib import Path
 import re
 import time
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import gi
 import numpy as np
+
 
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: E402
@@ -45,12 +48,20 @@ def _owned_bgr(mapped_data, width: int, height: int) -> np.ndarray:
     return array[..., :3].copy()
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class DeepStreamCapture:
     """Latest-frame RTSP capture owned by DeepStream nvurisrcbin.
 
     nvurisrcbin performs RTSP negotiation, H.264/H.265 codec discovery and NVIDIA
-    decode internally. The application therefore has no codec knob and never
-    guesses the stream format. Downstream queue/appsink are latest-only.
+    decode internally. One post-convert BGRx stream is split into two latest-only
+    consumers: the in-process appsink used by detection and an optional shmsink
+    used by the frontend native renderer. MJPEG remains a fallback path elsewhere.
     """
 
     backend = "deepstream-nvurisrcbin"
@@ -76,18 +87,39 @@ class DeepStreamCapture:
         self._frame_intervals_ms = deque(maxlen=300)
         self._last_frame_mono: float | None = None
 
-        for plugin in ("nvurisrcbin", "nvvideoconvert", "appsink"):
+        self.shm_enabled = _env_bool("ML_SHM_VIDEO_ENABLED", True)
+        self.shm_dir = Path(os.getenv("ML_SHM_VIDEO_DIR", "/tmp/ai-surveillance")).expanduser()
+        self.shm_socket = self.shm_dir / f"{self.camera_id}.sock"
+        frame_bytes = int(config.display_width) * int(config.display_height) * 4
+        requested_mb = max(2, int(os.getenv("ML_SHM_VIDEO_SIZE_MB", "8")))
+        self.shm_size_bytes = max(requested_mb * 1024 * 1024, frame_bytes * 4)
+
+        required_plugins = ["nvurisrcbin", "nvvideoconvert", "appsink"]
+        if self.shm_enabled:
+            required_plugins.append("shmsink")
+        for plugin in required_plugins:
             if Gst.ElementFactory.find(plugin) is None:
                 raise RuntimeError(f"required DeepStream/GStreamer plugin missing: {plugin}")
+
+        if self.shm_enabled:
+            self.shm_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self.shm_socket.unlink(missing_ok=True)
+            except OSError as exc:
+                raise RuntimeError(f"{camera_id}: cannot clear shm socket {self.shm_socket}: {exc}") from exc
 
         self.pipeline_text = self._build_pipeline()
         self.pipeline = Gst.parse_launch(self.pipeline_text)
         self.bus = self.pipeline.get_bus()
         self.sink = self.pipeline.get_by_name("sink")
         self.latest_queue = self.pipeline.get_by_name("latest_queue")
+        self.shm_sink = self.pipeline.get_by_name("shm_sink") if self.shm_enabled else None
         if self.sink is None:
             self.pipeline.set_state(Gst.State.NULL)
             raise RuntimeError(f"{camera_id}: appsink was not created")
+        if self.shm_enabled and self.shm_sink is None:
+            self.pipeline.set_state(Gst.State.NULL)
+            raise RuntimeError(f"{camera_id}: shmsink was not created")
 
         result = self.pipeline.set_state(Gst.State.PLAYING)
         self._opened = result != Gst.StateChangeReturn.FAILURE
@@ -103,37 +135,67 @@ class DeepStreamCapture:
         rtp_protocol = 4 if self.transport == "tcp" else 0
         source_uri = _uri_with_credentials(self.uri, self.username, self.password)
 
-        return " ".join(
+        parts = [
+            "nvurisrcbin",
+            "name=source",
+            f"uri={_gst_quote(source_uri)}",
+            f"gpu-id={int(c.gpu_id)}",
+            f"cudadec-memtype={int(c.cudadec_memtype)}",
+            f"num-extra-surfaces={max(1, int(c.decoder_extra_surfaces))}",
+            f"select-rtp-protocol={rtp_protocol}",
+            f"latency={max(1, int(c.latency_ms))}",
+            f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
+            f"udp-buffer-size={max(1, int(c.udp_buffer_size))}",
+            f"rtsp-reconnect-interval={reconnect_interval}",
+            "rtsp-reconnect-attempts=-1",
+            "disable-audio=true",
+            "async-handling=true",
+            "message-forward=true",
+            "!",
+            "queue",
+            "name=latest_queue",
+            f"max-size-buffers={queue_buffers}",
+            "max-size-bytes=0",
+            "max-size-time=0",
+            "leaky=downstream",
+            "silent=true",
+            "!",
+            "nvvideoconvert",
+            "name=converter",
+            f"gpu-id={int(c.gpu_id)}",
+            "!",
+            f"video/x-raw,width={int(c.display_width)},height={int(c.display_height)},format=BGRx",
+        ]
+
+        if not self.shm_enabled:
+            parts.extend(
+                [
+                    "!",
+                    "appsink",
+                    "name=sink",
+                    "drop=true",
+                    "max-buffers=1",
+                    "sync=false",
+                    "wait-on-eos=false",
+                    "enable-last-sample=false",
+                ]
+            )
+            return " ".join(parts)
+
+        parts.extend(
             [
-                "nvurisrcbin",
-                "name=source",
-                f"uri={_gst_quote(source_uri)}",
-                f"gpu-id={int(c.gpu_id)}",
-                f"cudadec-memtype={int(c.cudadec_memtype)}",
-                f"num-extra-surfaces={max(1, int(c.decoder_extra_surfaces))}",
-                f"select-rtp-protocol={rtp_protocol}",
-                f"latency={max(1, int(c.latency_ms))}",
-                f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
-                f"udp-buffer-size={max(1, int(c.udp_buffer_size))}",
-                f"rtsp-reconnect-interval={reconnect_interval}",
-                "rtsp-reconnect-attempts=-1",
-                "disable-audio=true",
-                "async-handling=true",
-                "message-forward=true",
+                "!",
+                "tee",
+                "name=frame_tee",
+                "frame_tee.",
                 "!",
                 "queue",
-                "name=latest_queue",
-                f"max-size-buffers={queue_buffers}",
+                "name=app_queue",
+                "max-size-buffers=1",
                 "max-size-bytes=0",
                 "max-size-time=0",
                 "leaky=downstream",
                 "silent=true",
-                "!",
-                "nvvideoconvert",
-                "name=converter",
-                f"gpu-id={int(c.gpu_id)}",
-                "!",
-                f"video/x-raw,width={int(c.display_width)},height={int(c.display_height)},format=BGRx",
                 "!",
                 "appsink",
                 "name=sink",
@@ -142,8 +204,27 @@ class DeepStreamCapture:
                 "sync=false",
                 "wait-on-eos=false",
                 "enable-last-sample=false",
+                "frame_tee.",
+                "!",
+                "queue",
+                "name=shm_queue",
+                "max-size-buffers=1",
+                "max-size-bytes=0",
+                "max-size-time=0",
+                "leaky=downstream",
+                "silent=true",
+                "!",
+                "shmsink",
+                "name=shm_sink",
+                f"socket-path={_gst_quote(str(self.shm_socket))}",
+                f"shm-size={int(self.shm_size_bytes)}",
+                "wait-for-connection=false",
+                "sync=false",
+                "async=false",
+                "qos=false",
             ]
         )
+        return " ".join(parts)
 
     def _consume_bus(self) -> str | None:
         terminal = None
@@ -227,9 +308,17 @@ class DeepStreamCapture:
             "last_error": self._last_error,
             "last_warning": self._last_warning,
             "queue_buffers": self.current_queue_buffers(),
+            "shm_enabled": self.shm_enabled,
+            "shm_socket": str(self.shm_socket) if self.shm_enabled else "",
+            "shm_size_bytes": int(self.shm_size_bytes) if self.shm_enabled else 0,
         }
 
     def close(self) -> None:
         self._opened = False
         if self.pipeline is not None:
             self.pipeline.set_state(Gst.State.NULL)
+        if self.shm_enabled:
+            try:
+                self.shm_socket.unlink(missing_ok=True)
+            except OSError:
+                pass
