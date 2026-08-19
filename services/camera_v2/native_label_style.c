@@ -29,6 +29,15 @@ static int is_generic_person_label(const char *label) {
     return 0;
 }
 
+static int should_style_track(const NvDsObjectMeta *obj) {
+    if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) return 0;
+    if (obj->unique_component_id == 191) return 0;
+    if (obj->rect_params.width <= 1.0f || obj->rect_params.height <= 1.0f) return 0;
+    /* native_meta_bridge.c sets border_width=0 for low-confidence NvDCF objects. */
+    if (obj->rect_params.border_width == 0) return 0;
+    return 1;
+}
+
 static void write_display_label(NvDsObjectMeta *obj,
                                 const char *display_label,
                                 float red,
@@ -92,8 +101,7 @@ int camera_v2_apply_local_track_style(uintptr_t buffer_ptr) {
 
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *)onode->data;
-            if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
-            if (obj->rect_params.width <= 1.0f || obj->rect_params.height <= 1.0f) continue;
+            if (!should_style_track(obj)) continue;
             set_local_track_label(obj, frame_meta->source_id);
             ++styled;
         }
@@ -126,7 +134,7 @@ int camera_v2_apply_global_track_style(uintptr_t buffer_ptr,
         if (!frame_meta) continue;
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *)onode->data;
-            if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
+            if (!should_style_track(obj)) continue;
             const CameraV2GlobalLabel *match = find_global_label(
                 rows, count, (uint32_t)frame_meta->source_id, (uint64_t)obj->object_id
             );
