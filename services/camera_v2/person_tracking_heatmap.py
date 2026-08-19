@@ -2,17 +2,37 @@ from __future__ import annotations
 
 import os
 
-# Keep the live mux at 1080p so fullscreen does not enlarge an already 720p wall
-# frame. Detector and NvDCF remain lightweight on their own lower-resolution
-# branches; only the presentation path keeps more source detail.
-os.environ.setdefault("CAMERA_V2_FRAME_WIDTH", "1920")
-os.environ.setdefault("CAMERA_V2_FRAME_HEIGHT", "1080")
-os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
-os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
-os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.05")
-os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
-os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "512")
-os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
+# Sentinel's active runtime is intentionally deterministic.  The shell can retain
+# old CAMERA_V2_* variables from earlier experiments (for example 704x384).  Using
+# setdefault() here allowed those stale values to silently override the production
+# detector/tracker geometry.  Force the canonical profile before importing the
+# detector modules so preflight and the real UI child process use identical values.
+_CANONICAL_RUNTIME = {
+    "CAMERA_V2_FRAME_WIDTH": "1920",
+    "CAMERA_V2_FRAME_HEIGHT": "1080",
+    "CAMERA_V2_DETECT_WIDTH": "736",
+    "CAMERA_V2_DETECT_HEIGHT": "416",
+    "CAMERA_V2_DETECT_CONF": "0.05",
+    "CAMERA_V2_DETECT_IOU": "0.65",
+    "CAMERA_V2_MAX_DET": "40",
+    "CAMERA_V2_MICRO_BATCH": "2",
+    "CAMERA_V2_TRACKER_WIDTH": "512",
+    "CAMERA_V2_TRACKER_HEIGHT": "288",
+}
+_stale_runtime_values: list[str] = []
+for _key, _value in _CANONICAL_RUNTIME.items():
+    _old = os.environ.get(_key)
+    if _old is not None and _old != _value:
+        _stale_runtime_values.append(f"{_key}={_old}")
+    os.environ[_key] = _value
+
+if _stale_runtime_values:
+    print(
+        "CAMERA_RUNTIME_PROFILE stale_env_overridden="
+        + ",".join(_stale_runtime_values)
+        + " canonical=display:1920x1080,detector:736x416,tracker:512x288",
+        flush=True,
+    )
 
 from .heatmap_filter import NativeHeatmapFilter
 from .person_tracking_final import CameraPersonTrackingFinal
