@@ -203,15 +203,24 @@ class MonitoringPage(QWidget):
             self.wall.update_metrics(metrics)
             self.wall.set_pipeline_status(status)
 
+            # Camera metrics are the visual source of truth. A transient GStreamer
+            # warning from one source must not make the whole six-camera wall look
+            # dead while other cameras are actively producing frames.
+            camera_rows = [row for row in metrics.get("cameras", []) if isinstance(row, dict)]
+            online_count = sum(1 for row in camera_rows if bool(row.get("online")))
+            configured_count = max(1, len(self.camera_configs))
             state = str(getattr(status, "state", "STARTING") or "STARTING").upper()
-            if state in {"LIVE", "VIDEO_BOUND", "FOCUS", "HEATMAP"}:
-                badge_state, badge_text = "live", "● LIVE"
-            elif state == "PIPELINE_WARNING":
-                badge_state, badge_text = "warning", "WARN"
+
+            if online_count > 0:
+                badge_state = "live"
+                badge_text = "● LIVE" if online_count == configured_count else f"● {online_count}/{configured_count}"
             elif state in {"ERROR", "STOPPED"}:
                 badge_state, badge_text = "error", state
+            elif state == "PIPELINE_WARNING":
+                badge_state, badge_text = "warning", "WARN"
             else:
                 badge_state, badge_text = "starting", "STARTING"
+
             self.live_badge.setText(badge_text)
             self.live_badge.setStyleSheet(self._status_style(badge_state))
 
