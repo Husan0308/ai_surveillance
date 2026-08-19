@@ -19,7 +19,7 @@ def test_camera_config_has_no_codec_knob() -> None:
     assert 'f"{camera_id.replace(\'-\', \'_\')}_URI"' in config
 
 
-def test_capture_is_owned_by_nvurisrcbin() -> None:
+def test_capture_is_nvurisrcbin_latest_only_and_gpu_scaled_before_host_copy() -> None:
     capture = source("services/ml_service/app/deepstream/capture.py")
 
     for required in (
@@ -30,30 +30,32 @@ def test_capture_is_owned_by_nvurisrcbin() -> None:
         'f"select-rtp-protocol={rtp_protocol}"',
         'f"cudadec-memtype={int(c.cudadec_memtype)}"',
         '"disable-audio=true"',
+        '"leaky=downstream"',
         '"drop=true"',
         '"max-buffers=1"',
+        '"nvvideoconvert"',
+        'f"video/x-raw,width={int(c.display_width)},height={int(c.display_height)},"',
     ):
         assert required in capture
 
+    assert "shmsink" not in capture
     assert "rtph264depay" not in capture
     assert "rtph265depay" not in capture
     assert "nvv4l2decoder" not in capture
 
 
-def test_native_display_preserves_decoder_resolution_while_analysis_stays_small() -> None:
-    capture = source("services/ml_service/app/deepstream/capture.py")
-    worker = source("services/ml_service/app/camera_worker.py")
+def test_proven_camera_latency_and_clear_display_profile_are_configured() -> None:
+    config = source("services/ml_service/app/config.py")
+    cameras = source("config/cameras.yaml")
 
-    assert '"name=decoded_tee"' in capture
-    assert '"name=analysis_converter"' in capture
-    assert '"name=display_converter"' in capture
-    assert '"video/x-raw,format=NV12"' in capture
-    assert "No width/height here: preserve the decoder's native camera size" in capture
-    assert 'f"video/x-raw,width={int(c.display_width)},height={int(c.display_height)},"' in capture
-    assert "def render_info" in capture
-    assert "render_width" in worker
-    assert "render_height" in worker
-    assert "render_format" in worker
+    assert "latency_ms: int | None" in config
+    assert "camera.latency_ms or self.ds.latency_ms" in source("services/ml_service/app/camera_worker.py")
+    assert cameras.count("latency_ms: 20") == 3
+    assert cameras.count("latency_ms: 80") == 3
+    assert "width: 960" in cameras
+    assert "height: 540" in cameras
+    assert "fps: 20" in cameras
+    assert "jpeg_quality: 88" in cameras
 
 
 def test_deepstream_settings_validate_decoder_memory() -> None:
@@ -65,10 +67,30 @@ def test_deepstream_settings_validate_decoder_memory() -> None:
     assert "cudadec_memtype: 0" in cameras
 
 
+def test_mmap_presentation_is_sigbus_safe_and_jpeg_is_on_demand() -> None:
+    pipeline = source("services/ml_service/app/deepstream/pipeline.py")
+    mmap_publisher = source("services/ml_service/app/mmap_publisher.py")
+    mmap_transport = source("shared/mmap_frame.py")
+    safe_writer = source("shared/safe_mmap_frame.py")
+    fallback = source("services/ml_service/app/fallback_jpeg.py")
+
+    assert "MmapFramePublisher" in pipeline
+    assert "OnDemandJpegPublisher" in pipeline
+    assert "self.mmap_publishers" in pipeline
+    assert "event-driven-mmap-latest-only" in mmap_publisher
+    assert "SigbusSafeMmapFrameWriter" in mmap_publisher
+    assert "MmapFrameReader" in mmap_transport
+    assert "os.replace" in safe_writer
+    assert "posix_fallocate" in safe_writer
+    assert "on-demand-fallback" in fallback
+
+
 def test_ml_preflight_exists() -> None:
     preflight = source("scripts/preflight_ml_service.py")
-    for plugin in ("nvurisrcbin", "nvvideoconvert", "appsink", "shmsink"):
+    for plugin in ("nvurisrcbin", "nvvideoconvert", "appsink"):
         assert plugin in preflight
+    assert "shmsink" not in preflight
+    assert "presentation=mmap" in preflight
     assert 'print("ML_PREFLIGHT=PASS"' in preflight
 
 
@@ -83,8 +105,6 @@ def test_person_detector_is_process_isolated_and_person_only() -> None:
     assert '"classes": [0]' in detector
     assert '"isolation"] = "spawn-process"' in detector
 
-    # Detector owns only person inference. Local tracking is a separate module,
-    # while ReID/face remain intentionally absent at this stage.
     for forbidden in (
         "insightface",
         "fastreid",
