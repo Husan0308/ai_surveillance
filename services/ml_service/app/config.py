@@ -63,10 +63,22 @@ class DetectionConfig:
 
 
 @dataclass(frozen=True)
+class TrackingConfig:
+    enabled: bool
+    track_high_thresh: float
+    track_low_thresh: float
+    new_track_thresh: float
+    track_buffer_seconds: float
+    match_thresh: float
+    fuse_score: bool
+
+
+@dataclass(frozen=True)
 class Settings:
     cameras: tuple[CameraConfig, ...]
     deepstream: DeepStreamConfig
     detection: DetectionConfig
+    tracking: TrackingConfig
 
 
 def _as_bool(value) -> bool:
@@ -161,6 +173,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
     ds = raw.get("deepstream") or {}
     display = raw.get("display") or {}
     detection = raw.get("detection") or {}
+    tracking = raw.get("tracking") or {}
 
     transport = str(ds.get("rtsp_transport", "auto")).strip().lower()
     if transport not in {"auto", "tcp"}:
@@ -234,6 +247,20 @@ def load_settings(path: str | Path | None = None) -> Settings:
     if overlay_max_age_ms < 0:
         raise ValueError("detection.overlay_max_age_ms must be >= 0")
 
+    track_high = float(tracking.get("track_high_thresh", 0.25))
+    track_low = float(tracking.get("track_low_thresh", 0.10))
+    new_track = float(tracking.get("new_track_thresh", 0.25))
+    track_buffer_seconds = float(tracking.get("track_buffer_seconds", 2.5))
+    match_thresh = float(tracking.get("match_thresh", 0.80))
+    if not 0.0 <= track_low <= track_high <= 1.0:
+        raise ValueError("tracking thresholds must satisfy 0 <= low <= high <= 1")
+    if not 0.0 <= new_track <= 1.0:
+        raise ValueError("tracking.new_track_thresh must be 0..1")
+    if not 0.1 <= track_buffer_seconds <= 30.0:
+        raise ValueError("tracking.track_buffer_seconds must be 0.1..30")
+    if not 0.0 <= match_thresh <= 1.0:
+        raise ValueError("tracking.match_thresh must be 0..1")
+
     return Settings(
         cameras=tuple(cameras),
         deepstream=DeepStreamConfig(
@@ -269,5 +296,14 @@ def load_settings(path: str | Path | None = None) -> Settings:
             half=_as_bool(detection.get("half", False)),
             overlay=_as_bool(detection.get("overlay", True)),
             overlay_max_age_ms=overlay_max_age_ms,
+        ),
+        tracking=TrackingConfig(
+            enabled=_as_bool(tracking.get("enabled", True)),
+            track_high_thresh=track_high,
+            track_low_thresh=track_low,
+            new_track_thresh=new_track,
+            track_buffer_seconds=track_buffer_seconds,
+            match_thresh=match_thresh,
+            fuse_score=_as_bool(tracking.get("fuse_score", True)),
         ),
     )
