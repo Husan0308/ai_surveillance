@@ -40,6 +40,22 @@ def test_capture_is_owned_by_nvurisrcbin() -> None:
     assert "nvv4l2decoder" not in capture
 
 
+def test_native_display_preserves_decoder_resolution_while_analysis_stays_small() -> None:
+    capture = source("services/ml_service/app/deepstream/capture.py")
+    worker = source("services/ml_service/app/camera_worker.py")
+
+    assert '"name=decoded_tee"' in capture
+    assert '"name=analysis_converter"' in capture
+    assert '"name=display_converter"' in capture
+    assert '"video/x-raw,format=NV12"' in capture
+    assert "No width/height here: preserve the decoder's native camera size" in capture
+    assert 'f"video/x-raw,width={int(c.display_width)},height={int(c.display_height)},"' in capture
+    assert "def render_info" in capture
+    assert "render_width" in worker
+    assert "render_height" in worker
+    assert "render_format" in worker
+
+
 def test_deepstream_settings_validate_decoder_memory() -> None:
     config = source("services/ml_service/app/config.py")
     cameras = source("config/cameras.yaml")
@@ -51,7 +67,7 @@ def test_deepstream_settings_validate_decoder_memory() -> None:
 
 def test_ml_preflight_exists() -> None:
     preflight = source("scripts/preflight_ml_service.py")
-    for plugin in ("nvurisrcbin", "nvvideoconvert", "appsink"):
+    for plugin in ("nvurisrcbin", "nvvideoconvert", "appsink", "shmsink"):
         assert plugin in preflight
     assert 'print("ML_PREFLIGHT=PASS"' in preflight
 
