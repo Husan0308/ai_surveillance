@@ -32,6 +32,7 @@ cameras:
 
 deepstream:
   gpu_id: 0
+  cudadec_memtype: 0
   rtsp_transport: auto
   latency_ms: 150
   drop_on_latency: true
