@@ -27,7 +27,17 @@ export CAMERA_V2_TRACKER_WIDTH=512
 export CAMERA_V2_TRACKER_HEIGHT=288
 export CAMERA_V2_MAX_DETECT_RESULT_AGE_MS=220
 
-echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} inherited_tracker=${INHERITED_TRACKER} effective_mux=2560x1440 focus=1920x1080 effective_detector=736x416 effective_tracker=512x288"
+# Tracker/count/heatmap truth stays exactly on NvDCF. Only the final OSD rectangle
+# gets a small adaptive expansion after analytics sampling so hands/feet are not
+# visually clipped by tight detector boxes.
+export CAMERA_V2_TRACK_BOX_SIDE_MARGIN=0.00
+export CAMERA_V2_TRACK_BOX_TOP_MARGIN=0.00
+export CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN=0.00
+export CAMERA_V2_DISPLAY_BOX_SIDE_MARGIN=0.08
+export CAMERA_V2_DISPLAY_BOX_TOP_MARGIN=0.04
+export CAMERA_V2_DISPLAY_BOX_BOTTOM_MARGIN=0.10
+
+echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} inherited_tracker=${INHERITED_TRACKER} effective_mux=2560x1440 focus=1920x1080 effective_detector=736x416 effective_tracker=512x288 display_box=adaptive-8/4/10"
 
 python scripts/preflight_sentinel_ui.py
 python scripts/preflight_camera_v2_core.py
