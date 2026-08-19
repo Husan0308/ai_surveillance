@@ -8,8 +8,9 @@ from enum import Enum
 from services.ml_service.app.camera_worker import CameraWorker
 from services.ml_service.app.config import Settings
 from services.ml_service.app.detector import PersonDetector
-from services.ml_service.app.jpeg_publisher import LatestJpegPublisher
+from services.ml_service.app.fallback_jpeg import OnDemandJpegPublisher
 from services.ml_service.app.latest_frame import LatestFrameStore
+from services.ml_service.app.mmap_publisher import MmapFramePublisher
 from services.ml_service.app.tracking import PersonTracker
 
 
@@ -29,7 +30,7 @@ class RuntimeSnapshot:
 
 
 class DeepStreamRuntime:
-    """NVDEC ingest -> shared person detector -> per-camera ByteTrack -> MJPEG."""
+    """NVDEC -> latest frame -> YOLO -> ByteTrack -> local mmap presentation."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -51,8 +52,27 @@ class DeepStreamRuntime:
             detector_fps=settings.detection.target_fps_per_camera,
         )
         overlay_store = self.tracker.results if settings.tracking.enabled else self.detector.results
-        self.publishers = {
-            camera.camera_id: LatestJpegPublisher(
+
+        # Canonical local UI path. This is the old proven sigbus-safe mmap design:
+        # no JPEG/HTTP encode cost while the desktop wall is running normally.
+        self.mmap_publishers = {
+            camera.camera_id: MmapFramePublisher(
+                camera.camera_id,
+                self.stores[camera.camera_id],
+                fps=settings.deepstream.display_fps,
+                max_width=settings.deepstream.display_width,
+                max_height=settings.deepstream.display_height,
+                detections=overlay_store,
+                overlay_enabled=settings.detection.overlay,
+                overlay_max_age_ms=settings.detection.overlay_max_age_ms,
+            )
+            for camera in settings.cameras
+        }
+
+        # /video remains for diagnostics/fallback only. JPEG work happens only
+        # when a client is actually connected, never in the normal mmap hot path.
+        self.jpeg_fallbacks = {
+            camera.camera_id: OnDemandJpegPublisher(
                 camera.camera_id,
                 self.stores[camera.camera_id],
                 fps=settings.deepstream.display_fps,
@@ -71,7 +91,7 @@ class DeepStreamRuntime:
             self._state = RuntimeState.STARTING
             self._last_error = None
 
-        for publisher in self.publishers.values():
+        for publisher in self.mmap_publishers.values():
             publisher.start()
         for index, camera in enumerate(self.settings.cameras):
             self.workers[camera.camera_id].start()
@@ -92,9 +112,9 @@ class DeepStreamRuntime:
             worker.stop()
         for worker in self.workers.values():
             worker.join()
-        for publisher in self.publishers.values():
+        for publisher in self.mmap_publishers.values():
             publisher.stop()
-        for publisher in self.publishers.values():
+        for publisher in self.mmap_publishers.values():
             publisher.join()
         with self._lock:
             self._state = RuntimeState.STOPPED
@@ -129,7 +149,8 @@ class DeepStreamRuntime:
         for camera in self.settings.cameras:
             camera_id = camera.camera_id
             metrics = self.workers[camera_id].metrics()
-            publisher = self.publishers[camera_id].metrics()
+            presentation = self.mmap_publishers[camera_id].metrics()
+            jpeg = self.jpeg_fallbacks[camera_id].metrics()
             detection = self.detector.camera_metrics(camera_id)
             tracking = self.tracker.camera_metrics(camera_id)
             people = (
@@ -144,13 +165,14 @@ class DeepStreamRuntime:
                     "people": people,
                     "detection": detection,
                     "tracking": tracking,
-                    "jpeg": publisher,
+                    "presentation": presentation,
+                    "jpeg": jpeg,
                 }
             )
         return rows
 
     def has_camera(self, camera_id: str) -> bool:
-        return camera_id in self.publishers
+        return camera_id in self.stores
 
     def detection_payload(self, camera_id: str) -> dict:
         if not self.has_camera(camera_id):
@@ -163,4 +185,4 @@ class DeepStreamRuntime:
         return self.tracker.snapshot_payload(camera_id)
 
     def wait_jpeg(self, camera_id: str, last_version: int, timeout: float = 1.0):
-        return self.publishers[camera_id].wait_newer(last_version, timeout)
+        return self.jpeg_fallbacks[camera_id].wait_newer(last_version, timeout)
