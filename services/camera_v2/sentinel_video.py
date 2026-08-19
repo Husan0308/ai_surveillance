@@ -322,9 +322,13 @@ class LiveVideoWall(QFrame):
         self.setMinimumSize(640, 540)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
+
+        # Keep exactly one native child window for GstVideoOverlay. Without this
+        # guard Qt can promote QStackedWidget/MainWindow ancestors to native
+        # windows too, which breaks sibling stacking and leaves stale pixels from
+        # previously visible pages inside the Monitoring wall.
+        self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
         self.setAttribute(Qt.WA_NativeWindow, True)
-        self.setAttribute(Qt.WA_PaintOnScreen, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
         _ = int(self.winId())
 
         self.camera_labels: list[QLabel] = []
@@ -352,12 +356,6 @@ class LiveVideoWall(QFrame):
             self.status_labels.append(status_label)
 
         self._layout_overlays()
-
-    def paintEngine(self):
-        return None
-
-    def paintEvent(self, event):
-        event.accept()
 
     def showEvent(self, event):
         super().showEvent(event)
