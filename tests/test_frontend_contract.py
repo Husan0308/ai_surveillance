@@ -82,7 +82,7 @@ def test_tracking_overlay_uses_bytetrack_ids_plus_presentation_smoother() -> Non
 
     assert "PresentationSmoother" in mmap_publisher
     assert 'label = f"Person T{int(track.track_id)}' in mmap_publisher
-    assert "ByteTrack remains authoritative for T-IDs" in smoother
+    assert "ByteTrack remains the only identity/association owner" in smoother
     assert "self.smoother.visible" in mmap_publisher
     assert "update_tracks" in wall
 
