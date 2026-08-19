@@ -19,7 +19,7 @@ from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.19-r9"
+EXPECTED_BUILD = "2026.08.19-r10"
 
 
 def _fail(message: str) -> None:
