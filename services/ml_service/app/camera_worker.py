@@ -23,6 +23,11 @@ class CameraMetrics:
     transport: str = ""
     backend: str = ""
     auth_configured: bool = False
+    render_width: int = 0
+    render_height: int = 0
+    render_format: str = ""
+    render_fps: float = 0.0
+    render_socket: str = ""
 
 
 class CameraWorker:
@@ -64,6 +69,18 @@ class CameraWorker:
             self._thread.join(timeout)
 
     def metrics(self) -> dict:
+        cap = self._capture
+        if cap is not None:
+            try:
+                render = cap.render_info()
+                with self._lock:
+                    self._metrics.render_width = int(render.get("width") or 0)
+                    self._metrics.render_height = int(render.get("height") or 0)
+                    self._metrics.render_format = str(render.get("format") or "")
+                    self._metrics.render_fps = float(render.get("fps") or 0.0)
+                    self._metrics.render_socket = str(render.get("socket") or "")
+            except Exception:
+                pass
         with self._lock:
             data = asdict(self._metrics)
             if self._last_frame_mono:
@@ -130,6 +147,7 @@ class CameraWorker:
                     backoff = max(0.5, self.ds.reconnect_delay_sec)
                     mono = time.monotonic()
                     height, width = image.shape[:2]
+                    render = cap.render_info()
 
                     with self._lock:
                         self._metrics.online = True
@@ -139,6 +157,11 @@ class CameraWorker:
                         self._metrics.width = width
                         self._metrics.height = height
                         self._metrics.queue_buffers = cap.current_queue_buffers()
+                        self._metrics.render_width = int(render.get("width") or 0)
+                        self._metrics.render_height = int(render.get("height") or 0)
+                        self._metrics.render_format = str(render.get("format") or "")
+                        self._metrics.render_fps = float(render.get("fps") or 0.0)
+                        self._metrics.render_socket = str(render.get("socket") or "")
                         self._last_frame_mono = mono
                         self._fps_frames += 1
                         elapsed = mono - self._fps_started
@@ -149,9 +172,13 @@ class CameraWorker:
 
                     self.store.put(Frame(self.camera.camera_id, frame_id, mono, image, width, height))
                     if frame_id == 1:
+                        render_text = (
+                            f" render={int(render.get('width') or 0)}x{int(render.get('height') or 0)}"
+                            f" {str(render.get('format') or '-') }"
+                        )
                         print(
-                            f"[CAMERA] {self.camera.camera_id} first frame {width}x{height} "
-                            f"backend={cap.backend} transport={transport}",
+                            f"[CAMERA] {self.camera.camera_id} first analysis frame {width}x{height} "
+                            f"backend={cap.backend} transport={transport}{render_text}",
                             flush=True,
                         )
 
