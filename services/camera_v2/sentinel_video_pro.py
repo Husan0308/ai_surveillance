@@ -41,8 +41,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
         gi.require_version("GstVideo", "1.0")
         from gi.repository import Gst, GstVideo
 
-        # Core-only runtime: DeepStream/NVDEC -> YOLO26m -> NvDCF -> heatmap.
-        # No pose model, ReID embedder, Qwen verifier, or global identity worker.
         from .person_tracking_heatmap import CameraPersonTrackingHeatmap
 
         runtime = CameraPersonTrackingHeatmap()
@@ -82,7 +80,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 pass
 
         def set_focus(source_id: int | None) -> None:
-            """Atomically switch tiler source and output aspect on the same XID."""
             nonlocal current_focus
             if runtime.tiler.find_property("show-source") is None:
                 return
@@ -102,7 +99,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
             runtime.wall_height = int(height)
             runtime.focus_source = sid
             runtime.tiler.set_property("show-source", sid)
-            _put_status(status_q, "FOCUS", f"source={sid} output={width}x{height}")
+            _put_status(status_q, "FOCUS", "Camera view")
 
         bind_overlay(runtime.sink, current_xid)
 
@@ -116,10 +113,11 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 return Gst.BusSyncReply.PASS
             try:
                 bind_overlay(message.src)
-                _put_status(status_q, "VIDEO_BOUND", f"xid={current_xid}")
+                _put_status(status_q, "VIDEO_BOUND", "Cameras ready")
                 return Gst.BusSyncReply.DROP
             except Exception as exc:
-                _put_status(status_q, "ERROR", f"video overlay: {exc}")
+                print(f"CAMERA_VIDEO_BIND_ERROR {type(exc).__name__}: {exc}", flush=True)
+                _put_status(status_q, "ERROR", "Camera display error")
                 return Gst.BusSyncReply.PASS
 
         runtime.bus.set_sync_handler(on_sync_message, None)
@@ -129,18 +127,15 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 try:
                     _old, new, _pending = message.parse_state_changed()
                     if new == Gst.State.PLAYING:
-                        _put_status(
-                            status_q,
-                            "LIVE",
-                            f"{camera_count}-camera DeepStream/NVDEC + YOLO26m + NvDCF + heatmap PLAYING",
-                        )
+                        _put_status(status_q, "LIVE", "Cameras live")
                 except Exception:
                     pass
             elif message.type == Gst.MessageType.ERROR:
                 try:
                     err, _debug = message.parse_error()
                     src = message.src.get_name() if message.src else "unknown"
-                    _put_status(status_q, "PIPELINE_WARNING", f"{src}: {err.message}")
+                    print(f"CAMERA_SOURCE_ERROR {src}: {err.message}", flush=True)
+                    _put_status(status_q, "PIPELINE_WARNING", "Camera source error")
                 except Exception:
                     pass
 
@@ -174,7 +169,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
 
             if latest_bind is not None and latest_bind > 0:
                 bind_overlay(runtime.sink, latest_bind)
-                _put_status(status_q, "VIDEO_BOUND", f"xid={latest_bind}")
+                _put_status(status_q, "VIDEO_BOUND", "Cameras ready")
 
             if got_focus:
                 set_focus(latest_focus)
@@ -184,11 +179,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 for source_id, enabled in heatmap_changes.items():
                     if 0 <= source_id < camera_count:
                         setter(source_id, enabled)
-                        _put_status(
-                            status_q,
-                            "HEATMAP",
-                            f"source={source_id} enabled={int(enabled)}",
-                        )
+                        _put_status(status_q, "HEATMAP", "Heatmap updated")
 
             if stop_requested:
                 runtime.stop()
@@ -206,6 +197,21 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
             last_metric_t = now
             rows = []
 
+            source_counter = getattr(runtime, "live_source_counts", None)
+            if callable(source_counter):
+                try:
+                    source_counts = {
+                        int(k): max(0, int(v))
+                        for k, v in source_counter().items()
+                    }
+                except Exception:
+                    source_counts = {}
+            else:
+                source_counts = {}
+
+            room_people: dict[str, int] = {}
+            camera_people: dict[str, int] = {}
+
             for index, camera in enumerate(runtime.cameras):
                 stat = runtime.stats[camera.camera_id]
                 previous = int(last_frames.get(camera.camera_id, 0))
@@ -215,18 +221,29 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 if delta > 0:
                     last_seen[camera.camera_id] = now
                 online = now - last_seen.get(camera.camera_id, 0.0) <= 2.5
+
+                people = max(0, int(source_counts.get(index, 0))) if online else 0
+                camera_people[camera.camera_id] = people
+                room_key = str(getattr(camera, "room", "") or "").strip()
+                if not room_key:
+                    room_key = camera.camera_id
+                room_people[room_key] = max(room_people.get(room_key, 0), people)
+
                 rows.append(
                     {
                         "id": camera.camera_id,
                         "source_id": index,
                         "fps": delta / elapsed,
                         "online": online,
+                        "people": people,
                     }
                 )
 
-            total = max(0, int(getattr(runtime, "tracked_now", 0)))
-            # Identity is intentionally disabled. Until ReID/face identity returns,
-            # every current local track is classified as unknown in the UI.
+            # Each physical room has two overlapping cameras. Without cross-camera
+            # identity, summing both cameras double-counts the same person. The
+            # room occupancy is therefore the maximum live count among cameras in
+            # that room, and building total is the sum of room occupancies.
+            total = sum(room_people.values())
             known = 0
             unknown = total
 
@@ -245,10 +262,11 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 "METRICS",
                 {
                     "cameras": rows,
+                    "camera_people": camera_people,
+                    "room_people": room_people,
                     "total_people": total,
                     "known_people": known,
                     "unknown_people": unknown,
-                    "identity_enabled": False,
                     "heatmap_sources": heatmap_sources,
                     "focus_source": int(current_focus),
                 },
@@ -257,15 +275,12 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
 
         runtime.GLib.timeout_add(50, poll_commands)
         runtime.GLib.timeout_add(500, publish_metrics)
-        _put_status(
-            status_q,
-            "STARTING",
-            f"core camera pipeline; active_cameras={camera_count}; pose=0 reid=0",
-        )
+        _put_status(status_q, "STARTING", "Cameras starting")
         rc = runtime.run()
-        _put_status(status_q, "STOPPED", f"exit={rc}")
+        _put_status(status_q, "STOPPED", "Cameras stopped")
     except BaseException as exc:
-        _put_status(status_q, "ERROR", f"{type(exc).__name__}: {exc}")
+        print(f"CAMERA_RUNTIME_ERROR {type(exc).__name__}: {exc}", flush=True)
+        _put_status(status_q, "ERROR", "Cameras could not start")
         try:
             if runtime is not None:
                 runtime.stop()
