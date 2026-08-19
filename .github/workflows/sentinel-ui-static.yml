@@ -23,6 +23,7 @@ on:
       - 'scripts/smoke_person_tracking_stability.py'
       - 'scripts/smoke_api_service.py'
       - 'scripts/smoke_frontend_integration.py'
+      - 'scripts/smoke_shm_video.py'
       - 'scripts/run_ml_service.sh'
       - 'scripts/run_api_service.sh'
       - 'scripts/run_frontend.sh'
@@ -72,6 +73,7 @@ jobs:
             services/frontend/app/api_client.py \
             services/frontend/app/config.py \
             services/frontend/app/camera_wall.py \
+            services/frontend/app/native_video.py \
             services/frontend/app/mjpeg_reader.py \
             scripts/preflight_ml_service.py \
             scripts/preflight_person_detection.py \
@@ -82,7 +84,8 @@ jobs:
             scripts/smoke_person_tracking.py \
             scripts/smoke_person_tracking_stability.py \
             scripts/smoke_api_service.py \
-            scripts/smoke_frontend_integration.py
+            scripts/smoke_frontend_integration.py \
+            scripts/smoke_shm_video.py
 
       - name: Compile Sentinel Python sources
         run: |
