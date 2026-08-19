@@ -10,6 +10,7 @@ on:
       - 'tests/test_ml_service_contract.py'
       - 'tests/test_person_detection_contract.py'
       - 'tests/test_person_tracking_contract.py'
+      - 'tests/test_api_service_contract.py'
       - 'docs/ARCHITECTURE_CONTRACT.md'
       - 'scripts/preflight_ml_service.py'
       - 'scripts/preflight_person_detection.py'
@@ -18,9 +19,11 @@ on:
       - 'scripts/smoke_person_detection.py'
       - 'scripts/smoke_person_tracking.py'
       - 'scripts/smoke_person_tracking_stability.py'
+      - 'scripts/smoke_api_service.py'
+      - 'scripts/run_ml_service.sh'
+      - 'scripts/run_api_service.sh'
       - 'scripts/preflight_sentinel_ui.py'
       - 'scripts/preflight_camera_v2_core.py'
-      - 'scripts/run_ml_service.sh'
       - 'scripts/run_sentinel_vms.sh'
       - 'config/cameras.yaml'
       - '.github/workflows/sentinel-ui-static.yml'
@@ -37,13 +40,14 @@ jobs:
       - name: Install static test dependency
         run: python -m pip install pytest
 
-      - name: Enforce architecture and ML contracts
+      - name: Enforce architecture and service contracts
         run: |
           python -m pytest -q \
             tests/test_architecture_contract.py \
             tests/test_ml_service_contract.py \
             tests/test_person_detection_contract.py \
-            tests/test_person_tracking_contract.py
+            tests/test_person_tracking_contract.py \
+            tests/test_api_service_contract.py
 
       - name: Compile canonical service entrypoints
         run: |
@@ -57,6 +61,8 @@ jobs:
             services/ml_service/app/deepstream/capture.py \
             services/ml_service/app/deepstream/pipeline.py \
             services/api_service/app/main.py \
+            services/api_service/app/config.py \
+            services/api_service/app/ml_client.py \
             services/frontend/app/main.py \
             scripts/preflight_ml_service.py \
             scripts/preflight_person_detection.py \
@@ -64,7 +70,8 @@ jobs:
             scripts/smoke_ml_service.py \
             scripts/smoke_person_detection.py \
             scripts/smoke_person_tracking.py \
-            scripts/smoke_person_tracking_stability.py
+            scripts/smoke_person_tracking_stability.py \
+            scripts/smoke_api_service.py
 
       - name: Compile Sentinel Python sources
         run: |
