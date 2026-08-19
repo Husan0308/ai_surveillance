@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
-echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r9"
+echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r10"
 
 # nveglglessink's GstVideoOverlay path needs a stable X11 window handle. On a
 # Wayland desktop DISPLAY normally points at XWayland, so run this one native
