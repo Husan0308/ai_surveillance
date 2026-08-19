@@ -6,7 +6,11 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 
 from services.api_service.app.config import load_settings
-from services.api_service.app.ml_client import MLServiceClient, MLServiceUnavailable
+from services.api_service.app.ml_client import (
+    MLServiceClient,
+    MLServiceNotFound,
+    MLServiceUnavailable,
+)
 
 settings = load_settings()
 
@@ -26,7 +30,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI Surveillance API Service",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -46,11 +50,23 @@ def service_unavailable(exc: MLServiceUnavailable) -> HTTPException:
     )
 
 
+def resource_not_found(camera_id: str, exc: MLServiceNotFound) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={
+            "resource": "camera",
+            "camera_id": camera_id,
+            "reason": str(exc),
+        },
+    )
+
+
 @app.get("/health")
 async def health() -> dict:
     return {
         "service": "api_service",
         "status": "ok",
+        "ml_base_url": settings.ml_base_url,
     }
 
 
@@ -66,6 +82,26 @@ async def ml_health(request: Request) -> dict:
 async def cameras(request: Request) -> dict:
     try:
         return await get_ml_client(request).cameras()
+    except MLServiceUnavailable as exc:
+        raise service_unavailable(exc) from exc
+
+
+@app.get("/api/v1/cameras/{camera_id}/detections")
+async def camera_detections(camera_id: str, request: Request) -> dict:
+    try:
+        return await get_ml_client(request).detections(camera_id)
+    except MLServiceNotFound as exc:
+        raise resource_not_found(camera_id, exc) from exc
+    except MLServiceUnavailable as exc:
+        raise service_unavailable(exc) from exc
+
+
+@app.get("/api/v1/cameras/{camera_id}/tracks")
+async def camera_tracks(camera_id: str, request: Request) -> dict:
+    try:
+        return await get_ml_client(request).tracks(camera_id)
+    except MLServiceNotFound as exc:
+        raise resource_not_found(camera_id, exc) from exc
     except MLServiceUnavailable as exc:
         raise service_unavailable(exc) from exc
 
