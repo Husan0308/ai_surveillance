@@ -36,6 +36,7 @@ class MmapVideoCanvas(QWidget):
         super().__init__(parent)
         self._image: QImage | None = None
         self._version = -1
+        self._smooth_scaling = False
         self.setMinimumSize(320, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
@@ -44,6 +45,13 @@ class MmapVideoCanvas(QWidget):
     @property
     def version(self) -> int:
         return self._version
+
+    def set_smooth_scaling(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._smooth_scaling:
+            return
+        self._smooth_scaling = enabled
+        self.update()
 
     def set_frame(self, image: QImage, version: int) -> bool:
         if image is None or image.isNull() or int(version) == self._version:
@@ -71,7 +79,13 @@ class MmapVideoCanvas(QWidget):
             draw_h = max(1, round(source_h * scale))
             x = (target_w - draw_w) // 2
             y = (target_h - draw_h) // 2
-            # Proven six-feed path: do not enable SmoothPixmapTransform here.
+
+            # The old clear wall used SmoothPixmapTransform and looked much
+            # cleaner when a camera was enlarged. Keep the six-feed wall on the
+            # cheap fast path, but enable high-quality filtering for the single
+            # focused camera where the cost is bounded to one repaint.
+            if self._smooth_scaling:
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.drawImage(QRect(x, y, draw_w, draw_h), image)
         painter.end()
 
@@ -97,6 +111,7 @@ class CameraTile(QFrame):
         self._had_mmap_frame = False
         self._last_mjpeg_version = 0
         self._track_count = 0
+        self._focused = False
 
         self.setObjectName("cameraTile")
         self.setStyleSheet(
@@ -162,6 +177,12 @@ class CameraTile(QFrame):
             self.mmap_reader = SmoothMmapFrameReader(camera_id)
             self.mmap_reader.start()
 
+    def set_presentation_mode(self, *, active: bool, focused: bool) -> None:
+        self._focused = bool(focused)
+        self.mmap_canvas.set_smooth_scaling(self._focused)
+        if self.mmap_reader is not None:
+            self.mmap_reader.set_active(bool(active))
+
     def update_stream_profile(self, camera_meta: dict) -> None:
         self.camera_meta = dict(camera_meta or {})
         online = bool(self.camera_meta.get("online"))
@@ -192,7 +213,7 @@ class CameraTile(QFrame):
     def refresh(self) -> None:
         if not self._fallback_active:
             reader = self.mmap_reader
-            if reader is None:
+            if reader is None or not reader.active:
                 return
             image, version = reader.latest()
             if image is not None and version >= 0:
@@ -225,11 +246,12 @@ class CameraTile(QFrame):
             pixmap = QPixmap.fromImage(image)
             target = self.fallback_video.size()
             if target.width() > 0 and target.height() > 0:
-                pixmap = pixmap.scaled(
-                    target,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation,
+                mode = (
+                    Qt.TransformationMode.SmoothTransformation
+                    if self._focused
+                    else Qt.TransformationMode.FastTransformation
                 )
+                pixmap = pixmap.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, mode)
             self.fallback_video.setPixmap(pixmap)
             self.status.setText("FALLBACK")
         elif reader.last_error:
@@ -246,7 +268,7 @@ class CameraTile(QFrame):
 
 
 class CameraWall(QWidget):
-    """Two-camera-per-row operator wall backed by latest-only mmap frames."""
+    """Two-camera-per-row wall with an adaptive one-camera HQ focus path."""
 
     COLUMNS = 2
     focusChanged = Signal(bool, str)
@@ -277,6 +299,15 @@ class CameraWall(QWidget):
     def focused_camera(self) -> str | None:
         return self._focused_camera
 
+    def _apply_presentation_policy(self) -> None:
+        focused = self._focused_camera
+        for camera_id, tile in self.tiles.items():
+            active = focused is None or camera_id == focused
+            tile.set_presentation_mode(
+                active=active,
+                focused=focused is not None and camera_id == focused,
+            )
+
     def _rebuild_grid(self) -> None:
         while self.grid.count():
             item = self.grid.takeAt(0)
@@ -289,6 +320,7 @@ class CameraWall(QWidget):
             self.grid.setContentsMargins(0, 0, 0, 0)
             self.grid.setSpacing(0)
             self.grid.addWidget(tile, 0, 0, 3, self.COLUMNS)
+            self._apply_presentation_policy()
             return
 
         self.grid.setContentsMargins(0, 0, 0, 0)
@@ -298,6 +330,7 @@ class CameraWall(QWidget):
             tile.show()
             row, column = divmod(index, self.COLUMNS)
             self.grid.addWidget(tile, row, column)
+        self._apply_presentation_policy()
 
     def toggle_focus(self, camera_id: str) -> None:
         camera_id = str(camera_id)
@@ -334,6 +367,9 @@ class CameraWall(QWidget):
                 tile.update_tracks(result)
 
     def refresh_frames(self) -> None:
+        if self._focused_camera:
+            self.tiles[self._focused_camera].refresh()
+            return
         for tile in self.tiles.values():
             tile.refresh()
 
