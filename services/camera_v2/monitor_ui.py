@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Backward-compatible entry point for the full Sentinel VMS desktop shell."""
+"""Canonical entry point for the Sentinel VMS desktop shell."""
 
 import multiprocessing as mp
 
