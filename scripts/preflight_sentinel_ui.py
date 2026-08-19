@@ -162,9 +162,25 @@ def main_preflight() -> int:
             "self.fullscreen_camera_label.setText(camera_id)",
             'self.fullscreen_fps_label.setText("LIVE")',
             "self._layout_fullscreen_hud()",
+            "def mouseMoveEvent(self, event)",
+            "sid == self._hover_source",
+            "action.setVisible(show)",
+            "def leaveEvent(self, event)",
+            "def set_pipeline_status(self, status)",
         ),
-        "camera-card/fixed-HUD",
+        "camera-card/native-wall/fixed-HUD",
     )
+
+    # A full-size Qt backing-store widget over GstVideoOverlay can leave stale
+    # pixels and hide otherwise-live camera frames. Never reintroduce that design.
+    for forbidden in (
+        "cameraWallStateCover",
+        "state_cover.show()",
+        "state_cover.raise_()",
+        '"ERROR", "STOPPED", "PIPELINE_WARNING"',
+    ):
+        if forbidden in wall_source:
+            _fail(f"native wall can be blocked by stale opaque overlay: {forbidden}")
 
     base_video_source = _source("services/camera_v2/sentinel_video.py")
     if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
@@ -191,6 +207,7 @@ def main_preflight() -> int:
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
     print("SENTINEL_PREFLIGHT monitoring=compact-vms 2x3 header-bars right-rail=262px")
+    print("SENTINEL_PREFLIGHT native_video=direct no-wall-cover single-hover=PASS")
     print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
     print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
