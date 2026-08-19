@@ -62,16 +62,28 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         self._heatmap_sources: dict[int, bool] = {}
         self.focus_source = -1
 
+        # Production display padding is intentionally separate from NvDCF truth.
+        # Count + floor-contact heatmap sample the original current tracker bbox;
+        # only the rectangle sent to OSD is enlarged afterwards so hands, elbows
+        # and feet are not visually clipped by a tight person detector box.
+        self.display_box_side_margin = max(
+            0.0, min(0.18, float(os.environ.get("CAMERA_V2_DISPLAY_BOX_SIDE_MARGIN", "0.08")))
+        )
+        self.display_box_top_margin = max(
+            0.0, min(0.12, float(os.environ.get("CAMERA_V2_DISPLAY_BOX_TOP_MARGIN", "0.04")))
+        )
+        self.display_box_bottom_margin = max(
+            0.0, min(0.18, float(os.environ.get("CAMERA_V2_DISPLAY_BOX_BOTTOM_MARGIN", "0.10")))
+        )
+        self.display_boxes_expanded = 0
+        self.display_box_error = ""
+
         super().__init__()
 
         self._heatmap_sources = {
             source_id: bool(self.heatmap_render_enabled)
             for source_id in range(len(self.cameras))
         }
-
-        if not self.heatmap_enabled:
-            print("CAMERA_HEATMAP disabled", flush=True)
-            return
 
         cool_seconds = max(
             300.0,
@@ -94,32 +106,44 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             min(96, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "84"))),
         )
 
-        self.bridge.configure_heatmap(
-            deposit=deposit,
-            decay=decay,
-            low_threshold=low,
-            yellow_threshold=yellow,
-            red_threshold=red,
-            max_points_per_source=max_points,
-        )
-        self.bridge.reset_heatmap()
-        self.heatmap_filter = NativeHeatmapFilter()
+        if self.heatmap_enabled:
+            self.bridge.configure_heatmap(
+                deposit=deposit,
+                decay=decay,
+                low_threshold=low,
+                yellow_threshold=yellow,
+                red_threshold=red,
+                max_points_per_source=max_points,
+            )
+            self.bridge.reset_heatmap()
+            self.heatmap_filter = NativeHeatmapFilter()
 
-        osd_sink = self.osd.get_static_pad("sink")
-        if osd_sink is None:
-            raise RuntimeError("CAMERA_HEATMAP could not get nvdsosd sink pad")
-        osd_sink.add_probe(
-            self.Gst.PadProbeType.BUFFER,
-            self._heatmap_render_probe,
-        )
+            osd_sink = self.osd.get_static_pad("sink")
+            if osd_sink is None:
+                raise RuntimeError("CAMERA_HEATMAP could not get nvdsosd sink pad")
+            osd_sink.add_probe(
+                self.Gst.PadProbeType.BUFFER,
+                self._heatmap_render_probe,
+            )
+
+            print(
+                "CAMERA_HEATMAP ready "
+                "anchor=tracked-floor-point "
+                f"grid=48x27 points={max_points}/cam "
+                f"deposit={deposit:.5f} decay={decay:.8f} cool={cool_seconds:.0f}s "
+                f"remain={hour_remaining:.2f} yellow={yellow:.3f} red={red:.3f} "
+                "style=rolling-density per_camera_toggle=1 fullscreen_heatmap=hidden",
+                flush=True,
+            )
+        else:
+            print("CAMERA_HEATMAP disabled", flush=True)
 
         print(
-            "CAMERA_HEATMAP ready "
-            "anchor=tracked-floor-point "
-            f"grid=48x27 points={max_points}/cam "
-            f"deposit={deposit:.5f} decay={decay:.8f} cool={cool_seconds:.0f}s "
-            f"remain={hour_remaining:.2f} yellow={yellow:.3f} red={red:.3f} "
-            "style=rolling-density per_camera_toggle=1 fullscreen_heatmap=hidden",
+            "CAMERA_DISPLAY_BOX ready "
+            f"side={self.display_box_side_margin:.3f} "
+            f"top={self.display_box_top_margin:.3f} "
+            f"bottom={self.display_box_bottom_margin:.3f} "
+            "mode=display-only adaptive-wide=1 tracker_truth=unchanged heatmap_truth=unchanged",
             flush=True,
         )
 
@@ -148,18 +172,38 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
 
     def _tracker_probe(self, pad, info):
         result = super()._tracker_probe(pad, info)
-        if not self.heatmap_enabled:
-            return result
         buffer = info.get_buffer()
         if buffer is None:
             return result
+
+        # Heatmap samples the unpadded current tracker rectangle first. This keeps
+        # the bottom-center floor point physically meaningful even though the OSD
+        # rectangle is deliberately made more forgiving for limbs afterwards.
+        if self.heatmap_enabled:
+            try:
+                updates = self.bridge.heatmap_update(buffer)
+                if updates > 0:
+                    self.heatmap_updates += int(updates)
+                self.heatmap_error = ""
+            except Exception as exc:
+                self.heatmap_error = f"update:{type(exc).__name__}:{exc}"
+
         try:
-            updates = self.bridge.heatmap_update(buffer)
-            if updates > 0:
-                self.heatmap_updates += int(updates)
-            self.heatmap_error = ""
+            expanded = self.bridge.expand_display_boxes(
+                buffer,
+                side_margin=self.display_box_side_margin,
+                top_margin=self.display_box_top_margin,
+                bottom_margin=self.display_box_bottom_margin,
+            )
+            if expanded > 0:
+                self.display_boxes_expanded += int(expanded)
+                # Re-run styling so the text origin follows the padded display box.
+                # Geometry is not read back into tracking/count/heatmap state.
+                self.bridge.apply_local_track_style(buffer)
+            self.display_box_error = ""
         except Exception as exc:
-            self.heatmap_error = f"update:{type(exc).__name__}:{exc}"
+            self.display_box_error = f"{type(exc).__name__}:{exc}"
+
         return result
 
     def _current_focus_source(self) -> int:
@@ -238,6 +282,15 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
                 f"error={self.heatmap_error or 'none'}",
                 flush=True,
             )
+        print(
+            "CAMERA_DISPLAY_BOX "
+            f"expanded_total={self.display_boxes_expanded} "
+            f"side={self.display_box_side_margin:.3f} "
+            f"top={self.display_box_top_margin:.3f} "
+            f"bottom={self.display_box_bottom_margin:.3f} "
+            f"error={self.display_box_error or 'none'}",
+            flush=True,
+        )
         return keep
 
 
