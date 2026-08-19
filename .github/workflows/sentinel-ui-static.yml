@@ -33,6 +33,7 @@ jobs:
             services/camera_v2/sentinel_ui_pages.py \
             services/camera_v2/sentinel_video.py \
             services/camera_v2/sentinel_video_pro.py \
+            services/camera_v2/sentinel_video_wall_ui.py \
             services/camera_v2/person_tracking_heatmap.py \
             services/camera_v2/pose_ankle.py \
             scripts/preflight_sentinel_ui.py
@@ -47,6 +48,7 @@ jobs:
           monitoring = Path('services/camera_v2/sentinel_ui_monitoring.py').read_text()
           video = Path('services/camera_v2/sentinel_video.py').read_text()
           video_pro = Path('services/camera_v2/sentinel_video_pro.py').read_text()
+          wall_ui = Path('services/camera_v2/sentinel_video_wall_ui.py').read_text()
           heatmap = Path('services/camera_v2/person_tracking_heatmap.py').read_text()
           shell = Path('services/camera_v2/sentinel_ui.py').read_text()
           camera_config = Path('config/cameras.yaml').read_text()
@@ -62,11 +64,15 @@ jobs:
           assert 'metrics.get("known_people"' in monitoring
           assert 'metrics.get("unknown_people"' in monitoring
           assert "Demo ism yoki fake avatar ko'rsatilmaydi" in monitoring
+          assert 'self.wall.set_pipeline_status(status)' in monitoring
           assert 'runtime.focus_source = sid' in video_pro
           assert 'mapFromGlobal(QCursor.pos())' in video_pro
+          assert 'cameraWallStateCover' in wall_ui
+          assert 'stale People/Settings content' in wall_ui
+          assert '"PIPELINE_WARNING"' in wall_ui
           assert 'anchor=pose-ankle-only' in heatmap
           assert 'bbox_anchor=disabled' in heatmap
-          assert 'BUILD_TAG = "2026.08.18-r4"' in shell
+          assert 'BUILD_TAG = "2026.08.19-r5"' in shell
 
           for forbidden in ('\n    codec:', '\n    env_uri:', '\n    environment_uri:'):
               assert forbidden not in camera_config, f'stale camera config field: {forbidden.strip()}'
