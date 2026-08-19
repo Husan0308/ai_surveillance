@@ -11,6 +11,7 @@ on:
       - 'docs/ARCHITECTURE_CONTRACT.md'
       - 'scripts/preflight_ml_service.py'
       - 'scripts/probe_cameras.py'
+      - 'scripts/smoke_ml_service.py'
       - 'scripts/preflight_sentinel_ui.py'
       - 'scripts/preflight_camera_v2_core.py'
       - 'scripts/run_sentinel_vms.sh'
@@ -46,7 +47,8 @@ jobs:
             services/api_service/app/main.py \
             services/frontend/app/main.py \
             scripts/preflight_ml_service.py \
-            scripts/probe_cameras.py
+            scripts/probe_cameras.py \
+            scripts/smoke_ml_service.py
 
       - name: Compile Sentinel Python sources
         run: |
