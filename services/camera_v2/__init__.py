@@ -1,16 +1,14 @@
-"""Camera V2 production defaults.
+"""Sentinel Camera V2 production runtime.
 
-The hot path remains camera ingest -> YOLO person metadata -> per-camera NvDCF.
-Cross-camera Global ReID is layered on top as a bounded asynchronous side path:
-quality/diversity crop bank -> CPU ReID gallery -> room/time constraints -> optional
-Qwen visual verification -> reversible Global ID state machine. ReID/Qwen never own
-or block the local tracker/display path.
+Active path: RTSP/NVDEC -> fresh YOLO person detection -> per-camera NvDCF ->
+native metadata/heatmap -> native Sentinel wall. Identity/ReID is not part of the
+current production pipeline.
 """
 
 from __future__ import annotations
 
 import os
 
-# Stride-32 detector geometry; keeps configured and actual YOLO input identical.
-os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "704")
-os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
+# Canonical detector geometry enforced by the production preflight.
+os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
+os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
