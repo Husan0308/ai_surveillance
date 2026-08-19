@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import os
 
-# Pose recovery is disabled, so keep the stronger primary-person detector tuning
-# that was already useful for reclining/foreshortened people.
+# Stronger primary-person detector tuning for reclining/foreshortened people.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.05")
@@ -14,14 +13,7 @@ from .person_tracking_final import CameraPersonTrackingFinal
 
 
 class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
-    """Camera-local NvDCF tracking with lightweight floor-contact heatmap.
-
-    Pose and ReID are deliberately absent from this runtime. Heat is accumulated
-    directly from stable NvDCF person tracks by the native metadata bridge. The
-    native implementation uses each tracked bbox bottom-center as a floor-contact
-    approximation, smooths it with an EMA, interpolates confirmed movement, and
-    slowly increases dwell density at repeatedly occupied locations.
-    """
+    """Camera-local tracking with lightweight floor-contact heatmap."""
 
     def __init__(self) -> None:
         self.heatmap_enabled = os.environ.get("CAMERA_V2_HEATMAP", "1").strip().lower() not in {
@@ -99,7 +91,7 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
 
         print(
             "CAMERA_HEATMAP ready "
-            "anchor=nvdcf-bbox-bottom-center pose=0 reid=0 "
+            "anchor=tracked-floor-point "
             f"grid=48x27 points={max_points}/cam "
             f"deposit={deposit:.5f} decay={decay:.8f} cool={cool_seconds:.0f}s "
             f"remain={hour_remaining:.2f} yellow={yellow:.3f} red={red:.3f} "
@@ -213,13 +205,12 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
                 pass
             print(
                 "CAMERA_HEATMAP "
-                f"anchor=bbox-foot updates={self.heatmap_updates} "
+                f"updates={self.heatmap_updates} "
                 f"render_frames={self.heatmap_render_frames} "
                 f"visible_points={self.heatmap_visible_points} "
                 f"filtered_points={self.heatmap_filtered_points} "
                 f"sources={enabled} focus={self.focus_source} "
                 f"rendered_total={rendered_total} "
-                "pose=0 reid=0 "
                 f"error={self.heatmap_error or 'none'}",
                 flush=True,
             )
