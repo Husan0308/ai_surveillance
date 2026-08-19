@@ -65,6 +65,10 @@ class CameraTile(QFrame):
 
 
 class CameraWall(QWidget):
+    """Canonical six-camera wall: two cameras per row, direct ML MJPEG video."""
+
+    COLUMNS = 2
+
     def __init__(self, ml_video_base_url: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.ml_video_base_url = ml_video_base_url
@@ -72,9 +76,9 @@ class CameraWall(QWidget):
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(6)
-        for row in range(2):
+        for row in range(3):
             self.grid.setRowStretch(row, 1)
-        for column in range(3):
+        for column in range(self.COLUMNS):
             self.grid.setColumnStretch(column, 1)
 
     def set_cameras(self, camera_ids: list[str]) -> None:
@@ -88,7 +92,7 @@ class CameraWall(QWidget):
         for index, camera_id in enumerate(camera_ids):
             tile = CameraTile(camera_id, self.ml_video_base_url, self)
             self.tiles[camera_id] = tile
-            row, column = divmod(index, 3)
+            row, column = divmod(index, self.COLUMNS)
             self.grid.addWidget(tile, row, column)
 
     def refresh_frames(self) -> None:
