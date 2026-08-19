@@ -6,16 +6,17 @@ import time
 from collections import deque
 from pathlib import Path
 
-# Keep detector geometry close to the 16:9 camera stream so person shapes are not
-# distorted before YOLO. person_tracking_heatmap.py sets the same production values
-# before importing this module; these defaults also make standalone tracking match.
+import numpy as np
+
+# Keep detector and tracker geometry close to the 16:9 camera stream. The active
+# heatmap runtime sets the same values before importing this module.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.05")
 os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.65")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
-os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "480")
+os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "512")
 os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
@@ -31,7 +32,13 @@ from .tracker_profile import prepare_sparse_tracker_config
 
 
 class CameraPersonTrackingFinal(_BaseTracking):
-    """Stable detector + camera-local NvDCF tracker."""
+    """Stable detector + camera-local NvDCF tracker.
+
+    The detector side-path is asynchronous, so this class is deliberately strict
+    about image layout and result freshness. BGRx frames are copied using the
+    actual mapped row stride (not width*4), stale detector results are discarded,
+    and NvDCF owns temporal motion between fresh detector observations.
+    """
 
     def __init__(self) -> None:
         self.detector_frames_applied = 0
@@ -47,9 +54,15 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.detector_min_idle = (
             float(os.environ.get("CAMERA_V2_DETECT_MIN_IDLE_MS", "8")) / 1000.0
         )
+        self.max_detector_result_age_ms = max(
+            120.0,
+            float(os.environ.get("CAMERA_V2_MAX_DETECT_RESULT_AGE_MS", "280")),
+        )
         self.detector_result_age_ms = 0.0
+        self.stale_detector_results = 0
         self.detector_times: dict[str, deque[float]] = {}
         self.source_track_counts: dict[int, int] = {}
+        self._infer_stride_logged: set[str] = set()
 
         super().__init__()
         self._set_if(self.osd, "display-text", True)
@@ -64,6 +77,80 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.latency_compensator = DetectorLatencyCompensator(
             self.frame_width, self.frame_height
         )
+        # NvDCF is the temporal tracker. Keep detector projection tiny so a pose
+        # change cannot manufacture a large center shift before tracker fusion.
+        self.latency_compensator.max_projection_s = 0.08
+        self.latency_compensator.projection_gain = 0.20
+
+        # The inference branch downsizes a 1440p CCTV image. GPU cubic scaling
+        # preserves edges/person silhouettes better than the default nearest mode.
+        for index in range(len(self.cameras)):
+            converter = self.pipeline.get_by_name(f"detect_convert_{index}")
+            if converter is not None:
+                self._set_if(converter, "interpolation-method", 2)
+                self._set_if(converter, "compute-hw", 1)
+
+    def _on_infer_sample(self, sink, cid: str):
+        """Copy packed BGRx respecting the real GStreamer row stride.
+
+        GPU/video buffers may pad every row. Treating such a buffer as tightly
+        packed width*4 bytes shears the detector image line-by-line, which makes
+        otherwise valid YOLO boxes appear vertically displaced on the live video.
+        """
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            with self.capture_lock:
+                self.capture_requested[cid] = True
+            return self.Gst.FlowReturn.OK
+
+        structure = sample.get_caps().get_structure(0)
+        width = int(structure.get_value("width"))
+        height = int(structure.get_value("height"))
+        buffer = sample.get_buffer()
+        ok, mapped = buffer.map(self.Gst.MapFlags.READ)
+        if not ok:
+            with self.capture_lock:
+                self.capture_requested[cid] = True
+            return self.Gst.FlowReturn.OK
+
+        try:
+            tight_stride = width * 4
+            mapped_size = int(getattr(mapped, "size", len(mapped.data)))
+            if mapped_size < tight_stride * height:
+                raise RuntimeError(
+                    f"{cid}: BGRx buffer too small: {mapped_size} < {tight_stride * height}"
+                )
+
+            if mapped_size % height == 0:
+                row_stride = mapped_size // height
+            else:
+                # Packed BGRx normally maps to height*stride. If an allocator
+                # adds tail padding only, the tight layout is the safe fallback.
+                row_stride = tight_stride
+
+            if row_stride < tight_stride:
+                raise RuntimeError(
+                    f"{cid}: invalid BGRx stride={row_stride}, tight={tight_stride}"
+                )
+
+            needed = row_stride * height
+            raw = np.frombuffer(mapped.data, dtype=np.uint8, count=needed)
+            rows = raw.reshape((height, row_stride))
+            bgrx = rows[:, :tight_stride].reshape((height, width, 4))
+            frame = bgrx[..., :3].copy()
+
+            if cid not in self._infer_stride_logged:
+                self._infer_stride_logged.add(cid)
+                print(
+                    f"CAMERA_INFER_LAYOUT {cid} size={mapped_size} "
+                    f"frame={width}x{height} stride={row_stride} tight={tight_stride}",
+                    flush=True,
+                )
+        finally:
+            buffer.unmap(mapped)
+
+        self.mailbox.put(cid, time.monotonic(), frame)
+        return self.Gst.FlowReturn.OK
 
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
@@ -123,10 +210,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
         captured_t: float,
         prepared: list[PreparedDetection],
     ) -> None:
-        # Always publish the detector decision, including an empty list. DeepStream
-        # distinguishes "detector ran and found zero" from "detector did not run".
-        # The old early-return kept bInferDone false on misses and let stale NvDCF
-        # targets behave as if no detector evidence had arrived.
+        # Always publish the detector decision, including an empty list.
         with self.pending_lock:
             self.pending_seq += 1
             self.pending[cid] = (
@@ -144,6 +228,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
         boxes_added = 0
         frames_applied = 0
         max_age_ms = 0.0
+        stale = 0
         with self.pending_lock:
             pending = dict(self.pending)
 
@@ -154,7 +239,15 @@ class CameraPersonTrackingFinal(_BaseTracking):
             seq, captured_t, prepared = row
             if seq <= self.injected_seq.get(cid, 0):
                 continue
-            boxes, age_ms = self.latency_compensator.project(
+
+            age_ms = max(0.0, (now - captured_t) * 1000.0)
+            if age_ms > self.max_detector_result_age_ms:
+                # Never keep retrying an old correction on newer live frames.
+                self.injected_seq[cid] = seq
+                stale += 1
+                continue
+
+            boxes, projected_age_ms = self.latency_compensator.project(
                 prepared, captured_t, now
             )
             result = self.bridge.apply_detector_result(buffer, source_id, boxes)
@@ -165,12 +258,13 @@ class CameraPersonTrackingFinal(_BaseTracking):
             self.injected_seq[cid] = seq
             frames_applied += 1
             boxes_added += result
-            max_age_ms = max(max_age_ms, age_ms)
+            max_age_ms = max(max_age_ms, projected_age_ms)
 
-        if frames_applied or boxes_added:
+        if frames_applied or boxes_added or stale:
             with self.det_lock:
                 self.detector_frames_applied += frames_applied
                 self.meta_boxes += boxes_added
+                self.stale_detector_results += stale
                 self.detector_result_age_ms = max_age_ms
         return self.Gst.PadProbeReturn.OK
 
@@ -233,6 +327,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"range={self.detector_min_hz:.1f}-{self.detector_max_hz:.1f}Hz/cam "
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"display_conf={os.environ.get('CAMERA_V2_MIN_DISPLAY_TRACK_CONF')} "
+            f"max_result_age={self.max_detector_result_age_ms:.0f}ms "
             f"device={ready.get('device')} cuda={ready.get('cuda')}",
             flush=True,
         )
@@ -361,6 +456,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             applied = self.detector_frames_applied
             tracked = self.tracked_now
             age_ms = self.detector_result_age_ms
+            stale = self.stale_detector_results
             target_hz = self.detector_target_hz
             source_counts = dict(self.source_track_counts)
 
@@ -377,7 +473,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"detector_frames={applied} tracked_now={tracked} source_counts={source_counts} "
             f"detector={INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
             f"target_hz={target_hz:.1f}/cam approx_skip={expected_skip:.1f}frames "
-            f"actual_hz=[{rate_text}] result_age={age_ms:.0f}ms "
+            f"actual_hz=[{rate_text}] result_age={age_ms:.0f}ms stale_results={stale} "
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"config={self.tracker_config}",
             flush=True,
