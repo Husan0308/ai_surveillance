@@ -5,7 +5,24 @@ from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QFrame, QLabel, QWidget
 
 from .sentinel_video_pro import ProLiveVideoWall as _BaseProLiveVideoWall
-from .sentinel_video_pro import ProPipelineController
+from .sentinel_video_pro import ProPipelineController as _BaseProPipelineController
+
+
+class ProPipelineController(_BaseProPipelineController):
+    """Prime the tiled grid once immediately after the runtime process starts."""
+
+    def start_or_bind(self, window_id: int) -> None:
+        was_alive = self.process is not None and self.process.is_alive()
+        super().start_or_bind(window_id)
+        if was_alive:
+            return
+        # The manual fullscreen action was effectively forcing a live
+        # nvmultistreamtiler/caps renegotiation. Prime that exact grid state at
+        # startup so the user never has to fullscreen once to make video appear.
+        try:
+            self.command_q.put_nowait(("focus", -1))
+        except Exception:
+            pass
 
 
 class ProLiveVideoWall(_BaseProLiveVideoWall):
