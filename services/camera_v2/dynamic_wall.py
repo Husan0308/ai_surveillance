@@ -11,9 +11,9 @@ from .main import CameraWallV2, SourceRuntime
 class DynamicCameraWallV2(CameraWallV2):
     """Dynamic camera wall with explicit, renegotiable display geometry.
 
-    The active Sentinel runtime chooses a 16:9 presentation mux geometry. Grid
-    output remains lightweight while focused fullscreen can renegotiate to the
-    higher-resolution presentation surface without stretching the camera.
+    The active Sentinel runtime keeps the native camera geometry through the mux,
+    then downsamples only for the visible grid/fullscreen surface. Grid output is
+    an exact 2x3 collection of 16:9 tiles; fullscreen renegotiates independently.
     """
 
     def __init__(self) -> None:
@@ -134,11 +134,11 @@ class DynamicCameraWallV2(CameraWallV2):
         self._set_if(self.mux, "width", self.frame_width)
         self._set_if(self.mux, "height", self.frame_height)
         self._set_if(self.mux, "enable-padding", False)
-        # On dGPU, Algo-1 is GPU cubic interpolation. The source is 1440p and the
-        # presentation mux is 1080p, so use a high-quality downscale instead of
-        # the default nearest path when this property is available.
         self._set_if(self.mux, "compute-hw", 1)
-        self._set_if(self.mux, "interpolation-method", 2)
+        # Algo-3 is Lanczos on dGPU. The mux normally does no scaling in the
+        # production profile (2560x1440 -> 2560x1440), but keep the best-quality
+        # transform selected if a source with a different resolution is added.
+        self._set_if(self.mux, "interpolation-method", 4)
         self._set_if(self.mux, "batched-push-timeout", self.mux_timeout_us)
         self._set_if(self.mux, "sync-inputs", False)
         self._set_if(self.mux, "max-latency", 0)
@@ -154,7 +154,9 @@ class DynamicCameraWallV2(CameraWallV2):
         self._set_if(self.tiler, "gpu-id", self.gpu_id)
         self._set_if(self.tiler, "nvbuf-memory-type", 2)
         self._set_if(self.tiler, "compute-hw", 1)
-        self._set_if(self.tiler, "interpolation-method", 2)
+        # Tiler is the real presentation downscale. Lanczos keeps small CCTV
+        # details/text/person silhouettes sharper than nearest/bilinear/cubic.
+        self._set_if(self.tiler, "interpolation-method", 4)
 
     def _wall_caps_value(self, width: int, height: int):
         return self.Gst.Caps.from_string(
