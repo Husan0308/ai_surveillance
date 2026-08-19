@@ -58,7 +58,8 @@ def test_detection_config_is_gpu_batched_and_fp32() -> None:
         "width: 736",
         "height: 416",
         "confidence: 0.08",
-        "iou: 0.50",
+        "iou: 0.70",
+        "max_detections: 50",
         "target_fps_per_camera: 4.0",
     ):
         assert text in config
