@@ -1,0 +1,8 @@
+# Python application dependencies for the single Sentinel production runtime.
+# DeepStream/GStreamer/PyGObject and NVIDIA drivers are system dependencies.
+# Keep a working CUDA-compatible PyTorch installation on the target machine.
+PySide6>=6.7,<7
+PyYAML>=6.0,<7
+python-dotenv>=1.0,<2
+numpy>=1.26,<3
+ultralytics>=8.3,<9
