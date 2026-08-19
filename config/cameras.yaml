@@ -53,7 +53,9 @@ detection:
   height: 288
   batch_size: 2
   target_fps_per_camera: 4.0
-  confidence: 0.20
+  # Keep this at or below ByteTrack track_low_thresh so low-confidence
+  # detections remain available for ByteTrack's second association stage.
+  confidence: 0.10
   iou: 0.55
   max_detections: 30
   half: false
