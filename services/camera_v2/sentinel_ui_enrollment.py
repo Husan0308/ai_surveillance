@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -16,12 +16,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .sentinel_store import SentinelStore
 from .sentinel_ui_base import C, Panel, ScrollPage, label, make_button, panel_layout
 
 
 class EnrollmentPage(ScrollPage):
     def __init__(self):
         super().__init__()
+        self.store = SentinelStore()
         self.image_paths: list[str] = []
         self.profile_index: int | None = None
 
@@ -38,7 +40,7 @@ class EnrollmentPage(ScrollPage):
         form_layout.addWidget(self.name)
         form_layout.addWidget(label("Qo'shimcha ma'lumot", "muted"))
         self.note = QTextEdit()
-        self.note.setPlaceholderText("Lavozim, bo'lim, ruxsatlar")
+        self.note.setPlaceholderText("Lavozim, bo'lim yoki izoh")
         self.note.setMaximumHeight(82)
         form_layout.addWidget(self.note)
 
@@ -64,7 +66,7 @@ class EnrollmentPage(ScrollPage):
             f"border:1px solid {C['border']};border-radius:5px;padding:10px;color:{C['muted']};"
         )
         form_layout.addWidget(self.count)
-        self.finish_button = make_button("✓  Enroll", "primary")
+        self.finish_button = make_button("✓  Save profile", "primary")
         self.finish_button.clicked.connect(self.finish)
         form_layout.addWidget(self.finish_button)
         form_layout.addStretch()
@@ -111,7 +113,7 @@ class EnrollmentPage(ScrollPage):
         photos_layout.addLayout(grid)
 
         hint = label(
-            "10 ta rasm yuklang, keyin eng yaxshi tushgan rasm ustiga bosib profile photo sifatida tanlang.",
+            "Rasmlar local Sentinel storage'ga ko'chiriladi. Recognition modeli alohida ulanmaguncha bu sahifa faqat profilni saqlaydi.",
             "muted",
         )
         hint.setWordWrap(True)
@@ -201,8 +203,27 @@ class EnrollmentPage(ScrollPage):
             f"Rasmlar: {len(self.image_paths)}/10 · Profile photo: {profile}"
         )
 
+    def _reset_form(self) -> None:
+        self.name.clear()
+        self.note.clear()
+        self.image_paths = []
+        self.profile_index = None
+        self.profile_preview.clear()
+        self.profile_preview.setText("Tanlanmagan")
+        self.profile_name.setText("Rasmlardan birini tanlang")
+        for index, button in enumerate(self.photo_buttons):
+            button.setEnabled(False)
+            button.setChecked(False)
+            button.setText("＋")
+            button.setIcon(QIcon())
+            button.setStyleSheet("")
+            self.photo_labels[index].setText(f"Rasm {index + 1} · bo'sh")
+            self.photo_labels[index].setStyleSheet("")
+        self.update_enrollment_status()
+
     def finish(self):
-        if not self.name.text().strip():
+        name = self.name.text().strip()
+        if not name:
             QMessageBox.warning(self, "Enrollment", "Shaxsning to'liq ismini kiriting.")
             return
         if len(self.image_paths) != 10:
@@ -219,9 +240,25 @@ class EnrollmentPage(ScrollPage):
                 "Eng yaxshi rasmni profile photo sifatida tanlang.",
             )
             return
+
+        try:
+            person = self.store.enroll_person(
+                name=name,
+                role="",
+                department="",
+                notes=self.note.toPlainText().strip(),
+                image_paths=self.image_paths,
+                profile_index=self.profile_index,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Enrollment", f"Profil saqlanmadi:\n{exc}")
+            return
+
+        person_id = str(person.get("id", ""))
         QMessageBox.information(
             self,
             "Enrollment",
-            f"{self.name.text().strip()} bazaga qo'shildi.\n"
-            f"Profile photo: Rasm {self.profile_index + 1}",
+            f"{name} local bazaga saqlandi.\nID: {person_id}\n"
+            "Eslatma: face-recognition modeli bu profilga hali ulanmagan.",
         )
+        self._reset_form()
