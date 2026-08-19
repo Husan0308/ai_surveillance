@@ -6,15 +6,15 @@ import cv2
 
 from shared.safe_mmap_frame import SigbusSafeMmapFrameWriter
 from services.ml_service.app.jpeg_publisher import LatestJpegPublisher
+from services.ml_service.app.presentation_smoother import PresentationSmoother
 
 
 class MmapFramePublisher(LatestJpegPublisher):
     """Event-driven latest-only local presentation transport.
 
-    This is the proven camera wall path from the old sigbus-safe-mmap branch:
-    no JPEG encode, no HTTP video relay, no presentation queue. The newest
-    960x540 BGR frame (with the current local-track overlay) is atomically
-    published to a double-buffered mmap file for the Qt frontend.
+    Video is the proven SIGBUS-safe mmap path. ByteTrack owns identity; an
+    independent presentation smoother only predicts/interpolates each existing
+    T-ID between sparse detector updates so boxes move at the camera cadence.
     """
 
     def __init__(
@@ -28,14 +28,37 @@ class MmapFramePublisher(LatestJpegPublisher):
         overlay_enabled=True,
         overlay_max_age_ms=900,
     ) -> None:
+        # Reuse the publisher lifecycle/condition primitives, but do not use its
+        # raw snapshot painter. mmap has its own T-ID-preserving smooth overlay.
         super().__init__(
             camera_id,
             store,
             fps=fps,
             quality=88,
-            detections=detections,
-            overlay_enabled=overlay_enabled,
+            detections=None,
+            overlay_enabled=False,
             overlay_max_age_ms=overlay_max_age_ms,
+        )
+        self.overlay_store = detections
+        self.presentation_overlay_enabled = bool(overlay_enabled)
+        self.presentation_overlay_max_age_sec = max(
+            0.0, float(overlay_max_age_ms) / 1000.0
+        )
+        self.smoother = PresentationSmoother(
+            hold_ms=850,
+            memory_ms=2800,
+            prediction_ms=340,
+            velocity_damping=0.95,
+            size_velocity_damping=0.60,
+            max_prediction_shift_boxes=0.55,
+            max_prediction_size_ratio=0.06,
+            adaptive_error_low=0.08,
+            adaptive_error_high=0.25,
+            center_response_slow=0.42,
+            center_response_fast=0.84,
+            size_response=0.30,
+            snap_distance_boxes=0.62,
+            reversal_damping=0.15,
         )
         self.max_width = max(1, int(max_width))
         self.max_height = max(1, int(max_height))
@@ -61,6 +84,7 @@ class MmapFramePublisher(LatestJpegPublisher):
                 "version": self._version,
                 "publisher_mode": "event-driven-mmap-latest-only",
                 "transport": "mmap-bgr-double-buffer-sigbus-safe",
+                "overlay": "bytetrack-id-presentation-smoother",
                 "mmap_path": str(self.writer.path),
                 "event_wakeups": self.event_wakeups,
                 "coalesced_frames": self.coalesced_frames,
@@ -73,6 +97,82 @@ class MmapFramePublisher(LatestJpegPublisher):
                 "width": self.max_width,
                 "height": self.max_height,
             }
+
+    @staticmethod
+    def _draw_track(image, track) -> None:
+        height, width = image.shape[:2]
+        x1, y1, x2, y2 = track.xyxy
+        left = max(0, min(width - 1, int(round(x1))))
+        top = max(0, min(height - 1, int(round(y1))))
+        right = max(0, min(width - 1, int(round(x2))))
+        bottom = max(0, min(height - 1, int(round(y2))))
+        if right <= left or bottom <= top:
+            return
+
+        # Clear old-style operator overlay: anti-aliased amber box and dark
+        # readable label. It remains visible over IR and bright colour cameras.
+        color = (0, 210, 255)
+        thickness = 3 if max(width, height) >= 900 else 2
+        cv2.rectangle(image, (left, top), (right, bottom), color, thickness, cv2.LINE_AA)
+
+        label = f"Person T{int(track.track_id)}  {float(track.confidence):.2f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.48 if width >= 900 else 0.42
+        text_thickness = 1
+        (tw, th), baseline = cv2.getTextSize(label, font, font_scale, text_thickness)
+        pad_x, pad_y = 6, 4
+        label_h = th + baseline + pad_y * 2
+        label_top = max(0, top - label_h)
+        label_right = min(width - 1, left + tw + pad_x * 2)
+        cv2.rectangle(
+            image,
+            (left, label_top),
+            (label_right, top),
+            (7, 13, 21),
+            -1,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(
+            image,
+            (left, label_top),
+            (label_right, top),
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            label,
+            (left + pad_x, max(th + 1, top - baseline - pad_y)),
+            font,
+            font_scale,
+            (245, 248, 252),
+            text_thickness,
+            cv2.LINE_AA,
+        )
+
+    def _presentation_image(self, frame):
+        if not self.presentation_overlay_enabled or self.overlay_store is None:
+            return frame.image
+
+        snapshot = self.overlay_store.get(self.camera_id)
+        if snapshot is not None:
+            observation = float(getattr(snapshot, "captured_monotonic", 0.0))
+            delta = float(frame.captured_monotonic) - observation
+            # Do not paint a result onto an older video frame. A recent result is
+            # accepted once the presentation clock catches it; the smoother then
+            # bridges detector gaps using the authoritative T-ID.
+            if -0.05 <= delta <= self.presentation_overlay_max_age_sec:
+                self.smoother.update(snapshot)
+
+        tracks = self.smoother.visible(float(frame.captured_monotonic))
+        if not tracks:
+            return frame.image
+
+        image = frame.image.copy()
+        for track in tracks:
+            self._draw_track(image, track)
+        return image
 
     def _run(self) -> None:
         last_store_version = 0
@@ -102,7 +202,7 @@ class MmapFramePublisher(LatestJpegPublisher):
                     continue
 
                 next_allowed = time.monotonic() + self.interval
-                image = self._image_for_encode(frame)
+                image = self._presentation_image(frame)
                 source_h, source_w = image.shape[:2]
 
                 resize_started = time.perf_counter()
@@ -118,8 +218,6 @@ class MmapFramePublisher(LatestJpegPublisher):
                         interpolation=cv2.INTER_AREA,
                     )
                 elif image is frame.image:
-                    # Writer needs an owned contiguous image because the camera
-                    # store may replace its reference immediately after publish.
                     image = image.copy()
                 resize_ms = (time.perf_counter() - resize_started) * 1000.0
 
@@ -146,7 +244,8 @@ class MmapFramePublisher(LatestJpegPublisher):
                 if self._encoded == 1:
                     print(
                         f"[MMAP] {self.camera_id} first frame "
-                        f"{image.shape[1]}x{image.shape[0]} bytes={int(packet['payload_bytes'])}",
+                        f"{image.shape[1]}x{image.shape[0]} bytes={int(packet['payload_bytes'])} "
+                        "overlay=bytetrack-smooth",
                         flush=True,
                     )
         finally:
