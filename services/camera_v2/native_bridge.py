@@ -150,6 +150,13 @@ class NativeMetaBridge:
             ctypes.c_int,
         ]
         self.lib.camera_v2_apply_global_track_style.restype = ctypes.c_int
+        self.lib.camera_v2_expand_display_boxes.argtypes = [
+            ctypes.c_uint64,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+        ]
+        self.lib.camera_v2_expand_display_boxes.restype = ctypes.c_int
 
         self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_count_tracked.restype = ctypes.c_int
@@ -232,6 +239,24 @@ class NativeMetaBridge:
         return int(
             self.lib.camera_v2_apply_local_track_style(
                 ctypes.c_uint64(hash(gst_buffer))
+            )
+        )
+
+    def expand_display_boxes(
+        self,
+        gst_buffer,
+        *,
+        side_margin: float = 0.08,
+        top_margin: float = 0.04,
+        bottom_margin: float = 0.10,
+    ) -> int:
+        """Pad only OSD rectangles; tracker/count/heatmap truth is sampled first."""
+        return int(
+            self.lib.camera_v2_expand_display_boxes(
+                ctypes.c_uint64(hash(gst_buffer)),
+                ctypes.c_float(float(side_margin)),
+                ctypes.c_float(float(top_margin)),
+                ctypes.c_float(float(bottom_margin)),
             )
         )
 
