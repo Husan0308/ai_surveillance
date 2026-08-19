@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.camera_v2.data import EVENTS, PEOPLE, ROOMS
 from services.camera_v2.sentinel_ui import BUILD_TAG, MainWindow, main
 from services.camera_v2.sentinel_ui_enrollment import EnrollmentPage
 from services.camera_v2.sentinel_ui_monitoring import MonitoringPage
@@ -28,7 +27,7 @@ EXPECTED_NAV = [
     "Settings",
 ]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.19-r5"
+EXPECTED_BUILD = "2026.08.19-r6"
 
 
 def _fail(message: str) -> None:
@@ -97,13 +96,11 @@ def main_preflight() -> int:
 
     monitoring_source = _source("services/camera_v2/sentinel_ui_monitoring.py")
     if 'metrics.get("known_people"' not in monitoring_source:
-        _fail("Monitoring Known counter is not wired to live metrics")
+        _fail("Monitoring Known counter is not wired to runtime metrics")
     if 'metrics.get("unknown_people"' not in monitoring_source:
-        _fail("Monitoring Unknown counter is not wired to live metrics")
+        _fail("Monitoring Unknown counter is not wired to runtime metrics")
     if "self.identity_panel.setMaximumWidth(336)" not in monitoring_source:
         _fail("Monitoring right rail responsive width guard is missing")
-    if "Demo ism yoki fake avatar ko'rsatilmaydi" not in monitoring_source:
-        _fail("Monitoring recent-view panel can regress to fake identities")
     if "self.wall.set_pipeline_status(status)" not in monitoring_source:
         _fail("Monitoring does not drive native wall startup/error cover")
 
@@ -118,10 +115,20 @@ def main_preflight() -> int:
         "FOCUS_WIDTH = 1920",
         "FOCUS_HEIGHT = 1080",
         "mapFromGlobal(QCursor.pos())",
+        "from .person_tracking_heatmap import CameraPersonTrackingHeatmap",
+        '"identity_enabled": False',
     )
     for guard in required_video_guards:
         if guard not in video_source:
-            _fail(f"professional video-wall guard missing: {guard}")
+            _fail(f"professional core video-wall guard missing: {guard}")
+    for forbidden_runtime in (
+        "person_tracking_reid_heatmap",
+        "pose_sidecar",
+        "live_people_counts",
+        "global_identity",
+    ):
+        if forbidden_runtime in video_source:
+            _fail(f"active Sentinel runtime still references {forbidden_runtime}")
 
     wall_ui_source = _source("services/camera_v2/sentinel_video_wall_ui.py")
     for guard in (
@@ -134,24 +141,32 @@ def main_preflight() -> int:
             _fail(f"native wall stale-page guard missing: {guard}")
 
     heat_source = _source("services/camera_v2/person_tracking_heatmap.py")
-    pose_source = _source("services/camera_v2/pose_ankle.py")
-    if "anchor=pose-ankle-only" not in heat_source or "bbox_anchor=disabled" not in heat_source:
-        _fail("heatmap is not ankle-only")
-    if "LEFT_ANKLE = 15" not in pose_source or "RIGHT_ANKLE = 16" not in pose_source:
-        _fail("COCO ankle keypoint mapping is missing")
-    if "focus_source >= 0 and not self._heatmap_sources.get" not in heat_source:
-        _fail("focused camera heatmap toggle is not isolated")
+    for required in (
+        "anchor=nvdcf-bbox-bottom-center",
+        "self.bridge.heatmap_update(buffer)",
+        "pose=0 reid=0",
+        "CameraPersonTrackingFinal",
+    ):
+        if required not in heat_source:
+            _fail(f"core native heatmap guard missing: {required}")
+    for forbidden_heat in ("PoseHeatmapBridge", "deposit_pose_ankle", "pose_heatmap"):
+        if forbidden_heat in heat_source:
+            _fail(f"active heatmap still depends on pose: {forbidden_heat}")
 
     enrollment_source = _source("services/camera_v2/sentinel_ui_enrollment.py")
     if "class ReportsPage" in enrollment_source:
         _fail("stale ReportsPage still exists")
 
-    if len(ROOMS) != 3:
-        _fail(f"supplied demo model expects 3 rooms, got {len(ROOMS)}")
-    if not PEOPLE:
-        _fail("supplied People demo data is empty")
-    if not EVENTS:
-        _fail("supplied Events demo data is empty")
+    launcher_source = _source("scripts/run_sentinel_vms.sh")
+    for forbidden_launcher in (
+        "setup_camera_v2_reid.py",
+        "preflight_camera_v2_reid.py",
+        "pose_heatmap_bridge",
+    ):
+        if forbidden_launcher in launcher_source:
+            _fail(f"launcher still starts optional identity/pose path: {forbidden_launcher}")
+    if "preflight_camera_v2_core.py" not in launcher_source:
+        _fail("launcher does not run core camera preflight")
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui_import=PASS")
     print("SENTINEL_PREFLIGHT nav=" + ",".join(nav_titles))
@@ -159,13 +174,12 @@ def main_preflight() -> int:
     print(
         "SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream "
         f"active_cameras={len(settings.cameras)} fullscreen_aspect=16:9 "
-        "hover_controls=compact demo_tile_counts=removed recent_fake_data=removed "
-        "native_stale_page_cover=PASS"
+        "hover_controls=compact demo_tile_counts=removed native_stale_page_cover=PASS"
     )
-    print("SENTINEL_PREFLIGHT occupancy=total+known+unknown live_metrics=PASS")
-    print("SENTINEL_PREFLIGHT heatmap=pose-ankle-only bbox_anchor=OFF per_camera=PASS")
+    print("SENTINEL_PREFLIGHT runtime=DeepStream+YOLO26m+NvDCF pose=OFF reid=OFF")
+    print("SENTINEL_PREFLIGHT occupancy=total-local-tracks known=0 unknown=total")
+    print("SENTINEL_PREFLIGHT heatmap=nvdcf-bbox-foot per_camera=PASS")
     print("SENTINEL_PREFLIGHT reports=REMOVED settings=production-camera-crud")
-    print("SENTINEL_PREFLIGHT enrollment=10-images profile-required")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
 
