@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 
-# Production detector/tracker geometry follows the 16:9 camera stream. 512x288
-# keeps NvDCF's internal frame exactly 16:9 while remaining lightweight on the
-# GTX 1050 Ti; both dimensions satisfy the tracker's 32-pixel alignment rule.
+# Keep the live mux at 1080p so fullscreen does not enlarge an already 720p wall
+# frame. Detector and NvDCF remain lightweight on their own lower-resolution
+# branches; only the presentation path keeps more source detail.
+os.environ.setdefault("CAMERA_V2_FRAME_WIDTH", "1920")
+os.environ.setdefault("CAMERA_V2_FRAME_HEIGHT", "1080")
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.05")
