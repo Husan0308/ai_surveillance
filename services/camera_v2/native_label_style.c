@@ -29,11 +29,24 @@ static int is_generic_person_label(const char *label) {
     return 0;
 }
 
+/* DeepStream keeps detector, tracker and last-writer rectangles separately.
+ * At the nvtracker src probe the canonical visual location is tracker_bbox_info.
+ * Copy it into rect_params immediately before styling so OSD, count and heatmap
+ * all use the exact same current NvDCF rectangle. */
+static void sync_rect_from_tracker(NvDsObjectMeta *obj) {
+    if (!obj) return;
+    NvOSD_RectParams *rect = &obj->tracker_bbox_info.org_bbox_coords;
+    if (rect->width <= 1.0f || rect->height <= 1.0f) return;
+    obj->rect_params.left = rect->left;
+    obj->rect_params.top = rect->top;
+    obj->rect_params.width = rect->width;
+    obj->rect_params.height = rect->height;
+}
+
 static int should_style_track(const NvDsObjectMeta *obj) {
     if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) return 0;
     if (obj->unique_component_id == 191) return 0;
     if (obj->rect_params.width <= 1.0f || obj->rect_params.height <= 1.0f) return 0;
-    /* native_meta_bridge.c sets border_width=0 for low-confidence NvDCF objects. */
     if (obj->rect_params.border_width == 0) return 0;
     return 1;
 }
@@ -101,6 +114,7 @@ int camera_v2_apply_local_track_style(uintptr_t buffer_ptr) {
 
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *)onode->data;
+            sync_rect_from_tracker(obj);
             if (!should_style_track(obj)) continue;
             set_local_track_label(obj, frame_meta->source_id);
             ++styled;
@@ -134,6 +148,7 @@ int camera_v2_apply_global_track_style(uintptr_t buffer_ptr,
         if (!frame_meta) continue;
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *)onode->data;
+            sync_rect_from_tracker(obj);
             if (!should_style_track(obj)) continue;
             const CameraV2GlobalLabel *match = find_global_label(
                 rows, count, (uint32_t)frame_meta->source_id, (uint64_t)obj->object_id
