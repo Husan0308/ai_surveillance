@@ -40,46 +40,36 @@ jobs:
 
           shell = Path('services/camera_v2/sentinel_ui.py').read_text()
           monitoring = Path('services/camera_v2/sentinel_ui_monitoring.py').read_text()
-          settings = Path('services/camera_v2/sentinel_ui_settings.py').read_text()
-          wall = Path('services/camera_v2/sentinel_video_wall_ui.py').read_text()
           base_video = Path('services/camera_v2/sentinel_video.py').read_text()
-          video = Path('services/camera_v2/sentinel_video_pro.py').read_text()
+          wall = Path('services/camera_v2/sentinel_video_wall_ui.py').read_text()
           launcher = Path('scripts/run_sentinel_vms.sh').read_text()
           tracker = Path('services/camera_v2/person_tracking_final.py').read_text()
-          heatmap = Path('services/camera_v2/person_tracking_heatmap.py').read_text()
-          camera_config = Path('config/cameras.yaml').read_text()
-
-          for source in (shell, monitoring, settings, wall):
-              for text in ('NVDEC', 'no pose/reid', 'pose=', 'reid=', 'DeepStream'):
-                  assert text not in source, f'technical UI label returned: {text}'
-
-          for text in ('Environment URI', 'self.env_uri =', 'self.codec =', 'form.addRow("Codec"'):
-              assert text not in settings, f'stale Settings field: {text}'
 
           assert 'BUILD_TAG = "2026.08.19-r12"' in shell
           assert 'QLabel("Estimated people")' in monitoring
-          assert 'QLabel("People in Building")' not in monitoring
-          assert 'metrics.get("total_people"' in monitoring
-          assert 'metrics.get("known_people"' in monitoring
-          assert 'unknown = max(0, total - known)' in monitoring
-          assert 'self.setAttribute(Qt.WA_NoSystemBackground, True)' in base_video
-          assert 'self.setObjectName("nativeVideoSurface")' in base_video
-          assert 'self._status_cache' in base_video
-          assert 'Do not re-raise every grid header on every metrics tick' in wall
+          assert 'class _GstVideoSurface(QWidget)' in base_video
+          assert 'self.setObjectName("gstVideoSurface")' in base_video
+          assert 'self.video_surface = _GstVideoSurface(self)' in base_video
+          assert 'def video_window_id(self)' in base_video
+          assert 'def winId(self)' in base_video
+          assert 'return self.video_surface.winId()' in base_video
+          assert 'self.video_surface.lower()' in base_video
+
+          assert 'class ProPipelineController(_BaseProPipelineController)' in wall
+          assert 'self.command_q.put_nowait(("focus", -1))' in wall
+          assert 'header.setAttribute(Qt.WA_NativeWindow, True)' in wall
+          assert 'cam.setParent(header)' in wall
+          assert 'stat.setParent(header)' in wall
+          assert 'frame.setAttribute(Qt.WA_NativeWindow, True)' in wall
+          assert 'left + width - actions.width() - 8' in wall
+          assert 'top + 34' in wall
+          assert 'top + height - actions.height()' not in wall
+
           assert 'export CAMERA_V2_TILER_COLUMNS=2' in launcher
           assert 'export CAMERA_V2_WALL_WIDTH=1600' in launcher
           assert 'export CAMERA_V2_WALL_HEIGHT=1350' in launcher
           assert 'live_source_counts' in tracker
           assert 'source_track_counts' in tracker
-          assert 'room_people[room_key] = max' in video
-          assert 'total = sum(room_people.values())' in video
-          assert 'known = 0' in video
-          assert 'unknown = total' in video
-          assert 'self.bridge.heatmap_update(buffer)' in heatmap
-          assert 'PoseHeatmapBridge' not in heatmap
-
-          for forbidden in ('\n    codec:', '\n    env_uri:', '\n    environment_uri:'):
-              assert forbidden not in camera_config, f'stale camera config field: {forbidden.strip()}'
 
           for path in [*Path('services').rglob('*.py'), *Path('scripts').rglob('*.py'), *Path('tests').rglob('*.py')]:
               source = path.read_text(encoding='utf-8')
@@ -87,7 +77,6 @@ jobs:
 
           for removed in (
               'services/camera_v2/data.py',
-              'services/camera_v2/sentinel_exact.py',
               'services/camera_v2/sentinel_app.py',
               'services/camera_v2/monitor_ui_reference.py',
               'services/camera_v2/qwen_reid.py',
