@@ -41,6 +41,17 @@ def test_tracking_configuration_is_time_based_for_low_detector_fps() -> None:
     assert "self.detector_fps" in tracking
 
 
+def test_detector_keeps_bytetrack_second_stage_candidates() -> None:
+    config = source("config/cameras.yaml")
+
+    # ByteTrack's second association uses detections down to track_low_thresh.
+    # The detector must not discard those boxes before the tracker sees them.
+    assert "confidence: 0.10" in config
+    assert "track_low_thresh: 0.10" in config
+    assert "track_high_thresh: 0.25" in config
+    assert "new_track_thresh: 0.25" in config
+
+
 def test_tracking_is_exposed_but_not_global_identity() -> None:
     main = source("services/ml_service/app/main.py")
     pipeline = source("services/ml_service/app/deepstream/pipeline.py")
