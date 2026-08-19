@@ -3,8 +3,7 @@ from __future__ import annotations
 import math
 import os
 
-from services.ml_service.app.config import load_settings
-
+from .config import load_settings
 from .main import CameraWallV2, SourceRuntime
 
 
