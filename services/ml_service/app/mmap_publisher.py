@@ -12,9 +12,10 @@ from services.ml_service.app.presentation_smoother import PresentationSmoother
 class MmapFramePublisher(LatestJpegPublisher):
     """Event-driven latest-only local presentation transport.
 
-    Video is the proven SIGBUS-safe mmap path. ByteTrack owns identity; an
-    independent presentation smoother only predicts/interpolates each existing
-    T-ID between sparse detector updates so boxes move at the camera cadence.
+    Video is the proven SIGBUS-safe mmap path. ByteTrack owns identity; the
+    presentation Kalman only projects each authoritative T-ID between detector
+    updates. The visual envelope is padded at draw time only, so it cannot alter
+    association or merge two nearby people into one track.
     """
 
     def __init__(
@@ -28,8 +29,6 @@ class MmapFramePublisher(LatestJpegPublisher):
         overlay_enabled=True,
         overlay_max_age_ms=900,
     ) -> None:
-        # Reuse the publisher lifecycle/condition primitives, but do not use its
-        # raw snapshot painter. mmap has its own T-ID-preserving smooth overlay.
         super().__init__(
             camera_id,
             store,
@@ -45,20 +44,16 @@ class MmapFramePublisher(LatestJpegPublisher):
             0.0, float(overlay_max_age_ms) / 1000.0
         )
         self.smoother = PresentationSmoother(
-            hold_ms=850,
+            hold_ms=700,
             memory_ms=2800,
-            prediction_ms=340,
-            velocity_damping=0.95,
-            size_velocity_damping=0.60,
-            max_prediction_shift_boxes=0.55,
-            max_prediction_size_ratio=0.06,
-            adaptive_error_low=0.08,
-            adaptive_error_high=0.25,
-            center_response_slow=0.42,
-            center_response_fast=0.84,
-            size_response=0.30,
-            snap_distance_boxes=0.62,
-            reversal_damping=0.15,
+            prediction_ms=280,
+            process_noise=1.0,
+            measurement_noise=0.70,
+            velocity_damping=0.985,
+            max_prediction_shift_boxes=0.48,
+            max_prediction_size_ratio=0.08,
+            snap_distance_boxes=0.42,
+            reversal_damping=0.12,
         )
         self.max_width = max(1, int(max_width))
         self.max_height = max(1, int(max_height))
@@ -84,7 +79,7 @@ class MmapFramePublisher(LatestJpegPublisher):
                 "version": self._version,
                 "publisher_mode": "event-driven-mmap-latest-only",
                 "transport": "mmap-bgr-double-buffer-sigbus-safe",
-                "overlay": "bytetrack-id-presentation-smoother",
+                "overlay": "bytetrack-id-kalman-presentation",
                 "mmap_path": str(self.writer.path),
                 "event_wakeups": self.event_wakeups,
                 "coalesced_frames": self.coalesced_frames,
@@ -99,18 +94,42 @@ class MmapFramePublisher(LatestJpegPublisher):
             }
 
     @staticmethod
-    def _draw_track(image, track) -> None:
-        height, width = image.shape[:2]
-        x1, y1, x2, y2 = track.xyxy
-        left = max(0, min(width - 1, int(round(x1))))
-        top = max(0, min(height - 1, int(round(y1))))
-        right = max(0, min(width - 1, int(round(x2))))
-        bottom = max(0, min(height - 1, int(round(y2))))
-        if right <= left or bottom <= top:
-            return
+    def _visual_envelope(image, xyxy) -> tuple[int, int, int, int] | None:
+        """Expand only the painted rectangle, never the tracker geometry.
 
-        # Clear old-style operator overlay: anti-aliased amber box and dark
-        # readable label. It remains visible over IR and bright colour cameras.
+        Person detectors often fit tightly to visible pixels. A small asymmetric
+        envelope keeps hands/feet/head on or just outside a raw detector edge
+        inside the operator box without feeding padded geometry back to ByteTrack.
+        """
+        image_h, image_w = image.shape[:2]
+        x1, y1, x2, y2 = [float(value) for value in xyxy]
+        box_w = max(2.0, x2 - x1)
+        box_h = max(2.0, y2 - y1)
+        aspect = box_w / box_h
+
+        # Seated/crouched people are wider and more likely to lose arms at the
+        # side edge. Upright people get a smaller horizontal margin.
+        side_ratio = 0.10 if aspect >= 0.62 else 0.065
+        side_pad = max(3.0, box_w * side_ratio)
+        top_pad = max(3.0, box_h * 0.055)
+        bottom_pad = max(4.0, box_h * 0.105)
+
+        left = max(0, min(image_w - 1, int(round(x1 - side_pad))))
+        top = max(0, min(image_h - 1, int(round(y1 - top_pad))))
+        right = max(0, min(image_w - 1, int(round(x2 + side_pad))))
+        bottom = max(0, min(image_h - 1, int(round(y2 + bottom_pad))))
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
+
+    @classmethod
+    def _draw_track(cls, image, track) -> None:
+        envelope = cls._visual_envelope(image, track.xyxy)
+        if envelope is None:
+            return
+        left, top, right, bottom = envelope
+        height, width = image.shape[:2]
+
         color = (0, 210, 255)
         thickness = 3 if max(width, height) >= 900 else 2
         cv2.rectangle(image, (left, top), (right, bottom), color, thickness, cv2.LINE_AA)
@@ -159,10 +178,9 @@ class MmapFramePublisher(LatestJpegPublisher):
         if snapshot is not None:
             observation = float(getattr(snapshot, "captured_monotonic", 0.0))
             delta = float(frame.captured_monotonic) - observation
-            # Do not paint a result onto an older video frame. A recent result is
-            # accepted once the presentation clock catches it; the smoother then
-            # bridges detector gaps using the authoritative T-ID.
-            if -0.05 <= delta <= self.presentation_overlay_max_age_sec:
+            # Never apply a detector result to a substantially older camera
+            # frame. This prevents an old rectangle appearing behind the person.
+            if -0.03 <= delta <= self.presentation_overlay_max_age_sec:
                 self.smoother.update(snapshot)
 
         tracks = self.smoother.visible(float(frame.captured_monotonic))
@@ -170,6 +188,8 @@ class MmapFramePublisher(LatestJpegPublisher):
             return frame.image
 
         image = frame.image.copy()
+        # Never deduplicate presentation tracks here. If ByteTrack has T1 and T2,
+        # both must remain visible even when their rectangles overlap heavily.
         for track in tracks:
             self._draw_track(image, track)
         return image
@@ -245,7 +265,7 @@ class MmapFramePublisher(LatestJpegPublisher):
                     print(
                         f"[MMAP] {self.camera_id} first frame "
                         f"{image.shape[1]}x{image.shape[0]} bytes={int(packet['payload_bytes'])} "
-                        "overlay=bytetrack-smooth",
+                        "overlay=bytetrack-kalman",
                         flush=True,
                     )
         finally:
