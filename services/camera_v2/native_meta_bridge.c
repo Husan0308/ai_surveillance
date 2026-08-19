@@ -254,6 +254,79 @@ int camera_v2_copy_tracks(uintptr_t buffer_ptr,
     return count;
 }
 
+/* Expand only the rectangle that will be drawn. This function is deliberately
+ * called after count/heatmap sampling, so tracker truth, people counts and the
+ * floor-contact heatmap remain based on the unmodified current NvDCF rectangle.
+ * Wide seated/reclined people get a little more side room for elbows/arms. */
+int camera_v2_expand_display_boxes(uintptr_t buffer_ptr,
+                                   float base_side_margin,
+                                   float base_top_margin,
+                                   float base_bottom_margin) {
+    if (!buffer_ptr) return -1;
+    GstBuffer *buffer = (GstBuffer *) buffer_ptr;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
+    if (!batch_meta) return -1;
+
+    base_side_margin = clampf_local(base_side_margin, 0.0f, 0.20f);
+    base_top_margin = clampf_local(base_top_margin, 0.0f, 0.15f);
+    base_bottom_margin = clampf_local(base_bottom_margin, 0.0f, 0.20f);
+    const float min_tracker_conf = env_float_local(
+        "CAMERA_V2_MIN_DISPLAY_TRACK_CONF", 0.28f, 0.0f, 1.0f
+    );
+    int expanded = 0;
+
+    for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) fnode->data;
+        if (!frame_meta) continue;
+
+        float frame_w = frame_meta->pipeline_width > 1 ? (float) frame_meta->pipeline_width
+                                                        : (float) frame_meta->source_frame_width;
+        float frame_h = frame_meta->pipeline_height > 1 ? (float) frame_meta->pipeline_height
+                                                         : (float) frame_meta->source_frame_height;
+        if (frame_w <= 1.0f || frame_h <= 1.0f) continue;
+
+        for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *) onode->data;
+            if (!is_displayable_track(obj, min_tracker_conf)) continue;
+
+            const float left = obj->rect_params.left;
+            const float top = obj->rect_params.top;
+            const float width = obj->rect_params.width;
+            const float height = obj->rect_params.height;
+            if (width <= 2.0f || height <= 4.0f) continue;
+
+            const float aspect = width / height;
+            const float wide_extra = clampf_local((aspect - 0.62f) * 0.12f, 0.0f, 0.055f);
+            const float side_margin = clampf_local(base_side_margin + wide_extra, 0.0f, 0.18f);
+            const float top_margin = clampf_local(
+                base_top_margin + (aspect > 0.90f ? 0.015f : 0.0f), 0.0f, 0.12f
+            );
+            const float bottom_margin = clampf_local(
+                base_bottom_margin + (aspect > 0.82f ? 0.020f : 0.0f), 0.0f, 0.18f
+            );
+
+            float side_px = width * side_margin;
+            float top_px = height * top_margin;
+            float bottom_px = height * bottom_margin;
+            if (side_px < 5.0f) side_px = 5.0f;
+            if (top_px < 4.0f) top_px = 4.0f;
+            if (bottom_px < 7.0f) bottom_px = 7.0f;
+
+            float new_left = clampf_local(left - side_px, 0.0f, frame_w - 1.0f);
+            float new_top = clampf_local(top - top_px, 0.0f, frame_h - 1.0f);
+            float new_right = clampf_local(left + width + side_px, new_left + 1.0f, frame_w);
+            float new_bottom = clampf_local(top + height + bottom_px, new_top + 1.0f, frame_h);
+
+            obj->rect_params.left = new_left;
+            obj->rect_params.top = new_top;
+            obj->rect_params.width = new_right - new_left;
+            obj->rect_params.height = new_bottom - new_top;
+            ++expanded;
+        }
+    }
+    return expanded;
+}
+
 uint64_t camera_v2_shadow_promoted_total(void) {
     return 0;
 }
