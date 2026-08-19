@@ -60,6 +60,15 @@ detection:
   overlay: true
   overlay_max_age_ms: 900
 
+tracking:
+  enabled: true
+  track_high_thresh: 0.25
+  track_low_thresh: 0.10
+  new_track_thresh: 0.25
+  track_buffer_seconds: 2.5
+  match_thresh: 0.80
+  fuse_score: true
+
 display:
   width: 736
   height: 416
