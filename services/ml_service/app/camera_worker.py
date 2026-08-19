@@ -23,6 +23,7 @@ class CameraMetrics:
     transport: str = ""
     backend: str = ""
     auth_configured: bool = False
+    latency_ms: int = 0
     render_width: int = 0
     render_height: int = 0
     render_format: str = ""
@@ -93,13 +94,14 @@ class CameraWorker:
     def _run(self) -> None:
         backoff = max(0.5, self.ds.reconnect_delay_sec)
         transport = self.ds.rtsp_transport
+        camera_latency = int(self.camera.latency_ms or self.ds.latency_ms)
 
         while not self._stop.is_set():
             cap = None
             try:
                 print(
                     f"[CAMERA] {self.camera.camera_id} opening {self.camera.uri} "
-                    f"backend=nvurisrcbin transport={transport} "
+                    f"backend=nvurisrcbin transport={transport} latency={camera_latency}ms "
                     f"auth={'yes' if self.camera.username else 'no'}",
                     flush=True,
                 )
@@ -110,6 +112,7 @@ class CameraWorker:
                     transport=transport,
                     username=self.camera.username,
                     password=self.camera.password,
+                    latency_ms=camera_latency,
                 )
                 self._capture = cap
                 opened_at = time.monotonic()
@@ -120,6 +123,7 @@ class CameraWorker:
                     self._metrics.backend = cap.backend
                     self._metrics.transport = transport
                     self._metrics.auth_configured = bool(self.camera.username)
+                    self._metrics.latency_ms = camera_latency
 
                 while not self._stop.is_set():
                     ok, image = cap.read()
@@ -172,13 +176,9 @@ class CameraWorker:
 
                     self.store.put(Frame(self.camera.camera_id, frame_id, mono, image, width, height))
                     if frame_id == 1:
-                        render_text = (
-                            f" render={int(render.get('width') or 0)}x{int(render.get('height') or 0)}"
-                            f" {str(render.get('format') or '-') }"
-                        )
                         print(
-                            f"[CAMERA] {self.camera.camera_id} first analysis frame {width}x{height} "
-                            f"backend={cap.backend} transport={transport}{render_text}",
+                            f"[CAMERA] {self.camera.camera_id} first frame {width}x{height} "
+                            f"backend={cap.backend} transport={transport} latency={camera_latency}ms",
                             flush=True,
                         )
 
