@@ -1,18 +1,18 @@
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include <gst/gst.h>
 #include "gstnvdsmeta.h"
 #include "nvdsmeta.h"
 
 #define MAX_SMOOTH_STATES 512
 /*
- * Detector inference is intentionally sparse to keep all six live cameras smooth.
- * Difficult poses such as reclining people can miss more than one detector cycle.
- * Keep the last authoritative NvDCF box visible for at most 36 display frames
- * (~1.8 s @ 20 FPS). This probe is downstream of nvtracker: held metadata is
- * presentation-only and can never create/change a tracker target.
+ * The tracker owns continuity. This downstream display helper should only bridge
+ * tiny visual gaps, never preserve an obsolete large box for seconds. At 20 FPS
+ * eight frames is roughly 0.4 s: enough for a brief sparse-detector miss without
+ * turning an old chair/person rectangle into a long ghost box.
  */
-#define DISPLAY_HOLD_FRAMES 36
+#define DISPLAY_HOLD_FRAMES 8
 
 typedef struct {
     int valid;
@@ -60,10 +60,10 @@ static float alpha_for_steps(float one_step_alpha, uint64_t steps) {
 }
 
 static void style_display_box(NvDsObjectMeta *obj) {
-    obj->rect_params.border_width = 3;
-    obj->rect_params.border_color.red = 0.10f;
-    obj->rect_params.border_color.green = 1.00f;
-    obj->rect_params.border_color.blue = 0.15f;
+    obj->rect_params.border_width = 2;
+    obj->rect_params.border_color.red = 0.965f;
+    obj->rect_params.border_color.green = 0.725f;
+    obj->rect_params.border_color.blue = 0.294f;
     obj->rect_params.border_color.alpha = 1.00f;
     obj->rect_params.has_bg_color = 0;
 }
@@ -75,6 +75,9 @@ static void write_rect(NvDsObjectMeta *obj,
                        float height,
                        float frame_w,
                        float frame_h) {
+    width = clampf_smooth(width, 2.0f, frame_w);
+    height = clampf_smooth(height, 2.0f, frame_h);
+
     float left = cx - width * 0.5f;
     float top = cy - height * 0.5f;
     float right = cx + width * 0.5f;
@@ -107,14 +110,11 @@ static int add_display_hold(NvDsBatchMeta *batch_meta,
     NvDsObjectMeta *obj = nvds_acquire_obj_meta_from_pool(batch_meta);
     if (!obj) return 0;
 
-    /*
-     * Predict only a small bounded distance so a held box follows a walking person
-     * instead of freezing behind them. This metadata is created AFTER nvtracker and
-     * is therefore display-only: it can never seed or alter a tracker target.
-     */
-    float predict_steps = (float) (gap > 6 ? 6 : gap);
-    float held_cx = s->display_cx + s->vx * predict_steps * 0.65f;
-    float held_cy = s->display_cy + s->vy * predict_steps * 0.65f;
+    /* Very small bounded continuation only. Do not let a stale display box run
+     * away from the actual person when NvDCF temporarily stops outputting it. */
+    float predict_steps = (float)(gap > 3 ? 3 : gap);
+    float held_cx = s->display_cx + s->vx * predict_steps * 0.30f;
+    float held_cy = s->display_cy + s->vy * predict_steps * 0.30f;
 
     obj->unique_component_id = 191;
     obj->class_id = 0;
@@ -130,13 +130,10 @@ static int add_display_hold(NvDsBatchMeta *batch_meta,
 }
 
 /*
- * Display smoother for REAL current-frame NvDCF objects plus a bounded downstream
- * display hold across sparse-inference metadata gaps.
- *
- * The hold never enters nvtracker because this probe runs on nvtracker's src pad.
- * It expires after DISPLAY_HOLD_FRAMES, so a person who really leaves cannot create
- * a long-lived ghost rectangle. Position follows quickly; size changes are eased to
- * avoid visible jumps when a person raises an arm, turns, sits or stands.
+ * Display smoother for current-frame NvDCF objects plus a very short visual hold.
+ * Position follows the tracker almost immediately. Width/height are intentionally
+ * allowed to shrink quickly so a previous oversized detection cannot keep covering
+ * a chair/table after the next accurate person observation arrives.
  */
 int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
     if (!buffer_ptr) return -1;
@@ -144,11 +141,10 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
     if (!batch_meta) return -1;
 
-    const float center_alpha_1f = 0.86f;
-    const float velocity_alpha = 0.45f;
-    const float lead_frames = 0.12f;
-    const float expand_alpha_1f = 0.34f;
-    const float shrink_alpha_1f = 0.22f;
+    const float center_alpha_1f = 0.96f;
+    const float velocity_alpha = 0.28f;
+    const float expand_alpha_1f = 0.72f;
+    const float shrink_alpha_1f = 0.72f;
     int smoothed = 0;
 
     for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
@@ -180,7 +176,7 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
             SmoothBoxState *s = &g_smooth_states[idx];
 
             if (!s->valid || s->source_id != source_id || s->object_id != (uint64_t)obj->object_id ||
-                (frame_num > s->last_frame_num && frame_num - s->last_frame_num > 40)) {
+                (frame_num > s->last_frame_num && frame_num - s->last_frame_num > 20)) {
                 memset(s, 0, sizeof(*s));
                 s->valid = 1;
                 s->source_id = source_id;
@@ -198,27 +194,48 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
             }
 
             uint64_t delta_frames = frame_num > s->last_frame_num ? frame_num - s->last_frame_num : 1;
-            if (delta_frames > 6) delta_frames = 6;
+            if (delta_frames > 4) delta_frames = 4;
 
             float measured_vx = (target_cx - s->target_cx) / (float)delta_frames;
             float measured_vy = (target_cy - s->target_cy) / (float)delta_frames;
-            float max_vx = width * 0.30f + 3.0f;
-            float max_vy = height * 0.30f + 3.0f;
+            float max_vx = width * 0.20f + 2.0f;
+            float max_vy = height * 0.20f + 2.0f;
             measured_vx = clampf_smooth(measured_vx, -max_vx, max_vx);
             measured_vy = clampf_smooth(measured_vy, -max_vy, max_vy);
             s->vx = s->vx * (1.0f - velocity_alpha) + measured_vx * velocity_alpha;
             s->vy = s->vy * (1.0f - velocity_alpha) + measured_vy * velocity_alpha;
 
-            float desired_cx = target_cx + s->vx * lead_frames;
-            float desired_cy = target_cy + s->vy * lead_frames;
             float center_alpha = alpha_for_steps(center_alpha_1f, delta_frames);
             float expand_alpha = alpha_for_steps(expand_alpha_1f, delta_frames);
             float shrink_alpha = alpha_for_steps(shrink_alpha_1f, delta_frames);
 
-            s->display_cx += (desired_cx - s->display_cx) * center_alpha;
-            s->display_cy += (desired_cy - s->display_cy) * center_alpha;
-            s->display_w += (width - s->display_w) * (width >= s->display_w ? expand_alpha : shrink_alpha);
-            s->display_h += (height - s->display_h) * (height >= s->display_h ? expand_alpha : shrink_alpha);
+            float dx = target_cx - s->display_cx;
+            float dy = target_cy - s->display_cy;
+            float jump_norm = hypotf(dx, dy) / fmaxf(20.0f, hypotf(width, height));
+
+            /* A large jump is usually a fresh tracker correction after an old
+             * display state. Snap instead of drawing a box between old/new people. */
+            if (jump_norm > 0.55f) {
+                s->display_cx = target_cx;
+                s->display_cy = target_cy;
+                s->vx = 0.0f;
+                s->vy = 0.0f;
+            } else {
+                s->display_cx += dx * center_alpha;
+                s->display_cy += dy * center_alpha;
+            }
+
+            /* If the current tracker says the target is much smaller than the old
+             * display state, snap size immediately. This fixes oversized boxes that
+             * otherwise continue to include chairs/desks for many frames. */
+            if (width < s->display_w * 0.68f || height < s->display_h * 0.68f ||
+                width > s->display_w * 1.55f || height > s->display_h * 1.55f) {
+                s->display_w = width;
+                s->display_h = height;
+            } else {
+                s->display_w += (width - s->display_w) * (width >= s->display_w ? expand_alpha : shrink_alpha);
+                s->display_h += (height - s->display_h) * (height >= s->display_h ? expand_alpha : shrink_alpha);
+            }
 
             s->target_cx = target_cx;
             s->target_cy = target_cy;
@@ -234,7 +251,7 @@ int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr) {
             uint64_t gap = frame_num - s->last_frame_num;
             if (gap <= DISPLAY_HOLD_FRAMES) {
                 smoothed += add_display_hold(batch_meta, frame_meta, s, gap, frame_w, frame_h);
-            } else if (gap > DISPLAY_HOLD_FRAMES + 8) {
+            } else if (gap > DISPLAY_HOLD_FRAMES + 4) {
                 s->valid = 0;
             }
         }
