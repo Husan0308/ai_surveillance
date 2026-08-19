@@ -54,3 +54,22 @@ def test_ml_preflight_exists() -> None:
     for plugin in ("nvurisrcbin", "nvvideoconvert", "appsink"):
         assert plugin in preflight
     assert 'print("ML_PREFLIGHT=PASS"' in preflight
+
+
+def test_person_detector_is_process_isolated_and_person_only() -> None:
+    detector = source("services/ml_service/app/detector.py")
+    main = source("services/ml_service/app/main.py")
+    launcher = source("scripts/run_ml_service.sh")
+    preflight = source("scripts/preflight_person_detection.py")
+
+    assert 'mp.get_context("spawn")' in detector
+    assert 'name="person-detector-cuda"' in detector
+    assert '"classes": [0]' in detector
+    assert '"isolation"] = "spawn-process"' in detector
+    assert "ReID" in detector and "face" in detector
+    assert "from services.ml_service.app.deepstream.pipeline import DeepStreamRuntime" in main
+    assert "runtime: Any | None = None" in main
+    assert "PERSON_DETECT_PREFLIGHT_WARNING" in launcher
+    assert "torch.cuda.get_arch_list()" in preflight
+    assert "torch.cuda.get_device_capability" in preflight
+    assert "PERSON_DETECT_CUDA_KERNEL=PASS" in preflight
