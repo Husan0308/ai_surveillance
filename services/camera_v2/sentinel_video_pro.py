@@ -20,8 +20,10 @@ from .sentinel_video import (
     _put_status,
 )
 
-FOCUS_WIDTH = 1920
-FOCUS_HEIGHT = 1080
+# Keep fullscreen at the exact native mux aspect/resolution. Upscaling to the
+# physical monitor is left to the EGL sink, avoiding a second unnecessary scale.
+FOCUS_WIDTH = 1280
+FOCUS_HEIGHT = 720
 
 
 def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
@@ -50,15 +52,12 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 f"Sentinel Monitoring supports 1..{CAMERA_COUNT} active cameras, found {camera_count}"
             )
 
-        runtime.wall_width = WALL_WIDTH
-        runtime.wall_height = WALL_HEIGHT
         runtime.tiler_rows = GRID_ROWS
         runtime.tiler_columns = GRID_COLUMNS
         runtime.focus_source = -1
         runtime.tiler.set_property("rows", GRID_ROWS)
         runtime.tiler.set_property("columns", GRID_COLUMNS)
-        runtime.tiler.set_property("width", WALL_WIDTH)
-        runtime.tiler.set_property("height", WALL_HEIGHT)
+        runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)
         if runtime.tiler.find_property("show-source") is not None:
             runtime.tiler.set_property("show-source", -1)
         if runtime.sink.find_property("force-aspect-ratio") is not None:
@@ -89,16 +88,26 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 else -1
             )
             current_focus = sid
+
             if sid >= 0:
-                width, height = FOCUS_WIDTH, FOCUS_HEIGHT
+                # A focused camera is a real 16:9 stream, not a zoomed source
+                # inside the old 2x3 1280x1080 wall canvas.
+                runtime.tiler.set_property("rows", 1)
+                runtime.tiler.set_property("columns", 1)
+                runtime.tiler_rows = 1
+                runtime.tiler_columns = 1
+                runtime.tiler.set_property("show-source", sid)
+                runtime.focus_source = sid
+                runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)
             else:
-                width, height = WALL_WIDTH, WALL_HEIGHT
-            runtime.tiler.set_property("width", int(width))
-            runtime.tiler.set_property("height", int(height))
-            runtime.wall_width = int(width)
-            runtime.wall_height = int(height)
-            runtime.focus_source = sid
-            runtime.tiler.set_property("show-source", sid)
+                runtime.tiler.set_property("rows", GRID_ROWS)
+                runtime.tiler.set_property("columns", GRID_COLUMNS)
+                runtime.tiler_rows = GRID_ROWS
+                runtime.tiler_columns = GRID_COLUMNS
+                runtime.tiler.set_property("show-source", -1)
+                runtime.focus_source = -1
+                runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)
+
             _put_status(status_q, "FOCUS", "Camera view")
 
         bind_overlay(runtime.sink, current_xid)
@@ -239,10 +248,6 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                     }
                 )
 
-            # Each physical room has two overlapping cameras. Without cross-camera
-            # identity, summing both cameras double-counts the same person. The
-            # room occupancy is therefore the maximum live count among cameras in
-            # that room, and building total is the sum of room occupancies.
             total = sum(room_people.values())
             known = 0
             unknown = total
