@@ -6,8 +6,6 @@ import time
 from collections import deque
 from pathlib import Path
 
-# Stride-32 valid detector geometry. 704x396 was silently changed by Ultralytics
-# to 704x416 on every call; 704x384 keeps configured and actual geometry identical.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "704")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
@@ -29,13 +27,7 @@ from .tracker_profile import prepare_sparse_tracker_config
 
 
 class CameraPersonTrackingFinal(_BaseTracking):
-    """Stable production detector + camera-local NvDCF tracker.
-
-    Cross-camera ReID is deliberately absent. This class keeps the measured
-    detector latency compensation, sparse round-robin YOLO scheduling, NvDCF
-    stabilization and GPU-native OSD path that were already working before the
-    ReID experiments. Identity on screen is only the local NvDCF track identity.
-    """
+    """Stable detector + camera-local NvDCF tracker."""
 
     def __init__(self) -> None:
         self.detector_frames_applied = 0
@@ -53,6 +45,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
         )
         self.detector_result_age_ms = 0.0
         self.detector_times: dict[str, deque[float]] = {}
+        self.source_track_counts: dict[int, int] = {}
 
         super().__init__()
         self._set_if(self.osd, "display-text", True)
@@ -61,19 +54,15 @@ class CameraPersonTrackingFinal(_BaseTracking):
             min(self.detector_max_hz, self.detector_target_hz),
         )
         self.detector_times = {cid: deque(maxlen=100) for cid in self.camera_index}
+        self.source_track_counts = {
+            int(source_id): 0 for source_id in self.camera_index.values()
+        }
         self.latency_compensator = DetectorLatencyCompensator(
             self.frame_width, self.frame_height
         )
 
-        print(
-            "CAMERA_TRACK_ID mode=local-nvdcf cross_camera=0 reid=0 qwen=0 "
-            "kpr=0 calibration=0",
-            flush=True,
-        )
-
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
-        """Keep sparse NvDCF stable without changing the known tracking baseline."""
         replacements = {
             "enableBboxUnClipping": "0",
             "minIouDiff4NewTarget": "0.60",
@@ -130,8 +119,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
         captured_t: float,
         prepared: list[PreparedDetection],
     ) -> None:
-        # Never inject an explicit empty result. NvDCF shadow tracking owns short
-        # detector misses and decides when a target actually ends.
         if not prepared:
             return
         with self.pending_lock:
@@ -188,18 +175,35 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
         try:
             count = self.bridge.style_and_count_tracked(buffer)
-            # Label with camera-local NvDCF identity only. A camera prefix is added
-            # natively so equal object IDs on different cameras cannot be mistaken
-            # for one Global ID while ReID is disabled.
             self.bridge.apply_local_track_style(buffer)
+
+            # Count unique active NvDCF object IDs per camera from the current
+            # batched metadata. This is the live source for UI people counts.
+            ids_by_source: dict[int, set[int]] = {
+                int(source_id): set() for source_id in self.camera_index.values()
+            }
+            for row in self.bridge.copy_tracks(buffer, max_rows=256):
+                source_id = int(row.get("source_id", -1))
+                object_id = int(row.get("object_id", 0))
+                if source_id in ids_by_source and object_id >= 0:
+                    ids_by_source[source_id].add(object_id)
+            source_counts = {
+                source_id: len(object_ids)
+                for source_id, object_ids in ids_by_source.items()
+            }
+
             if count >= 0:
                 with self.det_lock:
                     self.tracked_now = count
+                    self.source_track_counts = source_counts
                     self.tracker_frames += 1
         except Exception as exc:
-            # Tracking/display must stay alive even if text styling fails.
             print(f"CAMERA_TRACK_STYLE warning={type(exc).__name__}:{exc}", flush=True)
         return self.Gst.PadProbeReturn.OK
+
+    def live_source_counts(self) -> dict[int, int]:
+        with self.det_lock:
+            return dict(self.source_track_counts)
 
     def _scheduler(self) -> None:
         assert self.result_q is not None and self.job_q is not None
@@ -223,9 +227,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"iou={os.environ.get('CAMERA_V2_DETECT_IOU')} "
             f"target={self.detector_target_hz:.1f}Hz/cam "
             f"range={self.detector_min_hz:.1f}-{self.detector_max_hz:.1f}Hz/cam "
-            f"NvDCF={self.tracker_width}x{self.tracker_height} "
-            f"device={ready.get('device')} cuda={ready.get('cuda')} "
-            "identity=local-only reid=0 close_person=balanced stride32=1",
+            f"tracker={self.tracker_width}x{self.tracker_height} "
+            f"device={ready.get('device')} cuda={ready.get('cuda')}",
             flush=True,
         )
 
@@ -354,6 +357,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             tracked = self.tracked_now
             age_ms = self.detector_result_age_ms
             target_hz = self.detector_target_hz
+            source_counts = dict(self.source_track_counts)
 
         rates = {
             cid: self._recent_rate(rows, now)
@@ -365,14 +369,12 @@ class CameraPersonTrackingFinal(_BaseTracking):
         expected_skip = max(0.0, 20.0 / max(0.1, target_hz) - 1.0)
         print(
             "CAMERA_TRACK_FINAL "
-            f"detector_frames={applied} tracked_now={tracked} "
+            f"detector_frames={applied} tracked_now={tracked} source_counts={source_counts} "
             f"detector={INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
             f"target_hz={target_hz:.1f}/cam approx_skip={expected_skip:.1f}frames "
             f"actual_hz=[{rate_text}] result_age={age_ms:.0f}ms "
             f"tracker={self.tracker_width}x{self.tracker_height} "
-            f"config={self.tracker_config} profile=max_perf max_targets=24 "
-            "shadow=50 display_gap_bridge=1 synthetic_tracker_boxes=0 "
-            "identity=local-only reid=0",
+            f"config={self.tracker_config}",
             flush=True,
         )
         return keep
