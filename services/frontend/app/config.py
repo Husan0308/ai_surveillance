@@ -12,27 +12,25 @@ class FrontendSettings:
     frame_refresh_interval_ms: int
     track_refresh_interval_ms: int
     video_transport: str
-    shm_video_dir: str
     source_width: int
     source_height: int
     source_fps: int
-    gpu_id: int
 
 
 def load_settings() -> FrontendSettings:
-    video_transport = os.getenv("FRONTEND_VIDEO_TRANSPORT", "shm").strip().lower()
-    if video_transport not in {"shm", "mjpeg"}:
-        raise ValueError("FRONTEND_VIDEO_TRANSPORT must be shm or mjpeg")
+    video_transport = os.getenv("FRONTEND_VIDEO_TRANSPORT", "mmap").strip().lower()
+    if video_transport not in {"mmap", "mjpeg"}:
+        raise ValueError("FRONTEND_VIDEO_TRANSPORT must be mmap or mjpeg")
     return FrontendSettings(
         api_base_url=os.getenv("FRONTEND_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/"),
         ml_video_base_url=os.getenv("FRONTEND_ML_VIDEO_BASE_URL", "http://127.0.0.1:8001").rstrip("/"),
         refresh_interval_ms=int(os.getenv("FRONTEND_REFRESH_INTERVAL_MS", "2000")),
-        frame_refresh_interval_ms=int(os.getenv("FRONTEND_FRAME_REFRESH_INTERVAL_MS", "50")),
+        # Old proven wall polled faster than the 20 FPS source but repainted only
+        # cameras whose mmap sequence changed.
+        frame_refresh_interval_ms=int(os.getenv("FRONTEND_FRAME_REFRESH_INTERVAL_MS", "12")),
         track_refresh_interval_ms=int(os.getenv("FRONTEND_TRACK_REFRESH_INTERVAL_MS", "250")),
         video_transport=video_transport,
-        shm_video_dir=os.getenv("FRONTEND_SHM_VIDEO_DIR", "/tmp/ai-surveillance"),
-        source_width=int(os.getenv("FRONTEND_SOURCE_WIDTH", "736")),
-        source_height=int(os.getenv("FRONTEND_SOURCE_HEIGHT", "416")),
+        source_width=int(os.getenv("FRONTEND_SOURCE_WIDTH", "960")),
+        source_height=int(os.getenv("FRONTEND_SOURCE_HEIGHT", "540")),
         source_fps=int(os.getenv("FRONTEND_SOURCE_FPS", "20")),
-        gpu_id=int(os.getenv("FRONTEND_GPU_ID", "0")),
     )
