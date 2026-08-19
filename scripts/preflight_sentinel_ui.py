@@ -199,6 +199,8 @@ def main_preflight() -> int:
             "action.setVisible(show)",
             "def leaveEvent(self, event)",
             "def set_pipeline_status(self, status)",
+            "if state == self._pipeline_state and detail == self._pipeline_detail",
+            "Do not re-raise every grid header on every metrics tick",
         ),
         "camera-card/native-wall/fixed-HUD",
     )
@@ -218,13 +220,15 @@ def main_preflight() -> int:
         (
             "self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)",
             "self.setAttribute(Qt.WA_NativeWindow, True)",
+            "self.setAttribute(Qt.WA_NoSystemBackground, True)",
+            'self.setObjectName("nativeVideoSurface")',
+            "self._status_cache",
             "QTimer.singleShot(100, lambda: self.nativeReady.emit(xid))",
         ),
         "single native video child",
     )
     for forbidden_native in (
         "WA_PaintOnScreen",
-        "WA_NoSystemBackground",
         "def paintEngine(",
     ):
         if forbidden_native in base_video_source:
@@ -245,6 +249,9 @@ def main_preflight() -> int:
             "python scripts/preflight_camera_v2_core.py",
             "exec python -m services.camera_v2.monitor_ui",
             "export QT_QPA_PLATFORM=xcb",
+            "export CAMERA_V2_TILER_COLUMNS=2",
+            "export CAMERA_V2_WALL_WIDTH=1600",
+            "export CAMERA_V2_WALL_HEIGHT=1350",
             "SENTINEL_DISPLAY session=",
             "expected_ui=2026.08.19-r11",
         ),
@@ -257,8 +264,10 @@ def main_preflight() -> int:
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
     print("SENTINEL_PREFLIGHT monitoring=compact-vms 2x3 header-bars right-rail=262px")
-    print("SENTINEL_PREFLIGHT native_video=single-native-child no-stale-page-pixels PASS")
+    print("SENTINEL_PREFLIGHT native_video=egl-owned-no-system-background PASS")
     print("SENTINEL_PREFLIGHT native_binding=xcb+rebind-only-on-new-xid PASS")
+    print("SENTINEL_PREFLIGHT grid_topology=2x3-from-construction PASS")
+    print("SENTINEL_PREFLIGHT overlay_repaint=state-change-only PASS")
     print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused-estimate total+known+unknown wiring=PASS")
     print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
