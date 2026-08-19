@@ -37,6 +37,14 @@ def _require_all(source: str, guards: tuple[str, ...], label: str) -> None:
 
 
 def main_preflight() -> int:
+    """Validate only the Sentinel UI/control contract.
+
+    Detector, NvDCF, native bridge and heatmap runtime validation intentionally
+    belongs to scripts/preflight_camera_v2_core.py, which the launcher runs
+    immediately after this script. Keeping the two contracts separate prevents
+    harmless implementation/string changes in the tracking stack from blocking
+    an otherwise valid UI build.
+    """
     if not callable(main):
         _fail("main entry point is missing")
     if BUILD_TAG != EXPECTED_BUILD:
@@ -83,6 +91,7 @@ def main_preflight() -> int:
         "settings": _source("services/camera_v2/sentinel_ui_settings.py"),
     }
 
+    # Technical backend names must stay in terminal diagnostics, not user UI.
     for name, source in ui_files.items():
         for forbidden_text in ("NVDEC", "no pose/reid", "pose=", "reid=", "DeepStream"):
             if forbidden_text in source:
@@ -110,40 +119,8 @@ def main_preflight() -> int:
         "monitoring",
     )
 
-    tracker_source = _source("services/camera_v2/person_tracking_final.py")
-    _require_all(
-        tracker_source,
-        (
-            "live_source_counts",
-            "source_track_counts",
-            'CAMERA_V2_DETECT_WIDTH", "736"',
-            'CAMERA_V2_DETECT_HEIGHT", "416"',
-            'CAMERA_V2_TRACKER_WIDTH", "512"',
-            'CAMERA_V2_TRACKER_HEIGHT", "288"',
-            'CAMERA_V2_MIN_DISPLAY_TRACK_CONF", "0.28"',
-            '"maxShadowTrackingAge": "12"',
-            '"minTrackingConfidenceDuringInactive": "0.40"',
-            "def _publish_prepared(",
-            "self.pending[cid] = (",
-            "list(prepared),",
-        ),
-        "current NvDCF tracking",
-    )
-    if "if not prepared:\n            return" in tracker_source:
-        _fail("empty detector results are still being dropped before NvDCF")
-
-    dynamic_source = _source("services/camera_v2/dynamic_wall.py")
-    _require_all(
-        dynamic_source,
-        (
-            'self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")',
-            "set_wall_output_geometry",
-            "pixel-aspect-ratio=1/1",
-            'self._require_link(self.tiler, self.wall_caps',
-        ),
-        "dynamic wall aspect",
-    )
-
+    # Runtime exposes room-fused people metrics to the UI. Do not assert detector
+    # or NvDCF implementation details here; core preflight owns those.
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
     _require_all(
         video_source,
@@ -162,7 +139,19 @@ def main_preflight() -> int:
             'runtime.tiler.set_property("rows", 1)',
             'runtime.tiler.set_property("columns", 1)',
         ),
-        "runtime",
+        "monitoring runtime contract",
+    )
+
+    dynamic_source = _source("services/camera_v2/dynamic_wall.py")
+    _require_all(
+        dynamic_source,
+        (
+            'self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")',
+            "set_wall_output_geometry",
+            "pixel-aspect-ratio=1/1",
+            'self._require_link(self.tiler, self.wall_caps',
+        ),
+        "wall aspect",
     )
 
     wall_source = ui_files["wall"]
@@ -185,89 +174,20 @@ def main_preflight() -> int:
     if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
         _fail("demo per-camera occupancy badge returned")
 
-    heat_source = _source("services/camera_v2/person_tracking_heatmap.py")
-    if "self.bridge.heatmap_update(buffer)" not in heat_source:
-        _fail("tracked floor heatmap update is missing")
-    for forbidden_heat in ("PoseHeatmapBridge", "deposit_pose_ankle", "pose_sidecar"):
-        if forbidden_heat in heat_source:
-            _fail(f"active heatmap has optional dependency: {forbidden_heat}")
-
-    # Validate executable behavior, not comments/prose. The compatibility symbol
-    # may remain, but it must be a strict no-op and must not contain any old hold/
-    # prediction implementation state.
-    smoother_source = _source("services/camera_v2/native_display_smoother.c")
-    _require_all(
-        smoother_source,
-        (
-            "int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr)",
-            "return buffer_ptr ? 0 : -1;",
-        ),
-        "NvDCF-only display bbox",
-    )
-    for forbidden_smoother in (
-        "DISPLAY_HOLD_FRAMES",
-        "add_display_hold",
-        "display_cx",
-        "display_w",
-        "display_h",
-        "display_cy",
-    ):
-        if forbidden_smoother in smoother_source:
-            _fail(f"custom display predictor returned: {forbidden_smoother}")
-
-    meta_source = _source("services/camera_v2/native_meta_bridge.c")
-    _require_all(
-        meta_source,
-        (
-            'CAMERA_V2_MIN_DISPLAY_TRACK_CONF", 0.28f',
-            "obj->class_id = -1",
-            "obj->unique_component_id == 191",
-            "frame_meta->pipeline_width > 1",
-        ),
-        "tracker metadata filter",
-    )
-
-    label_source = _source("services/camera_v2/native_label_style.c")
-    _require_all(
-        label_source,
-        (
-            "should_style_track",
-            "obj->unique_component_id == 191",
-            "obj->rect_params.border_width == 0",
-        ),
-        "track label filter",
-    )
-
-    profile_source = _source("services/camera_v2/tracker_profile.py")
-    _require_all(
-        profile_source,
-        (
-            '"minTrackerConfidence": "0.28"',
-            '"maxShadowTrackingAge": "12"',
-            '"earlyTerminationAge": "1"',
-            '"minTrackingConfidenceDuringInactive": "0.40"',
-            '"outputShadowTracks", "0"',
-        ),
-        "NvDCF stale-track profile",
-    )
-
-    latency_source = _source("services/camera_v2/detector_latency.py")
-    _require_all(
-        latency_source,
-        (
-            "self.max_projection_s = 0.16",
-            "self.projection_gain = 0.62",
-            "geometry_stable",
-            "motion_plausible",
-        ),
-        "conservative detector projection",
-    )
-
     enrollment_source = _source("services/camera_v2/sentinel_ui_enrollment.py")
     if "class ReportsPage" in enrollment_source:
         _fail("stale ReportsPage still exists")
 
     launcher = _source("scripts/run_sentinel_vms.sh")
+    _require_all(
+        launcher,
+        (
+            "python scripts/preflight_sentinel_ui.py",
+            "python scripts/preflight_camera_v2_core.py",
+            "exec python -m services.camera_v2.monitor_ui",
+        ),
+        "launcher",
+    )
     for forbidden_launcher in ("setup_camera_v2_reid.py", "preflight_camera_v2_reid.py"):
         if forbidden_launcher in launcher:
             _fail(f"launcher still starts optional path: {forbidden_launcher}")
@@ -275,9 +195,8 @@ def main_preflight() -> int:
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
     print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=16:9-renegotiated fixed-hud=PASS")
-    print("SENTINEL_PREFLIGHT bbox=current-nvdcf-only custom_hold=OFF tracker_conf=0.28 shadow_age=12")
-    print("SENTINEL_PREFLIGHT detector=736x416 tracker=512x288 empty_results=authoritative")
-    print("SENTINEL_PREFLIGHT people_count=visible-tracks->room-max->total known+unknown=consistent")
+    print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
+    print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
     print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
