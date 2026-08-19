@@ -66,7 +66,18 @@ def test_person_detector_is_process_isolated_and_person_only() -> None:
     assert 'name="person-detector-cuda"' in detector
     assert '"classes": [0]' in detector
     assert '"isolation"] = "spawn-process"' in detector
-    assert "ReID" in detector and "face" in detector
+
+    # Detector owns only person inference. Local tracking is a separate module,
+    # while ReID/face remain intentionally absent at this stage.
+    for forbidden in (
+        "insightface",
+        "fastreid",
+        "torchreid",
+        "BYTETracker",
+        "GlobalIdentity",
+    ):
+        assert forbidden not in detector
+
     assert "from services.ml_service.app.deepstream.pipeline import DeepStreamRuntime" in main
     assert "runtime: Any | None = None" in main
     assert "PERSON_DETECT_PREFLIGHT_WARNING" in launcher
