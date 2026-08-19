@@ -9,14 +9,16 @@ def source(path: str) -> str:
 
 def test_frontend_uses_api_for_metadata_and_mmap_for_local_video() -> None:
     main = source("services/frontend/app/main.py")
+    operator = source("services/frontend/app/operator_window.py")
     api_client = source("services/frontend/app/api_client.py")
     wall = source("services/frontend/app/camera_wall.py")
     mmap_reader = source("services/frontend/app/mmap_frame_reader.py")
     fallback = source("services/frontend/app/mjpeg_reader.py")
 
-    assert "ApiClient(self.settings.api_base_url" in main
-    assert "CameraWall(self.settings)" in main
-    assert "self.camera_wall.set_cameras(cameras)" in main
+    assert "OperatorWindow" in main
+    assert "ApiClient(self.settings.api_base_url" in operator
+    assert "CameraWall(settings" in operator
+    assert "self.monitoring.camera_wall.set_cameras(cameras)" in operator
     assert '"/api/v1/ml/health"' in api_client
     assert '"/api/v1/cameras"' in api_client
     assert '"/api/v1/tracks"' in api_client
@@ -32,15 +34,35 @@ def test_frontend_uses_api_for_metadata_and_mmap_for_local_video() -> None:
         "BYTETracker",
         "YOLO(",
     ):
-        assert forbidden not in main
-        assert forbidden not in api_client
-        assert forbidden not in wall
-        assert forbidden not in mmap_reader
-        assert forbidden not in fallback
+        for text in (main, operator, api_client, wall, mmap_reader, fallback):
+            assert forbidden not in text
+
+
+def test_operator_ui_restores_dark_monitoring_layout() -> None:
+    operator = source("services/frontend/app/operator_window.py")
+    wall = source("services/frontend/app/camera_wall.py")
+
+    for text in (
+        "Apsidal",
+        "Monitoring",
+        "People",
+        "Events",
+        "Enrollment",
+        "Settings",
+        "People in Building",
+        "Recent Views",
+        "KNOWN",
+        "UNKNOWN",
+    ):
+        assert text in operator
+    assert '"#071018"' in operator
+    assert "fullscreenRequested" in wall
+    assert "toggle_focus" in wall
+    assert 'self.status.setText("● LIVE")' in wall
 
 
 def test_mmap_wall_repaints_only_new_frames_and_keeps_mjpeg_fallback() -> None:
-    main = source("services/frontend/app/main.py")
+    operator = source("services/frontend/app/operator_window.py")
     wall = source("services/frontend/app/camera_wall.py")
 
     assert "MmapVideoCanvas" in wall
@@ -49,18 +71,20 @@ def test_mmap_wall_repaints_only_new_frames_and_keeps_mjpeg_fallback() -> None:
     assert "SmoothPixmapTransform" in wall  # comment documents it is deliberately OFF
     assert "SmoothMjpegReader" in wall
     assert "_start_fallback" in wall
-    assert "Qt.TimerType.PreciseTimer" in main
-    assert "frame_refresh_interval_ms" in main
+    assert "Qt.TimerType.PreciseTimer" in operator
+    assert "frame_refresh_interval_ms" in operator
 
 
-def test_tracking_overlay_is_baked_by_ml_not_duplicated_in_qt() -> None:
+def test_tracking_overlay_uses_bytetrack_ids_plus_presentation_smoother() -> None:
     wall = source("services/frontend/app/camera_wall.py")
     mmap_publisher = source("services/ml_service/app/mmap_publisher.py")
-    jpeg_publisher = source("services/ml_service/app/jpeg_publisher.py")
+    smoother = source("services/ml_service/app/presentation_smoother.py")
 
-    assert "self._image_for_encode(frame)" in mmap_publisher
-    assert "track_id = getattr(detection, \"track_id\", None)" in jpeg_publisher
-    assert "would duplicate boxes" in wall
+    assert "PresentationSmoother" in mmap_publisher
+    assert 'label = f"Person T{int(track.track_id)}' in mmap_publisher
+    assert "ByteTrack remains authoritative for T-IDs" in smoother
+    assert "self.smoother.visible" in mmap_publisher
+    assert "update_tracks" in wall
 
 
 def test_frontend_camera_wall_is_two_columns() -> None:
@@ -83,4 +107,4 @@ def test_frontend_launcher_preflight_and_mmap_smoke_exist() -> None:
     assert '"/api/v1/cameras"' in integration
     assert "FRONTEND_SMOKE=PASS" in integration
     assert "MMAP_VIDEO_SMOKE=PASS" in mmap_smoke
-    assert "960" not in mmap_smoke  # geometry comes from canonical frontend settings
+    assert "960" not in mmap_smoke
