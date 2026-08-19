@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
     QStackedLayout,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -17,8 +18,19 @@ from services.frontend.app.mjpeg_reader import SmoothMjpegReader
 from services.frontend.app.mmap_frame_reader import SmoothMmapFrameReader
 
 
+BG = "#071018"
+CARD = "#0b151e"
+CARD_HEAD = "#0d1822"
+BORDER = "#1b2b38"
+BORDER_LIVE = "#21445a"
+TEXT = "#e7eef5"
+MUTED = "#8293a3"
+GREEN = "#38d996"
+AMBER = "#ffca54"
+
+
 class MmapVideoCanvas(QWidget):
-    """Paint only newly committed mmap frames; never queue presentation work."""
+    doubleClicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -41,9 +53,13 @@ class MmapVideoCanvas(QWidget):
         self.update()
         return True
 
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        self.doubleClicked.emit()
+        event.accept()
+
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#000000"))
+        painter.fillRect(self.rect(), QColor("#020609"))
         image = self._image
         if image is not None and not image.isNull():
             source_w = max(1, image.width())
@@ -55,13 +71,14 @@ class MmapVideoCanvas(QWidget):
             draw_h = max(1, round(source_h * scale))
             x = (target_w - draw_w) // 2
             y = (target_h - draw_h) // 2
-            # This matches the old proven smooth wall: SmoothPixmapTransform is
-            # deliberately OFF for six continuously changing feeds.
+            # Proven six-feed path: do not enable SmoothPixmapTransform here.
             painter.drawImage(QRect(x, y, draw_w, draw_h), image)
         painter.end()
 
 
 class CameraTile(QFrame):
+    fullscreenRequested = Signal(str)
+
     def __init__(
         self,
         camera_id: str,
@@ -79,16 +96,42 @@ class CameraTile(QFrame):
         self._wait_ticks = 0
         self._had_mmap_frame = False
         self._last_mjpeg_version = 0
+        self._track_count = 0
 
-        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setObjectName("cameraTile")
+        self.setStyleSheet(
+            f"QFrame#cameraTile{{background:{CARD};border:1px solid {BORDER};border-radius:7px;}}"
+        )
+
+        header_widget = QWidget(self)
+        header_widget.setFixedHeight(31)
+        header_widget.setStyleSheet(f"background:{CARD_HEAD};border:0;border-radius:6px;")
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(10, 0, 7, 0)
+        header.setSpacing(7)
+
         self.title = QLabel(camera_id)
+        self.title.setStyleSheet(f"color:{TEXT};font-size:10px;font-weight:750;")
         self.status = QLabel("CONNECTING")
+        self.status.setStyleSheet(
+            f"color:{AMBER};font:700 8px 'DejaVu Sans Mono';letter-spacing:.4px;"
+        )
+        self.fullscreen = QToolButton()
+        self.fullscreen.setText("⛶")
+        self.fullscreen.setToolTip("Fullscreen camera")
+        self.fullscreen.setFixedSize(25, 23)
+        self.fullscreen.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fullscreen.setStyleSheet(
+            "QToolButton{color:#b9c7d2;background:#101d27;border:1px solid #223543;"
+            "border-radius:5px;font-size:13px;}"
+            "QToolButton:hover{color:white;background:#193044;border-color:#31526a;}"
+        )
+        self.fullscreen.clicked.connect(lambda: self.fullscreenRequested.emit(self.camera_id))
 
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(self.title)
         header.addStretch(1)
         header.addWidget(self.status)
+        header.addWidget(self.fullscreen)
 
         self.video_host = QWidget(self)
         self.video_host.setMinimumSize(320, 180)
@@ -97,27 +140,34 @@ class CameraTile(QFrame):
         self.stack.setContentsMargins(0, 0, 0, 0)
 
         self.mmap_canvas = MmapVideoCanvas(self.video_host)
-        self.fallback_video = QLabel("Connecting...")
+        self.mmap_canvas.doubleClicked.connect(
+            lambda: self.fullscreenRequested.emit(self.camera_id)
+        )
+        self.fallback_video = QLabel("Connecting…")
         self.fallback_video.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.fallback_video.setStyleSheet("background: black; color: white;")
+        self.fallback_video.setStyleSheet("background:#020609;color:#8293a3;")
         self.stack.addWidget(self.mmap_canvas)
         self.stack.addWidget(self.fallback_video)
         self.stack.setCurrentWidget(self.mmap_canvas)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
-        layout.addLayout(header)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+        layout.addWidget(header_widget)
         layout.addWidget(self.video_host, 1)
 
         if settings.video_transport == "mjpeg":
-            self._start_fallback("configured mjpeg")
+            self._start_fallback("configured MJPEG")
         else:
             self.mmap_reader = SmoothMmapFrameReader(camera_id)
             self.mmap_reader.start()
 
     def update_stream_profile(self, camera_meta: dict) -> None:
         self.camera_meta = dict(camera_meta or {})
+        online = bool(self.camera_meta.get("online"))
+        if not online and self._had_mmap_frame:
+            self.status.setText("OFFLINE")
+            self.status.setStyleSheet("color:#ff6b6b;font:700 8px 'DejaVu Sans Mono';")
 
     def _start_fallback(self, reason: str) -> None:
         if self._fallback_active:
@@ -129,14 +179,15 @@ class CameraTile(QFrame):
         self.stack.setCurrentWidget(self.fallback_video)
         self.mjpeg_reader = SmoothMjpegReader(self.camera_id, self.settings.ml_video_base_url)
         self.mjpeg_reader.start()
-        self.status.setText("MJPEG FALLBACK")
+        self.status.setText("FALLBACK")
+        self.status.setStyleSheet(f"color:{AMBER};font:700 8px 'DejaVu Sans Mono';")
         self.fallback_video.setText(reason)
 
-    def update_tracks(self, _result: dict | None) -> None:
-        # Current ByteTrack T-IDs are baked into the mmap presentation frame by
-        # ml_service. API track metadata remains available for the rest of UI,
-        # but drawing it again here would duplicate boxes.
-        return
+    def update_tracks(self, result: dict | None) -> None:
+        if not isinstance(result, dict):
+            return
+        rows = result.get("tracks") or []
+        self._track_count = len(rows) if isinstance(rows, list) else int(result.get("people") or 0)
 
     def refresh(self) -> None:
         if not self._fallback_active:
@@ -148,18 +199,21 @@ class CameraTile(QFrame):
                 if self.mmap_canvas.set_frame(image, version):
                     self._had_mmap_frame = True
                     self._wait_ticks = 0
-                self.status.setText(
-                    f"LIVE MMAP {image.width()}x{image.height()} · {reader.last_frame_age_ms:.0f}ms"
+                self.status.setText("● LIVE")
+                self.status.setStyleSheet(
+                    f"color:{GREEN};font:700 8px 'DejaVu Sans Mono';letter-spacing:.4px;"
+                )
+                self.setToolTip(
+                    f"{self.camera_id} · {image.width()}x{image.height()} · "
+                    f"frame age {reader.last_frame_age_ms:.0f} ms · people {self._track_count}"
                 )
                 return
 
             self._wait_ticks += 1
-            self.status.setText("MMAP WAIT")
-            # Only use HTTP fallback if mmap never became available during a
-            # generous startup window. Once mmap has worked, its reader handles
-            # backend inode replacement/restart itself.
+            self.status.setText("WAIT")
+            self.status.setStyleSheet(f"color:{AMBER};font:700 8px 'DejaVu Sans Mono';")
             if not self._had_mmap_frame and self._wait_ticks >= 800:
-                self._start_fallback("mmap frame not available")
+                self._start_fallback("mmap frame unavailable")
             return
 
         reader = self.mjpeg_reader
@@ -177,9 +231,9 @@ class CameraTile(QFrame):
                     Qt.TransformationMode.FastTransformation,
                 )
             self.fallback_video.setPixmap(pixmap)
-            self.status.setText(f"MJPEG {reader.frames}")
+            self.status.setText("FALLBACK")
         elif reader.last_error:
-            self.status.setText("RECONNECTING")
+            self.status.setText("RECONNECT")
 
     def close_reader(self) -> None:
         if self.mmap_reader is not None:
@@ -192,21 +246,24 @@ class CameraTile(QFrame):
 
 
 class CameraWall(QWidget):
-    """Canonical six-camera wall: two per row, proven mmap presentation first."""
+    """Two-camera-per-row operator wall backed by latest-only mmap frames."""
 
     COLUMNS = 2
+    focusChanged = Signal(bool, str)
 
     def __init__(self, settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.settings = settings
+        self._focused_camera: str | None = None
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setSpacing(6)
+        self.grid.setSpacing(7)
         self.tiles: dict[str, CameraTile] = {}
 
         for index in range(6):
             camera_id = f"CAM-{index + 1:02d}"
             tile = CameraTile(camera_id, settings, parent=self)
+            tile.fullscreenRequested.connect(self.toggle_focus)
             row, column = divmod(index, self.COLUMNS)
             self.grid.addWidget(tile, row, column)
             self.tiles[camera_id] = tile
@@ -215,6 +272,48 @@ class CameraWall(QWidget):
             self.grid.setRowStretch(row, 1)
         for column in range(self.COLUMNS):
             self.grid.setColumnStretch(column, 1)
+
+    @property
+    def focused_camera(self) -> str | None:
+        return self._focused_camera
+
+    def _rebuild_grid(self) -> None:
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()
+
+        if self._focused_camera:
+            tile = self.tiles[self._focused_camera]
+            tile.show()
+            self.grid.setContentsMargins(0, 0, 0, 0)
+            self.grid.setSpacing(0)
+            self.grid.addWidget(tile, 0, 0, 3, self.COLUMNS)
+            return
+
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(7)
+        for index, camera_id in enumerate(sorted(self.tiles)):
+            tile = self.tiles[camera_id]
+            tile.show()
+            row, column = divmod(index, self.COLUMNS)
+            self.grid.addWidget(tile, row, column)
+
+    def toggle_focus(self, camera_id: str) -> None:
+        camera_id = str(camera_id)
+        if self._focused_camera == camera_id:
+            self._focused_camera = None
+        elif camera_id in self.tiles:
+            self._focused_camera = camera_id
+        self._rebuild_grid()
+        self.focusChanged.emit(bool(self._focused_camera), self._focused_camera or "")
+
+    def clear_focus(self) -> None:
+        if self._focused_camera is None:
+            return
+        self._focused_camera = None
+        self._rebuild_grid()
+        self.focusChanged.emit(False, "")
 
     def set_cameras(self, cameras: list[dict]) -> None:
         for row in cameras:
@@ -231,7 +330,8 @@ class CameraWall(QWidget):
             camera_id = str(row.get("camera_id") or "")
             tile = self.tiles.get(camera_id)
             if tile is not None:
-                tile.update_tracks(row)
+                result = row.get("result") if isinstance(row.get("result"), dict) else row
+                tile.update_tracks(result)
 
     def refresh_frames(self) -> None:
         for tile in self.tiles.values():
