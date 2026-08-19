@@ -46,8 +46,10 @@ def main() -> int:
     ENV_PATH.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     os.chmod(ENV_PATH, 0o600)
     print(f"Saved credentials to {ENV_PATH} with mode 600. Password was not printed.")
-    print("Next: python scripts/preflight_camera_v2.py")
-    print("Then: python -m services.camera_v2")
+    print("Next:")
+    print("  python scripts/preflight_sentinel_ui.py")
+    print("  python scripts/preflight_camera_v2_core.py")
+    print("  bash scripts/run_sentinel_vms.sh")
     return 0
 
 
