@@ -2,12 +2,10 @@ name: Sentinel UI Static
 
 on:
   push:
-    branches: [rebuild/gpu-v2-clean]
+    branches: [rebuild/gpu-v2-clean, agent/production-runtime-cleanup]
   pull_request:
     paths:
-      - 'services/camera_v2/sentinel_*.py'
-      - 'services/camera_v2/person_tracking_final.py'
-      - 'services/camera_v2/person_tracking_heatmap.py'
+      - 'services/camera_v2/**'
       - 'scripts/preflight_sentinel_ui.py'
       - 'scripts/preflight_camera_v2_core.py'
       - 'scripts/run_sentinel_vms.sh'
@@ -23,24 +21,28 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Compile Sentinel Python sources
+      - name: Compile production Python sources
         run: |
           python -m py_compile \
+            services/camera_v2/config.py \
             services/camera_v2/sentinel_ui.py \
             services/camera_v2/sentinel_ui_base.py \
             services/camera_v2/sentinel_ui_monitoring.py \
             services/camera_v2/sentinel_ui_settings.py \
             services/camera_v2/sentinel_ui_enrollment.py \
             services/camera_v2/sentinel_ui_pages.py \
+            services/camera_v2/sentinel_store.py \
             services/camera_v2/sentinel_video.py \
             services/camera_v2/sentinel_video_pro.py \
             services/camera_v2/sentinel_video_wall_ui.py \
+            services/camera_v2/detection.py \
+            services/camera_v2/person_tracking.py \
             services/camera_v2/person_tracking_final.py \
             services/camera_v2/person_tracking_heatmap.py \
             scripts/preflight_sentinel_ui.py \
             scripts/preflight_camera_v2_core.py
 
-      - name: Enforce UI contract
+      - name: Enforce production contract
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -61,7 +63,7 @@ jobs:
           for text in ('Environment URI', 'self.env_uri =', 'self.codec =', 'form.addRow("Codec"'):
               assert text not in settings, f'stale Settings field: {text}'
 
-          assert 'BUILD_TAG = "2026.08.19-r7"' in shell
+          assert 'BUILD_TAG = "2026.08.19-r11"' in shell
           assert 'metrics.get("total_people"' in monitoring
           assert 'metrics.get("known_people"' in monitoring
           assert 'unknown = max(0, total - known)' in monitoring
@@ -76,6 +78,14 @@ jobs:
 
           for forbidden in ('\n    codec:', '\n    env_uri:', '\n    environment_uri:'):
               assert forbidden not in camera_config, f'stale camera config field: {forbidden.strip()}'
+
+          for removed in (
+              'services/camera_v2/data.py',
+              'services/camera_v2/sentinel_exact.py',
+              'services/camera_v2/sentinel_app.py',
+              'services/camera_v2/monitor_ui_reference.py',
+          ):
+              assert not Path(removed).exists(), f'legacy production file returned: {removed}'
 
           print('SENTINEL_UI_STATIC=PASS')
           PY
