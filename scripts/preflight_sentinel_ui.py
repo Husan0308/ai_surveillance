@@ -39,11 +39,9 @@ def _require_all(source: str, guards: tuple[str, ...], label: str) -> None:
 def main_preflight() -> int:
     """Validate only the Sentinel UI/control contract.
 
-    Detector, NvDCF, native bridge and heatmap runtime validation intentionally
-    belongs to scripts/preflight_camera_v2_core.py, which the launcher runs
-    immediately after this script. Keeping the two contracts separate prevents
-    harmless implementation/string changes in the tracking stack from blocking
-    an otherwise valid UI build.
+    Detector, NvDCF, native bridge and heatmap runtime validation belongs to
+    scripts/preflight_camera_v2_core.py, which the launcher runs immediately
+    after this script.
     """
     if not callable(main):
         _fail("main entry point is missing")
@@ -91,7 +89,6 @@ def main_preflight() -> int:
         "settings": _source("services/camera_v2/sentinel_ui_settings.py"),
     }
 
-    # Technical backend names must stay in terminal diagnostics, not user UI.
     for name, source in ui_files.items():
         for forbidden_text in ("NVDEC", "no pose/reid", "pose=", "reid=", "DeepStream"):
             if forbidden_text in source:
@@ -119,8 +116,6 @@ def main_preflight() -> int:
         "monitoring",
     )
 
-    # Runtime exposes room-fused people metrics to the UI. Do not assert detector
-    # or NvDCF implementation details here; core preflight owns those.
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
     _require_all(
         video_source,
@@ -132,8 +127,8 @@ def main_preflight() -> int:
             "known = 0",
             "unknown = total",
             "force-aspect-ratio",
-            "FOCUS_WIDTH = 1280",
-            "FOCUS_HEIGHT = 720",
+            "FOCUS_WIDTH = 1920",
+            "FOCUS_HEIGHT = 1080",
             "runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)",
             "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
             'runtime.tiler.set_property("rows", 1)',
@@ -194,7 +189,7 @@ def main_preflight() -> int:
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
-    print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=16:9-renegotiated fixed-hud=PASS")
+    print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=1080p-16:9 fixed-hud=PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
     print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
     print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
