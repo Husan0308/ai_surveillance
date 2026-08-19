@@ -27,7 +27,7 @@ class MainWindow(QMainWindow):
         status_row.addWidget(self.camera_count)
         status_row.addStretch(1)
 
-        self.camera_wall = CameraWall(ml_video_base_url=self.settings.ml_video_base_url)
+        self.camera_wall = CameraWall(self.settings)
 
         layout = QVBoxLayout()
         layout.addLayout(status_row)
@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         self.api.api_health_received.connect(self._on_api_health)
         self.api.ml_health_received.connect(self._on_ml_health)
         self.api.cameras_received.connect(self._on_cameras)
+        self.api.tracks_received.connect(self.camera_wall.update_tracks)
         self.api.request_failed.connect(self._on_request_failed)
 
         self.api_timer = QTimer(self)
@@ -47,12 +48,20 @@ class MainWindow(QMainWindow):
         self.api_timer.timeout.connect(self.api.refresh_all)
         self.api_timer.start()
 
+        self.track_timer = QTimer(self)
+        self.track_timer.setInterval(self.settings.track_refresh_interval_ms)
+        self.track_timer.timeout.connect(self.api.refresh_tracks)
+        self.track_timer.start()
+
+        # Native GStreamer renders frames without Qt frame copies. This timer only
+        # polls renderer health; it also drives the MJPEG fallback when necessary.
         self.frame_timer = QTimer(self)
         self.frame_timer.setInterval(self.settings.frame_refresh_interval_ms)
         self.frame_timer.timeout.connect(self.camera_wall.refresh_frames)
         self.frame_timer.start()
 
         self.api.refresh_all()
+        self.api.refresh_tracks()
 
     def _on_api_health(self, data: dict) -> None:
         self.api_status.setText(f"API: {data.get('status', 'unknown')}")
@@ -77,6 +86,8 @@ class MainWindow(QMainWindow):
             self.ml_status.setText(f"ML: unavailable ({reason})")
         elif request_name == "cameras":
             self.camera_count.setText(f"Cameras: unavailable ({reason})")
+        # Track overlay polling is deliberately non-fatal. Video must keep
+        # rendering smoothly even if one metadata request is delayed.
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.camera_wall.close_readers()
