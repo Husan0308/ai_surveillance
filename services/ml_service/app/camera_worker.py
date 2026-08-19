@@ -82,14 +82,13 @@ class CameraWorker:
             try:
                 print(
                     f"[CAMERA] {self.camera.camera_id} opening {self.camera.uri} "
-                    f"codec={self.camera.codec} transport={transport} "
+                    f"backend=nvurisrcbin transport={transport} "
                     f"auth={'yes' if self.camera.username else 'no'}",
                     flush=True,
                 )
                 cap = DeepStreamCapture(
                     self.camera.camera_id,
                     self.camera.uri,
-                    self.camera.codec,
                     self.ds,
                     transport=transport,
                     username=self.camera.username,
