@@ -55,8 +55,10 @@ def test_detection_config_is_gpu_batched_and_fp32() -> None:
         "detection:",
         "model: yolo26m.pt",
         "batch_size: 2",
-        "width: 512",
-        "height: 288",
+        "width: 736",
+        "height: 416",
+        "confidence: 0.08",
+        "iou: 0.50",
         "target_fps_per_camera: 4.0",
     ):
         assert text in config
