@@ -24,6 +24,37 @@ def _device_index(device: str) -> int:
     raise ValueError(f"person detector requires CUDA device, got {device!r}")
 
 
+def _parse_sm_arch(value: str) -> tuple[int, int] | None:
+    text = str(value).strip().lower()
+    if not text.startswith("sm_"):
+        return None
+    digits = text[3:]
+    if len(digits) < 2 or not digits.isdigit():
+        return None
+    return int(digits[:-1]), int(digits[-1])
+
+
+def _compatible_arches(
+    capability: tuple[int, int], compiled_arches: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Return cubin targets binary-compatible with this desktop GPU.
+
+    NVIDIA guarantees cubin compatibility within one compute-capability major
+    version when the GPU minor version is >= the cubin target minor version.
+    Example: sm_60 is valid on an sm_61 desktop GPU.
+    """
+    gpu_major, gpu_minor = capability
+    compatible: list[str] = []
+    for arch in compiled_arches:
+        parsed = _parse_sm_arch(arch)
+        if parsed is None:
+            continue
+        arch_major, arch_minor = parsed
+        if arch_major == gpu_major and arch_minor <= gpu_minor:
+            compatible.append(arch)
+    return tuple(compatible)
+
+
 def main() -> int:
     settings = load_settings()
     cfg = settings.detection
@@ -52,6 +83,7 @@ def main() -> int:
         capability = torch.cuda.get_device_capability(device_index)
         required_arch = f"sm_{capability[0]}{capability[1]}"
         compiled_arches = tuple(torch.cuda.get_arch_list())
+        compatible_arches = _compatible_arches(capability, compiled_arches)
     except Exception as exc:
         return fail(f"CUDA device query failed: {type(exc).__name__}: {exc}")
 
@@ -74,20 +106,24 @@ def main() -> int:
     )
     print(
         f"PERSON_DETECT_LIB torch={torch.__version__} cuda={torch.version.cuda} "
-        f"ultralytics={ultralytics.__version__} arches={','.join(compiled_arches)}",
+        f"ultralytics={ultralytics.__version__} arches={','.join(compiled_arches)} "
+        f"compatible_cubins={','.join(compatible_arches) or 'none'}",
         flush=True,
     )
     print(f"PERSON_DETECT_MODEL {model_state}", flush=True)
 
-    if compiled_arches and required_arch not in compiled_arches:
-        return fail(
-            f"GPU requires {required_arch}, but installed PyTorch binary supports "
-            f"{','.join(compiled_arches)}"
+    # get_arch_list() reports compile targets, but exact matching is not
+    # required. NVIDIA desktop cubins are forward-compatible across minor
+    # revisions in the same major family (for example sm_60 -> sm_61).
+    # If no compatible cubin is listed, still run a real kernel because a
+    # wheel may also contain PTX that the driver can JIT for this GPU.
+    if compiled_arches and not compatible_arches:
+        print(
+            f"PERSON_DETECT_ARCH_WARNING no same-major compatible cubin listed for {required_arch}; "
+            "trying a real CUDA kernel in case PTX JIT is available",
+            flush=True,
         )
 
-    # Run a tiny real CUDA kernel. cuda.is_available() alone only proves that a
-    # CUDA runtime/device can be discovered; it does not prove this wheel can
-    # execute kernels on this GPU architecture.
     try:
         probe = torch.ones((32, 32), device=cfg.device)
         probe = probe @ probe
