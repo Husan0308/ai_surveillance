@@ -17,11 +17,11 @@ def _gst_quote(value: str) -> str:
 
 
 class NativeShmRenderer:
-    """Render one ML shared-memory BGRx stream directly into an X11 Qt window.
+    """Render one ML native-resolution SHM stream into an X11 Qt window.
 
-    There is no JPEG encode/decode and no QImage/QPixmap conversion on this path.
-    shmsrc is converted back to NVMM and rendered by nveglglessink. The renderer
-    owns only presentation; camera decode/inference remain inside ml_service.
+    ML sends system-memory NV12 at the decoder's original resolution. The
+    frontend converts it back to NVMM/RGBA for nveglglessink. There is no JPEG,
+    QImage or QPixmap path on the normal renderer.
     """
 
     def __init__(
@@ -33,14 +33,16 @@ class NativeShmRenderer:
         height: int,
         fps: int,
         gpu_id: int = 0,
+        pixel_format: str = "NV12",
     ) -> None:
         self.camera_id = camera_id
         self.window_id = int(window_id)
         self.socket_path = Path(socket_path)
         self.width = int(width)
         self.height = int(height)
-        self.fps = max(1, int(fps))
+        self.fps = max(1, int(round(float(fps))))
         self.gpu_id = int(gpu_id)
+        self.pixel_format = str(pixel_format or "NV12").upper()
         self.pipeline = None
         self.bus = None
         self.sink = None
@@ -67,8 +69,8 @@ class NativeShmRenderer:
                 "do-timestamp=true",
                 "!",
                 (
-                    f"video/x-raw,format=BGRx,width={self.width},height={self.height},"
-                    f"framerate={self.fps}/1"
+                    f"video/x-raw,format={self.pixel_format},width={self.width},"
+                    f"height={self.height},framerate={self.fps}/1"
                 ),
                 "!",
                 "queue",
@@ -125,6 +127,8 @@ class NativeShmRenderer:
             raise RuntimeError(f"missing GStreamer plugins: {','.join(missing)}")
         if self.window_id <= 0:
             raise RuntimeError("invalid Qt native window id")
+        if self.width <= 0 or self.height <= 0:
+            raise RuntimeError(f"invalid native stream size {self.width}x{self.height}")
         if not self.socket_path.exists():
             raise RuntimeError(f"shared-memory socket not ready: {self.socket_path}")
 
