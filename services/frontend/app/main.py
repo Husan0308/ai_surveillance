@@ -73,11 +73,10 @@ class MainWindow(QMainWindow):
         self.ml_status.setText(f"ML: {status} | online={online}/{total}")
 
     def _on_cameras(self, data: dict) -> None:
-        cameras = data.get("cameras", [])
-        camera_ids = [str(camera.get("id", "unknown")) for camera in cameras]
+        cameras = [row for row in data.get("cameras", []) if isinstance(row, dict)]
         online = sum(1 for camera in cameras if camera.get("online"))
-        self.camera_count.setText(f"Cameras: {online}/{data.get('count', len(camera_ids))}")
-        self.camera_wall.set_cameras(camera_ids)
+        self.camera_count.setText(f"Cameras: {online}/{data.get('count', len(cameras))}")
+        self.camera_wall.set_cameras(cameras)
 
     def _on_request_failed(self, request_name: str, reason: str) -> None:
         if request_name == "api_health":
