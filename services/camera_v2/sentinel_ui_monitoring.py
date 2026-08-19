@@ -11,8 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services.ml_service.app.config import load_settings
-
+from .config import load_settings
 from .sentinel_ui_base import C, Panel
 from .sentinel_video_wall_ui import ProLiveVideoWall, ProPipelineController
 
@@ -71,7 +70,10 @@ class MonitoringPage(QWidget):
 
         summary_head = QHBoxLayout()
         summary_head.setSpacing(6)
-        heading = QLabel("People in Building")
+        heading = QLabel("Estimated people")
+        heading.setToolTip(
+            "Room-level estimate from local camera tracks; unique-person identity is not enabled."
+        )
         heading.setStyleSheet("color:#e7edf3;font-size:11px;font-weight:750;")
         summary_head.addWidget(heading)
         summary_head.addStretch()
@@ -87,7 +89,7 @@ class MonitoringPage(QWidget):
             f"color:{C['text']};font-size:35px;font-weight:850;letter-spacing:-1px;"
         )
         total_row.addWidget(self.total_value)
-        total_caption = QLabel("people")
+        total_caption = QLabel("visible")
         total_caption.setStyleSheet(
             f"color:{C['muted']};font-size:10px;padding-top:13px;"
         )
