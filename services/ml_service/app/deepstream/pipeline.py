@@ -10,6 +10,7 @@ from services.ml_service.app.config import Settings
 from services.ml_service.app.detector import PersonDetector
 from services.ml_service.app.jpeg_publisher import LatestJpegPublisher
 from services.ml_service.app.latest_frame import LatestFrameStore
+from services.ml_service.app.tracking import PersonTracker
 
 
 class RuntimeState(str, Enum):
@@ -28,7 +29,7 @@ class RuntimeSnapshot:
 
 
 class DeepStreamRuntime:
-    """Independent NVDEC camera ingest plus one shared person detector."""
+    """NVDEC ingest -> shared person detector -> per-camera ByteTrack -> MJPEG."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -41,13 +42,22 @@ class DeepStreamRuntime:
             for camera in settings.cameras
         }
         self.detector = PersonDetector(settings.detection, self.stores)
+        self.tracker = PersonTracker(
+            settings.tracking,
+            self.detector.results,
+            [camera.camera_id for camera in settings.cameras],
+            frame_width=settings.deepstream.display_width,
+            frame_height=settings.deepstream.display_height,
+            detector_fps=settings.detection.target_fps_per_camera,
+        )
+        overlay_store = self.tracker.results if settings.tracking.enabled else self.detector.results
         self.publishers = {
             camera.camera_id: LatestJpegPublisher(
                 camera.camera_id,
                 self.stores[camera.camera_id],
                 fps=settings.deepstream.display_fps,
                 quality=settings.deepstream.jpeg_quality,
-                detections=self.detector.results,
+                detections=overlay_store,
                 overlay_enabled=settings.detection.overlay,
                 overlay_max_age_ms=settings.detection.overlay_max_age_ms,
             )
@@ -68,11 +78,14 @@ class DeepStreamRuntime:
             if index + 1 < len(self.settings.cameras):
                 time.sleep(self.settings.deepstream.startup_stagger_sec)
         self.detector.start()
+        self.tracker.start()
 
         with self._lock:
             self._state = RuntimeState.PLAYING
 
     def stop(self) -> None:
+        self.tracker.stop()
+        self.tracker.join()
         self.detector.stop()
         self.detector.join()
         for worker in self.workers.values():
@@ -93,6 +106,9 @@ class DeepStreamRuntime:
         detector_metrics = self.detector.metrics()
         if detector_metrics.get("enabled") and detector_metrics.get("state") == "error":
             errors.append(f'detector: {detector_metrics.get("last_error", "unknown error")}')
+        tracker_metrics = self.tracker.metrics()
+        if tracker_metrics.get("enabled") and tracker_metrics.get("state") == "error":
+            errors.append(f'tracker: {tracker_metrics.get("last_error", "unknown error")}')
         with self._lock:
             state = self._state
         return RuntimeSnapshot(
@@ -105,6 +121,9 @@ class DeepStreamRuntime:
     def detector_metrics(self) -> dict:
         return self.detector.metrics()
 
+    def tracker_metrics(self) -> dict:
+        return self.tracker.metrics()
+
     def camera_metrics(self) -> list[dict]:
         rows = []
         for camera in self.settings.cameras:
@@ -112,12 +131,19 @@ class DeepStreamRuntime:
             metrics = self.workers[camera_id].metrics()
             publisher = self.publishers[camera_id].metrics()
             detection = self.detector.camera_metrics(camera_id)
+            tracking = self.tracker.camera_metrics(camera_id)
+            people = (
+                int(tracking.get("active_tracks", 0))
+                if self.settings.tracking.enabled
+                else int(detection.get("people", 0))
+            )
             rows.append(
                 {
                     "id": camera_id,
                     **metrics,
-                    "people": int(detection.get("people", 0)),
+                    "people": people,
                     "detection": detection,
+                    "tracking": tracking,
                     "jpeg": publisher,
                 }
             )
@@ -130,6 +156,11 @@ class DeepStreamRuntime:
         if not self.has_camera(camera_id):
             raise KeyError(camera_id)
         return self.detector.snapshot_payload(camera_id)
+
+    def tracking_payload(self, camera_id: str) -> dict:
+        if not self.has_camera(camera_id):
+            raise KeyError(camera_id)
+        return self.tracker.snapshot_payload(camera_id)
 
     def wait_jpeg(self, camera_id: str, last_version: int, timeout: float = 1.0):
         return self.publishers[camera_id].wait_newer(last_version, timeout)
