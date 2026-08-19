@@ -29,20 +29,12 @@ static int is_generic_person_label(const char *label) {
     return 0;
 }
 
-/* DeepStream keeps detector, tracker and last-writer rectangles separately.
- * At the nvtracker src probe the canonical visual location is tracker_bbox_info.
- * Copy it into rect_params immediately before styling so OSD, count and heatmap
- * all use the exact same current NvDCF rectangle. */
-static void sync_rect_from_tracker(NvDsObjectMeta *obj) {
-    if (!obj) return;
-    const NvBbox_Coords *rect = &obj->tracker_bbox_info.org_bbox_coords;
-    if (rect->width <= 1.0f || rect->height <= 1.0f) return;
-    obj->rect_params.left = rect->left;
-    obj->rect_params.top = rect->top;
-    obj->rect_params.width = rect->width;
-    obj->rect_params.height = rect->height;
-}
-
+/* Do not rewrite bbox geometry here.
+ * DeepStream documents rect_params as the positional parameters written by the
+ * last component that updates an object. In this pipeline nvtracker is after the
+ * detector, therefore rect_params is already the current, clipped NvDCF bbox.
+ * nvmultistreamtiler later transforms these metadata coordinates together with
+ * the video. Styling must only change border/text, never left/top/width/height. */
 static int should_style_track(const NvDsObjectMeta *obj) {
     if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) return 0;
     if (obj->unique_component_id == 191) return 0;
@@ -114,7 +106,6 @@ int camera_v2_apply_local_track_style(uintptr_t buffer_ptr) {
 
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *)onode->data;
-            sync_rect_from_tracker(obj);
             if (!should_style_track(obj)) continue;
             set_local_track_label(obj, frame_meta->source_id);
             ++styled;
@@ -148,7 +139,6 @@ int camera_v2_apply_global_track_style(uintptr_t buffer_ptr,
         if (!frame_meta) continue;
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *)onode->data;
-            sync_rect_from_tracker(obj);
             if (!should_style_track(obj)) continue;
             const CameraV2GlobalLabel *match = find_global_label(
                 rows, count, (uint32_t)frame_meta->source_id, (uint64_t)obj->object_id
