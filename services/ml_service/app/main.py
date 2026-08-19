@@ -23,7 +23,7 @@ async def lifespan(_app: FastAPI):
         runtime.stop()
 
 
-app = FastAPI(title="AI Surveillance ML Service", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="AI Surveillance ML Service", version="0.4.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -34,6 +34,7 @@ def health() -> dict:
         "status": snapshot.state.value,
         "camera_count": snapshot.camera_count,
         "online_camera_count": snapshot.online_camera_count,
+        "detector": runtime.detector_metrics(),
         "last_error": snapshot.last_error,
     }
 
@@ -42,6 +43,13 @@ def health() -> dict:
 def cameras() -> dict:
     rows = runtime.camera_metrics()
     return {"count": len(rows), "cameras": rows}
+
+
+@app.get("/detections/{camera_id}")
+def detections(camera_id: str) -> dict:
+    if not runtime.has_camera(camera_id):
+        raise HTTPException(status_code=404, detail=f"Unknown camera: {camera_id}")
+    return runtime.detection_payload(camera_id)
 
 
 @app.get("/video/{camera_id}")
@@ -70,7 +78,10 @@ def video(camera_id: str):
     return StreamingResponse(
         stream(),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
     )
 
 
