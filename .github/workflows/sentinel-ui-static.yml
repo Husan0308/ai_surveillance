@@ -11,17 +11,21 @@ on:
       - 'tests/test_person_detection_contract.py'
       - 'tests/test_person_tracking_contract.py'
       - 'tests/test_api_service_contract.py'
+      - 'tests/test_frontend_contract.py'
       - 'docs/ARCHITECTURE_CONTRACT.md'
       - 'scripts/preflight_ml_service.py'
       - 'scripts/preflight_person_detection.py'
+      - 'scripts/preflight_frontend.py'
       - 'scripts/probe_cameras.py'
       - 'scripts/smoke_ml_service.py'
       - 'scripts/smoke_person_detection.py'
       - 'scripts/smoke_person_tracking.py'
       - 'scripts/smoke_person_tracking_stability.py'
       - 'scripts/smoke_api_service.py'
+      - 'scripts/smoke_frontend_integration.py'
       - 'scripts/run_ml_service.sh'
       - 'scripts/run_api_service.sh'
+      - 'scripts/run_frontend.sh'
       - 'scripts/preflight_sentinel_ui.py'
       - 'scripts/preflight_camera_v2_core.py'
       - 'scripts/run_sentinel_vms.sh'
@@ -47,7 +51,8 @@ jobs:
             tests/test_ml_service_contract.py \
             tests/test_person_detection_contract.py \
             tests/test_person_tracking_contract.py \
-            tests/test_api_service_contract.py
+            tests/test_api_service_contract.py \
+            tests/test_frontend_contract.py
 
       - name: Compile canonical service entrypoints
         run: |
@@ -64,14 +69,20 @@ jobs:
             services/api_service/app/config.py \
             services/api_service/app/ml_client.py \
             services/frontend/app/main.py \
+            services/frontend/app/api_client.py \
+            services/frontend/app/config.py \
+            services/frontend/app/camera_wall.py \
+            services/frontend/app/mjpeg_reader.py \
             scripts/preflight_ml_service.py \
             scripts/preflight_person_detection.py \
+            scripts/preflight_frontend.py \
             scripts/probe_cameras.py \
             scripts/smoke_ml_service.py \
             scripts/smoke_person_detection.py \
             scripts/smoke_person_tracking.py \
             scripts/smoke_person_tracking_stability.py \
-            scripts/smoke_api_service.py
+            scripts/smoke_api_service.py \
+            scripts/smoke_frontend_integration.py
 
       - name: Compile Sentinel Python sources
         run: |
