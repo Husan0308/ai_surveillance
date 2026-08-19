@@ -6,19 +6,23 @@ import time
 from collections import deque
 from pathlib import Path
 
-os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "704")
-os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
+# Keep detector geometry close to the 16:9 camera stream so person shapes are not
+# distorted before YOLO. person_tracking_heatmap.py sets the same production values
+# before importing this module; these defaults also make standalone tracking match.
+os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
+os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
 os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "2")
-os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.08")
-os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.78")
+os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.05")
+os.environ.setdefault("CAMERA_V2_DETECT_IOU", "0.65")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
 os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "480")
 os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
-os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.92")
-os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.99")
+os.environ.setdefault("CAMERA_V2_MIN_DISPLAY_TRACK_CONF", "0.28")
+os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.82")
+os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.94")
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
 from .detector_latency import DetectorLatencyCompensator, PreparedDetection
@@ -65,13 +69,13 @@ class CameraPersonTrackingFinal(_BaseTracking):
     def _stabilize_tracker_config(path: Path) -> Path:
         replacements = {
             "enableBboxUnClipping": "0",
-            "minIouDiff4NewTarget": "0.60",
-            "minTrackerConfidence": "0.18",
+            "minIouDiff4NewTarget": "0.72",
+            "minTrackerConfidence": "0.28",
             "probationAge": "2",
-            "maxShadowTrackingAge": "50",
-            "earlyTerminationAge": "2",
-            "minTrackingConfidenceDuringInactive": "0.22",
-            "minIou4TargetDuplicate": "0.90",
+            "maxShadowTrackingAge": "12",
+            "earlyTerminationAge": "1",
+            "minTrackingConfidenceDuringInactive": "0.40",
+            "minIou4TargetDuplicate": "0.94",
             "targetDuplicateRunInterval": "5",
         }
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -119,8 +123,10 @@ class CameraPersonTrackingFinal(_BaseTracking):
         captured_t: float,
         prepared: list[PreparedDetection],
     ) -> None:
-        if not prepared:
-            return
+        # Always publish the detector decision, including an empty list. DeepStream
+        # distinguishes "detector ran and found zero" from "detector did not run".
+        # The old early-return kept bInferDone false on misses and let stale NvDCF
+        # targets behave as if no detector evidence had arrived.
         with self.pending_lock:
             self.pending_seq += 1
             self.pending[cid] = (
@@ -177,8 +183,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
             count = self.bridge.style_and_count_tracked(buffer)
             self.bridge.apply_local_track_style(buffer)
 
-            # Count unique active NvDCF object IDs per camera from the current
-            # batched metadata. This is the live source for UI people counts.
             ids_by_source: dict[int, set[int]] = {
                 int(source_id): set() for source_id in self.camera_index.values()
             }
@@ -228,6 +232,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
             f"target={self.detector_target_hz:.1f}Hz/cam "
             f"range={self.detector_min_hz:.1f}-{self.detector_max_hz:.1f}Hz/cam "
             f"tracker={self.tracker_width}x{self.tracker_height} "
+            f"display_conf={os.environ.get('CAMERA_V2_MIN_DISPLAY_TRACK_CONF')} "
             f"device={ready.get('device')} cuda={ready.get('cuda')}",
             flush=True,
         )
