@@ -46,9 +46,27 @@ class DeepStreamConfig:
 
 
 @dataclass(frozen=True)
+class DetectionConfig:
+    enabled: bool
+    model: str
+    device: str
+    width: int
+    height: int
+    batch_size: int
+    target_fps_per_camera: float
+    confidence: float
+    iou: float
+    max_detections: int
+    half: bool
+    overlay: bool
+    overlay_max_age_ms: int
+
+
+@dataclass(frozen=True)
 class Settings:
     cameras: tuple[CameraConfig, ...]
     deepstream: DeepStreamConfig
+    detection: DetectionConfig
 
 
 def _as_bool(value) -> bool:
@@ -111,7 +129,6 @@ def load_settings(path: str | Path | None = None) -> Settings:
         seen.add(camera_id)
 
         # Codec is negotiated by DeepStream nvurisrcbin from the RTSP stream.
-        # Keeping codec out of config avoids H264/H265 drift between NVR and app.
         uri = _camera_uri(camera_id, str(row.get("uri", "")))
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
@@ -143,6 +160,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
 
     ds = raw.get("deepstream") or {}
     display = raw.get("display") or {}
+    detection = raw.get("detection") or {}
 
     transport = str(ds.get("rtsp_transport", "auto")).strip().lower()
     if transport not in {"auto", "tcp"}:
@@ -192,6 +210,30 @@ def load_settings(path: str | Path | None = None) -> Settings:
     if not 20 <= quality <= 95:
         raise ValueError("display.jpeg_quality must be 20..95")
 
+    detect_width = int(detection.get("width", 512))
+    detect_height = int(detection.get("height", 288))
+    detect_batch = int(detection.get("batch_size", 2))
+    detect_fps = float(detection.get("target_fps_per_camera", 4.0))
+    detect_conf = float(detection.get("confidence", 0.20))
+    detect_iou = float(detection.get("iou", 0.55))
+    detect_max = int(detection.get("max_detections", 30))
+    overlay_max_age_ms = int(detection.get("overlay_max_age_ms", 900))
+
+    if detect_width < 320 or detect_height < 192:
+        raise ValueError("detection width/height are too small")
+    if not 1 <= detect_batch <= len(cameras):
+        raise ValueError("detection.batch_size must be between 1 and enabled camera count")
+    if not 0.1 <= detect_fps <= 30.0:
+        raise ValueError("detection.target_fps_per_camera must be 0.1..30")
+    if not 0.01 <= detect_conf <= 1.0:
+        raise ValueError("detection.confidence must be 0.01..1.0")
+    if not 0.01 <= detect_iou <= 1.0:
+        raise ValueError("detection.iou must be 0.01..1.0")
+    if not 1 <= detect_max <= 300:
+        raise ValueError("detection.max_detections must be 1..300")
+    if overlay_max_age_ms < 0:
+        raise ValueError("detection.overlay_max_age_ms must be >= 0")
+
     return Settings(
         cameras=tuple(cameras),
         deepstream=DeepStreamConfig(
@@ -212,5 +254,20 @@ def load_settings(path: str | Path | None = None) -> Settings:
             display_height=height,
             display_fps=fps,
             jpeg_quality=quality,
+        ),
+        detection=DetectionConfig(
+            enabled=_as_bool(detection.get("enabled", True)),
+            model=str(os.getenv("ML_DETECT_MODEL", detection.get("model", "yolo26m.pt"))).strip(),
+            device=str(os.getenv("ML_DETECT_DEVICE", detection.get("device", f"cuda:{gpu_id}"))).strip(),
+            width=detect_width,
+            height=detect_height,
+            batch_size=detect_batch,
+            target_fps_per_camera=detect_fps,
+            confidence=detect_conf,
+            iou=detect_iou,
+            max_detections=detect_max,
+            half=_as_bool(detection.get("half", False)),
+            overlay=_as_bool(detection.get("overlay", True)),
+            overlay_max_age_ms=overlay_max_age_ms,
         ),
     )
