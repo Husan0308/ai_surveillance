@@ -16,13 +16,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .data import EVENTS, PEOPLE
 from .sentinel_ui_base import APP_QSS, C, label, make_button
 from .sentinel_ui_enrollment import EnrollmentPage
 from .sentinel_ui_monitoring import MonitoringPage
 from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
-
 
 BUILD_TAG = "2026.08.19-r11"
 
@@ -30,10 +28,10 @@ BUILD_TAG = "2026.08.19-r11"
 class MainWindow(QMainWindow):
     NAV = [
         ("▣", "Monitoring", "Live cameras · tracking · heatmap", MonitoringPage),
-        ("♙", "People", f"{len(PEOPLE)} ta identity", PeoplePage),
-        ("⌁", "Events", f"{len(EVENTS)} ta hodisa", EventsPage),
-        ("▥", "Rooms", "Xonalar va camera topology", RoomsPage),
-        ("♙+", "Enrollment", "10 ta yuz rasmi orqali ro'yxatga olish", EnrollmentPage),
+        ("♙", "People", "Local worker profiles", PeoplePage),
+        ("⌁", "Events", "Persisted event history", EventsPage),
+        ("▥", "Rooms", "Configured camera topology", RoomsPage),
+        ("♙+", "Enrollment", "10 ta yuz rasmi orqali profil saqlash", EnrollmentPage),
         ("⚙", "Settings", "Camera management", SettingsPage),
     ]
 
@@ -146,6 +144,10 @@ class MainWindow(QMainWindow):
             return
         if self._monitoring_fullscreen:
             self.pages[0].exit_fullscreen()
+        page = self.pages[index]
+        refresh = getattr(page, "refresh", None)
+        if callable(refresh):
+            refresh()
         self.stack.setCurrentIndex(index)
         _, title, subtitle, _ = self.NAV[index]
         self.title.setText(title)
