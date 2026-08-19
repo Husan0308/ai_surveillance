@@ -82,6 +82,37 @@ def _cuda_device_index(device: str) -> int:
     raise RuntimeError(f"person detector requires CUDA device, got {device!r}")
 
 
+def _parse_sm_arch(value: str) -> tuple[int, int] | None:
+    text = str(value).strip().lower()
+    if not text.startswith("sm_"):
+        return None
+    digits = text[3:]
+    if len(digits) < 2 or not digits.isdigit():
+        return None
+    return int(digits[:-1]), int(digits[-1])
+
+
+def _compatible_arches(
+    capability: tuple[int, int], compiled_arches: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Return cubin targets that can execute on this desktop GPU.
+
+    CUDA desktop cubins are binary-compatible within one compute-capability
+    major family when the device minor version is >= the cubin target minor.
+    Therefore an sm_60 cubin is compatible with an sm_61 GPU.
+    """
+    gpu_major, gpu_minor = capability
+    compatible: list[str] = []
+    for arch in compiled_arches:
+        parsed = _parse_sm_arch(arch)
+        if parsed is None:
+            continue
+        arch_major, arch_minor = parsed
+        if arch_major == gpu_major and arch_minor <= gpu_minor:
+            compatible.append(arch)
+    return tuple(compatible)
+
+
 def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
     """CUDA-only child process. A native crash here must not kill ml_service."""
     try:
@@ -105,11 +136,7 @@ def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
         capability = torch.cuda.get_device_capability(device_index)
         required_arch = f"sm_{capability[0]}{capability[1]}"
         compiled_arches = tuple(torch.cuda.get_arch_list())
-        if compiled_arches and required_arch not in compiled_arches:
-            raise RuntimeError(
-                f"GPU requires {required_arch}, but this PyTorch binary was compiled for "
-                f"{','.join(compiled_arches)}"
-            )
+        compatible_arches = _compatible_arches(capability, compiled_arches)
 
         try:
             torch.set_num_threads(1)
@@ -117,8 +144,22 @@ def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
         except Exception:
             pass
 
-        # Force one real CUDA kernel before model construction. This turns an
-        # unsupported binary/device combination into a clear worker failure.
+        # Do not require an exact get_arch_list() match. NVIDIA desktop cubins
+        # are compatible forward across minor revisions of the same major
+        # compute capability (sm_60 -> sm_61). If no compatible cubin appears
+        # in the list, the real kernel below is still authoritative because
+        # the wheel may contain PTX that the driver can JIT for this device.
+        if compiled_arches and not compatible_arches:
+            result_q.put(
+                {
+                    "type": "warning",
+                    "warning": (
+                        f"no same-major compatible cubin listed for {required_arch}; "
+                        "probing CUDA kernel/PTX JIT"
+                    ),
+                }
+            )
+
         probe = torch.ones((32, 32), device=device)
         probe = probe @ probe
         _ = float(probe.sum().item())
@@ -155,6 +196,7 @@ def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
                 "device": device,
                 "cuda_capability": required_arch,
                 "torch_arches": list(compiled_arches),
+                "compatible_arches": list(compatible_arches),
             }
         )
 
@@ -337,6 +379,11 @@ class PersonDetector:
 
     def _consume_message(self, message: dict, next_due: dict[str, float]) -> bool:
         kind = message.get("type")
+        if kind == "warning":
+            warning = str(message.get("warning") or "detector compatibility warning")
+            print(f"[DETECT] warning: {warning}", flush=True)
+            return False
+
         if kind == "ready":
             with self._lock:
                 self._metrics.state = "ready"
@@ -345,10 +392,11 @@ class PersonDetector:
                 self._metrics.cuda_capability = str(message.get("cuda_capability", ""))
                 self._metrics.torch_arches = tuple(message.get("torch_arches") or ())
                 self._metrics.last_error = ""
+            compatible = ",".join(message.get("compatible_arches") or ()) or "ptx/kernel-probe"
             print(
                 f"[DETECT] ready pid={message.get('pid')} model={self.config.model} "
                 f"device={self.config.device} batch={self.config.batch_size} "
-                f"imgsz={self.config.width}x{self.config.height}",
+                f"imgsz={self.config.width}x{self.config.height} compatible={compatible}",
                 flush=True,
             )
             return False
