@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
-echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r9"
+echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r8"
 
 # Old shells/.env files can retain CAMERA_V2_* values from earlier experiments.
 # Preserve the known 4MP main-stream geometry through nvstreammux. Detector and
@@ -25,8 +25,6 @@ export CAMERA_V2_MAX_DET=40
 export CAMERA_V2_MICRO_BATCH=2
 export CAMERA_V2_TRACKER_WIDTH=512
 export CAMERA_V2_TRACKER_HEIGHT=288
-
-# Bound stale async detections; NvDCF owns per-frame motion between detector hits.
 export CAMERA_V2_MAX_DETECT_RESULT_AGE_MS=220
 
 echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} inherited_tracker=${INHERITED_TRACKER} effective_mux=2560x1440 focus=1920x1080 effective_detector=736x416 effective_tracker=512x288"
