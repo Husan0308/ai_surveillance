@@ -15,6 +15,8 @@ def test_ml_has_one_latest_only_person_detector() -> None:
     assert '"classes": [0]' in detector
     assert "LatestFrameStore" in detector
     assert "model.predict(source=frames" in detector
+    assert 'mp.get_context("spawn")' in detector
+    assert 'name="person-detector-cuda"' in detector
     assert "self.detector = PersonDetector(settings.detection, self.stores)" in pipeline
     assert "PersonDetector(" not in source("services/ml_service/app/camera_worker.py")
 
@@ -59,6 +61,7 @@ def test_ml_exposes_detection_health_and_results() -> None:
     main = source("services/ml_service/app/main.py")
     pipeline = source("services/ml_service/app/deepstream/pipeline.py")
 
-    assert '"detector": runtime.detector_metrics()' in main
+    assert '"detector": current.detector_metrics()' in main
     assert '@app.get("/detections/{camera_id}")' in main
+    assert 'runtime: Any | None = None' in main
     assert '"people": int(detection.get("people", 0))' in pipeline
