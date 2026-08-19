@@ -28,7 +28,7 @@ EXPECTED_NAV = [
     "Settings",
 ]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.18-r4"
+EXPECTED_BUILD = "2026.08.19-r5"
 
 
 def _fail(message: str) -> None:
@@ -104,6 +104,8 @@ def main_preflight() -> int:
         _fail("Monitoring right rail responsive width guard is missing")
     if "Demo ism yoki fake avatar ko'rsatilmaydi" not in monitoring_source:
         _fail("Monitoring recent-view panel can regress to fake identities")
+    if "self.wall.set_pipeline_status(status)" not in monitoring_source:
+        _fail("Monitoring does not drive native wall startup/error cover")
 
     base_video_source = _source("services/camera_v2/sentinel_video.py")
     if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
@@ -120,6 +122,16 @@ def main_preflight() -> int:
     for guard in required_video_guards:
         if guard not in video_source:
             _fail(f"professional video-wall guard missing: {guard}")
+
+    wall_ui_source = _source("services/camera_v2/sentinel_video_wall_ui.py")
+    for guard in (
+        "cameraWallStateCover",
+        "stale People/Settings content",
+        '"PIPELINE_WARNING"',
+        "set_pipeline_status",
+    ):
+        if guard not in wall_ui_source:
+            _fail(f"native wall stale-page guard missing: {guard}")
 
     heat_source = _source("services/camera_v2/person_tracking_heatmap.py")
     pose_source = _source("services/camera_v2/pose_ankle.py")
@@ -147,7 +159,8 @@ def main_preflight() -> int:
     print(
         "SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream "
         f"active_cameras={len(settings.cameras)} fullscreen_aspect=16:9 "
-        "hover_controls=stable demo_tile_counts=removed recent_fake_data=removed"
+        "hover_controls=compact demo_tile_counts=removed recent_fake_data=removed "
+        "native_stale_page_cover=PASS"
     )
     print("SENTINEL_PREFLIGHT occupancy=total+known+unknown live_metrics=PASS")
     print("SENTINEL_PREFLIGHT heatmap=pose-ankle-only bbox_anchor=OFF per_camera=PASS")
