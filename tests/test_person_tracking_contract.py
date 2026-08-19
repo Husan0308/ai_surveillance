@@ -46,8 +46,8 @@ def test_detector_keeps_bytetrack_second_stage_candidates() -> None:
 
     # ByteTrack's second association uses detections down to track_low_thresh.
     # The detector must not discard those boxes before the tracker sees them.
-    assert "confidence: 0.10" in config
-    assert "track_low_thresh: 0.10" in config
+    assert "confidence: 0.08" in config
+    assert "track_low_thresh: 0.08" in config
     assert "track_high_thresh: 0.25" in config
     assert "new_track_thresh: 0.25" in config
 
