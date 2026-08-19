@@ -16,6 +16,7 @@ from services.camera_v2.detection import INFER_HEIGHT, INFER_WIDTH  # noqa: E402
 from services.camera_v2.heatmap_filter import ensure_heatmap_filter  # noqa: E402
 from services.camera_v2.native_bridge import ensure_bridge  # noqa: E402
 from services.camera_v2.person_tracking_final import CameraPersonTrackingFinal  # noqa: E402
+from services.camera_v2.sentinel_video import WALL_HEIGHT, WALL_WIDTH  # noqa: E402
 from services.ml_service.app.config import load_settings  # noqa: E402
 
 
@@ -33,6 +34,10 @@ def main() -> int:
     if (mux_width, mux_height) != (2560, 1440):
         raise RuntimeError(
             f"source-preserving mux must be 2560x1440, got {mux_width}x{mux_height}"
+        )
+    if (WALL_WIDTH, WALL_HEIGHT) != (1600, 1350):
+        raise RuntimeError(
+            f"monitoring wall must be 1600x1350 (800x450/tile), got {WALL_WIDTH}x{WALL_HEIGHT}"
         )
     if (INFER_WIDTH, INFER_HEIGHT) != (736, 416):
         raise RuntimeError(
@@ -86,8 +91,10 @@ def main() -> int:
         encoding="utf-8"
     )
     for required in (
-        'self._set_if(self.mux, "interpolation-method", 2)',
+        'self._set_if(self.mux, "interpolation-method", 4)',
+        'self._set_if(self.tiler, "interpolation-method", 4)',
         'self._set_if(self.mux, "compute-hw", 1)',
+        'self._set_if(self.tiler, "compute-hw", 1)',
         'self._set_if(self.sink, "force-aspect-ratio", True)',
     ):
         if required not in display_source and required not in (
@@ -112,9 +119,10 @@ def main() -> int:
 
     print(
         f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=PASS "
-        f"mux={mux_width}x{mux_height} focus=1920x1080 "
+        f"mux={mux_width}x{mux_height} grid={WALL_WIDTH}x{WALL_HEIGHT} "
+        f"tile={WALL_WIDTH // 2}x{WALL_HEIGHT // 3} focus=1920x1080 "
         f"detector={INFER_WIDTH}x{INFER_HEIGHT} tracker={tracker_width}x{tracker_height} "
-        "stride_safe=PASS bbox=tracker-rect-params scaling=cubic custom_bbox_hold=OFF"
+        "stride_safe=PASS bbox=tracker-rect-params scaling=lanczos custom_bbox_hold=OFF"
     )
     print("CAMERA_PREFLIGHT=PASS")
     return 0
