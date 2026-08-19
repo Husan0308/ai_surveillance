@@ -9,13 +9,11 @@ from .sentinel_video_pro import ProPipelineController
 
 
 class ProLiveVideoWall(_BaseProLiveVideoWall):
-    """Native-EGL-safe professional camera wall presentation layer.
+    """Professional wall with EGL video isolated from Qt chrome.
 
-    Important rule: never place a full-size opaque Qt child over the EGL video
-    window after startup. Qt child backing-store pixels can remain stale over a
-    native GstVideoOverlay surface even after the child is hidden. Pipeline state
-    is therefore shown by the per-camera FPS/OFFLINE labels and the right rail,
-    never by a wall-sized cover.
+    GStreamer renders only into LiveVideoWall.video_surface. Camera headers,
+    fullscreen HUD and hover actions are separate native sibling windows, so Qt
+    repainting them cannot clear the EGL frame underneath.
     """
 
     _LIVE_STATES = {"LIVE", "VIDEO_BOUND", "FOCUS", "HEATMAP"}
@@ -29,46 +27,59 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
         self.tile_headers: list[QFrame] = []
         self.room_labels: list[QLabel] = []
 
+        self.video_surface.lower()
+
         for sid, camera in enumerate(self.cameras[:6]):
             header = QFrame(self)
+            header.setObjectName("cameraNativeHeader")
+            header.setAttribute(Qt.WA_NativeWindow, True)
             header.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             header.setStyleSheet(
-                "QFrame{background:rgba(4,9,14,224);border:0;"
-                "border-bottom:1px solid rgba(49,74,91,190);border-radius:0;}"
+                "QFrame#cameraNativeHeader{background:#04090e;border:0;"
+                "border-bottom:1px solid #314a5b;border-radius:0;}"
             )
             self.tile_headers.append(header)
+
+            cam = self.camera_labels[sid]
+            cam.setParent(header)
+            cam.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            cam.setStyleSheet(
+                "background:#061018;color:#f1f5f8;"
+                "border:1px solid #4b687c;border-radius:3px;"
+                "padding:2px 6px;font:700 9px 'DejaVu Sans Mono';"
+            )
+            cam.adjustSize()
 
             room_text = str(
                 getattr(camera, "name", "")
                 or getattr(camera, "room", "")
                 or f"Camera {sid + 1}"
             )
-            room = QLabel(room_text, self)
+            room = QLabel(room_text, header)
             room.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             room.setStyleSheet(
                 "background:transparent;border:0;color:#cbd5dd;"
                 "font-size:9px;font-weight:650;padding:0;"
             )
+            room.adjustSize()
             self.room_labels.append(room)
 
-            if sid < len(self.camera_labels):
-                self.camera_labels[sid].setStyleSheet(
-                    "background:rgba(6,12,18,238);color:#f1f5f8;"
-                    "border:1px solid rgba(75,104,124,165);border-radius:3px;"
-                    "padding:2px 6px;font:700 9px 'DejaVu Sans Mono';"
-                )
-                self.camera_labels[sid].adjustSize()
-            if sid < len(self.status_labels):
-                self.status_labels[sid].setStyleSheet(
-                    "background:transparent;border:0;color:#39d995;"
-                    "padding:0;font:700 9px 'DejaVu Sans Mono';"
-                )
-                self.status_labels[sid].adjustSize()
+            stat = self.status_labels[sid]
+            stat.setParent(header)
+            stat.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            stat.setStyleSheet(
+                "background:transparent;border:0;color:#39d995;"
+                "padding:0;font:700 9px 'DejaVu Sans Mono';"
+            )
+            stat.adjustSize()
 
+        # Heatmap/fullscreen controls live at the upper-right of the tile, directly
+        # below its header. They are native siblings so the EGL child cannot cover them.
         for frame in self.action_frames:
+            frame.setAttribute(Qt.WA_NativeWindow, True)
             frame.setStyleSheet(
-                "QFrame#cameraHoverActions{background:rgba(5,10,15,242);"
-                "border:1px solid rgba(72,98,117,215);border-radius:5px;}"
+                "QFrame#cameraHoverActions{background:#050a0f;"
+                "border:1px solid #486275;border-radius:5px;}"
                 "QToolButton{background:transparent;color:#dce6ed;border:0;"
                 "border-radius:3px;padding:4px 7px;font:700 9px 'DejaVu Sans';}"
                 "QToolButton:hover{background:#17242e;color:#ffffff;}"
@@ -77,21 +88,23 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
             frame.adjustSize()
             frame.hide()
 
-        # Dedicated fullscreen HUD. Grid widgets are never moved onto the native
-        # fullscreen surface, avoiding stale CAM/FPS copies.
+        self.exit_button.setAttribute(Qt.WA_NativeWindow, True)
+
         self.fullscreen_camera_label = QLabel("", self)
+        self.fullscreen_camera_label.setAttribute(Qt.WA_NativeWindow, True)
         self.fullscreen_camera_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.fullscreen_camera_label.setStyleSheet(
-            "background:rgba(6,12,18,238);color:#f0f5f8;"
-            "border:1px solid rgba(80,105,125,160);border-radius:4px;"
+            "background:#061018;color:#f0f5f8;"
+            "border:1px solid #50697d;border-radius:4px;"
             "padding:4px 9px;font:700 10px 'DejaVu Sans Mono';"
         )
         self.fullscreen_camera_label.hide()
 
         self.fullscreen_fps_label = QLabel("", self)
+        self.fullscreen_fps_label.setAttribute(Qt.WA_NativeWindow, True)
         self.fullscreen_fps_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.fullscreen_fps_label.setStyleSheet(
-            "background:rgba(6,12,18,232);color:#39d995;"
+            "background:#061018;color:#39d995;"
             "border-radius:4px;padding:4px 8px;font:700 9px 'DejaVu Sans Mono';"
         )
         self.fullscreen_fps_label.hide()
@@ -104,16 +117,18 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
         if not hasattr(self, "tile_headers"):
             return
 
+        self.video_surface.lower()
+
         if self._fullscreen_active:
             for header in self.tile_headers:
                 header.hide()
-            for room in self.room_labels:
-                room.hide()
+            for action in self.action_frames:
+                action.hide()
             self._layout_fullscreen_hud()
             return
 
         for sid in range(min(len(self.tile_headers), len(self.cameras), 6)):
-            left, top, width, height = self._tile_rect(sid)
+            left, top, width, _height = self._tile_rect(sid)
 
             header = self.tile_headers[sid]
             header.setGeometry(left + 1, top + 1, max(1, width - 2), 27)
@@ -122,65 +137,61 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
 
             cam = self.camera_labels[sid]
             cam.adjustSize()
-            cam.move(left + 8, top + 4)
+            cam.move(7, 4)
             cam.show()
-            cam.raise_()
 
             room = self.room_labels[sid]
             room.adjustSize()
-            room.move(left + 15 + cam.width(), top + 7)
+            room.move(14 + cam.width(), 7)
             room.show()
-            room.raise_()
 
             stat = self.status_labels[sid]
             stat.adjustSize()
-            stat.move(left + width - stat.width() - 9, top + 7)
+            stat.move(max(8, header.width() - stat.width() - 8), 7)
             stat.show()
-            stat.raise_()
 
             if sid < len(self.action_frames):
                 actions = self.action_frames[sid]
                 actions.adjustSize()
                 actions.move(
-                    left + 8,
-                    max(top + 34, top + height - actions.height() - 8),
+                    max(left + 8, left + width - actions.width() - 8),
+                    top + 34,
                 )
                 if actions.isVisible():
                     actions.raise_()
 
     def _refresh_tile_frames(self) -> None:
-        # Let the base class draw tile borders, then enforce a strict one-hover
-        # policy. This prevents multiple Heatmap/fullscreen palettes remaining
-        # visible after child-widget mouse transitions.
-        super()._refresh_tile_frames()
+        # Native video is the background; avoid 24 extra border child windows.
+        for borders in self.tile_borders:
+            for border in borders:
+                border.hide()
+
         for sid, action in enumerate(self.action_frames):
             show = (
                 not self._fullscreen_active
                 and self._hover_source is not None
                 and sid == self._hover_source
             )
-            action.setVisible(show)
+            if action.isVisible() != show:
+                action.setVisible(show)
             if show:
                 action.raise_()
 
+        if self.exit_button.isVisible():
+            self.exit_button.raise_()
+
     def mouseMoveEvent(self, event) -> None:
-        if self._fullscreen_active:
-            self._hover_source = None
-        else:
-            self._hover_source = self.source_at(event.position().toPoint())
-        self._refresh_tile_frames()
-        self._layout_overlays()
+        source = None if self._fullscreen_active else self.source_at(event.position().toPoint())
+        if source != self._hover_source:
+            self._hover_source = source
+            self._refresh_tile_frames()
+            self._layout_overlays()
         event.accept()
 
     def leaveEvent(self, event) -> None:
-        # Moving from the native parent onto its action child can produce a parent
-        # leave event. Keep the palette only while the global cursor is still
-        # physically inside the wall; otherwise clear it.
         local = self.mapFromGlobal(QCursor.pos())
-        if not self.rect().contains(local):
+        if not self.rect().contains(local) and self._hover_source is not None:
             self._hover_source = None
-            for action in self.action_frames:
-                action.hide()
             self._refresh_tile_frames()
         event.accept()
 
@@ -207,6 +218,8 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self.video_surface.setGeometry(self.rect())
+        self.video_surface.lower()
         self._layout_overlays()
         self._refresh_tile_frames()
         self._layout_fullscreen_hud()
@@ -222,38 +235,30 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
         if state in self._LIVE_STATES:
             self._ever_live = True
 
-        # Deliberately no full-size Qt cover here. PIPELINE_WARNING is non-fatal
-        # and must never hide healthy camera frames. Fatal/startup state is shown
-        # by the right rail + per-camera CONNECTING/OFFLINE status instead.
-        self._layout_overlays()
-        self._layout_fullscreen_hud()
-
     def set_fullscreen_mode(self, active: bool, source_id: int | None = None) -> None:
         self._fullscreen_active = bool(active)
         self._focused_source = int(source_id) if active and source_id is not None else None
         self._hover_source = None
         self._fullscreen_status_key = None
 
-        for widget in self.camera_labels:
-            widget.setVisible(not active)
-        for widget in self.status_labels:
-            widget.setVisible(not active)
-        for widget in self.room_labels:
-            widget.setVisible(not active)
         for header in self.tile_headers:
             header.setVisible(not active)
-        for widget in self.occupancy_labels:
-            widget.hide()
         for action in self.action_frames:
             action.hide()
+        for widget in self.occupancy_labels:
+            widget.hide()
         for borders in self.tile_borders:
             for border in borders:
-                border.setVisible(not active)
+                border.hide()
 
         if active and self._focused_source is not None and self._focused_source < len(self.cameras):
             camera = self.cameras[self._focused_source]
             camera_id = str(
-                getattr(camera, "camera_id", getattr(camera, "id", f"CAM-{self._focused_source + 1:02d}"))
+                getattr(
+                    camera,
+                    "camera_id",
+                    getattr(camera, "id", f"CAM-{self._focused_source + 1:02d}"),
+                )
             )
             self.fullscreen_camera_label.setText(camera_id)
             self.fullscreen_fps_label.setText("LIVE")
@@ -262,14 +267,12 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
             self.fullscreen_fps_label.hide()
 
         self.exit_button.setVisible(active)
-        super()._refresh_tile_frames()
+        self.video_surface.lower()
         self._refresh_tile_frames()
         self._layout_overlays()
         self._layout_fullscreen_hud()
 
     def update_metrics(self, metrics: dict) -> None:
-        # Base class now only relayouts a status label when its rendered state
-        # actually changes. Do not re-raise every grid header on every metrics tick.
         super().update_metrics(metrics)
 
         if self._fullscreen_active and self._focused_source is not None:
@@ -293,7 +296,7 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
 
             self.fullscreen_fps_label.setText(text)
             self.fullscreen_fps_label.setStyleSheet(
-                f"background:rgba(6,12,18,232);color:{color};"
+                f"background:#061018;color:{color};"
                 "border-radius:4px;padding:4px 8px;font:700 9px 'DejaVu Sans Mono';"
             )
             self._layout_fullscreen_hud()
