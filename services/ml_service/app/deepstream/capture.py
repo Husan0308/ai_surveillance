@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 import re
 import time
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import gi
 import numpy as np
@@ -12,21 +13,31 @@ from gi.repository import Gst  # noqa: E402
 
 Gst.init(None)
 
-_CODEC = {
-    "h264": ("H264", "rtph264depay", "h264parse"),
-    "h265": ("H265", "rtph265depay", "h265parse"),
-}
-
 
 def _gst_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _redact(value: str) -> str:
-    value = re.sub(r"(?i)(rtsps?://)[^@/\s]+@", r"\1***:***@", value)
-    value = re.sub(r'(?i)user-id="[^"]*"', 'user-id="***"', value)
-    value = re.sub(r'(?i)user-pw="[^"]*"', 'user-pw="***"', value)
-    return value
+    return re.sub(r"(?i)(rtsps?://)[^@/\s]+@", r"\1***:***@", value)
+
+
+def _uri_with_credentials(uri: str, username: str, password: str) -> str:
+    if not username:
+        return uri
+    parsed = urlsplit(uri)
+    if parsed.username:
+        return uri
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    userinfo = quote(username, safe="")
+    if password:
+        userinfo += ":" + quote(password, safe="")
+    netloc = f"{userinfo}@{host}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def _owned_bgr(mapped_data, width: int, height: int) -> np.ndarray:
@@ -35,20 +46,19 @@ def _owned_bgr(mapped_data, width: int, height: int) -> np.ndarray:
 
 
 class DeepStreamCapture:
-    """Explicit RTSP + NVIDIA NVDEC capture for one camera.
+    """Latest-frame RTSP capture owned by DeepStream nvurisrcbin.
 
-    RTSP negotiation is owned by rtspsrc. NVIDIA owns decode/scale via
-    nvv4l2decoder + nvvideoconvert. The downstream queue and appsink each keep
-    only the newest frame, so no presentation backlog can grow.
+    nvurisrcbin performs RTSP negotiation, H.264/H.265 codec discovery and NVIDIA
+    decode internally. The application therefore has no codec knob and never
+    guesses the stream format. Downstream queue/appsink are latest-only.
     """
 
-    backend = "rtspsrc-nvv4l2decoder"
+    backend = "deepstream-nvurisrcbin"
 
     def __init__(
         self,
         camera_id: str,
         uri: str,
-        codec: str,
         config,
         transport: str | None = None,
         username: str = "",
@@ -56,7 +66,6 @@ class DeepStreamCapture:
     ) -> None:
         self.camera_id = camera_id
         self.uri = uri
-        self.codec = codec.lower()
         self.config = config
         self.transport = (transport or config.rtsp_transport).lower()
         self.username = username
@@ -67,11 +76,9 @@ class DeepStreamCapture:
         self._frame_intervals_ms = deque(maxlen=300)
         self._last_frame_mono: float | None = None
 
-        if self.codec not in _CODEC:
-            raise ValueError(f"{camera_id}: unsupported codec {codec}")
-        for plugin in ("rtspsrc", "nvv4l2decoder", "nvvideoconvert", "appsink"):
+        for plugin in ("nvurisrcbin", "nvvideoconvert", "appsink"):
             if Gst.ElementFactory.find(plugin) is None:
-                raise RuntimeError(f"required GStreamer/NVIDIA plugin missing: {plugin}")
+                raise RuntimeError(f"required DeepStream/GStreamer plugin missing: {plugin}")
 
         self.pipeline_text = self._build_pipeline()
         self.pipeline = Gst.parse_launch(self.pipeline_text)
@@ -91,43 +98,50 @@ class DeepStreamCapture:
 
     def _build_pipeline(self) -> str:
         c = self.config
-        encoding, depay, parser = _CODEC[self.codec]
         queue_buffers = max(1, int(c.postdecode_queue_buffers))
-        source_options = [
-            f"location={_gst_quote(self.uri)}",
-            f"latency={max(1, c.latency_ms)}",
-            f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
-            "buffer-mode=auto",
-        ]
-
-        # rtspsrc natively handles RTSP Basic/Digest challenges via these
-        # properties; secrets never need to appear inside the committed URI.
-        if self.username:
-            source_options.append(f"user-id={_gst_quote(self.username)}")
-            source_options.append(f"user-pw={_gst_quote(self.password)}")
-
-        # 'auto' preserves GStreamer's normal UDP->TCP negotiation. The old
-        # working project used auto; force TCP/UDP only when explicitly asked.
-        if self.transport in {"tcp", "udp"}:
-            source_options.append(f"protocols={self.transport}")
-        if self.transport in {"udp", "auto"} and c.udp_buffer_size > 0:
-            source_options.append(f"udp-buffer-size={c.udp_buffer_size}")
+        reconnect_interval = max(1, int(round(c.reconnect_delay_sec)))
+        rtp_protocol = 4 if self.transport == "tcp" else 0
+        source_uri = _uri_with_credentials(self.uri, self.username, self.password)
 
         return " ".join(
             [
-                "rtspsrc", "name=source", *source_options,
-                "!", f"application/x-rtp,media=video,encoding-name={encoding}",
-                "!", depay, "name=depay",
-                "!", parser, "name=parser",
-                "!", "nvv4l2decoder", "name=decoder",
-                f"num-extra-surfaces={max(1, c.decoder_extra_surfaces)}",
-                "!", "queue", "name=latest_queue",
+                "nvurisrcbin",
+                "name=source",
+                f"uri={_gst_quote(source_uri)}",
+                f"gpu-id={int(c.gpu_id)}",
+                f"cudadec-memtype={int(c.cudadec_memtype)}",
+                f"num-extra-surfaces={max(1, int(c.decoder_extra_surfaces))}",
+                f"select-rtp-protocol={rtp_protocol}",
+                f"latency={max(1, int(c.latency_ms))}",
+                f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
+                f"udp-buffer-size={max(1, int(c.udp_buffer_size))}",
+                f"rtsp-reconnect-interval={reconnect_interval}",
+                "rtsp-reconnect-attempts=-1",
+                "disable-audio=true",
+                "async-handling=true",
+                "message-forward=true",
+                "!",
+                "queue",
+                "name=latest_queue",
                 f"max-size-buffers={queue_buffers}",
-                "max-size-bytes=0", "max-size-time=0", "leaky=downstream", "silent=true",
-                "!", "nvvideoconvert", "name=converter", f"gpu-id={c.gpu_id}",
-                "!", f"video/x-raw,width={c.display_width},height={c.display_height},format=BGRx",
-                "!", "appsink", "name=sink", "drop=true", "max-buffers=1", "sync=false",
-                "wait-on-eos=false", "enable-last-sample=false",
+                "max-size-bytes=0",
+                "max-size-time=0",
+                "leaky=downstream",
+                "silent=true",
+                "!",
+                "nvvideoconvert",
+                "name=converter",
+                f"gpu-id={int(c.gpu_id)}",
+                "!",
+                f"video/x-raw,width={int(c.display_width)},height={int(c.display_height)},format=BGRx",
+                "!",
+                "appsink",
+                "name=sink",
+                "drop=true",
+                "max-buffers=1",
+                "sync=false",
+                "wait-on-eos=false",
+                "enable-last-sample=false",
             ]
         )
 
@@ -208,7 +222,6 @@ class DeepStreamCapture:
         return {
             "backend": self.backend,
             "transport": self.transport,
-            "codec": self.codec,
             "auth_configured": bool(self.username),
             "pipeline": _redact(self.pipeline_text),
             "last_error": self._last_error,
