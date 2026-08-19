@@ -6,10 +6,10 @@ on:
   pull_request:
     paths:
       - 'services/camera_v2/**'
-      - 'scripts/preflight_sentinel_ui.py'
-      - 'scripts/preflight_camera_v2_core.py'
-      - 'scripts/run_sentinel_vms.sh'
+      - 'tests/**'
+      - 'scripts/**'
       - 'config/cameras.yaml'
+      - 'requirements.txt'
       - '.github/workflows/sentinel-ui-static.yml'
 
 jobs:
@@ -21,26 +21,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Compile production Python sources
-        run: |
-          python -m py_compile \
-            services/camera_v2/config.py \
-            services/camera_v2/sentinel_ui.py \
-            services/camera_v2/sentinel_ui_base.py \
-            services/camera_v2/sentinel_ui_monitoring.py \
-            services/camera_v2/sentinel_ui_settings.py \
-            services/camera_v2/sentinel_ui_enrollment.py \
-            services/camera_v2/sentinel_ui_pages.py \
-            services/camera_v2/sentinel_store.py \
-            services/camera_v2/sentinel_video.py \
-            services/camera_v2/sentinel_video_pro.py \
-            services/camera_v2/sentinel_video_wall_ui.py \
-            services/camera_v2/detection.py \
-            services/camera_v2/person_tracking.py \
-            services/camera_v2/person_tracking_final.py \
-            services/camera_v2/person_tracking_heatmap.py \
-            scripts/preflight_sentinel_ui.py \
-            scripts/preflight_camera_v2_core.py
+      - name: Install lightweight test dependencies
+        run: python -m pip install PyYAML python-dotenv
+
+      - name: Compile all retained Python sources
+        run: python -m compileall -q services/camera_v2 scripts tests
+
+      - name: Run config and persistence unit tests
+        run: python -m unittest discover -s tests -v
 
       - name: Enforce production contract
         run: |
@@ -84,8 +72,12 @@ jobs:
               'services/camera_v2/sentinel_exact.py',
               'services/camera_v2/sentinel_app.py',
               'services/camera_v2/monitor_ui_reference.py',
+              'services/camera_v2/qwen_reid.py',
+              'services/camera_v2/reid_runtime.py',
+              'services/api_service',
+              'services/frontend',
           ):
-              assert not Path(removed).exists(), f'legacy production file returned: {removed}'
+              assert not Path(removed).exists(), f'legacy production path returned: {removed}'
 
           print('SENTINEL_UI_STATIC=PASS')
           PY
