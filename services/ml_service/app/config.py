@@ -27,6 +27,7 @@ class CameraConfig:
 @dataclass(frozen=True)
 class DeepStreamConfig:
     gpu_id: int
+    cudadec_memtype: int
     rtsp_transport: str
     latency_ms: int
     drop_on_latency: bool
@@ -101,9 +102,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
             raise ValueError(f"Duplicate camera id: {camera_id}")
         seen.add(camera_id)
 
-        # A camera has one source only: the RTSP URI. nvurisrcbin/rtspsrc and the
-        # downstream decode chain negotiate the actual stream format from caps.
-        # There is deliberately no user-facing or config-level codec/env_uri knob.
+        # Codec is negotiated by DeepStream nvurisrcbin from the RTSP stream.
+        # Keeping codec out of config avoids H264/H265 drift between NVR and app.
         uri = str(row.get("uri", "")).strip()
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
@@ -135,9 +135,43 @@ def load_settings(path: str | Path | None = None) -> Settings:
 
     ds = raw.get("deepstream") or {}
     display = raw.get("display") or {}
+
     transport = str(ds.get("rtsp_transport", "auto")).strip().lower()
-    if transport not in {"auto", "tcp", "udp"}:
-        raise ValueError("deepstream.rtsp_transport must be auto, tcp, or udp")
+    if transport not in {"auto", "tcp"}:
+        raise ValueError("deepstream.rtsp_transport must be auto or tcp for nvurisrcbin")
+
+    gpu_id = int(ds.get("gpu_id", 0))
+    cudadec_memtype = int(ds.get("cudadec_memtype", 0))
+    latency_ms = int(ds.get("latency_ms", 150))
+    decoder_extra_surfaces = int(ds.get("decoder_extra_surfaces", 4))
+    udp_buffer_size = int(ds.get("udp_buffer_size", 1_048_576))
+    postdecode_queue_buffers = int(ds.get("postdecode_queue_buffers", 1))
+    capture_timeout_ms = int(ds.get("capture_timeout_ms", 1200))
+    startup_grace_sec = float(ds.get("startup_grace_sec", 12.0))
+    reconnect_delay_sec = float(ds.get("reconnect_delay_sec", 2.0))
+    reconnect_delay_max_sec = float(ds.get("reconnect_delay_max_sec", 10.0))
+    startup_stagger_sec = float(ds.get("startup_stagger_sec", 0.5))
+
+    if gpu_id < 0:
+        raise ValueError("deepstream.gpu_id must be >= 0")
+    if cudadec_memtype not in {0, 1, 2}:
+        raise ValueError("deepstream.cudadec_memtype must be 0, 1, or 2")
+    if latency_ms < 1:
+        raise ValueError("deepstream.latency_ms must be >= 1")
+    if decoder_extra_surfaces < 1:
+        raise ValueError("deepstream.decoder_extra_surfaces must be >= 1")
+    if udp_buffer_size < 1:
+        raise ValueError("deepstream.udp_buffer_size must be >= 1")
+    if postdecode_queue_buffers < 1:
+        raise ValueError("deepstream.postdecode_queue_buffers must be >= 1")
+    if capture_timeout_ms < 100:
+        raise ValueError("deepstream.capture_timeout_ms must be >= 100")
+    if startup_grace_sec <= 0:
+        raise ValueError("deepstream.startup_grace_sec must be > 0")
+    if reconnect_delay_sec <= 0 or reconnect_delay_max_sec < reconnect_delay_sec:
+        raise ValueError("deepstream reconnect delay range is invalid")
+    if startup_stagger_sec < 0:
+        raise ValueError("deepstream.startup_stagger_sec must be >= 0")
 
     width = int(display.get("width", 736))
     height = int(display.get("height", 416))
@@ -153,18 +187,19 @@ def load_settings(path: str | Path | None = None) -> Settings:
     return Settings(
         cameras=tuple(cameras),
         deepstream=DeepStreamConfig(
-            gpu_id=int(ds.get("gpu_id", 0)),
+            gpu_id=gpu_id,
+            cudadec_memtype=cudadec_memtype,
             rtsp_transport=transport,
-            latency_ms=int(ds.get("latency_ms", 150)),
+            latency_ms=latency_ms,
             drop_on_latency=_as_bool(ds.get("drop_on_latency", True)),
-            decoder_extra_surfaces=int(ds.get("decoder_extra_surfaces", 4)),
-            udp_buffer_size=int(ds.get("udp_buffer_size", 1_048_576)),
-            postdecode_queue_buffers=int(ds.get("postdecode_queue_buffers", 1)),
-            capture_timeout_ms=int(ds.get("capture_timeout_ms", 1200)),
-            startup_grace_sec=float(ds.get("startup_grace_sec", 12.0)),
-            reconnect_delay_sec=float(ds.get("reconnect_delay_sec", 2.0)),
-            reconnect_delay_max_sec=float(ds.get("reconnect_delay_max_sec", 10.0)),
-            startup_stagger_sec=float(ds.get("startup_stagger_sec", 0.5)),
+            decoder_extra_surfaces=decoder_extra_surfaces,
+            udp_buffer_size=udp_buffer_size,
+            postdecode_queue_buffers=postdecode_queue_buffers,
+            capture_timeout_ms=capture_timeout_ms,
+            startup_grace_sec=startup_grace_sec,
+            reconnect_delay_sec=reconnect_delay_sec,
+            reconnect_delay_max_sec=reconnect_delay_max_sec,
+            startup_stagger_sec=startup_stagger_sec,
             display_width=width,
             display_height=height,
             display_fps=fps,
