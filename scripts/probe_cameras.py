@@ -16,7 +16,7 @@ def main() -> int:
     settings = load_settings()
     failures = 0
 
-    print("=== RTSP/NVDEC one-frame probe ===", flush=True)
+    print("=== DeepStream nvurisrcbin one-frame probe ===", flush=True)
     print(f"project_root={PROJECT_ROOT}", flush=True)
     print("Each camera is tested sequentially so the NVR is not connection-stormed.\n", flush=True)
 
@@ -26,14 +26,13 @@ def main() -> int:
         try:
             print(
                 f"[PROBE] {camera.camera_id} {camera.uri} "
-                f"codec={camera.codec} transport={settings.deepstream.rtsp_transport} "
+                f"transport={settings.deepstream.rtsp_transport} "
                 f"auth={'yes' if camera.username else 'no'}",
                 flush=True,
             )
             cap = DeepStreamCapture(
                 camera.camera_id,
                 camera.uri,
-                camera.codec,
                 settings.deepstream,
                 transport=settings.deepstream.rtsp_transport,
                 username=camera.username,
@@ -50,7 +49,11 @@ def main() -> int:
                 raise RuntimeError("no decoded frame before startup deadline")
             h, w = frame.shape[:2]
             elapsed = time.monotonic() - started
-            print(f"[PASS] {camera.camera_id} first_frame={w}x{h} in {elapsed:.2f}s", flush=True)
+            print(
+                f"[PASS] {camera.camera_id} first_frame={w}x{h} "
+                f"backend={cap.backend} in {elapsed:.2f}s",
+                flush=True,
+            )
         except Exception as exc:
             failures += 1
             detail = {}
@@ -74,8 +77,8 @@ def main() -> int:
     print(f"\nRESULT: {passed}/{len(settings.cameras)} cameras passed", flush=True)
     if failures and not any(camera.username for camera in settings.cameras):
         print(
-            "NOTE: no RTSP credentials are configured. Run scripts/probe_rtsp_server.py; "
-            "if DESCRIBE returns 401, create .env with the NVR username/password.",
+            "NOTE: no RTSP credentials are configured. If the NVR returns 401, "
+            "put SURVEILLANCE_RTSP_USERNAME/PASSWORD in .env.",
             flush=True,
         )
     return 0 if failures == 0 else 1
