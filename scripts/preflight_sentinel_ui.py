@@ -111,7 +111,20 @@ def main_preflight() -> int:
     )
 
     tracker_source = _source("services/camera_v2/person_tracking_final.py")
-    _require_all(tracker_source, ("live_source_counts", "source_track_counts"), "people count")
+    _require_all(
+        tracker_source,
+        (
+            "live_source_counts",
+            "source_track_counts",
+            'CAMERA_V2_DETECT_WIDTH", "736"',
+            'CAMERA_V2_DETECT_HEIGHT", "416"',
+            'CAMERA_V2_MIN_DISPLAY_TRACK_CONF", "0.28"',
+            '"maxShadowTrackingAge": "12"',
+            '"minTrackingConfidenceDuringInactive": "0.40"',
+            "Always publish the detector decision, including an empty list",
+        ),
+        "current NvDCF tracking",
+    )
 
     dynamic_source = _source("services/camera_v2/dynamic_wall.py")
     _require_all(
@@ -146,9 +159,6 @@ def main_preflight() -> int:
         "runtime",
     )
 
-    # Check actual fullscreen HUD behavior, never prose/comments. Grid CAM/FPS
-    # widgets must be hidden in fullscreen and dedicated fixed-position HUD widgets
-    # must be shown instead. This avoids brittle case-sensitive comment matching.
     wall_source = ui_files["wall"]
     _require_all(
         wall_source,
@@ -176,16 +186,61 @@ def main_preflight() -> int:
         if forbidden_heat in heat_source:
             _fail(f"active heatmap has optional dependency: {forbidden_heat}")
 
+    # The old downstream smoother generated held/predicted rectangles after NvDCF.
+    # Production must now use the current NvDCF bbox only.
     smoother_source = _source("services/camera_v2/native_display_smoother.c")
     _require_all(
         smoother_source,
         (
-            "#define DISPLAY_HOLD_FRAMES 8",
-            "center_alpha_1f = 0.96f",
-            "shrink_alpha_1f = 0.72f",
-            "jump_norm > 0.55f",
+            "Intentionally a no-op",
+            "do not create, move, resize, or hold any metadata",
+            "return buffer_ptr ? 0 : -1",
         ),
-        "tight bbox display",
+        "NvDCF-only display bbox",
+    )
+    for forbidden_smoother in (
+        "DISPLAY_HOLD_FRAMES",
+        "add_display_hold",
+        "display_cx",
+        "display_w",
+    ):
+        if forbidden_smoother in smoother_source:
+            _fail(f"custom display predictor returned: {forbidden_smoother}")
+
+    meta_source = _source("services/camera_v2/native_meta_bridge.c")
+    _require_all(
+        meta_source,
+        (
+            'CAMERA_V2_MIN_DISPLAY_TRACK_CONF", 0.28f',
+            "obj->class_id = -1",
+            "obj->unique_component_id == 191",
+            "frame_meta->pipeline_width > 1",
+        ),
+        "tracker metadata filter",
+    )
+
+    label_source = _source("services/camera_v2/native_label_style.c")
+    _require_all(
+        label_source,
+        (
+            "should_style_track",
+            "obj->unique_component_id == 191",
+            "obj->rect_params.border_width == 0",
+        ),
+        "track label filter",
+    )
+
+    profile_source = _source("services/camera_v2/tracker_profile.py")
+    _require_all(
+        profile_source,
+        (
+            '"minTrackerConfidence": "0.28"',
+            '"maxShadowTrackingAge": "12"',
+            '"earlyTerminationAge": "1"',
+            '"minTrackingConfidenceDuringInactive": "0.40"',
+            '"outputShadowTracks", "0"',
+        ),
+        "NvDCF stale-track profile",
     )
 
     latency_source = _source("services/camera_v2/detector_latency.py")
@@ -212,8 +267,9 @@ def main_preflight() -> int:
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
     print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=16:9-renegotiated fixed-hud=PASS")
-    print("SENTINEL_PREFLIGHT bbox=nvdcf-tight hold=8frames latency_projection=conservative")
-    print("SENTINEL_PREFLIGHT people_count=per-camera->room-max->total known+unknown=consistent")
+    print("SENTINEL_PREFLIGHT bbox=current-nvdcf-only custom_hold=OFF tracker_conf=0.28 shadow_age=12")
+    print("SENTINEL_PREFLIGHT detector=736x416 empty_results=authoritative latency_projection=conservative")
+    print("SENTINEL_PREFLIGHT people_count=visible-tracks->room-max->total known+unknown=consistent")
     print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
