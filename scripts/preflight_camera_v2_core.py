@@ -16,22 +16,13 @@ def main() -> int:
     settings = load_settings()
     camera_count = len(settings.cameras)
     if not 1 <= camera_count <= 6:
-        raise RuntimeError(f"core camera wall requires 1..6 enabled cameras, got {camera_count}")
+        raise RuntimeError(f"camera wall requires 1..6 enabled cameras, got {camera_count}")
 
-    native = ensure_bridge()
-    heat_filter = ensure_heatmap_filter()
+    ensure_bridge()
+    ensure_heatmap_filter()
 
-    print(
-        "CAMERA_V2_CORE_PREFLIGHT "
-        f"cameras={camera_count} native=PASS path={native} "
-        f"heatmap_filter=PASS path={heat_filter}"
-    )
-    print(
-        "CAMERA_V2_CORE_PREFLIGHT "
-        "runtime=DeepStream/NVDEC+YOLO26m+NvDCF+native-heatmap "
-        "pose=OFF reid=OFF qwen=OFF face=OFF"
-    )
-    print("CAMERA_V2_CORE_PREFLIGHT=PASS")
+    print(f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=PASS")
+    print("CAMERA_PREFLIGHT=PASS")
     return 0
 
 
