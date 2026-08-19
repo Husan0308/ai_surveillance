@@ -9,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from services.ml_service.app.config import load_settings
+from services.camera_v2.config import load_settings
 
 
 def _rtsp_request(uri: str, method: str, cseq: int = 1) -> tuple[str, dict[str, str]]:
