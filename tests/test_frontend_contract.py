@@ -55,7 +55,7 @@ def test_operator_ui_restores_dark_monitoring_layout() -> None:
         "UNKNOWN",
     ):
         assert text in operator
-    assert '"#071018"' in operator
+    assert '"#070b11"' in operator
     assert "fullscreenRequested" in wall
     assert "toggle_focus" in wall
     assert 'self.status.setText("● LIVE")' in wall
