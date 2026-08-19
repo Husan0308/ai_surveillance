@@ -63,18 +63,18 @@ static float env_margin(const char *name, float fallback) {
 static int is_displayable_track(const NvDsObjectMeta *obj, float min_tracker_conf) {
     if (!obj) return 0;
     if (obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) return 0;
-    /* 191 was used by the old downstream display-hold helper. Never treat such
-     * metadata as a real current tracker observation, even if an old .so is loaded. */
     if (obj->unique_component_id == 191) return 0;
     if (obj->rect_params.width <= 1.0f || obj->rect_params.height <= 1.0f) return 0;
-    /* NvDCF exposes tracker_confidence. A negative value means the plugin did not
-     * provide one for this object, so do not reject solely on that sentinel value. */
     if (obj->tracker_confidence >= 0.0f && obj->tracker_confidence < min_tracker_conf) return 0;
     return 1;
 }
 
 static void hide_track(NvDsObjectMeta *obj) {
     if (!obj) return;
+    /* Mark hidden objects as non-person downstream so labels, counts and heatmap
+     * all ignore the same rejected NvDCF state. This probe runs after nvtracker,
+     * so changing class_id here cannot affect tracker association. */
+    obj->class_id = -1;
     obj->rect_params.border_width = 0;
     obj->rect_params.has_bg_color = 0;
     if (obj->text_params.display_text) {
@@ -178,7 +178,6 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) fnode->data;
         if (!frame_meta) continue;
 
-        /* rect_params at this point are in the mux/pipeline coordinate system. */
         float frame_w = frame_meta->pipeline_width > 1 ? (float) frame_meta->pipeline_width
                                                         : (float) frame_meta->source_frame_width;
         float frame_h = frame_meta->pipeline_height > 1 ? (float) frame_meta->pipeline_height
