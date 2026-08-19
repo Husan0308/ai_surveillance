@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI Surveillance API Service",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -82,6 +82,14 @@ async def ml_health(request: Request) -> dict:
 async def cameras(request: Request) -> dict:
     try:
         return await get_ml_client(request).cameras()
+    except MLServiceUnavailable as exc:
+        raise service_unavailable(exc) from exc
+
+
+@app.get("/api/v1/tracks")
+async def tracks_all(request: Request) -> dict:
+    try:
+        return await get_ml_client(request).tracks_all()
     except MLServiceUnavailable as exc:
         raise service_unavailable(exc) from exc
 
