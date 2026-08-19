@@ -42,7 +42,9 @@ jobs:
           monitoring = Path('services/camera_v2/sentinel_ui_monitoring.py').read_text()
           settings = Path('services/camera_v2/sentinel_ui_settings.py').read_text()
           wall = Path('services/camera_v2/sentinel_video_wall_ui.py').read_text()
+          base_video = Path('services/camera_v2/sentinel_video.py').read_text()
           video = Path('services/camera_v2/sentinel_video_pro.py').read_text()
+          launcher = Path('scripts/run_sentinel_vms.sh').read_text()
           tracker = Path('services/camera_v2/person_tracking_final.py').read_text()
           heatmap = Path('services/camera_v2/person_tracking_heatmap.py').read_text()
           camera_config = Path('config/cameras.yaml').read_text()
@@ -54,12 +56,19 @@ jobs:
           for text in ('Environment URI', 'self.env_uri =', 'self.codec =', 'form.addRow("Codec"'):
               assert text not in settings, f'stale Settings field: {text}'
 
-          assert 'BUILD_TAG = "2026.08.19-r11"' in shell
+          assert 'BUILD_TAG = "2026.08.19-r12"' in shell
           assert 'QLabel("Estimated people")' in monitoring
           assert 'QLabel("People in Building")' not in monitoring
           assert 'metrics.get("total_people"' in monitoring
           assert 'metrics.get("known_people"' in monitoring
           assert 'unknown = max(0, total - known)' in monitoring
+          assert 'self.setAttribute(Qt.WA_NoSystemBackground, True)' in base_video
+          assert 'self.setObjectName("nativeVideoSurface")' in base_video
+          assert 'self._status_cache' in base_video
+          assert 'Do not re-raise every grid header on every metrics tick' in wall
+          assert 'export CAMERA_V2_TILER_COLUMNS=2' in launcher
+          assert 'export CAMERA_V2_WALL_WIDTH=1600' in launcher
+          assert 'export CAMERA_V2_WALL_HEIGHT=1350' in launcher
           assert 'live_source_counts' in tracker
           assert 'source_track_counts' in tracker
           assert 'room_people[room_key] = max' in video
