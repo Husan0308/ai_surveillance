@@ -23,7 +23,7 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.19-r8"
+BUILD_TAG = "2026.08.19-r9"
 
 
 class MainWindow(QMainWindow):
