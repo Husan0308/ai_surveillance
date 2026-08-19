@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-import os
-from pathlib import Path
 import re
 import time
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -48,21 +46,13 @@ def _owned_bgr(mapped_data, width: int, height: int) -> np.ndarray:
     return array[..., :3].copy()
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 class DeepStreamCapture:
-    """One NVDEC decode with independent display and analysis branches.
+    """One NVDEC decode, newest-frame-only, GPU-scaled before host copy.
 
-    The decoded camera frame is split before any resize. The frontend SHM branch
-    preserves the decoder's native resolution and converts only to system-memory
-    NV12. The analysis branch is independently resized to the configured compact
-    BGRx dimensions used by YOLO. This keeps presentation sharp without raising
-    detector cost or opening a second RTSP/decode path.
+    This intentionally mirrors the old proven camera-smoothness branch: the
+    decoder stays on NVIDIA, a one-buffer leaky queue drops obsolete decoded
+    frames, nvvideoconvert scales to the clear 960x540 presentation frame on
+    the GPU, and only that bounded BGR frame is copied into Python.
     """
 
     backend = "deepstream-nvurisrcbin"
@@ -75,6 +65,7 @@ class DeepStreamCapture:
         transport: str | None = None,
         username: str = "",
         password: str = "",
+        latency_ms: int | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.uri = uri
@@ -82,47 +73,25 @@ class DeepStreamCapture:
         self.transport = (transport or config.rtsp_transport).lower()
         self.username = username
         self.password = password
+        self.latency_ms = max(1, int(latency_ms if latency_ms is not None else config.latency_ms))
         self._opened = False
         self._last_error = ""
         self._last_warning = ""
         self._frame_intervals_ms = deque(maxlen=300)
         self._last_frame_mono: float | None = None
 
-        self.shm_enabled = _env_bool("ML_SHM_VIDEO_ENABLED", True)
-        self.shm_dir = Path(os.getenv("ML_SHM_VIDEO_DIR", "/tmp/ai-surveillance")).expanduser()
-        self.shm_socket = self.shm_dir / f"{self.camera_id}.sock"
-        requested_mb = max(8, int(os.getenv("ML_SHM_VIDEO_SIZE_MB", "32")))
-        self.shm_size_bytes = requested_mb * 1024 * 1024
-
-        required_plugins = ["nvurisrcbin", "nvvideoconvert", "appsink"]
-        if self.shm_enabled:
-            required_plugins.append("shmsink")
-        for plugin in required_plugins:
+        for plugin in ("nvurisrcbin", "nvvideoconvert", "appsink"):
             if Gst.ElementFactory.find(plugin) is None:
                 raise RuntimeError(f"required DeepStream/GStreamer plugin missing: {plugin}")
-
-        if self.shm_enabled:
-            self.shm_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                self.shm_socket.unlink(missing_ok=True)
-            except OSError as exc:
-                raise RuntimeError(f"{camera_id}: cannot clear shm socket {self.shm_socket}: {exc}") from exc
 
         self.pipeline_text = self._build_pipeline()
         self.pipeline = Gst.parse_launch(self.pipeline_text)
         self.bus = self.pipeline.get_bus()
         self.sink = self.pipeline.get_by_name("sink")
         self.latest_queue = self.pipeline.get_by_name("latest_queue")
-        self.shm_sink = self.pipeline.get_by_name("shm_sink") if self.shm_enabled else None
-        self.display_converter = (
-            self.pipeline.get_by_name("display_converter") if self.shm_enabled else None
-        )
         if self.sink is None:
             self.pipeline.set_state(Gst.State.NULL)
             raise RuntimeError(f"{camera_id}: appsink was not created")
-        if self.shm_enabled and self.shm_sink is None:
-            self.pipeline.set_state(Gst.State.NULL)
-            raise RuntimeError(f"{camera_id}: shmsink was not created")
 
         result = self.pipeline.set_state(Gst.State.PLAYING)
         self._opened = result != Gst.StateChangeReturn.FAILURE
@@ -131,60 +100,40 @@ class DeepStreamCapture:
             self.pipeline.set_state(Gst.State.NULL)
             raise RuntimeError(f"{camera_id}: PLAYING failed: {detail or 'no detail'}")
 
-    def _source_parts(self) -> list[str]:
+    def _build_pipeline(self) -> str:
         c = self.config
         queue_buffers = max(1, int(c.postdecode_queue_buffers))
         reconnect_interval = max(1, int(round(c.reconnect_delay_sec)))
         rtp_protocol = 4 if self.transport == "tcp" else 0
         source_uri = _uri_with_credentials(self.uri, self.username, self.password)
-        return [
-            "nvurisrcbin",
-            "name=source",
-            f"uri={_gst_quote(source_uri)}",
-            f"gpu-id={int(c.gpu_id)}",
-            f"cudadec-memtype={int(c.cudadec_memtype)}",
-            f"num-extra-surfaces={max(1, int(c.decoder_extra_surfaces))}",
-            f"select-rtp-protocol={rtp_protocol}",
-            f"latency={max(1, int(c.latency_ms))}",
-            f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
-            f"udp-buffer-size={max(1, int(c.udp_buffer_size))}",
-            f"rtsp-reconnect-interval={reconnect_interval}",
-            "rtsp-reconnect-attempts=-1",
-            "disable-audio=true",
-            "async-handling=true",
-            "message-forward=true",
-            "!",
-            "queue",
-            "name=latest_queue",
-            f"max-size-buffers={queue_buffers}",
-            "max-size-bytes=0",
-            "max-size-time=0",
-            "leaky=downstream",
-            "silent=true",
-        ]
-
-    def _analysis_parts(self, tee_name: str | None = None) -> list[str]:
-        c = self.config
-        parts: list[str] = []
-        if tee_name:
-            parts.extend(
-                [
-                    f"{tee_name}.",
-                    "!",
-                    "queue",
-                    "name=app_queue",
-                    "max-size-buffers=1",
-                    "max-size-bytes=0",
-                    "max-size-time=0",
-                    "leaky=downstream",
-                    "silent=true",
-                ]
-            )
-        parts.extend(
+        return " ".join(
             [
+                "nvurisrcbin",
+                "name=source",
+                f"uri={_gst_quote(source_uri)}",
+                f"gpu-id={int(c.gpu_id)}",
+                f"cudadec-memtype={int(c.cudadec_memtype)}",
+                f"num-extra-surfaces={max(1, int(c.decoder_extra_surfaces))}",
+                f"select-rtp-protocol={rtp_protocol}",
+                f"latency={self.latency_ms}",
+                f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
+                f"udp-buffer-size={max(1, int(c.udp_buffer_size))}",
+                f"rtsp-reconnect-interval={reconnect_interval}",
+                "rtsp-reconnect-attempts=-1",
+                "disable-audio=true",
+                "async-handling=true",
+                "message-forward=true",
+                "!",
+                "queue",
+                "name=latest_queue",
+                f"max-size-buffers={queue_buffers}",
+                "max-size-bytes=0",
+                "max-size-time=0",
+                "leaky=downstream",
+                "silent=true",
                 "!",
                 "nvvideoconvert",
-                "name=analysis_converter",
+                "name=converter",
                 f"gpu-id={int(c.gpu_id)}",
                 "!",
                 (
@@ -201,48 +150,6 @@ class DeepStreamCapture:
                 "enable-last-sample=false",
             ]
         )
-        return parts
-
-    def _display_parts(self, tee_name: str) -> list[str]:
-        c = self.config
-        return [
-            f"{tee_name}.",
-            "!",
-            "queue",
-            "name=shm_queue",
-            "max-size-buffers=1",
-            "max-size-bytes=0",
-            "max-size-time=0",
-            "leaky=downstream",
-            "silent=true",
-            "!",
-            "nvvideoconvert",
-            "name=display_converter",
-            f"gpu-id={int(c.gpu_id)}",
-            "!",
-            # No width/height here: preserve the decoder's native camera size.
-            "video/x-raw,format=NV12",
-            "!",
-            "shmsink",
-            "name=shm_sink",
-            f"socket-path={_gst_quote(str(self.shm_socket))}",
-            f"shm-size={int(self.shm_size_bytes)}",
-            "wait-for-connection=false",
-            "sync=false",
-            "async=false",
-            "qos=false",
-        ]
-
-    def _build_pipeline(self) -> str:
-        parts = self._source_parts()
-        if not self.shm_enabled:
-            parts.extend(self._analysis_parts())
-            return " ".join(parts)
-
-        parts.extend(["!", "tee", "name=decoded_tee"])
-        parts.extend(self._analysis_parts("decoded_tee"))
-        parts.extend(self._display_parts("decoded_tee"))
-        return " ".join(parts)
 
     def _consume_bus(self) -> str | None:
         terminal = None
@@ -280,42 +187,13 @@ class DeepStreamCapture:
             return None
 
     def render_info(self) -> dict:
-        if not self.shm_enabled or self.shm_sink is None:
-            return {
-                "enabled": False,
-                "width": 0,
-                "height": 0,
-                "format": "",
-                "fps": 0.0,
-                "socket": "",
-            }
-        width = 0
-        height = 0
-        pixel_format = ""
-        fps = 0.0
-        try:
-            pad = self.shm_sink.get_static_pad("sink")
-            caps = pad.get_current_caps() if pad is not None else None
-            if caps is not None and caps.get_size() > 0:
-                structure = caps.get_structure(0)
-                width = int(structure.get_value("width") or 0)
-                height = int(structure.get_value("height") or 0)
-                pixel_format = str(structure.get_value("format") or "")
-                framerate = structure.get_value("framerate")
-                if framerate is not None:
-                    try:
-                        fps = float(framerate.num) / max(1.0, float(framerate.denom))
-                    except Exception:
-                        fps = 0.0
-        except Exception:
-            pass
         return {
             "enabled": True,
-            "width": width,
-            "height": height,
-            "format": pixel_format,
-            "fps": fps,
-            "socket": str(self.shm_socket),
+            "width": int(self.config.display_width),
+            "height": int(self.config.display_height),
+            "format": "BGR",
+            "fps": float(self.config.display_fps),
+            "socket": "",
         }
 
     def read(self):
@@ -360,21 +238,16 @@ class DeepStreamCapture:
         return {
             "backend": self.backend,
             "transport": self.transport,
+            "latency_ms": self.latency_ms,
             "auth_configured": bool(self.username),
             "pipeline": _redact(self.pipeline_text),
             "last_error": self._last_error,
             "last_warning": self._last_warning,
             "queue_buffers": self.current_queue_buffers(),
-            "shm": self.render_info(),
-            "shm_size_bytes": int(self.shm_size_bytes) if self.shm_enabled else 0,
+            "gpu_scaled_output": f"{int(self.config.display_width)}x{int(self.config.display_height)}",
         }
 
     def close(self) -> None:
         self._opened = False
         if self.pipeline is not None:
             self.pipeline.set_state(Gst.State.NULL)
-        if self.shm_enabled:
-            try:
-                self.shm_socket.unlink(missing_ok=True)
-            except OSError:
-                pass
