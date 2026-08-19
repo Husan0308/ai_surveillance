@@ -11,11 +11,9 @@ from .main import CameraWallV2, SourceRuntime
 class DynamicCameraWallV2(CameraWallV2):
     """Dynamic camera wall with explicit, renegotiable display geometry.
 
-    Source frames are normalized by nvstreammux to the canonical camera aspect
-    (1280x720 by default). The 2x3 wall is rendered at 1280x1080, which gives
-    every tile a 640x360 16:9 viewport. A capsfilter after the tiler makes the
-    output geometry renegotiable while PLAYING, so single-camera fullscreen can
-    switch to 1280x720 instead of stretching a camera into the 2x3 wall canvas.
+    The active Sentinel runtime chooses a 16:9 presentation mux geometry. Grid
+    output remains lightweight while focused fullscreen can renegotiate to the
+    higher-resolution presentation surface without stretching the camera.
     """
 
     def __init__(self) -> None:
@@ -135,9 +133,12 @@ class DynamicCameraWallV2(CameraWallV2):
         self._set_if(self.mux, "live-source", True)
         self._set_if(self.mux, "width", self.frame_width)
         self._set_if(self.mux, "height", self.frame_height)
-        # Camera sources are 16:9 and mux geometry is also 16:9. Padding is not
-        # needed and would waste pixels; importantly, no stage changes aspect.
         self._set_if(self.mux, "enable-padding", False)
+        # On dGPU, Algo-1 is GPU cubic interpolation. The source is 1440p and the
+        # presentation mux is 1080p, so use a high-quality downscale instead of
+        # the default nearest path when this property is available.
+        self._set_if(self.mux, "compute-hw", 1)
+        self._set_if(self.mux, "interpolation-method", 2)
         self._set_if(self.mux, "batched-push-timeout", self.mux_timeout_us)
         self._set_if(self.mux, "sync-inputs", False)
         self._set_if(self.mux, "max-latency", 0)
@@ -152,6 +153,8 @@ class DynamicCameraWallV2(CameraWallV2):
         self._set_if(self.tiler, "height", self.wall_height)
         self._set_if(self.tiler, "gpu-id", self.gpu_id)
         self._set_if(self.tiler, "nvbuf-memory-type", 2)
+        self._set_if(self.tiler, "compute-hw", 1)
+        self._set_if(self.tiler, "interpolation-method", 2)
 
     def _wall_caps_value(self, width: int, height: int):
         return self.Gst.Caps.from_string(
@@ -170,6 +173,4 @@ class DynamicCameraWallV2(CameraWallV2):
         self.wall_height = height
         self.tiler.set_property("width", width)
         self.tiler.set_property("height", height)
-        # Changing capsfilter caps while PLAYING sends RECONFIGURE upstream. This
-        # is the critical step missing from the previous fullscreen implementation.
         self.wall_caps.set_property("caps", self._wall_caps_value(width, height))
