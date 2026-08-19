@@ -77,8 +77,6 @@ class CameraConfigStore:
                 f"Monitoring 2x3 wall maksimum {MAX_ACTIVE_CAMERAS} ta active camera qo'llaydi"
             )
 
-        # Canonical source schema contains only identity, room, enabled state and
-        # RTSP URI. Stream format/decoder selection belongs to DeepStream.
         payload["cameras"] = cleaned
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -90,8 +88,6 @@ class CameraConfigStore:
 
 
 class CameraEditorDialog(QDialog):
-    """Dark in-app camera editor with only the fields a user should choose."""
-
     def __init__(
         self,
         camera: dict | None = None,
@@ -126,7 +122,7 @@ class CameraEditorDialog(QDialog):
         header_text.addWidget(
             label("Yangi camera" if camera is None else "Camerani tahrirlash", "sectionTitle")
         )
-        header_text.addWidget(label("RTSP source", "mono"))
+        header_text.addWidget(label("Camera source", "mono"))
         header.addLayout(header_text)
         header.addStretch()
         close = QToolButton()
@@ -156,7 +152,7 @@ class CameraEditorDialog(QDialog):
         status_text = QVBoxLayout()
         status_text.setSpacing(1)
         status_text.addWidget(label("Camera status", "sectionTitle"))
-        status_text.addWidget(label("Monitoring wallga source qo'shilsin", "muted"))
+        status_text.addWidget(label("Monitoringga qo'shilsin", "muted"))
         status_row.addLayout(status_text)
         status_row.addStretch()
         self.enabled = QCheckBox("Enabled")
@@ -165,9 +161,8 @@ class CameraEditorDialog(QDialog):
         root.addLayout(status_row)
 
         note = QLabel(
-            "Stream formati va decoder DeepStream tomonidan avtomatik aniqlanadi. "
-            "Login/parol .env dagi SURVEILLANCE_RTSP_USERNAME va "
-            "SURVEILLANCE_RTSP_PASSWORD dan olinadi."
+            "Stream formati avtomatik aniqlanadi. Login/parol .env dagi "
+            "SURVEILLANCE_RTSP_USERNAME va SURVEILLANCE_RTSP_PASSWORD dan olinadi."
         )
         note.setWordWrap(True)
         note.setStyleSheet(
@@ -229,7 +224,7 @@ class CameraSettingsRow(Panel):
         super().__init__(parent)
         self.index = int(index)
         self.camera = dict(camera)
-        self.setMinimumHeight(94)
+        self.setMinimumHeight(88)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 11, 12, 11)
@@ -264,10 +259,6 @@ class CameraSettingsRow(Panel):
         uri.setTextInteractionFlags(Qt.TextSelectableByMouse)
         uri.setStyleSheet(f"color:{C['muted']};font:10px 'DejaVu Sans Mono';")
         info.addWidget(uri)
-
-        source_note = QLabel("DeepStream · automatic stream · RTSP")
-        source_note.setStyleSheet(f"color:#5f7080;font:9px 'DejaVu Sans Mono';")
-        info.addWidget(source_note)
         row.addLayout(info, 1)
 
         enabled = QCheckBox("Enabled")
@@ -315,7 +306,7 @@ class SettingsPage(QWidget):
         outer.addLayout(controls)
 
         self.banner = QLabel(
-            "Camera ID, name, room va RTSP URL yetarli. Stream formati va decoder avtomatik tanlanadi."
+            "Camera ID, name, room va RTSP URL yetarli. Qolgan sozlamalar avtomatik tanlanadi."
         )
         self.banner.setWordWrap(True)
         self.banner.setStyleSheet(
@@ -347,9 +338,7 @@ class SettingsPage(QWidget):
     def _set_dirty(self, message: str) -> None:
         self.dirty = True
         self.apply_button.setEnabled(True)
-        self.banner.setText(
-            message + " · Apply changes bosilganda live camera pipeline qayta ishga tushadi."
-        )
+        self.banner.setText(message + " · Apply changes bosilganda Monitoring qayta ulanadi.")
         self.banner.setStyleSheet(
             "color:#f6d98a;background:#211c0e;border:1px solid #5b4921;"
             "border-radius:6px;padding:9px 12px;"
@@ -454,9 +443,7 @@ class SettingsPage(QWidget):
         self.dirty = False
         self.apply_button.setEnabled(False)
         self.payload = self.store.load()
-        self.banner.setText(
-            "Camera config applied. Monitoring pipeline yangi source list bilan qayta ishga tushdi."
-        )
+        self.banner.setText("Camera changes applied.")
         self.banner.setStyleSheet(
             f"color:{C['known']};background:#0b1c19;border:1px solid #174238;"
             "border-radius:6px;padding:9px 12px;"
