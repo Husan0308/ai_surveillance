@@ -7,6 +7,26 @@ HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
 echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r8"
 
+# Old shells/.env files can retain CAMERA_V2_* values from earlier experiments.
+# The production VMS profile is fixed so preflight and the UI child process always
+# run the same detector/tracker/display geometry.
+INHERITED_DETECT="${CAMERA_V2_DETECT_WIDTH:-unset}x${CAMERA_V2_DETECT_HEIGHT:-unset}"
+INHERITED_TRACKER="${CAMERA_V2_TRACKER_WIDTH:-unset}x${CAMERA_V2_TRACKER_HEIGHT:-unset}"
+INHERITED_DISPLAY="${CAMERA_V2_FRAME_WIDTH:-unset}x${CAMERA_V2_FRAME_HEIGHT:-unset}"
+
+export CAMERA_V2_FRAME_WIDTH=1920
+export CAMERA_V2_FRAME_HEIGHT=1080
+export CAMERA_V2_DETECT_WIDTH=736
+export CAMERA_V2_DETECT_HEIGHT=416
+export CAMERA_V2_DETECT_CONF=0.05
+export CAMERA_V2_DETECT_IOU=0.65
+export CAMERA_V2_MAX_DET=40
+export CAMERA_V2_MICRO_BATCH=2
+export CAMERA_V2_TRACKER_WIDTH=512
+export CAMERA_V2_TRACKER_HEIGHT=288
+
+echo "SENTINEL_PROFILE inherited_display=${INHERITED_DISPLAY} inherited_detector=${INHERITED_DETECT} inherited_tracker=${INHERITED_TRACKER} effective_display=1920x1080 effective_detector=736x416 effective_tracker=512x288"
+
 python scripts/preflight_sentinel_ui.py
 python scripts/preflight_camera_v2_core.py
 
