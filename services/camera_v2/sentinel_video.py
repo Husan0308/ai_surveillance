@@ -12,8 +12,11 @@ from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QWidget
 CAMERA_COUNT = 6
 GRID_COLUMNS = 2
 GRID_ROWS = 3
-WALL_WIDTH = 1280
-WALL_HEIGHT = 1080
+# 2x3 wall with exact 16:9 tiles. 1600x1350 gives every camera an 800x450
+# presentation tile, avoiding the visibly soft 640x360 intermediate while keeping
+# render cost close to a single 1080p surface on the GTX 1050 Ti.
+WALL_WIDTH = 1600
+WALL_HEIGHT = 1350
 
 
 @dataclass(frozen=True)
