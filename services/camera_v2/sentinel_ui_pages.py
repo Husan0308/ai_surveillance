@@ -1,89 +1,280 @@
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QVBoxLayout,
+    QComboBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QVBoxLayout,
 )
 
-from .data import CAMERAS, EVENTS, PEOPLE, ROOMS, TYPE_LABEL, camera_name, fmt, room_name
-from .sentinel_ui_base import C, FaceAvatar, Panel, ScrollPage, clear_layout, label, make_button, panel_layout
+from .config import load_settings
+from .sentinel_store import SentinelStore
+from .sentinel_ui_base import C, Panel, ScrollPage, clear_layout, label, make_button, panel_layout
 
 
 class PeoplePage(ScrollPage):
     def __init__(self):
-        super().__init__(); self.filter = "all"
-        top = QHBoxLayout(); self.buttons = QButtonGroup(self); self.buttons.setExclusive(True)
-        for key, text in [("all","Barchasi"),("known","Known"),("unknown","Unknown")]:
-            b=make_button(text); b.setCheckable(True); b.setChecked(key=="all"); b.clicked.connect(lambda _, k=key: self.set_filter(k)); self.buttons.addButton(b); top.addWidget(b)
-        self.search = QLineEdit(); self.search.setPlaceholderText("Ism yoki Unknown_XX qidirish"); self.search.setMaximumWidth(320); self.search.textChanged.connect(self.rebuild); top.addWidget(self.search); top.addStretch(); self.layout.addLayout(top)
-        self.grid = QGridLayout(); self.grid.setSpacing(12); self.layout.addLayout(self.grid); self.layout.addStretch(); self.rebuild()
+        super().__init__()
+        self.store = SentinelStore()
+        top = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Ism yoki ID qidirish")
+        self.search.setMaximumWidth(340)
+        self.search.textChanged.connect(self.rebuild)
+        top.addWidget(self.search)
+        top.addStretch()
+        self.layout.addLayout(top)
 
-    def set_filter(self, value): self.filter=value; self.rebuild()
+        self.grid = QGridLayout()
+        self.grid.setSpacing(12)
+        self.layout.addLayout(self.grid)
+        self.layout.addStretch()
+        self.rebuild()
 
-    def rebuild(self):
-        clear_layout(self.grid); q=self.search.text().lower() if hasattr(self, 'search') else ""
-        items=[p for p in PEOPLE if (self.filter=="all" or p.known==(self.filter=="known")) and q in p.label.lower()]
-        for i,p in enumerate(items): self.grid.addWidget(self.person_card(p), i//3, i%3)
-        for col in range(3): self.grid.setColumnStretch(col,1)
+    def refresh(self) -> None:
+        self.rebuild()
 
-    def person_card(self, p):
-        card=Panel(); card.setMinimumWidth(295); lay=panel_layout(card, (12,12,12,12), 8)
-        top=QHBoxLayout(); top.addWidget(FaceAvatar(p)); info=QVBoxLayout(); name=make_button(p.label,"ghost"); name.setStyleSheet("text-align:left;font-weight:700;padding:0;border:0;"); info.addWidget(name); info.addWidget(label(p.id,"mono")); badge=label("KNOWN" if p.known else "UNKNOWN"); badge.setStyleSheet(f"background:{C['known'] if p.known else C['unknown']};color:{C['bg']};padding:3px 6px;border-radius:3px;font:8px 'DejaVu Sans Mono';"); info.addWidget(badge,0,Qt.AlignLeft); info.addStretch(); top.addLayout(info,1); lay.addLayout(top)
-        details=[("Birinchi",fmt(p.first_seen)),("Oxirgi",fmt(p.last_seen)),("Xona",room_name(p.room_id) if p.in_building else "Binoda emas"),("Kameralar",", ".join(camera_name(x) for x in p.cameras))]
-        for k,v in details:
-            row=QHBoxLayout(); row.addWidget(label(k,"muted")); val=label(v,"mono"); val.setWordWrap(True); row.addWidget(val,1,Qt.AlignRight); lay.addLayout(row)
-        actions=QHBoxLayout()
-        if not p.known:
-            b=make_button("⌑  Ism berish","secondary"); b.clicked.connect(lambda _,p=p:self.rename_person(p)); actions.addWidget(b)
-        merge=make_button("⇉  Birlashtirish"); merge.clicked.connect(lambda _,p=p:self.merge_person(p)); actions.addWidget(merge)
-        if len(p.cameras)>1: actions.addWidget(make_button("⑂  Ajratish","ghost"))
-        actions.addStretch(); lay.addLayout(actions); return card
+    def rebuild(self) -> None:
+        clear_layout(self.grid)
+        query = self.search.text().strip().lower()
+        people = self.store.list_people()
+        if query:
+            people = [
+                person
+                for person in people
+                if query in str(person.get("name", "")).lower()
+                or query in str(person.get("id", "")).lower()
+            ]
 
-    def rename_person(self,p):
-        dlg=QDialog(self); dlg.setWindowTitle("Unknown odamga ism berish"); l=QVBoxLayout(dlg); l.addWidget(label("Unknown odamga ism berish","title")); inp=QLineEdit(); inp.setPlaceholderText("To'liq ism"); l.addWidget(inp); bb=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel); bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); l.addWidget(bb)
-        if dlg.exec() and inp.text().strip(): p.name=inp.text().strip(); p.known=True; self.rebuild()
+        if not people:
+            empty = label("Saqlangan profil topilmadi.", "muted")
+            self.grid.addWidget(empty, 0, 0)
+            return
 
-    def merge_person(self,p):
-        QMessageBox.information(self,"Noto'g'ri ajralgan ID'ni birlashtirish",f"Tanlangan ID {p.id} bilan birlashtiriladi va bitta global ID qoladi.")
+        for index, person in enumerate(people):
+            self.grid.addWidget(self._person_card(person), index // 3, index % 3)
+        for column in range(3):
+            self.grid.setColumnStretch(column, 1)
+
+    def _person_card(self, person: dict) -> Panel:
+        card = Panel()
+        card.setMinimumWidth(280)
+        layout = panel_layout(card, (12, 12, 12, 12), 8)
+
+        top = QHBoxLayout()
+        photo = QLabel()
+        photo.setFixedSize(64, 64)
+        photo.setAlignment(Qt.AlignCenter)
+        photo.setStyleSheet(
+            f"background:{C['field']};border:1px solid {C['border']};border-radius:6px;color:{C['muted']};"
+        )
+        profile_path = Path(str(person.get("profile_photo", "")))
+        pixmap = QPixmap(str(profile_path)) if profile_path.is_file() else QPixmap()
+        if pixmap.isNull():
+            name = str(person.get("name", "?"))
+            photo.setText("".join(part[:1] for part in name.split()[:2]).upper() or "?")
+        else:
+            photo.setPixmap(
+                pixmap.scaled(photo.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            )
+        top.addWidget(photo)
+
+        info = QVBoxLayout()
+        info.addWidget(label(str(person.get("name", "")), "sectionTitle"))
+        info.addWidget(label(str(person.get("id", "")), "mono"))
+        details = " · ".join(
+            value
+            for value in (
+                str(person.get("role", "")).strip(),
+                str(person.get("department", "")).strip(),
+            )
+            if value
+        )
+        if details:
+            info.addWidget(label(details, "muted"))
+        info.addStretch()
+        top.addLayout(info, 1)
+        layout.addLayout(top)
+
+        notes = str(person.get("notes", "")).strip()
+        if notes:
+            note = label(notes, "muted")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        remove = make_button("Deactivate", "ghost")
+        remove.clicked.connect(lambda _=False, pid=str(person.get("id", "")): self._deactivate(pid))
+        actions.addWidget(remove)
+        layout.addLayout(actions)
+        return card
+
+    def _deactivate(self, person_id: str) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Profilni o'chirish",
+            f"{person_id} profilini active ro'yxatdan olib tashlaysizmi?",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.store.deactivate_person(person_id)
+        self.rebuild()
 
 
 class EventsPage(ScrollPage):
-    TYPE_COLORS={"entry":C['known'],"exit":C['muted'],"transition":C['blue'],"unknown":C['unknown'],"restricted":C['offline'],"camera_offline":C['offline'],"service":C['violet']}
-    def __init__(self):
-        super().__init__(); filters=QGridLayout(); filters.setSpacing(8)
-        self.kind=QComboBox(); self.kind.addItem("Barcha turlar","all"); [self.kind.addItem(v,k) for k,v in TYPE_LABEL.items()]
-        self.room=QComboBox(); self.room.addItem("Barcha xonalar","all"); [self.room.addItem(r.name,r.id) for r in ROOMS]
-        self.person=QComboBox(); self.person.addItem("Barcha odamlar","all"); [self.person.addItem(p.label,p.id) for p in PEOPLE]
-        self.date=QLineEdit(); self.date.setPlaceholderText("dd.mm.yyyy")
-        for i,w in enumerate([self.kind,self.room,self.person,self.date]): filters.addWidget(w,0,i)
-        self.kind.currentIndexChanged.connect(self.rebuild); self.room.currentIndexChanged.connect(self.rebuild); self.person.currentIndexChanged.connect(self.rebuild); self.date.textChanged.connect(self.rebuild)
-        self.layout.addLayout(filters); self.list=QVBoxLayout(); self.list.setSpacing(8); self.layout.addLayout(self.list); self.layout.addStretch(); self.rebuild()
+    TYPE_LABELS = {
+        "entry": "Kirish",
+        "exit": "Chiqish",
+        "transition": "Xonalar orasida",
+        "unknown": "Unknown",
+        "restricted": "Restricted zone",
+        "camera_offline": "Camera offline",
+        "service": "Service",
+    }
 
-    def rebuild(self):
-        clear_layout(self.list); kind=self.kind.currentData(); room=self.room.currentData(); person=self.person.currentData(); date=self.date.text().strip()
-        rows=[e for e in EVENTS if (kind=='all' or e.type==kind) and (room=='all' or e.room_id==room) and (person=='all' or e.person_id==person) and (not date or date in fmt(e.at))]
-        for e in rows:
-            card=Panel(); card.setMinimumHeight(80); lay=QHBoxLayout(card); lay.setContentsMargins(12,10,12,10); lay.setSpacing(12)
-            thumb=QLabel(); thumb.setFixedSize(64,48); thumb.setStyleSheet(f"background:{self.TYPE_COLORS[e.type]}18;border:1px solid {C['border']};border-radius:4px;"); lay.addWidget(thumb)
-            info=QVBoxLayout(); top=QHBoxLayout(); tag=label(TYPE_LABEL[e.type]); tag.setStyleSheet(f"background:{self.TYPE_COLORS[e.type]};color:{C['bg']};padding:3px 6px;border-radius:3px;font:8px 'DejaVu Sans Mono';"); top.addWidget(tag); top.addWidget(label(fmt(e.at),"mono")); top.addStretch(); info.addLayout(top); info.addWidget(label(e.message)); info.addWidget(label(f"{camera_name(e.camera_id)} · {room_name(e.room_id)}","mono")); lay.addLayout(info,1)
-            if e.person_id: lay.addWidget(make_button("Profil","ghost"))
-            self.list.addWidget(card)
+    def __init__(self):
+        super().__init__()
+        self.store = SentinelStore()
+
+        filters = QHBoxLayout()
+        self.kind = QComboBox()
+        self.kind.addItem("Barcha turlar", "all")
+        for key, title in self.TYPE_LABELS.items():
+            self.kind.addItem(title, key)
+        self.kind.currentIndexChanged.connect(self.rebuild)
+        filters.addWidget(self.kind)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Person ID, camera yoki room")
+        self.search.textChanged.connect(self.rebuild)
+        filters.addWidget(self.search, 1)
+        self.layout.addLayout(filters)
+
+        self.rows = QVBoxLayout()
+        self.rows.setSpacing(8)
+        self.layout.addLayout(self.rows)
+        self.layout.addStretch()
+        self.rebuild()
+
+    def refresh(self) -> None:
+        self.rebuild()
+
+    @staticmethod
+    def _fmt(timestamp: float) -> str:
+        try:
+            return datetime.fromtimestamp(float(timestamp)).astimezone().strftime("%d.%m.%Y, %H:%M:%S")
+        except Exception:
+            return "—"
+
+    def rebuild(self) -> None:
+        clear_layout(self.rows)
+        kind = self.kind.currentData()
+        query = self.search.text().strip().lower()
+        events = self.store.list_events(limit=500)
+        filtered = []
+        for event in events:
+            if kind != "all" and str(event.get("event_type", "")) != kind:
+                continue
+            haystack = " ".join(
+                str(event.get(key, ""))
+                for key in ("person_id", "person_name", "local_id", "camera_id", "room")
+            ).lower()
+            if query and query not in haystack:
+                continue
+            filtered.append(event)
+
+        if not filtered:
+            self.rows.addWidget(label("Real event yozuvlari hali yo'q.", "muted"))
+            return
+
+        for event in filtered:
+            card = Panel()
+            layout = QHBoxLayout(card)
+            layout.setContentsMargins(12, 10, 12, 10)
+            layout.setSpacing(12)
+
+            snapshot = QLabel()
+            snapshot.setFixedSize(72, 54)
+            snapshot.setAlignment(Qt.AlignCenter)
+            snapshot.setStyleSheet(
+                f"background:{C['field']};border:1px solid {C['border']};border-radius:4px;color:{C['muted']};"
+            )
+            snapshot_path = Path(str(event.get("snapshot_path", "")))
+            pixmap = QPixmap(str(snapshot_path)) if snapshot_path.is_file() else QPixmap()
+            if pixmap.isNull():
+                snapshot.setText("No image")
+            else:
+                snapshot.setPixmap(
+                    pixmap.scaled(snapshot.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                )
+            layout.addWidget(snapshot)
+
+            info = QVBoxLayout()
+            event_type = str(event.get("event_type", ""))
+            title = self.TYPE_LABELS.get(event_type, event_type or "Event")
+            info.addWidget(label(f"{title} · {self._fmt(event.get('created_at', 0))}", "sectionTitle"))
+            identity = str(event.get("person_name") or event.get("person_id") or event.get("local_id") or "Unknown")
+            info.addWidget(label(identity))
+            location = " · ".join(
+                value
+                for value in (
+                    str(event.get("camera_id", "")).strip(),
+                    str(event.get("room", "")).strip(),
+                )
+                if value
+            )
+            if location:
+                info.addWidget(label(location, "mono"))
+            layout.addLayout(info, 1)
+            self.rows.addWidget(card)
 
 
 class RoomsPage(ScrollPage):
     def __init__(self):
-        super().__init__(); grid=QGridLayout(); grid.setSpacing(16); inside=[p for p in PEOPLE if p.in_building]
-        for i,room in enumerate(ROOMS):
-            occupants=[p for p in inside if p.room_id==room.id]; cams=[c for c in CAMERAS if c.room_id==room.id]; load=round(len(occupants)/room.capacity*100)
-            card=Panel(); lay=panel_layout(card); top=QHBoxLayout(); top.addWidget(label(room.name,"sectionTitle")); top.addStretch(); top.addWidget(label(str(len(occupants)),"metric",C['primary'])); lay.addLayout(top)
-            bar=QProgressBar(); bar.setMaximum(100); bar.setValue(load); lay.addWidget(bar); lay.addWidget(label(f"sig'im {room.capacity} · {load}% band","mono")); lay.addSpacing(8); lay.addWidget(label("KAMERALAR","eyebrow"))
-            for cam in cams:
-                row=QHBoxLayout(); row.addWidget(label(cam.name)); row.addStretch(); row.addWidget(label(f"{cam.fps:.1f} fps" if cam.online else "offline","mono",C['known'] if cam.online else C['offline'])); lay.addLayout(row)
-            lay.addSpacing(8); lay.addWidget(label("HOZIR XONADA","eyebrow"))
-            if occupants:
-                for p in occupants:
-                    row=QHBoxLayout(); row.addWidget(FaceAvatar(p,32)); row.addWidget(label(p.label)); row.addStretch(); lay.addLayout(row)
-            else: lay.addWidget(label("Xona bo'sh","muted"))
-            lay.addStretch(); grid.addWidget(card,0,i); grid.setColumnStretch(i,1)
-        self.layout.addLayout(grid); self.layout.addStretch()
+        super().__init__()
+        self.grid = QGridLayout()
+        self.grid.setSpacing(16)
+        self.layout.addLayout(self.grid)
+        self.layout.addStretch()
+        self.refresh()
+
+    def refresh(self) -> None:
+        clear_layout(self.grid)
+        settings = load_settings()
+        rooms: dict[str, list] = {}
+        for camera in settings.cameras:
+            room = str(camera.room or "Unassigned").strip() or "Unassigned"
+            rooms.setdefault(room, []).append(camera)
+
+        for index, (room_name, cameras) in enumerate(sorted(rooms.items())):
+            card = Panel()
+            layout = panel_layout(card)
+            header = QHBoxLayout()
+            header.addWidget(label(room_name, "sectionTitle"))
+            header.addStretch()
+            header.addWidget(label(str(len(cameras)), "mono", C["primary"]))
+            layout.addLayout(header)
+            layout.addWidget(label("Configured cameras", "eyebrow"))
+            for camera in cameras:
+                row = QHBoxLayout()
+                row.addWidget(label(camera.camera_id, "mono"))
+                row.addWidget(label(camera.name))
+                row.addStretch()
+                row.addWidget(label("enabled", "mono", C["known"]))
+                layout.addLayout(row)
+            layout.addStretch()
+            self.grid.addWidget(card, index // 3, index % 3)
+
+        if not rooms:
+            self.grid.addWidget(label("Camera room config topilmadi.", "muted"), 0, 0)
+        for column in range(3):
+            self.grid.setColumnStretch(column, 1)
