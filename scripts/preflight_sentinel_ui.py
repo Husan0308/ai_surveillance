@@ -114,6 +114,27 @@ def main_preflight() -> int:
         "monitoring",
     )
 
+    # Native video binding is intentionally self-healing. QWidget native ids may
+    # change during show/window-state transitions, and a stale GstVideoOverlay
+    # handle produces a black wall while analytics continue to run.
+    _require_all(
+        monitoring_source,
+        (
+            "self.wall.installEventFilter(self)",
+            "QEvent.Type.WinIdChange",
+            "QEvent.Type.Show",
+            "QEvent.Type.ParentChange",
+            "def _ensure_video_binding",
+            "def _schedule_rebind",
+            "SENTINEL_UI_BIND action=",
+            'self._ensure_video_binding(True, "watchdog-5s")',
+            'self._schedule_rebind("fullscreen-enter")',
+            'self._schedule_rebind("fullscreen-exit")',
+            'self._bind_window_id(int(xid), force=True, reason="native-ready")',
+        ),
+        "native video rebind",
+    )
+
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
     _require_all(
         video_source,
@@ -131,6 +152,7 @@ def main_preflight() -> int:
             "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
             'runtime.tiler.set_property("rows", 1)',
             'runtime.tiler.set_property("columns", 1)',
+            "GstVideo.VideoOverlay.set_window_handle",
         ),
         "monitoring runtime contract",
     )
@@ -197,6 +219,8 @@ def main_preflight() -> int:
             "python scripts/preflight_sentinel_ui.py",
             "python scripts/preflight_camera_v2_core.py",
             "exec python -m services.camera_v2.monitor_ui",
+            "export QT_QPA_PLATFORM=xcb",
+            "SENTINEL_DISPLAY session=",
         ),
         "launcher",
     )
@@ -208,6 +232,7 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
     print("SENTINEL_PREFLIGHT monitoring=compact-vms 2x3 header-bars right-rail=262px")
     print("SENTINEL_PREFLIGHT native_video=direct no-wall-cover single-hover=PASS")
+    print("SENTINEL_PREFLIGHT native_binding=xcb+winid-change+show+fullscreen+watchdog PASS")
     print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
     print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
