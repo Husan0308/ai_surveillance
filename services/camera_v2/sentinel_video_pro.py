@@ -41,9 +41,11 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
         gi.require_version("GstVideo", "1.0")
         from gi.repository import Gst, GstVideo
 
-        from .person_tracking_reid_heatmap import CameraPersonTrackingReIDHeatmap
+        # Core-only runtime: DeepStream/NVDEC -> YOLO26m -> NvDCF -> heatmap.
+        # No pose model, ReID embedder, Qwen verifier, or global identity worker.
+        from .person_tracking_heatmap import CameraPersonTrackingHeatmap
 
-        runtime = CameraPersonTrackingReIDHeatmap()
+        runtime = CameraPersonTrackingHeatmap()
         camera_count = len(runtime.cameras)
         if not 1 <= camera_count <= CAMERA_COUNT:
             raise RuntimeError(
@@ -130,7 +132,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                         _put_status(
                             status_q,
                             "LIVE",
-                            f"{camera_count}-camera DeepStream/NvDCF + ReID + ankle heatmap PLAYING",
+                            f"{camera_count}-camera DeepStream/NVDEC + YOLO26m + NvDCF + heatmap PLAYING",
                         )
                 except Exception:
                     pass
@@ -222,25 +224,11 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                     }
                 )
 
-            identity_metrics = {}
-            identity = getattr(runtime, "identity", None)
-            if identity is not None:
-                try:
-                    identity_metrics = identity.metrics()
-                except Exception:
-                    identity_metrics = {}
-
-            counts = {
-                "total": int(getattr(runtime, "tracked_now", 0)),
-                "known": 0,
-                "unknown": 0,
-            }
-            counter = getattr(runtime, "live_people_counts", None)
-            if callable(counter):
-                try:
-                    counts.update({k: int(v) for k, v in counter().items()})
-                except Exception:
-                    pass
+            total = max(0, int(getattr(runtime, "tracked_now", 0)))
+            # Identity is intentionally disabled. Until ReID/face identity returns,
+            # every current local track is classified as unknown in the UI.
+            known = 0
+            unknown = total
 
             heatmap_sources = {}
             source_states = getattr(runtime, "heatmap_source_states", None)
@@ -252,25 +240,16 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 except Exception:
                     heatmap_sources = {}
 
-            pose_metrics = {}
-            pose_sidecar = getattr(runtime, "pose_sidecar", None)
-            if pose_sidecar is not None:
-                try:
-                    pose_metrics = dict(pose_sidecar.metrics())
-                except Exception:
-                    pose_metrics = {}
-
             _put_status(
                 status_q,
                 "METRICS",
                 {
                     "cameras": rows,
-                    "total_people": int(counts.get("total", 0)),
-                    "known_people": int(counts.get("known", 0)),
-                    "unknown_people": int(counts.get("unknown", 0)),
-                    "global_identity": identity_metrics,
+                    "total_people": total,
+                    "known_people": known,
+                    "unknown_people": unknown,
+                    "identity_enabled": False,
                     "heatmap_sources": heatmap_sources,
-                    "pose": pose_metrics,
                     "focus_source": int(current_focus),
                 },
             )
@@ -281,7 +260,7 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
         _put_status(
             status_q,
             "STARTING",
-            f"professional 2x3 wall; active_cameras={camera_count}; aspect-safe focus",
+            f"core camera pipeline; active_cameras={camera_count}; pose=0 reid=0",
         )
         rc = runtime.run()
         _put_status(status_q, "STOPPED", f"exit={rc}")
@@ -333,8 +312,6 @@ class ProLiveVideoWall(LiveVideoWall):
         self.fullscreen_buttons: list[QToolButton] = []
         self.tile_borders: list[tuple[QFrame, QFrame, QFrame, QFrame]] = []
 
-        # The old bottom-left occupancy pills were demo room counts, not live
-        # camera analytics. Keep only CAM-ID and live FPS on the video itself.
         for badge in self.occupancy_labels:
             badge.hide()
 
@@ -502,8 +479,6 @@ class ProLiveVideoWall(LiveVideoWall):
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:
-        # Moving from the native wall onto our child action frame is still inside
-        # this widget. Do not hide the controls under the cursor.
         local = self.mapFromGlobal(QCursor.pos())
         if not self.rect().contains(local):
             self._set_hover_source(None)
