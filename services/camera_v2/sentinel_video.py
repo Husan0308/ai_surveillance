@@ -28,11 +28,7 @@ def _put_status(status_q, state: str, detail) -> None:
 
 
 class PipelineController:
-    """Queue/process lifecycle shared by the production Pro controller.
-
-    The old base controller launched an obsolete ReID runtime. Production now has
-    one launcher only: ProPipelineController in sentinel_video_pro.py.
-    """
+    """Queue/process lifecycle shared by the production Pro controller."""
 
     def __init__(self) -> None:
         self.ctx = mp.get_context("spawn")
@@ -97,6 +93,27 @@ class PipelineController:
         self.last_status = UiStatus("WAITING")
 
 
+class _GstVideoSurface(QWidget):
+    """Dedicated native X11 child owned only by GstVideoOverlay.
+
+    Qt UI chrome is deliberately not painted into this window. The old layout
+    bound nveglglessink to the same native QFrame that also painted camera labels,
+    headers and hover controls; Qt backing-store flushes could therefore replace
+    the live EGL image with the panel background. This child gives GStreamer its
+    own stable XID while the parent wall remains a normal Qt container.
+    """
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("gstVideoSurface")
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
+        self.setAttribute(Qt.WA_NativeWindow, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        _ = int(self.winId())
+
+
 class LiveVideoWall(QFrame):
     nativeReady = Signal(int)
     cameraDoubleClicked = Signal(int)
@@ -109,20 +126,17 @@ class LiveVideoWall(QFrame):
         self._metrics: dict = {"cameras": []}
         self._status_cache: dict[int, tuple[str, str]] = {}
 
-        # This QWidget is not a normal Qt-painted panel: nveglglessink owns its
-        # native X11 surface through GstVideoOverlay. Do not let the application
-        # QSS or Qt's background erase race with EGL video frames.
-        self.setObjectName("nativeVideoSurface")
+        # Container is Qt-owned. Only video_surface below is native/EGL-owned.
+        self.setObjectName("videoWallContainer")
         self.setFrameShape(QFrame.NoFrame)
         self.setAutoFillBackground(False)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setMinimumSize(640, 540)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
 
-        self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
-        self.setAttribute(Qt.WA_NativeWindow, True)
-        _ = int(self.winId())
+        self.video_surface = _GstVideoSurface(self)
+        self.video_surface.setGeometry(self.rect())
+        self.video_surface.lower()
 
         self.camera_labels: list[QLabel] = []
         self.status_labels: list[QLabel] = []
@@ -131,8 +145,8 @@ class LiveVideoWall(QFrame):
         for index, _camera in enumerate(self.cameras[:CAMERA_COUNT]):
             camera_label = QLabel(f"CAM-{index + 1:02d}", self)
             camera_label.setStyleSheet(
-                "background:rgba(8,14,20,224);color:#e7edf3;"
-                "border:1px solid rgba(80,105,125,120);border-radius:4px;"
+                "background:#081018;color:#e7edf3;"
+                "border:1px solid #50697d;border-radius:4px;"
                 "padding:3px 7px;font-weight:700;"
             )
             camera_label.adjustSize()
@@ -149,15 +163,22 @@ class LiveVideoWall(QFrame):
 
         self._layout_overlays()
 
+    def video_window_id(self) -> int:
+        return int(self.video_surface.winId())
+
     def showEvent(self, event):
         super().showEvent(event)
+        self.video_surface.show()
+        self.video_surface.lower()
         if not self._native_emitted:
             self._native_emitted = True
-            xid = int(self.winId())
-            QTimer.singleShot(100, lambda: self.nativeReady.emit(xid))
+            xid = self.video_window_id()
+            QTimer.singleShot(120, lambda: self.nativeReady.emit(xid))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.video_surface.setGeometry(self.rect())
+        self.video_surface.lower()
         self._layout_overlays()
 
     def _tile_rect(self, source_id: int) -> tuple[int, int, int, int]:
@@ -170,10 +191,14 @@ class LiveVideoWall(QFrame):
         return left, top, max(1, right - left), max(1, bottom - top)
 
     def _layout_overlays(self) -> None:
+        # Professional wall reparents grid labels into native header windows.
+        # Only lay out labels that still belong directly to this base container.
         for sid in range(min(CAMERA_COUNT, len(self.camera_labels))):
-            left, top, width, _height = self._tile_rect(sid)
             cam = self.camera_labels[sid]
             stat = self.status_labels[sid]
+            if cam.parentWidget() is not self or stat.parentWidget() is not self:
+                continue
+            left, top, width, _height = self._tile_rect(sid)
             cam.move(left + 10, top + 10)
             stat.adjustSize()
             stat.move(left + width - stat.width() - 10, top + 10)
@@ -214,9 +239,6 @@ class LiveVideoWall(QFrame):
                 text = "CONNECTING"
                 color = "#7e8c99"
             elif row.get("online"):
-                # The display does not need sub-frame FPS precision. Integer FPS
-                # prevents a 19.9/20.0/20.1 label from repainting the native video
-                # surface several times per second while the actual stream is fine.
                 text = f"{int(round(float(row.get('fps', 0.0))))} fps"
                 color = "#3ddc97"
             else:
