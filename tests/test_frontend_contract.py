@@ -16,6 +16,7 @@ def test_frontend_uses_api_for_metadata_and_ml_only_for_video_transport() -> Non
 
     assert "ApiClient(self.settings.api_base_url" in main
     assert "CameraWall(self.settings)" in main
+    assert "self.camera_wall.set_cameras(cameras)" in main
     assert '"/api/v1/ml/health"' in api_client
     assert '"/api/v1/cameras"' in api_client
     assert '"/api/v1/tracks"' in api_client
@@ -40,7 +41,7 @@ def test_frontend_uses_api_for_metadata_and_ml_only_for_video_transport() -> Non
         assert forbidden not in reader
 
 
-def test_native_video_has_latest_only_low_latency_sink_and_mjpeg_fallback() -> None:
+def test_native_video_uses_negotiated_render_profile_and_low_latency_sink() -> None:
     native = source("services/frontend/app/native_video.py")
     wall = source("services/frontend/app/camera_wall.py")
     capture = source("services/ml_service/app/deepstream/capture.py")
@@ -48,6 +49,11 @@ def test_native_video_has_latest_only_low_latency_sink_and_mjpeg_fallback() -> N
     assert '"wait-for-connection=false"' in capture
     assert '"leaky=downstream"' in capture
     assert '"shmsink"' in capture
+    assert '"video/x-raw,format=NV12"' in capture
+    assert "render_width" in wall
+    assert "render_height" in wall
+    assert "render_format" in wall
+    assert "pixel_format=pixel_format" in wall
     assert '"sync=false"' in native
     assert '"qos=false"' in native
     assert '"max-size-buffers=1"' in native
@@ -61,6 +67,7 @@ def test_track_boxes_are_vector_overlay_not_baked_into_native_video() -> None:
 
     assert "TrackOverlay" in wall
     assert "QPainter" in wall
+    assert 'text = f"Person T{track_id}' in wall
     assert "track_refresh_interval_ms" in main
     assert "self.api.refresh_tracks" in main
     assert "self.camera_wall.update_tracks" in main
@@ -87,3 +94,5 @@ def test_frontend_launcher_preflight_and_smokes_exist() -> None:
     assert 'f"/video/{camera_id}"' in smoke
     assert "FRONTEND_SMOKE=PASS" in smoke
     assert "SHM_VIDEO_SMOKE=PASS" in shm_smoke
+    assert "native=" in shm_smoke
+    assert "analysis=" in shm_smoke
