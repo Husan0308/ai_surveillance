@@ -24,7 +24,6 @@ def test_ml_has_one_latest_only_person_detector() -> None:
 
 
 def test_cuda_cubin_minor_compatibility() -> None:
-    # NVIDIA desktop binary compatibility permits sm_60 cubin on sm_61 GPU.
     assert _compatible_arches((6, 1), ("sm_50", "sm_60", "sm_70")) == ("sm_60",)
     assert _compatible_arches((7, 5), ("sm_70", "sm_75", "sm_80")) == ("sm_70", "sm_75")
     assert _compatible_arches((6, 0), ("sm_61", "sm_70")) == ()
@@ -47,10 +46,10 @@ def test_detection_stage_does_not_own_tracking_reid_or_face() -> None:
         assert text not in detector
 
 
-def test_detection_config_is_gpu_batched_and_overlayed() -> None:
+def test_detection_config_is_gpu_batched_and_fp32() -> None:
     config = source("config/cameras.yaml")
     runtime_config = source("services/ml_service/app/config.py")
-    publisher = source("services/ml_service/app/jpeg_publisher.py")
+    detector = source("services/ml_service/app/detector.py")
 
     for text in (
         "detection:",
@@ -62,8 +61,8 @@ def test_detection_config_is_gpu_batched_and_overlayed() -> None:
     ):
         assert text in config
     assert "class DetectionConfig" in runtime_config
-    assert "DetectionStore" in publisher
-    assert 'text = f"Person {detection.confidence:.2f}"' in publisher
+    assert '"classes": [0]' in detector
+    assert '"half": bool(config["half"])' not in detector
 
 
 def test_ml_exposes_detection_health_and_results() -> None:
@@ -73,4 +72,4 @@ def test_ml_exposes_detection_health_and_results() -> None:
     assert '"detector": current.detector_metrics()' in main
     assert '@app.get("/detections/{camera_id}")' in main
     assert 'runtime: Any | None = None' in main
-    assert '"people": int(detection.get("people", 0))' in pipeline
+    assert '"detection": detection' in pipeline
