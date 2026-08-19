@@ -40,8 +40,7 @@ deepstream:
   gpu_id: 0
   cudadec_memtype: 0
   rtsp_transport: auto
-  # Fallback only; each production camera above carries the old proven 20/80 ms
-  # per-camera jitter setting.
+  # Fallback only; production cameras carry their proven per-camera latency.
   latency_ms: 150
   drop_on_latency: true
   decoder_extra_surfaces: 4
@@ -57,13 +56,15 @@ detection:
   enabled: true
   model: yolo26m.pt
   device: cuda:0
-  width: 512
-  height: 288
+  # Restored from the old stable detection/smooth-camera baseline. The camera
+  # display stays 960x540 while YOLO receives a stride-friendly 736x416 tensor.
+  width: 736
+  height: 416
   batch_size: 2
   target_fps_per_camera: 4.0
-  # Preserve low-confidence boxes for ByteTrack stage-2 recovery.
-  confidence: 0.10
-  iou: 0.55
+  # Preserve low-score person candidates for ByteTrack stage-2 continuation.
+  confidence: 0.08
+  iou: 0.50
   max_detections: 30
   half: false
   overlay: true
@@ -72,7 +73,7 @@ detection:
 tracking:
   enabled: true
   track_high_thresh: 0.25
-  track_low_thresh: 0.10
+  track_low_thresh: 0.08
   new_track_thresh: 0.25
   track_buffer_seconds: 2.5
   match_thresh: 0.80
@@ -80,7 +81,6 @@ tracking:
 
 display:
   # Proven clear/smooth wall profile from the old sigbus-safe-mmap branch.
-  # NVDEC output is GPU-scaled to this size before the Python host copy.
   width: 960
   height: 540
   fps: 20
