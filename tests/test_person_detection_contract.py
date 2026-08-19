@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from services.ml_service.app.detector import _compatible_arches
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -19,6 +21,13 @@ def test_ml_has_one_latest_only_person_detector() -> None:
     assert 'name="person-detector-cuda"' in detector
     assert "self.detector = PersonDetector(settings.detection, self.stores)" in pipeline
     assert "PersonDetector(" not in source("services/ml_service/app/camera_worker.py")
+
+
+def test_cuda_cubin_minor_compatibility() -> None:
+    # NVIDIA desktop binary compatibility permits sm_60 cubin on sm_61 GPU.
+    assert _compatible_arches((6, 1), ("sm_50", "sm_60", "sm_70")) == ("sm_60",)
+    assert _compatible_arches((7, 5), ("sm_70", "sm_75", "sm_80")) == ("sm_70", "sm_75")
+    assert _compatible_arches((6, 0), ("sm_61", "sm_70")) == ()
 
 
 def test_detection_stage_does_not_own_tracking_reid_or_face() -> None:
