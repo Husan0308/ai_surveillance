@@ -16,7 +16,7 @@ from .sentinel_video_wall_ui import ProLiveVideoWall, ProPipelineController
 
 
 class MonitoringPage(QWidget):
-    """Professional live Monitoring page backed by current pipeline metrics."""
+    """Live camera monitoring page."""
 
     def __init__(self):
         super().__init__()
@@ -36,9 +36,6 @@ class MonitoringPage(QWidget):
         camera_column.setContentsMargins(0, 0, 0, 0)
         camera_column.setSpacing(0)
 
-        # No demo people are injected into the native wall. The wall starts with
-        # an opaque status cover so stale pixels from another QStackedWidget page
-        # can never appear while the DeepStream native surface is not PLAYING.
         self.wall = ProLiveVideoWall(self.camera_configs, [], self.camera_panel)
         self.wall.nativeReady.connect(self._start_or_bind)
         self.wall.cameraDoubleClicked.connect(self.expand)
@@ -55,7 +52,7 @@ class MonitoringPage(QWidget):
         identity_rail.setSpacing(10)
 
         summary = Panel()
-        summary.setMinimumHeight(190)
+        summary.setMinimumHeight(166)
         summary_layout = QVBoxLayout(summary)
         summary_layout.setContentsMargins(16, 14, 16, 14)
         summary_layout.setSpacing(9)
@@ -63,7 +60,7 @@ class MonitoringPage(QWidget):
         summary_head = QHBoxLayout()
         heading = QVBoxLayout()
         heading.setSpacing(2)
-        heading.addWidget(label("OCCUPANCY", "eyebrow"))
+        heading.addWidget(label("PEOPLE", "eyebrow"))
         heading.addWidget(label("Hozir binoda", "muted"))
         summary_head.addLayout(heading)
         summary_head.addStretch()
@@ -94,14 +91,6 @@ class MonitoringPage(QWidget):
         split.addWidget(known_box, 1)
         split.addWidget(unknown_box, 1)
         summary_layout.addLayout(split)
-
-        self.pipeline_detail = QLabel("DeepStream ishga tushmoqda")
-        self.pipeline_detail.setWordWrap(True)
-        self.pipeline_detail.setMaximumHeight(34)
-        self.pipeline_detail.setStyleSheet(
-            f"color:{C['muted']};font:9px 'DejaVu Sans Mono';"
-        )
-        summary_layout.addWidget(self.pipeline_detail)
         identity_rail.addWidget(summary)
 
         recent_panel = Panel()
@@ -121,13 +110,10 @@ class MonitoringPage(QWidget):
         empty_layout = QVBoxLayout(empty)
         empty_layout.setContentsMargins(14, 18, 14, 18)
         empty_layout.setSpacing(5)
-        empty_title = QLabel("Live recent-view feed")
+        empty_title = QLabel("Recent activity")
         empty_title.setStyleSheet("font-weight:700;")
         empty_layout.addWidget(empty_title)
-        empty_text = QLabel(
-            "Face crop/event source hali bu live wall metricsiga ulanmagan. "
-            "Demo ism yoki fake avatar ko'rsatilmaydi."
-        )
+        empty_text = QLabel("Hozircha recent-view ma'lumotlari yo'q.")
         empty_text.setWordWrap(True)
         empty_text.setStyleSheet(f"color:{C['muted']};font-size:10px;")
         empty_layout.addWidget(empty_text)
@@ -191,7 +177,6 @@ class MonitoringPage(QWidget):
             self.wall.set_pipeline_status(status)
 
             state = str(getattr(status, "state", "STARTING") or "STARTING").upper()
-            detail = str(getattr(status, "detail", "") or "").strip()
             if state in {"LIVE", "VIDEO_BOUND", "FOCUS", "HEATMAP"}:
                 badge_state = "live"
                 badge_text = "● LIVE"
@@ -207,25 +192,11 @@ class MonitoringPage(QWidget):
             self.live_badge.setText(badge_text)
             self.live_badge.setStyleSheet(self._status_style(badge_state))
 
-            if detail:
-                self.pipeline_detail.setText(detail)
-                self.pipeline_detail.setToolTip(detail)
-                self.pipeline_detail.setStyleSheet(
-                    f"color:{C['offline'] if badge_state == 'error' else C['muted']};"
-                    "font:9px 'DejaVu Sans Mono';"
-                )
-            else:
-                self.pipeline_detail.setText(
-                    "DeepStream live" if badge_state == "live" else "DeepStream ishga tushmoqda"
-                )
-                self.pipeline_detail.setToolTip("")
-
             known = max(0, int(metrics.get("known_people", 0) or 0))
-            unknown = max(0, int(metrics.get("unknown_people", 0) or 0))
-            total = max(0, int(metrics.get("total_people", known + unknown) or 0))
-            classified = known + unknown
-            if total < classified:
-                total = classified
+            total = max(0, int(metrics.get("total_people", 0) or 0))
+            if known > total:
+                known = total
+            unknown = max(0, total - known)
 
             self.total_value.setText(str(total))
             self.known_value.setText(str(known))
