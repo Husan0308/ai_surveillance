@@ -2,12 +2,12 @@ name: Sentinel UI Static
 
 on:
   push:
-    branches: [rebuild/gpu-v2-clean]
+    branches: [rebuild/gpu-v2-clean, agent/three-service-stabilization]
   pull_request:
     paths:
-      - 'services/camera_v2/sentinel_*.py'
-      - 'services/camera_v2/person_tracking_final.py'
-      - 'services/camera_v2/person_tracking_heatmap.py'
+      - 'services/**'
+      - 'tests/test_architecture_contract.py'
+      - 'docs/ARCHITECTURE_CONTRACT.md'
       - 'scripts/preflight_sentinel_ui.py'
       - 'scripts/preflight_camera_v2_core.py'
       - 'scripts/run_sentinel_vms.sh'
@@ -22,6 +22,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Install architecture test dependency
+        run: python -m pip install pytest
+
+      - name: Enforce three-service architecture
+        run: python -m pytest -q tests/test_architecture_contract.py
+
+      - name: Compile canonical service entrypoints
+        run: |
+          python -m py_compile \
+            services/ml_service/app/main.py \
+            services/api_service/app/main.py \
+            services/frontend/app/main.py
 
       - name: Compile Sentinel Python sources
         run: |
