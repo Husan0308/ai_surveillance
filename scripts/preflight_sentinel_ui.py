@@ -19,7 +19,7 @@ from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_R
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.19-r11"
+EXPECTED_BUILD = "2026.08.19-r12"
 
 
 def _fail(message: str) -> None:
@@ -253,7 +253,7 @@ def main_preflight() -> int:
             "export CAMERA_V2_WALL_WIDTH=1600",
             "export CAMERA_V2_WALL_HEIGHT=1350",
             "SENTINEL_DISPLAY session=",
-            "expected_ui=2026.08.19-r11",
+            "expected_ui=2026.08.19-r12",
         ),
         "launcher",
     )
