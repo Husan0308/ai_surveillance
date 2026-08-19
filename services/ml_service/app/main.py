@@ -39,7 +39,7 @@ async def lifespan(_app: FastAPI):
             current.stop()
 
 
-app = FastAPI(title="AI Surveillance ML Service", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="AI Surveillance ML Service", version="0.6.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -52,6 +52,7 @@ def health() -> dict:
         "camera_count": snapshot.camera_count,
         "online_camera_count": snapshot.online_camera_count,
         "detector": current.detector_metrics(),
+        "tracker": current.tracker_metrics(),
         "last_error": snapshot.last_error,
     }
 
@@ -68,6 +69,14 @@ def detections(camera_id: str) -> dict:
     if not current.has_camera(camera_id):
         raise HTTPException(status_code=404, detail=f"Unknown camera: {camera_id}")
     return current.detection_payload(camera_id)
+
+
+@app.get("/tracks/{camera_id}")
+def tracks(camera_id: str) -> dict:
+    current = _runtime()
+    if not current.has_camera(camera_id):
+        raise HTTPException(status_code=404, detail=f"Unknown camera: {camera_id}")
+    return current.tracking_payload(camera_id)
 
 
 @app.get("/video/{camera_id}")
