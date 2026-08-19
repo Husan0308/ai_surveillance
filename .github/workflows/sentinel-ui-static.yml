@@ -45,7 +45,7 @@ jobs:
           launcher = Path('scripts/run_sentinel_vms.sh').read_text()
           tracker = Path('services/camera_v2/person_tracking_final.py').read_text()
 
-          assert 'BUILD_TAG = "2026.08.19-r12"' in shell
+          assert 'BUILD_TAG = "2026.08.19-r13"' in shell
           assert 'QLabel("Estimated people")' in monitoring
           assert 'class _GstVideoSurface(QWidget)' in base_video
           assert 'self.setObjectName("gstVideoSurface")' in base_video
@@ -65,6 +65,7 @@ jobs:
           assert 'top + 34' in wall
           assert 'top + height - actions.height()' not in wall
 
+          assert 'expected_ui=2026.08.19-r13' in launcher
           assert 'export CAMERA_V2_TILER_COLUMNS=2' in launcher
           assert 'export CAMERA_V2_WALL_WIDTH=1600' in launcher
           assert 'export CAMERA_V2_WALL_HEIGHT=1350' in launcher
