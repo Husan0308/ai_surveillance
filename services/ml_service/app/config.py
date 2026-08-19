@@ -75,6 +75,14 @@ def _credential(
     return str(row_value or "")
 
 
+def _camera_uri(camera_id: str, row_value: str) -> str:
+    env_name = f"{camera_id.replace('-', '_')}_URI"
+    override = os.getenv(env_name)
+    if override is not None and override.strip():
+        return override.strip()
+    return str(row_value or "").strip()
+
+
 def load_settings(path: str | Path | None = None) -> Settings:
     config_path = Path(path or os.getenv("CAMERA_CONFIG", "config/cameras.yaml"))
     if not config_path.is_absolute():
@@ -104,7 +112,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
 
         # Codec is negotiated by DeepStream nvurisrcbin from the RTSP stream.
         # Keeping codec out of config avoids H264/H265 drift between NVR and app.
-        uri = str(row.get("uri", "")).strip()
+        uri = _camera_uri(camera_id, str(row.get("uri", "")))
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
 
