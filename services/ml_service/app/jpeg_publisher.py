@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 
 import cv2
 
-from services.ml_service.app.detector import DetectionStore
 from services.ml_service.app.latest_frame import LatestFrameStore
 
 try:
@@ -24,7 +24,7 @@ class LatestJpegPublisher:
         store: LatestFrameStore,
         fps: int,
         quality: int,
-        detections: DetectionStore | None = None,
+        detections: Any | None = None,
         overlay_enabled: bool = True,
         overlay_max_age_ms: int = 900,
     ) -> None:
@@ -100,7 +100,11 @@ class LatestJpegPublisher:
             if right <= left or bottom <= top:
                 continue
             cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 255), 2)
-            text = f"Person {detection.confidence:.2f}"
+            track_id = getattr(detection, "track_id", None)
+            if track_id is None:
+                text = f"Person {detection.confidence:.2f}"
+            else:
+                text = f"T{int(track_id)} {detection.confidence:.2f}"
             text_y = max(16, top - 6)
             cv2.putText(
                 image,
