@@ -7,15 +7,17 @@ RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
 # Local NvDCF tuning only. ReID/re-association is forcibly disabled below.
+# The detector is sparse, but stale visual tracks must not remain visible over
+# empty floor. Keep a short recovery window and require useful tracker confidence.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
-    "enableBboxUnClipping": "1",
+    "enableBboxUnClipping": "0",
     "maxTargetsPerStream": "24",
-    "minIouDiff4NewTarget": "0.90",
-    "minTrackerConfidence": "0.18",
-    "probationAge": "1",
-    "maxShadowTrackingAge": "28",
-    "earlyTerminationAge": "2",
+    "minIouDiff4NewTarget": "0.72",
+    "minTrackerConfidence": "0.28",
+    "probationAge": "2",
+    "maxShadowTrackingAge": "12",
+    "earlyTerminationAge": "1",
 }
 
 _OPTIONAL_PATCHES: dict[str, str] = {
@@ -24,16 +26,16 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "featureImgSizeLevel": "3",
     "searchRegionPaddingScale": "1",
     "associationMatcherType": "1",
-    "tentativeDetectorConfidence": "0.22",
-    "minMatchingScore4TentativeIou": "0.10",
-    "minMatchingScore4Overall": "0.06",
-    "minMatchingScore4SizeSimilarity": "0.05",
-    "minMatchingScore4Iou": "0.02",
-    "minMatchingScore4VisualSimilarity": "0.05",
+    "tentativeDetectorConfidence": "0.20",
+    "minMatchingScore4TentativeIou": "0.12",
+    "minMatchingScore4Overall": "0.08",
+    "minMatchingScore4SizeSimilarity": "0.08",
+    "minMatchingScore4Iou": "0.03",
+    "minMatchingScore4VisualSimilarity": "0.08",
     "usePrediction4Assoc": "1",
-    "minTrackingConfidenceDuringInactive": "0.35",
-    "minIou4TargetDuplicate": "0.98",
-    "targetDuplicateRunInterval": "10",
+    "minTrackingConfidenceDuringInactive": "0.40",
+    "minIou4TargetDuplicate": "0.94",
+    "targetDuplicateRunInterval": "5",
 }
 
 
@@ -98,11 +100,7 @@ def _remove_section_keys(lines: list[str], section: str, keys: set[str]) -> None
 
 
 def _disable_reid(lines: list[str]) -> None:
-    """Make the generated NvDCF profile strictly camera-local.
-
-    This is unconditional so stale CAMERA_V2_REID* shell variables cannot silently
-    re-enable model loading, TensorRT engines, galleries or trajectory reassociation.
-    """
+    """Make the generated NvDCF profile strictly camera-local."""
     _set_section_key(lines, "TrajectoryManagement", "enableReAssoc", "0")
     _set_section_key(lines, "ReID", "reidType", "0")
     _set_section_key(lines, "ReID", "outputReidTensor", "0")
@@ -151,7 +149,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing)
         )
 
-    # Shadow tracks remain internal; only real NvDCF outputs reach OSD/heatmap.
+    # Shadow tracks remain internal; only accepted current NvDCF outputs reach UI.
     _set_section_key(output, "TargetManagement", "outputShadowTracks", "0")
     _disable_reid(output)
 
@@ -160,7 +158,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     header = [
         f"# Auto-generated from {stock.name}.",
         "# Camera V2 local NvDCF profile; cross-camera ReID is intentionally absent.",
-        "# maxTargetsPerStream=24; close-person admission tuned; shadow output internal.",
+        "# maxShadowTrackingAge=12; outputShadowTracks=0; stale-track UI filtering enabled.",
         "# TrajectoryManagement.enableReAssoc=0; ReID.reidType=0; outputReidTensor=0.",
         "# No ReID model, TensorRT engine, gallery, sidecar or room topology is loaded.",
         "# Optional patches applied: "
