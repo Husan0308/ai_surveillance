@@ -5,6 +5,7 @@ import time
 
 import cv2
 
+from services.ml_service.app.detector import DetectionStore
 from services.ml_service.app.latest_frame import LatestFrameStore
 
 try:
@@ -17,9 +18,21 @@ except Exception:
 class LatestJpegPublisher:
     """One event-driven latest JPEG per camera; no presentation backlog."""
 
-    def __init__(self, camera_id: str, store: LatestFrameStore, fps: int, quality: int) -> None:
+    def __init__(
+        self,
+        camera_id: str,
+        store: LatestFrameStore,
+        fps: int,
+        quality: int,
+        detections: DetectionStore | None = None,
+        overlay_enabled: bool = True,
+        overlay_max_age_ms: int = 900,
+    ) -> None:
         self.camera_id = camera_id
         self.store = store
+        self.detections = detections
+        self.overlay_enabled = bool(overlay_enabled)
+        self.overlay_max_age_sec = max(0.0, float(overlay_max_age_ms) / 1000.0)
         self.interval = 1.0 / max(1, int(fps))
         self.quality = int(quality)
         self._stop = threading.Event()
@@ -59,7 +72,47 @@ class LatestJpegPublisher:
 
     def metrics(self) -> dict:
         with self._lock:
-            return {"encoded": self._encoded, "version": self._version, "last_encode_ms": self._last_encode_ms}
+            return {
+                "encoded": self._encoded,
+                "version": self._version,
+                "last_encode_ms": self._last_encode_ms,
+            }
+
+    def _image_for_encode(self, frame):
+        if not self.overlay_enabled or self.detections is None:
+            return frame.image
+        snapshot = self.detections.get(self.camera_id)
+        if snapshot is None or not snapshot.detections:
+            return frame.image
+
+        delta = float(frame.captured_monotonic) - float(snapshot.captured_monotonic)
+        if delta < -0.05 or delta > self.overlay_max_age_sec:
+            return frame.image
+
+        image = frame.image.copy()
+        height, width = image.shape[:2]
+        for detection in snapshot.detections:
+            x1, y1, x2, y2 = detection.xyxy
+            left = max(0, min(width - 1, int(round(x1))))
+            top = max(0, min(height - 1, int(round(y1))))
+            right = max(0, min(width - 1, int(round(x2))))
+            bottom = max(0, min(height - 1, int(round(y2))))
+            if right <= left or bottom <= top:
+                continue
+            cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 255), 2)
+            text = f"Person {detection.confidence:.2f}"
+            text_y = max(16, top - 6)
+            cv2.putText(
+                image,
+                text,
+                (left, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+        return image
 
     def _run(self) -> None:
         last_store_version = 0
@@ -79,7 +132,8 @@ class LatestJpegPublisher:
             last_store_version = store_version
             next_allowed = time.monotonic() + self.interval
             started = time.perf_counter()
-            ok, encoded = cv2.imencode(".jpg", frame.image, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+            image = self._image_for_encode(frame)
+            ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
             encode_ms = (time.perf_counter() - started) * 1000.0
             if not ok:
                 continue
