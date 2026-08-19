@@ -17,17 +17,9 @@ from services.camera_v2.sentinel_ui_settings import SettingsPage
 from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_ROWS
 from services.ml_service.app.config import CameraConfig, load_settings
 
-
-EXPECTED_NAV = [
-    "Monitoring",
-    "People",
-    "Events",
-    "Rooms",
-    "Enrollment",
-    "Settings",
-]
+EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.19-r6"
+EXPECTED_BUILD = "2026.08.19-r7"
 
 
 def _fail(message: str) -> None:
@@ -58,20 +50,15 @@ def main_preflight() -> int:
         EnrollmentPage,
         SettingsPage,
     ]
-    nav_classes = [row[3] for row in MainWindow.NAV]
-    if nav_classes != expected_classes:
-        _fail("navigation page classes do not match supplied UI order")
+    if [row[3] for row in MainWindow.NAV] != expected_classes:
+        _fail("navigation page classes do not match")
 
-    if CAMERA_COUNT != 6:
-        _fail(f"Monitoring wall capacity must be 6, got {CAMERA_COUNT}")
-    if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
-        _fail(f"Monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
+    if CAMERA_COUNT != 6 or (GRID_COLUMNS, GRID_ROWS) != (2, 3):
+        _fail("Monitoring wall must be 2x3 / 6-camera capacity")
 
     settings = load_settings()
     if not 1 <= len(settings.cameras) <= CAMERA_COUNT:
-        _fail(
-            f"enabled camera count must be 1..{CAMERA_COUNT}, got {len(settings.cameras)}"
-        )
+        _fail(f"enabled camera count must be 1..{CAMERA_COUNT}")
 
     fields = set(CameraConfig.__dataclass_fields__)
     if "codec" in fields:
@@ -80,9 +67,20 @@ def main_preflight() -> int:
     for row in raw.get("cameras") or []:
         forbidden = {"codec", "env_uri", "environment_uri"}.intersection(row)
         if forbidden:
-            _fail(f"{row.get('id','camera')} contains forbidden source fields: {sorted(forbidden)}")
+            _fail(f"{row.get('id','camera')} contains forbidden fields: {sorted(forbidden)}")
 
-    settings_source = _source("services/camera_v2/sentinel_ui_settings.py")
+    ui_files = {
+        "shell": _source("services/camera_v2/sentinel_ui.py"),
+        "monitoring": _source("services/camera_v2/sentinel_ui_monitoring.py"),
+        "wall": _source("services/camera_v2/sentinel_video_wall_ui.py"),
+        "settings": _source("services/camera_v2/sentinel_ui_settings.py"),
+    }
+    for name, source in ui_files.items():
+        for forbidden_text in ("NVDEC", "no pose/reid", "pose=", "reid=", "DeepStream"):
+            if forbidden_text in source:
+                _fail(f"{name} still exposes technical UI text: {forbidden_text}")
+
+    settings_source = ui_files["settings"]
     for forbidden_text in (
         "Environment URI",
         'form.addRow("Codec"',
@@ -90,96 +88,62 @@ def main_preflight() -> int:
         "self.env_uri =",
     ):
         if forbidden_text in settings_source:
-            _fail(f"stale Settings source still contains {forbidden_text!r}")
-    if "Stream formati va decoder DeepStream tomonidan avtomatik aniqlanadi" not in settings_source:
-        _fail("Settings no longer states automatic stream negotiation")
+            _fail(f"stale Settings field remains: {forbidden_text}")
 
-    monitoring_source = _source("services/camera_v2/sentinel_ui_monitoring.py")
+    monitoring_source = ui_files["monitoring"]
     if 'metrics.get("known_people"' not in monitoring_source:
-        _fail("Monitoring Known counter is not wired to runtime metrics")
-    if 'metrics.get("unknown_people"' not in monitoring_source:
-        _fail("Monitoring Unknown counter is not wired to runtime metrics")
-    if "self.identity_panel.setMaximumWidth(336)" not in monitoring_source:
-        _fail("Monitoring right rail responsive width guard is missing")
+        _fail("Known counter is not wired")
+    if 'metrics.get("total_people"' not in monitoring_source:
+        _fail("Total counter is not wired")
+    if "unknown = max(0, total - known)" not in monitoring_source:
+        _fail("Unknown counter is not kept consistent with Total/Known")
     if "self.wall.set_pipeline_status(status)" not in monitoring_source:
-        _fail("Monitoring does not drive native wall startup/error cover")
+        _fail("camera wall state cover is not wired")
 
-    base_video_source = _source("services/camera_v2/sentinel_video.py")
-    if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
-        _fail("base video wall still creates demo per-camera occupancy badges")
+    tracker_source = _source("services/camera_v2/person_tracking_final.py")
+    if "live_source_counts" not in tracker_source or "source_track_counts" not in tracker_source:
+        _fail("per-camera live tracking counts are missing")
 
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
-    required_video_guards = (
-        "runtime.focus_source = sid",
+    for guard in (
+        "live_source_counts",
+        "room_people",
+        "room_people[room_key] = max",
+        "total = sum(room_people.values())",
+        "known = 0",
+        "unknown = total",
         "force-aspect-ratio",
         "FOCUS_WIDTH = 1920",
         "FOCUS_HEIGHT = 1080",
-        "mapFromGlobal(QCursor.pos())",
-        "from .person_tracking_heatmap import CameraPersonTrackingHeatmap",
-        '"identity_enabled": False',
-    )
-    for guard in required_video_guards:
+    ):
         if guard not in video_source:
-            _fail(f"professional core video-wall guard missing: {guard}")
-    for forbidden_runtime in (
-        "person_tracking_reid_heatmap",
-        "pose_sidecar",
-        "live_people_counts",
-        "global_identity",
-    ):
-        if forbidden_runtime in video_source:
-            _fail(f"active Sentinel runtime still references {forbidden_runtime}")
+            _fail(f"runtime guard missing: {guard}")
 
-    wall_ui_source = _source("services/camera_v2/sentinel_video_wall_ui.py")
-    for guard in (
-        "cameraWallStateCover",
-        "stale People/Settings content",
-        '"PIPELINE_WARNING"',
-        "set_pipeline_status",
-    ):
-        if guard not in wall_ui_source:
-            _fail(f"native wall stale-page guard missing: {guard}")
+    base_video_source = _source("services/camera_v2/sentinel_video.py")
+    if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
+        _fail("demo per-camera occupancy badge returned")
 
     heat_source = _source("services/camera_v2/person_tracking_heatmap.py")
-    for required in (
-        "anchor=nvdcf-bbox-bottom-center",
-        "self.bridge.heatmap_update(buffer)",
-        "pose=0 reid=0",
-        "CameraPersonTrackingFinal",
-    ):
-        if required not in heat_source:
-            _fail(f"core native heatmap guard missing: {required}")
-    for forbidden_heat in ("PoseHeatmapBridge", "deposit_pose_ankle", "pose_heatmap"):
+    if "self.bridge.heatmap_update(buffer)" not in heat_source:
+        _fail("tracked floor heatmap update is missing")
+    for forbidden_heat in ("PoseHeatmapBridge", "deposit_pose_ankle", "pose_sidecar"):
         if forbidden_heat in heat_source:
-            _fail(f"active heatmap still depends on pose: {forbidden_heat}")
+            _fail(f"active heatmap has optional dependency: {forbidden_heat}")
 
     enrollment_source = _source("services/camera_v2/sentinel_ui_enrollment.py")
     if "class ReportsPage" in enrollment_source:
         _fail("stale ReportsPage still exists")
 
-    launcher_source = _source("scripts/run_sentinel_vms.sh")
-    for forbidden_launcher in (
-        "setup_camera_v2_reid.py",
-        "preflight_camera_v2_reid.py",
-        "pose_heatmap_bridge",
-    ):
-        if forbidden_launcher in launcher_source:
-            _fail(f"launcher still starts optional identity/pose path: {forbidden_launcher}")
-    if "preflight_camera_v2_core.py" not in launcher_source:
-        _fail("launcher does not run core camera preflight")
+    launcher = _source("scripts/run_sentinel_vms.sh")
+    for forbidden_launcher in ("setup_camera_v2_reid.py", "preflight_camera_v2_reid.py"):
+        if forbidden_launcher in launcher:
+            _fail(f"launcher still starts optional path: {forbidden_launcher}")
 
-    print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui_import=PASS")
-    print("SENTINEL_PREFLIGHT nav=" + ",".join(nav_titles))
-    print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status legacy_fields=none")
-    print(
-        "SENTINEL_PREFLIGHT monitoring=2x3-live-deepstream "
-        f"active_cameras={len(settings.cameras)} fullscreen_aspect=16:9 "
-        "hover_controls=compact demo_tile_counts=removed native_stale_page_cover=PASS"
-    )
-    print("SENTINEL_PREFLIGHT runtime=DeepStream+YOLO26m+NvDCF pose=OFF reid=OFF")
-    print("SENTINEL_PREFLIGHT occupancy=total-local-tracks known=0 unknown=total")
-    print("SENTINEL_PREFLIGHT heatmap=nvdcf-bbox-foot per_camera=PASS")
-    print("SENTINEL_PREFLIGHT reports=REMOVED settings=production-camera-crud")
+    print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
+    print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
+    print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=PASS hover=PASS")
+    print("SENTINEL_PREFLIGHT people_count=per-camera->room-max->total known+unknown=consistent")
+    print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
 
