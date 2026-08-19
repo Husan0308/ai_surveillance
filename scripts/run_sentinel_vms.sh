@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
-echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r8"
+echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r9"
 
 # Old shells/.env files can retain CAMERA_V2_* values from earlier experiments.
 # Preserve the known 4MP main-stream geometry through nvstreammux. Detector and
