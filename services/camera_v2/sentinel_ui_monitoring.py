@@ -1,22 +1,24 @@
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from services.ml_service.app.config import load_settings
 
-from .sentinel_ui_base import C, Panel, label, panel_layout
+from .sentinel_ui_base import C, Panel, label
 from .sentinel_video_wall_ui import ProLiveVideoWall, ProPipelineController
 
 
 class MonitoringPage(QWidget):
-    """Live camera monitoring page."""
+    """Compact production monitoring wall + occupancy rail."""
 
     def __init__(self):
         super().__init__()
@@ -27,8 +29,8 @@ class MonitoringPage(QWidget):
         self.camera_configs = list(load_settings().cameras)
 
         self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(12, 10, 12, 12)
-        self.layout.setSpacing(12)
+        self.layout.setContentsMargins(7, 6, 7, 7)
+        self.layout.setSpacing(8)
 
         self.camera_panel = QWidget(self)
         self.camera_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -45,24 +47,25 @@ class MonitoringPage(QWidget):
         self.layout.addWidget(self.camera_panel, 1)
 
         self.identity_panel = QWidget(self)
-        self.identity_panel.setMinimumWidth(292)
-        self.identity_panel.setMaximumWidth(336)
+        self.identity_panel.setFixedWidth(262)
         identity_rail = QVBoxLayout(self.identity_panel)
         identity_rail.setContentsMargins(0, 0, 0, 0)
-        identity_rail.setSpacing(10)
+        identity_rail.setSpacing(8)
 
         summary = Panel()
-        summary.setMinimumHeight(166)
+        summary.setFixedHeight(154)
+        summary.setStyleSheet(
+            "QFrame#panel{background:#0b1219;border:1px solid #1d2b37;border-radius:7px;}"
+        )
         summary_layout = QVBoxLayout(summary)
-        summary_layout.setContentsMargins(16, 14, 16, 14)
-        summary_layout.setSpacing(9)
+        summary_layout.setContentsMargins(13, 11, 13, 11)
+        summary_layout.setSpacing(7)
 
         summary_head = QHBoxLayout()
-        heading = QVBoxLayout()
-        heading.setSpacing(2)
-        heading.addWidget(label("PEOPLE", "eyebrow"))
-        heading.addWidget(label("Hozir binoda", "muted"))
-        summary_head.addLayout(heading)
+        summary_head.setSpacing(6)
+        heading = QLabel("People in Building")
+        heading.setStyleSheet("color:#e7edf3;font-size:11px;font-weight:750;")
+        summary_head.addWidget(heading)
         summary_head.addStretch()
         self.live_badge = QLabel("STARTING")
         self.live_badge.setStyleSheet(self._status_style("starting"))
@@ -70,19 +73,24 @@ class MonitoringPage(QWidget):
         summary_layout.addLayout(summary_head)
 
         total_row = QHBoxLayout()
-        total_row.setSpacing(7)
+        total_row.setSpacing(6)
         self.total_value = QLabel("0")
         self.total_value.setStyleSheet(
-            f"color:{C['text']};font-size:40px;font-weight:800;letter-spacing:-1px;"
+            f"color:{C['text']};font-size:35px;font-weight:850;letter-spacing:-1px;"
         )
         total_row.addWidget(self.total_value)
         total_caption = QLabel("people")
         total_caption.setStyleSheet(
-            f"color:{C['muted']};font-size:11px;padding-top:18px;"
+            f"color:{C['muted']};font-size:10px;padding-top:13px;"
         )
         total_row.addWidget(total_caption)
         total_row.addStretch()
         summary_layout.addLayout(total_row)
+
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background:#17232d;border:0;")
+        summary_layout.addWidget(divider)
 
         split = QHBoxLayout()
         split.setSpacing(8)
@@ -94,31 +102,54 @@ class MonitoringPage(QWidget):
         identity_rail.addWidget(summary)
 
         recent_panel = Panel()
-        recent_layout = panel_layout(recent_panel, (14, 14, 14, 14), 0)
+        recent_panel.setStyleSheet(
+            "QFrame#panel{background:#0b1219;border:1px solid #1d2b37;border-radius:7px;}"
+        )
+        recent_layout = QVBoxLayout(recent_panel)
+        recent_layout.setContentsMargins(12, 12, 12, 12)
+        recent_layout.setSpacing(0)
+
         recent_head = QHBoxLayout()
-        recent_head.addWidget(label("Recent Views", "sectionTitle"))
+        recent_title = QLabel("Recent Views")
+        recent_title.setStyleSheet("font-size:11px;font-weight:750;color:#e7edf3;")
+        recent_head.addWidget(recent_title)
         recent_head.addStretch()
-        self.active_count = label("0 active", "mono")
+        self.active_count = QLabel("0 active")
+        self.active_count.setStyleSheet(
+            f"color:{C['muted']};font:9px 'DejaVu Sans Mono';"
+        )
         recent_head.addWidget(self.active_count)
         recent_layout.addLayout(recent_head)
-        recent_layout.addSpacing(14)
+        recent_layout.addSpacing(10)
 
         empty = QFrame()
         empty.setStyleSheet(
-            "QFrame{background:#091018;border:1px dashed #22313f;border-radius:7px;}"
+            "QFrame{background:#091018;border:1px dashed #22313f;border-radius:6px;}"
         )
         empty_layout = QVBoxLayout(empty)
-        empty_layout.setContentsMargins(14, 18, 14, 18)
-        empty_layout.setSpacing(5)
+        empty_layout.setContentsMargins(12, 13, 12, 13)
+        empty_layout.setSpacing(3)
         empty_title = QLabel("Recent activity")
-        empty_title.setStyleSheet("font-weight:700;")
+        empty_title.setStyleSheet("font-size:10px;font-weight:700;color:#dbe5ec;")
         empty_layout.addWidget(empty_title)
-        empty_text = QLabel("Hozircha recent-view ma'lumotlari yo'q.")
+        empty_text = QLabel("Live face/event crop source ulanganda shu yerda real viewlar chiqadi.")
         empty_text.setWordWrap(True)
-        empty_text.setStyleSheet(f"color:{C['muted']};font-size:10px;")
+        empty_text.setStyleSheet(f"color:{C['muted']};font-size:9px;")
         empty_layout.addWidget(empty_text)
         recent_layout.addWidget(empty)
         recent_layout.addStretch()
+
+        self.view_events = QToolButton()
+        self.view_events.setText("View all events")
+        self.view_events.setCursor(Qt.PointingHandCursor)
+        self.view_events.setStyleSheet(
+            "QToolButton{background:#0a1118;color:#cbd6de;border:1px solid #1d2b37;"
+            "border-radius:6px;padding:7px 10px;font-size:10px;font-weight:650;}"
+            "QToolButton:hover{background:#111c25;border-color:#304555;color:#ffffff;}"
+        )
+        self.view_events.clicked.connect(self._open_events_page)
+        recent_layout.addWidget(self.view_events)
+
         identity_rail.addWidget(recent_panel, 1)
         self.layout.addWidget(self.identity_panel, 0)
 
@@ -128,44 +159,40 @@ class MonitoringPage(QWidget):
     def _status_style(state: str) -> str:
         state = str(state or "").lower()
         if state == "live":
-            color = C["known"]
-            bg = "#0b1c19"
-            border = "#174238"
+            color, bg, border = C["known"], "#0a1b17", "#174238"
         elif state in {"error", "offline"}:
-            color = C["offline"]
-            bg = "#211215"
-            border = "#4a2529"
+            color, bg, border = C["offline"], "#211215", "#4a2529"
         elif state == "warning":
-            color = C["unknown"]
-            bg = "#211a0e"
-            border = "#58461f"
+            color, bg, border = C["unknown"], "#211a0e", "#58461f"
         else:
-            color = C["unknown"]
-            bg = "#201a0e"
-            border = "#4b3b1d"
+            color, bg, border = C["unknown"], "#201a0e", "#4b3b1d"
         return (
             f"color:{color};background:{bg};border:1px solid {border};"
-            "border-radius:5px;padding:4px 7px;font:700 9px 'DejaVu Sans Mono';"
+            "border-radius:4px;padding:3px 6px;font:700 8px 'DejaVu Sans Mono';"
         )
 
     @staticmethod
     def _summary_metric(heading: str, color: str):
         box = QFrame()
-        box.setStyleSheet(
-            "QFrame{background:#0a1118;border:1px solid #1b2935;border-radius:6px;}"
-        )
+        box.setStyleSheet("QFrame{background:transparent;border:0;}")
         lay = QVBoxLayout(box)
-        lay.setContentsMargins(10, 8, 10, 8)
-        lay.setSpacing(2)
+        lay.setContentsMargins(5, 0, 5, 0)
+        lay.setSpacing(1)
         title = QLabel(heading)
         title.setStyleSheet(
-            f"color:{C['muted']};font:700 9px 'DejaVu Sans Mono';letter-spacing:1px;"
+            f"color:{C['muted']};font:700 8px 'DejaVu Sans Mono';letter-spacing:1px;"
         )
         metric = QLabel("0")
-        metric.setStyleSheet(f"color:{color};font-size:22px;font-weight:800;")
+        metric.setStyleSheet(f"color:{color};font-size:20px;font-weight:850;")
         lay.addWidget(title)
         lay.addWidget(metric)
         return metric, box
+
+    def _open_events_page(self) -> None:
+        top = self.window()
+        switcher = getattr(top, "switch_page", None)
+        if callable(switcher):
+            switcher(2)
 
     def _start_or_bind(self, xid: int) -> None:
         self.controller.start_or_bind(int(xid))
@@ -178,17 +205,13 @@ class MonitoringPage(QWidget):
 
             state = str(getattr(status, "state", "STARTING") or "STARTING").upper()
             if state in {"LIVE", "VIDEO_BOUND", "FOCUS", "HEATMAP"}:
-                badge_state = "live"
-                badge_text = "● LIVE"
+                badge_state, badge_text = "live", "● LIVE"
             elif state == "PIPELINE_WARNING":
-                badge_state = "warning"
-                badge_text = "WARN"
+                badge_state, badge_text = "warning", "WARN"
             elif state in {"ERROR", "STOPPED"}:
-                badge_state = "error"
-                badge_text = state
+                badge_state, badge_text = "error", state
             else:
-                badge_state = "starting"
-                badge_text = "STARTING"
+                badge_state, badge_text = "starting", "STARTING"
             self.live_badge.setText(badge_text)
             self.live_badge.setStyleSheet(self._status_style(badge_state))
 
@@ -232,8 +255,8 @@ class MonitoringPage(QWidget):
         self._focused_source = None
         self.wall.set_fullscreen_mode(False, None)
         self.identity_panel.show()
-        self.layout.setContentsMargins(12, 10, 12, 12)
-        self.layout.setSpacing(12)
+        self.layout.setContentsMargins(7, 6, 7, 7)
+        self.layout.setSpacing(8)
         self._set_app_fullscreen_shell(False)
 
     def open_fullscreen_grid(self) -> None:
