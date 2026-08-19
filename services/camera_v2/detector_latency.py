@@ -26,9 +26,13 @@ def _center(box: tuple[float, float, float, float]) -> tuple[float, float]:
     return ((x1 + x2) * 0.5, (y1 + y2) * 0.5)
 
 
+def _size(box: tuple[float, float, float, float]) -> tuple[float, float]:
+    return (max(1.0, box[2] - box[0]), max(1.0, box[3] - box[1]))
+
+
 def _diag(box: tuple[float, float, float, float]) -> float:
-    x1, y1, x2, y2 = box
-    return max(20.0, math.hypot(max(1.0, x2 - x1), max(1.0, y2 - y1)))
+    w, h = _size(box)
+    return max(20.0, math.hypot(w, h))
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -46,27 +50,28 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
 
 
 class DetectorLatencyCompensator:
-    """Project only stale detector observations to the live injection timestamp.
+    """Conservative projection of stale detector observations.
 
-    External YOLO runs asynchronously from the live DeepStream wall. The bbox was
-    measured on the captured frame, while nvtracker receives it roughly 100-220ms
-    later. For a walking target, injecting the old coordinates makes the detector
-    correction pull NvDCF behind the person. We estimate center velocity from two
-    detector observations and project only by the measured result age. NvDCF remains
-    the sole temporal tracker.
+    YOLO runs asynchronously and its result arrives after the captured frame. A
+    small center projection helps a genuinely walking person, but body pose changes
+    (sit/lean/turn) also move the detector-box center. Treating that as velocity can
+    push a fresh correction away from the actual person. Projection is therefore
+    gated by stable box geometry and bounded to a short interval; NvDCF remains the
+    only temporal tracker.
     """
 
     def __init__(self, frame_width: int, frame_height: int) -> None:
         self.frame_width = float(frame_width)
         self.frame_height = float(frame_height)
         self.history: dict[str, list[_HistoryDetection]] = {}
-        # Logs on the GTX 1050 Ti show detector result age commonly around
-        # 160-200ms. Allow the whole observed age to be compensated, with a slight
-        # >1 gain because the previous 0.88 gain still visibly trailed walkers.
-        self.max_projection_s = 0.28
-        self.projection_gain = 1.08
-        self.max_speed_x = self.frame_width * 1.25
-        self.max_speed_y = self.frame_height * 1.25
+        self.max_projection_s = 0.16
+        self.projection_gain = 0.62
+        self.max_speed_x = self.frame_width * 0.80
+        self.max_speed_y = self.frame_height * 0.80
+        self.min_motion_norm = 0.035
+        self.max_motion_norm = 0.42
+        self.min_size_ratio = 0.76
+        self.max_size_ratio = 1.32
 
     def prepare(
         self,
@@ -74,29 +79,28 @@ class DetectorLatencyCompensator:
         captured_t: float,
         boxes: list[tuple[float, float, float, float, float]],
     ) -> list[PreparedDetection]:
-        # A single sparse-detector miss must not erase velocity history. The next
-        # real detection can still be matched to the last observation (up to the
-        # existing 2s matching horizon), which prevents the correction box from
-        # falling behind after one missed YOLO sample.
         if not boxes:
             return []
 
         previous = self.history.get(cid, [])
-        current_plain = [(float(x1), float(y1), float(x2), float(y2)) for x1, y1, x2, y2, _ in boxes]
+        current_plain = [
+            (float(x1), float(y1), float(x2), float(y2))
+            for x1, y1, x2, y2, _ in boxes
+        ]
 
         candidates: list[tuple[float, int, int]] = []
         for ci, box in enumerate(current_plain):
             ccx, ccy = _center(box)
             for pi, old in enumerate(previous):
                 dt = captured_t - old.captured_t
-                if dt <= 0.03 or dt > 2.0:
+                if dt <= 0.03 or dt > 1.5:
                     continue
                 pcx, pcy = _center(old.box)
                 dist = math.hypot(ccx - pcx, ccy - pcy) / max(_diag(box), _diag(old.box))
                 iou = _iou(box, old.box)
-                if iou < 0.02 and dist > 0.72:
+                if iou < 0.03 and dist > 0.60:
                     continue
-                score = iou * 0.68 + max(0.0, 1.0 - dist) * 0.32
+                score = iou * 0.72 + max(0.0, 1.0 - dist) * 0.28
                 candidates.append((score, ci, pi))
 
         candidates.sort(reverse=True)
@@ -104,7 +108,7 @@ class DetectorLatencyCompensator:
         used_previous: set[int] = set()
         matches: dict[int, int] = {}
         for score, ci, pi in candidates:
-            if score < 0.12 or ci in used_current or pi in used_previous:
+            if score < 0.16 or ci in used_current or pi in used_previous:
                 continue
             used_current.add(ci)
             used_previous.add(pi)
@@ -120,13 +124,35 @@ class DetectorLatencyCompensator:
                 old = previous[pi]
                 dt = captured_t - old.captured_t
                 if dt > 0.03:
-                    ccx, ccy = _center((x1, y1, x2, y2))
+                    current_box = (x1, y1, x2, y2)
+                    ccx, ccy = _center(current_box)
                     pcx, pcy = _center(old.box)
-                    vx = max(-self.max_speed_x, min(self.max_speed_x, (ccx - pcx) / dt))
-                    vy = max(-self.max_speed_y, min(self.max_speed_y, (ccy - pcy) / dt))
+                    cw, ch = _size(current_box)
+                    pw, ph = _size(old.box)
+                    width_ratio = cw / max(1.0, pw)
+                    height_ratio = ch / max(1.0, ph)
+                    motion_norm = math.hypot(ccx - pcx, ccy - pcy) / max(
+                        _diag(current_box), _diag(old.box)
+                    )
+
+                    geometry_stable = (
+                        self.min_size_ratio <= width_ratio <= self.max_size_ratio
+                        and self.min_size_ratio <= height_ratio <= self.max_size_ratio
+                    )
+                    motion_plausible = self.min_motion_norm <= motion_norm <= self.max_motion_norm
+
+                    if geometry_stable and motion_plausible:
+                        raw_vx = (ccx - pcx) / dt
+                        raw_vy = (ccy - pcy) / dt
+                        vx = max(-self.max_speed_x, min(self.max_speed_x, raw_vx))
+                        vy = max(-self.max_speed_y, min(self.max_speed_y, raw_vy))
+
             output.append(PreparedDetection(x1, y1, x2, y2, confidence, vx, vy))
 
-        self.history[cid] = [_HistoryDetection(box=b, captured_t=captured_t) for b in current_plain]
+        self.history[cid] = [
+            _HistoryDetection(box=b, captured_t=captured_t)
+            for b in current_plain
+        ]
         return output
 
     def project(
