@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import os
 
-# Stronger primary-person detector tuning for reclining/foreshortened people.
+# Production detector/tracker geometry follows the 16:9 camera stream. 512x288
+# keeps NvDCF's internal frame exactly 16:9 while remaining lightweight on the
+# GTX 1050 Ti; both dimensions satisfy the tracker's 32-pixel alignment rule.
 os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
 os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.05")
 os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
+os.environ.setdefault("CAMERA_V2_TRACKER_WIDTH", "512")
+os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 
 from .heatmap_filter import NativeHeatmapFilter
 from .person_tracking_final import CameraPersonTrackingFinal
