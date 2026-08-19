@@ -66,6 +66,7 @@ jobs:
             services/ml_service/app/camera_worker.py \
             services/ml_service/app/detector.py \
             services/ml_service/app/tracking.py \
+            services/ml_service/app/presentation_smoother.py \
             services/ml_service/app/jpeg_publisher.py \
             services/ml_service/app/fallback_jpeg.py \
             services/ml_service/app/mmap_publisher.py \
@@ -75,6 +76,7 @@ jobs:
             services/api_service/app/config.py \
             services/api_service/app/ml_client.py \
             services/frontend/app/main.py \
+            services/frontend/app/operator_window.py \
             services/frontend/app/api_client.py \
             services/frontend/app/config.py \
             services/frontend/app/camera_wall.py \
