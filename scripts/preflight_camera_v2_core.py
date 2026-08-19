@@ -12,12 +12,12 @@ if str(ROOT) not in sys.path:
 # Importing the active runtime pins the canonical production geometry but does
 # not construct/start a GStreamer pipeline.
 import services.camera_v2.person_tracking_heatmap  # noqa: F401,E402
+from services.camera_v2.config import load_settings  # noqa: E402
 from services.camera_v2.detection import INFER_HEIGHT, INFER_WIDTH  # noqa: E402
 from services.camera_v2.heatmap_filter import ensure_heatmap_filter  # noqa: E402
 from services.camera_v2.native_bridge import ensure_bridge  # noqa: E402
 from services.camera_v2.person_tracking_final import CameraPersonTrackingFinal  # noqa: E402
 from services.camera_v2.sentinel_video import WALL_HEIGHT, WALL_WIDTH  # noqa: E402
-from services.ml_service.app.config import load_settings  # noqa: E402
 
 
 def main() -> int:
