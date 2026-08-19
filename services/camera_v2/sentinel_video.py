@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
-import os
 import queue
-import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
@@ -12,9 +10,6 @@ from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QWidget
 CAMERA_COUNT = 6
 GRID_COLUMNS = 2
 GRID_ROWS = 3
-# 2x3 wall with exact 16:9 tiles. 1600x1350 gives every camera an 800x450
-# presentation tile, avoiding the visibly soft 640x360 intermediate while keeping
-# render cost close to a single 1080p surface on the GTX 1050 Ti.
 WALL_WIDTH = 1600
 WALL_HEIGHT = 1350
 
@@ -32,206 +27,13 @@ def _put_status(status_q, state: str, detail) -> None:
         pass
 
 
-def _pipeline_process(window_id: int, command_q, status_q) -> None:
-    runtime = None
-    try:
-        if int(window_id) <= 0:
-            raise RuntimeError("invalid Qt native window id")
-
-        os.environ["CAMERA_V2_WALL_WIDTH"] = str(WALL_WIDTH)
-        os.environ["CAMERA_V2_WALL_HEIGHT"] = str(WALL_HEIGHT)
-
-        import gi
-
-        gi.require_version("Gst", "1.0")
-        gi.require_version("GstVideo", "1.0")
-        from gi.repository import Gst, GstVideo
-
-        from .person_tracking_reid import CameraPersonTrackingReID
-
-        runtime = CameraPersonTrackingReID()
-        if len(runtime.cameras) != CAMERA_COUNT:
-            raise RuntimeError(
-                f"Sentinel Monitoring expects {CAMERA_COUNT} enabled cameras, "
-                f"found {len(runtime.cameras)}"
-            )
-
-        runtime.wall_width = WALL_WIDTH
-        runtime.wall_height = WALL_HEIGHT
-        runtime.tiler.set_property("rows", GRID_ROWS)
-        runtime.tiler.set_property("columns", GRID_COLUMNS)
-        runtime.tiler.set_property("width", WALL_WIDTH)
-        runtime.tiler.set_property("height", WALL_HEIGHT)
-        if runtime.tiler.find_property("show-source") is not None:
-            runtime.tiler.set_property("show-source", -1)
-
-        current_xid = int(window_id)
-
-        def bind_overlay(overlay, xid: int | None = None) -> None:
-            nonlocal current_xid
-            target = int(current_xid if xid is None else xid)
-            if target <= 0:
-                return
-            current_xid = target
-            GstVideo.VideoOverlay.set_window_handle(overlay, target)
-            try:
-                GstVideo.VideoOverlay.handle_events(overlay, False)
-            except Exception:
-                pass
-
-        bind_overlay(runtime.sink, current_xid)
-
-        def on_sync_message(_bus, message, _data=None):
-            try:
-                prepare = GstVideo.is_video_overlay_prepare_window_handle_message(message)
-            except Exception:
-                structure = message.get_structure()
-                prepare = bool(
-                    structure and structure.get_name() == "prepare-window-handle"
-                )
-            if not prepare:
-                return Gst.BusSyncReply.PASS
-            try:
-                bind_overlay(message.src)
-                _put_status(status_q, "VIDEO_BOUND", f"xid={current_xid}")
-                return Gst.BusSyncReply.DROP
-            except Exception as exc:
-                _put_status(status_q, "ERROR", f"video overlay: {exc}")
-                return Gst.BusSyncReply.PASS
-
-        runtime.bus.set_sync_handler(on_sync_message, None)
-
-        def observe_bus(_bus, message):
-            if (
-                message.type == Gst.MessageType.STATE_CHANGED
-                and message.src == runtime.pipeline
-            ):
-                try:
-                    _old, new, _pending = message.parse_state_changed()
-                    if new == Gst.State.PLAYING:
-                        _put_status(
-                            status_q,
-                            "LIVE",
-                            "6-camera YOLO/NvDCF + async Global ReID pipeline PLAYING",
-                        )
-                except Exception:
-                    pass
-            elif message.type == Gst.MessageType.ERROR:
-                try:
-                    err, _debug = message.parse_error()
-                    src = message.src.get_name() if message.src else "unknown"
-                    _put_status(
-                        status_q,
-                        "PIPELINE_WARNING",
-                        f"{src}: {err.message}",
-                    )
-                except Exception:
-                    pass
-
-        runtime.bus.connect("message", observe_bus)
-
-        def poll_commands() -> bool:
-            stop_requested = False
-            latest_focus = None
-            got_focus = False
-            latest_bind = None
-            while True:
-                try:
-                    command, value = command_q.get_nowait()
-                except queue.Empty:
-                    break
-                if command == "stop":
-                    stop_requested = True
-                elif command == "focus":
-                    latest_focus = int(value)
-                    got_focus = True
-                elif command == "bind":
-                    latest_bind = int(value)
-
-            if latest_bind is not None and latest_bind > 0:
-                bind_overlay(runtime.sink, latest_bind)
-                _put_status(status_q, "VIDEO_BOUND", f"xid={latest_bind}")
-
-            if got_focus and runtime.tiler.find_property("show-source") is not None:
-                source_id = (
-                    latest_focus
-                    if latest_focus is not None
-                    and 0 <= latest_focus < CAMERA_COUNT
-                    else -1
-                )
-                runtime.tiler.set_property("show-source", source_id)
-                _put_status(status_q, "FOCUS", str(source_id))
-
-            if stop_requested:
-                runtime.stop()
-                return False
-            return True
-
-        last_frames = {camera.camera_id: 0 for camera in runtime.cameras}
-        last_seen = {camera.camera_id: 0.0 for camera in runtime.cameras}
-        last_metric_t = time.monotonic()
-
-        def publish_metrics() -> bool:
-            nonlocal last_metric_t
-            now = time.monotonic()
-            elapsed = max(0.20, now - last_metric_t)
-            last_metric_t = now
-            rows = []
-            for index, camera in enumerate(runtime.cameras):
-                stat = runtime.stats[camera.camera_id]
-                previous = int(last_frames.get(camera.camera_id, 0))
-                current = int(stat.frames)
-                delta = max(0, current - previous)
-                last_frames[camera.camera_id] = current
-                if delta > 0:
-                    last_seen[camera.camera_id] = now
-                online = now - last_seen.get(camera.camera_id, 0.0) <= 2.5
-                rows.append(
-                    {
-                        "id": camera.camera_id,
-                        "source_id": index,
-                        "fps": delta / elapsed,
-                        "online": online,
-                    }
-                )
-            identity_metrics = {}
-            identity = getattr(runtime, "identity", None)
-            if identity is not None:
-                try:
-                    identity_metrics = identity.metrics()
-                except Exception:
-                    identity_metrics = {}
-            _put_status(
-                status_q,
-                "METRICS",
-                {
-                    "cameras": rows,
-                    "total_people": int(getattr(runtime, "tracked_now", 0)),
-                    "global_identity": identity_metrics,
-                },
-            )
-            return True
-
-        runtime.GLib.timeout_add(50, poll_commands)
-        runtime.GLib.timeout_add(500, publish_metrics)
-        _put_status(
-            status_q,
-            "STARTING",
-            "2 columns x 3 rows; YOLO/NvDCF unchanged; Global ReID/Qwen bounded async",
-        )
-        rc = runtime.run()
-        _put_status(status_q, "STOPPED", f"exit={rc}")
-    except BaseException as exc:
-        _put_status(status_q, "ERROR", f"{type(exc).__name__}: {exc}")
-        try:
-            if runtime is not None:
-                runtime.stop()
-                runtime.pipeline.set_state(runtime.Gst.State.NULL)
-        except Exception:
-            pass
-
-
 class PipelineController:
+    """Queue/process lifecycle shared by the production Pro controller.
+
+    The old base controller launched an obsolete ReID runtime. Production now has
+    one launcher only: ProPipelineController in sentinel_video_pro.py.
+    """
+
     def __init__(self) -> None:
         self.ctx = mp.get_context("spawn")
         self.command_q = self.ctx.Queue(maxsize=64)
@@ -245,20 +47,7 @@ class PipelineController:
         self.status_q = self.ctx.Queue(maxsize=128)
 
     def start_or_bind(self, window_id: int) -> None:
-        xid = int(window_id)
-        if xid <= 0:
-            return
-        if self.process is not None and self.process.is_alive():
-            self.bind(xid)
-            return
-        self.process = self.ctx.Process(
-            target=_pipeline_process,
-            args=(xid, self.command_q, self.status_q),
-            name="sentinel-live-camera-wall",
-            daemon=False,
-        )
-        self.process.start()
-        self.last_status = UiStatus("STARTING")
+        raise NotImplementedError("Use ProPipelineController for the Sentinel production runtime")
 
     def bind(self, window_id: int) -> None:
         try:
@@ -323,18 +112,12 @@ class LiveVideoWall(QFrame):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
 
-        # Keep exactly one native child window for GstVideoOverlay. Without this
-        # guard Qt can promote QStackedWidget/MainWindow ancestors to native
-        # windows too, which breaks sibling stacking and leaves stale pixels from
-        # previously visible pages inside the Monitoring wall.
         self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
         self.setAttribute(Qt.WA_NativeWindow, True)
         _ = int(self.winId())
 
         self.camera_labels: list[QLabel] = []
         self.status_labels: list[QLabel] = []
-        # Kept as an empty compatibility list for ProLiveVideoWall. Old demo
-        # per-tile occupancy pills are intentionally removed from the base UI.
         self.occupancy_labels: list[QLabel] = []
 
         for index, _camera in enumerate(self.cameras[:CAMERA_COUNT]):
