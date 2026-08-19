@@ -74,7 +74,7 @@ jobs:
           for text in ('Environment URI', 'self.env_uri =', 'self.codec =', 'form.addRow("Codec"'):
               assert text not in settings, f'stale Settings field: {text}'
 
-          assert 'BUILD_TAG = "2026.08.19-r7"' in shell
+          assert 'BUILD_TAG = "2026.08.19-r11"' in shell
           assert 'metrics.get("total_people"' in monitoring
           assert 'metrics.get("known_people"' in monitoring
           assert 'unknown = max(0, total - known)' in monitoring
