@@ -30,6 +30,12 @@ def _source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _require_all(source: str, guards: tuple[str, ...], label: str) -> None:
+    for guard in guards:
+        if guard not in source:
+            _fail(f"{label} guard missing: {guard}")
+
+
 def main_preflight() -> int:
     if not callable(main):
         _fail("main entry point is missing")
@@ -63,11 +69,12 @@ def main_preflight() -> int:
     fields = set(CameraConfig.__dataclass_fields__)
     if "codec" in fields:
         _fail("CameraConfig still exposes codec")
+
     raw = yaml.safe_load((ROOT / "config" / "cameras.yaml").read_text(encoding="utf-8")) or {}
     for row in raw.get("cameras") or []:
         forbidden = {"codec", "env_uri", "environment_uri"}.intersection(row)
         if forbidden:
-            _fail(f"{row.get('id','camera')} contains forbidden fields: {sorted(forbidden)}")
+            _fail(f"{row.get('id', 'camera')} contains forbidden fields: {sorted(forbidden)}")
 
     ui_files = {
         "shell": _source("services/camera_v2/sentinel_ui.py"),
@@ -75,6 +82,7 @@ def main_preflight() -> int:
         "wall": _source("services/camera_v2/sentinel_video_wall_ui.py"),
         "settings": _source("services/camera_v2/sentinel_ui_settings.py"),
     }
+
     for name, source in ui_files.items():
         for forbidden_text in ("NVDEC", "no pose/reid", "pose=", "reid=", "DeepStream"):
             if forbidden_text in source:
@@ -91,58 +99,71 @@ def main_preflight() -> int:
             _fail(f"stale Settings field remains: {forbidden_text}")
 
     monitoring_source = ui_files["monitoring"]
-    if 'metrics.get("known_people"' not in monitoring_source:
-        _fail("Known counter is not wired")
-    if 'metrics.get("total_people"' not in monitoring_source:
-        _fail("Total counter is not wired")
-    if "unknown = max(0, total - known)" not in monitoring_source:
-        _fail("Unknown counter is not kept consistent with Total/Known")
-    if "self.wall.set_pipeline_status(status)" not in monitoring_source:
-        _fail("camera wall state cover is not wired")
+    _require_all(
+        monitoring_source,
+        (
+            'metrics.get("known_people"',
+            'metrics.get("total_people"',
+            "unknown = max(0, total - known)",
+            "self.wall.set_pipeline_status(status)",
+        ),
+        "monitoring",
+    )
 
     tracker_source = _source("services/camera_v2/person_tracking_final.py")
-    if "live_source_counts" not in tracker_source or "source_track_counts" not in tracker_source:
-        _fail("per-camera live tracking counts are missing")
+    _require_all(tracker_source, ("live_source_counts", "source_track_counts"), "people count")
 
     dynamic_source = _source("services/camera_v2/dynamic_wall.py")
-    for guard in (
-        'self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")',
-        "set_wall_output_geometry",
-        "pixel-aspect-ratio=1/1",
-        'self._require_link(self.tiler, self.wall_caps',
-    ):
-        if guard not in dynamic_source:
-            _fail(f"dynamic wall aspect guard missing: {guard}")
+    _require_all(
+        dynamic_source,
+        (
+            'self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")',
+            "set_wall_output_geometry",
+            "pixel-aspect-ratio=1/1",
+            'self._require_link(self.tiler, self.wall_caps',
+        ),
+        "dynamic wall aspect",
+    )
 
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
-    for guard in (
-        "live_source_counts",
-        "room_people",
-        "room_people[room_key] = max",
-        "total = sum(room_people.values())",
-        "known = 0",
-        "unknown = total",
-        "force-aspect-ratio",
-        "FOCUS_WIDTH = 1280",
-        "FOCUS_HEIGHT = 720",
-        "runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)",
-        "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
-        'runtime.tiler.set_property("rows", 1)',
-        'runtime.tiler.set_property("columns", 1)',
-    ):
-        if guard not in video_source:
-            _fail(f"runtime guard missing: {guard}")
+    _require_all(
+        video_source,
+        (
+            "live_source_counts",
+            "room_people",
+            "room_people[room_key] = max",
+            "total = sum(room_people.values())",
+            "known = 0",
+            "unknown = total",
+            "force-aspect-ratio",
+            "FOCUS_WIDTH = 1280",
+            "FOCUS_HEIGHT = 720",
+            "runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)",
+            "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
+            'runtime.tiler.set_property("rows", 1)',
+            'runtime.tiler.set_property("columns", 1)',
+        ),
+        "runtime",
+    )
 
+    # Check actual fullscreen HUD behavior, never prose/comments. Grid CAM/FPS
+    # widgets must be hidden in fullscreen and dedicated fixed-position HUD widgets
+    # must be shown instead. This avoids brittle case-sensitive comment matching.
     wall_source = ui_files["wall"]
-    for guard in (
-        "fullscreen_camera_label",
-        "fullscreen_fps_label",
-        "grid labels therefore never move in fullscreen",
-        "widget.setVisible(not active)",
-        "Do not call the parent implementation",
-    ):
-        if guard not in wall_source:
-            _fail(f"fullscreen fixed-HUD guard missing: {guard}")
+    _require_all(
+        wall_source,
+        (
+            'self.fullscreen_camera_label = QLabel("", self)',
+            'self.fullscreen_fps_label = QLabel("", self)',
+            "for widget in self.camera_labels:",
+            "for widget in self.status_labels:",
+            "widget.setVisible(not active)",
+            "self.fullscreen_camera_label.setText(camera_id)",
+            'self.fullscreen_fps_label.setText("LIVE")',
+            "self._layout_fullscreen_hud()",
+        ),
+        "fullscreen fixed-HUD",
+    )
 
     base_video_source = _source("services/camera_v2/sentinel_video.py")
     if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
@@ -156,24 +177,28 @@ def main_preflight() -> int:
             _fail(f"active heatmap has optional dependency: {forbidden_heat}")
 
     smoother_source = _source("services/camera_v2/native_display_smoother.c")
-    for guard in (
-        "#define DISPLAY_HOLD_FRAMES 8",
-        "center_alpha_1f = 0.96f",
-        "shrink_alpha_1f = 0.72f",
-        "jump_norm > 0.55f",
-    ):
-        if guard not in smoother_source:
-            _fail(f"tight bbox display guard missing: {guard}")
+    _require_all(
+        smoother_source,
+        (
+            "#define DISPLAY_HOLD_FRAMES 8",
+            "center_alpha_1f = 0.96f",
+            "shrink_alpha_1f = 0.72f",
+            "jump_norm > 0.55f",
+        ),
+        "tight bbox display",
+    )
 
     latency_source = _source("services/camera_v2/detector_latency.py")
-    for guard in (
-        "self.max_projection_s = 0.16",
-        "self.projection_gain = 0.62",
-        "geometry_stable",
-        "motion_plausible",
-    ):
-        if guard not in latency_source:
-            _fail(f"conservative detector projection guard missing: {guard}")
+    _require_all(
+        latency_source,
+        (
+            "self.max_projection_s = 0.16",
+            "self.projection_gain = 0.62",
+            "geometry_stable",
+            "motion_plausible",
+        ),
+        "conservative detector projection",
+    )
 
     enrollment_source = _source("services/camera_v2/sentinel_ui_enrollment.py")
     if "class ReportsPage" in enrollment_source:
