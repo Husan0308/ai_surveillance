@@ -19,7 +19,7 @@ from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.19-r8"
+EXPECTED_BUILD = "2026.08.19-r9"
 
 
 def _fail(message: str) -> None:
@@ -37,12 +37,7 @@ def _require_all(source: str, guards: tuple[str, ...], label: str) -> None:
 
 
 def main_preflight() -> int:
-    """Validate only the Sentinel UI/control contract.
-
-    Detector, NvDCF, native bridge and heatmap runtime validation belongs to
-    scripts/preflight_camera_v2_core.py, which the launcher runs immediately
-    after this script.
-    """
+    """Validate only the Sentinel UI/control contract."""
     if not callable(main):
         _fail("main entry point is missing")
     if BUILD_TAG != EXPECTED_BUILD:
@@ -108,6 +103,9 @@ def main_preflight() -> int:
     _require_all(
         monitoring_source,
         (
+            'self.identity_panel.setFixedWidth(262)',
+            'QLabel("People in Building")',
+            'QLabel("Recent Views")',
             'metrics.get("known_people"',
             'metrics.get("total_people"',
             "unknown = max(0, total - known)",
@@ -153,6 +151,9 @@ def main_preflight() -> int:
     _require_all(
         wall_source,
         (
+            "self.tile_headers: list[QFrame]",
+            "self.room_labels: list[QLabel]",
+            'header.setGeometry(left + 1, top + 1, max(1, width - 2), 27)',
             'self.fullscreen_camera_label = QLabel("", self)',
             'self.fullscreen_fps_label = QLabel("", self)',
             "for widget in self.camera_labels:",
@@ -162,7 +163,7 @@ def main_preflight() -> int:
             'self.fullscreen_fps_label.setText("LIVE")',
             "self._layout_fullscreen_hud()",
         ),
-        "fullscreen fixed-HUD",
+        "camera-card/fixed-HUD",
     )
 
     base_video_source = _source("services/camera_v2/sentinel_video.py")
@@ -189,7 +190,8 @@ def main_preflight() -> int:
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
-    print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=1080p-16:9 fixed-hud=PASS")
+    print("SENTINEL_PREFLIGHT monitoring=compact-vms 2x3 header-bars right-rail=262px")
+    print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
     print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
     print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
