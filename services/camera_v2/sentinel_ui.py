@@ -23,17 +23,17 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.19-r6"
+BUILD_TAG = "2026.08.19-r7"
 
 
 class MainWindow(QMainWindow):
     NAV = [
-        ("▣", "Monitoring", "DeepStream live wall · YOLO26m · NvDCF · heatmap", MonitoringPage),
+        ("▣", "Monitoring", "Live cameras · tracking · heatmap", MonitoringPage),
         ("♙", "People", f"{len(PEOPLE)} ta identity", PeoplePage),
         ("⌁", "Events", f"{len(EVENTS)} ta hodisa", EventsPage),
         ("▥", "Rooms", "Xonalar va camera topology", RoomsPage),
         ("♙+", "Enrollment", "10 ta yuz rasmi orqali ro'yxatga olish", EnrollmentPage),
-        ("⚙", "Settings", "Camera source management", SettingsPage),
+        ("⚙", "Settings", "Camera management", SettingsPage),
     ]
 
     def __init__(self):
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
         bt = QVBoxLayout()
         bt.setSpacing(0)
         bt.addWidget(label("SENTINEL VMS", "brand"))
-        bt.addWidget(label("edge ai · deepstream", "mono"))
+        bt.addWidget(label("video monitoring", "mono"))
         bl.addLayout(bt)
         bl.addStretch()
         side.addWidget(brand)
@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         nl.addStretch()
         side.addWidget(navwrap, 1)
 
-        build = label(f"build {BUILD_TAG}\ncore camera · no pose/reid", "mono")
+        build = label(f"build {BUILD_TAG}", "mono")
         build.setStyleSheet(
             f"border-top:1px solid {C['border']};padding:12px 14px;color:{C['muted']};"
         )
