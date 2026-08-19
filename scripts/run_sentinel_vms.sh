@@ -5,10 +5,11 @@ cd "$(dirname "$0")/.."
 
 HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
-echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.18-r4"
+echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.19-r5"
 
 # Fail immediately if the checkout contains a stale camera dialog, fake tile
-# occupancy badges, broken fullscreen/hover behavior or regressed ankle heatmap.
+# occupancy badges, broken fullscreen/hover behavior, native stale-page bleed,
+# or a regressed ankle heatmap contract.
 python scripts/preflight_sentinel_ui.py
 
 # Resolve/warm bounded side paths only after the UI/source-schema contract passes.
