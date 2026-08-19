@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -210,11 +211,22 @@ class MainWindow(QMainWindow):
 
 
 def run():
+    # GstVideoOverlay/nveglglessink is an X11 native-window path. Force this VMS
+    # shell onto XCB whenever an X display is available, including under XWayland.
+    # This also protects direct `python -m ...monitor_ui` launches that bypass the
+    # shell launcher.
+    if os.environ.get("DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("Sentinel VMS")
     app.setOrganizationName("Sentinel")
     app.setStyle("Fusion")
     app.setStyleSheet(APP_QSS)
+    print(
+        f"SENTINEL_QT platform={app.platformName()} display={os.environ.get('DISPLAY', 'unset')}",
+        flush=True,
+    )
     window = MainWindow()
     window.show()
     return app.exec()
