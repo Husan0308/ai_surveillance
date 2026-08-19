@@ -23,7 +23,9 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
     def __init__(self, cameras, people, parent: QWidget | None = None) -> None:
         super().__init__(cameras, people, parent)
         self._pipeline_state = "STARTING"
+        self._pipeline_detail = ""
         self._ever_live = False
+        self._fullscreen_status_key: tuple[str, str] | None = None
         self.tile_headers: list[QFrame] = []
         self.room_labels: list[QLabel] = []
 
@@ -211,7 +213,12 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
 
     def set_pipeline_status(self, status) -> None:
         state = str(getattr(status, "state", "STARTING") or "STARTING").upper()
+        detail = str(getattr(status, "detail", "") or "")
+        if state == self._pipeline_state and detail == self._pipeline_detail:
+            return
+
         self._pipeline_state = state
+        self._pipeline_detail = detail
         if state in self._LIVE_STATES:
             self._ever_live = True
 
@@ -225,6 +232,7 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
         self._fullscreen_active = bool(active)
         self._focused_source = int(source_id) if active and source_id is not None else None
         self._hover_source = None
+        self._fullscreen_status_key = None
 
         for widget in self.camera_labels:
             widget.setVisible(not active)
@@ -260,9 +268,9 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
         self._layout_fullscreen_hud()
 
     def update_metrics(self, metrics: dict) -> None:
+        # Base class now only relayouts a status label when its rendered state
+        # actually changes. Do not re-raise every grid header on every metrics tick.
         super().update_metrics(metrics)
-        self._refresh_tile_frames()
-        self._layout_overlays()
 
         if self._fullscreen_active and self._focused_source is not None:
             by_source = {
@@ -272,15 +280,20 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
             }
             row = by_source.get(self._focused_source)
             if row and row.get("online"):
-                self.fullscreen_fps_label.setText(f"{float(row.get('fps', 0.0)):.1f} fps")
-                self.fullscreen_fps_label.setStyleSheet(
-                    "background:rgba(6,12,18,232);color:#39d995;"
-                    "border-radius:4px;padding:4px 8px;font:700 9px 'DejaVu Sans Mono';"
-                )
+                text = f"{int(round(float(row.get('fps', 0.0))))} fps"
+                color = "#39d995"
             else:
-                self.fullscreen_fps_label.setText("OFFLINE")
-                self.fullscreen_fps_label.setStyleSheet(
-                    "background:rgba(6,12,18,232);color:#f06464;"
-                    "border-radius:4px;padding:4px 8px;font:700 9px 'DejaVu Sans Mono';"
-                )
+                text = "OFFLINE"
+                color = "#f06464"
+
+            key = (text, color)
+            if key == self._fullscreen_status_key:
+                return
+            self._fullscreen_status_key = key
+
+            self.fullscreen_fps_label.setText(text)
+            self.fullscreen_fps_label.setStyleSheet(
+                f"background:rgba(6,12,18,232);color:{color};"
+                "border-radius:4px;padding:4px 8px;font:700 9px 'DejaVu Sans Mono';"
+            )
             self._layout_fullscreen_hud()
