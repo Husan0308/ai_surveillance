@@ -45,6 +45,7 @@ def test_api_launcher_and_smoke_exist() -> None:
     smoke = source("scripts/smoke_api_service.py")
 
     assert "services.api_service.app.main" in launcher
-    assert '"/api/v1/cameras/{camera_id}/detections"' not in smoke
-    assert "/api/v1/cameras/" in smoke
+    assert 'f"/api/v1/cameras/{camera_id}/detections"' in smoke
+    assert 'f"/api/v1/cameras/{camera_id}/tracks"' in smoke
+    assert "CAM-DOES-NOT-EXIST" in smoke
     assert "API_SMOKE=PASS" in smoke
