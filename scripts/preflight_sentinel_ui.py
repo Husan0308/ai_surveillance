@@ -19,7 +19,7 @@ from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.19-r7"
+EXPECTED_BUILD = "2026.08.19-r8"
 
 
 def _fail(message: str) -> None:
@@ -104,6 +104,16 @@ def main_preflight() -> int:
     if "live_source_counts" not in tracker_source or "source_track_counts" not in tracker_source:
         _fail("per-camera live tracking counts are missing")
 
+    dynamic_source = _source("services/camera_v2/dynamic_wall.py")
+    for guard in (
+        'self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")',
+        "set_wall_output_geometry",
+        "pixel-aspect-ratio=1/1",
+        'self._require_link(self.tiler, self.wall_caps',
+    ):
+        if guard not in dynamic_source:
+            _fail(f"dynamic wall aspect guard missing: {guard}")
+
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
     for guard in (
         "live_source_counts",
@@ -113,8 +123,12 @@ def main_preflight() -> int:
         "known = 0",
         "unknown = total",
         "force-aspect-ratio",
-        "FOCUS_WIDTH = 1920",
-        "FOCUS_HEIGHT = 1080",
+        "FOCUS_WIDTH = 1280",
+        "FOCUS_HEIGHT = 720",
+        "runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)",
+        "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
+        'runtime.tiler.set_property("rows", 1)',
+        'runtime.tiler.set_property("columns", 1)',
     ):
         if guard not in video_source:
             _fail(f"runtime guard missing: {guard}")
@@ -141,7 +155,7 @@ def main_preflight() -> int:
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
-    print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=PASS hover=PASS")
+    print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=16:9-renegotiated hover=PASS")
     print("SENTINEL_PREFLIGHT people_count=per-camera->room-max->total known+unknown=consistent")
     print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
     print("SENTINEL_UI_PREFLIGHT=PASS")
