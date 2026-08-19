@@ -21,6 +21,7 @@ class CameraConfig:
     password: str
     name: str = ""
     room: str = ""
+    latency_ms: int | None = None
     enabled: bool = True
 
 
@@ -140,10 +141,15 @@ def load_settings(path: str | Path | None = None) -> Settings:
             raise ValueError(f"Duplicate camera id: {camera_id}")
         seen.add(camera_id)
 
-        # Codec is negotiated by DeepStream nvurisrcbin from the RTSP stream.
         uri = _camera_uri(camera_id, str(row.get("uri", "")))
         if not uri.startswith("rtsp://"):
             raise ValueError(f"{camera_id}: source must start with rtsp://")
+
+        camera_latency = row.get("latency_ms")
+        if camera_latency is not None:
+            camera_latency = int(camera_latency)
+            if camera_latency < 1:
+                raise ValueError(f"{camera_id}: latency_ms must be >= 1")
 
         cameras.append(
             CameraConfig(
@@ -163,6 +169,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 ),
                 name=str(row.get("name", camera_id)).strip() or camera_id,
                 room=str(row.get("room", "")).strip(),
+                latency_ms=camera_latency,
                 enabled=True,
             )
         )
@@ -212,10 +219,10 @@ def load_settings(path: str | Path | None = None) -> Settings:
     if startup_stagger_sec < 0:
         raise ValueError("deepstream.startup_stagger_sec must be >= 0")
 
-    width = int(display.get("width", 736))
-    height = int(display.get("height", 416))
+    width = int(display.get("width", 960))
+    height = int(display.get("height", 540))
     fps = int(display.get("fps", 20))
-    quality = int(display.get("jpeg_quality", 70))
+    quality = int(display.get("jpeg_quality", 88))
     if width <= 0 or height <= 0:
         raise ValueError("display width/height must be positive")
     if not 1 <= fps <= 60:
@@ -227,7 +234,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
     detect_height = int(detection.get("height", 288))
     detect_batch = int(detection.get("batch_size", 2))
     detect_fps = float(detection.get("target_fps_per_camera", 4.0))
-    detect_conf = float(detection.get("confidence", 0.20))
+    detect_conf = float(detection.get("confidence", 0.10))
     detect_iou = float(detection.get("iou", 0.55))
     detect_max = int(detection.get("max_detections", 30))
     overlay_max_age_ms = int(detection.get("overlay_max_age_ms", 900))
