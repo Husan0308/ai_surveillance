@@ -18,8 +18,8 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
     appear inside Monitoring camera tiles.
     """
 
-    _LIVE_STATES = {"LIVE", "VIDEO_BOUND", "FOCUS", "HEATMAP", "PIPELINE_WARNING"}
-    _ERROR_STATES = {"ERROR", "STOPPED"}
+    _LIVE_STATES = {"LIVE", "VIDEO_BOUND", "FOCUS", "HEATMAP"}
+    _ERROR_STATES = {"ERROR", "STOPPED", "PIPELINE_WARNING"}
 
     def __init__(self, cameras, people, parent: QWidget | None = None) -> None:
         super().__init__(cameras, people, parent)
@@ -99,7 +99,9 @@ class ProLiveVideoWall(_BaseProLiveVideoWall):
 
         self.state_cover.show()
         if state in self._ERROR_STATES:
-            self.state_eyebrow.setText("CAMERA PIPELINE ERROR")
+            self.state_eyebrow.setText(
+                "CAMERA PIPELINE WARNING" if state == "PIPELINE_WARNING" else "CAMERA PIPELINE ERROR"
+            )
             self.state_eyebrow.setStyleSheet(
                 f"color:{C['offline']};font:700 9px 'DejaVu Sans Mono';letter-spacing:1px;"
             )
