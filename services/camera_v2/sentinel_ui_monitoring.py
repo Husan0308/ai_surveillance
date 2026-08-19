@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from services.ml_service.app.config import load_settings
 
 from .sentinel_ui_base import C, Panel, label, panel_layout
-from .sentinel_video_pro import ProLiveVideoWall, ProPipelineController
+from .sentinel_video_wall_ui import ProLiveVideoWall, ProPipelineController
 
 
 class MonitoringPage(QWidget):
@@ -36,8 +36,9 @@ class MonitoringPage(QWidget):
         camera_column.setContentsMargins(0, 0, 0, 0)
         camera_column.setSpacing(0)
 
-        # No demo people are injected into the native wall. Tile counts are live
-        # only and rendered in the right occupancy rail.
+        # No demo people are injected into the native wall. The wall starts with
+        # an opaque status cover so stale pixels from another QStackedWidget page
+        # can never appear while the DeepStream native surface is not PLAYING.
         self.wall = ProLiveVideoWall(self.camera_configs, [], self.camera_panel)
         self.wall.nativeReady.connect(self._start_or_bind)
         self.wall.cameraDoubleClicked.connect(self.expand)
@@ -54,10 +55,10 @@ class MonitoringPage(QWidget):
         identity_rail.setSpacing(10)
 
         summary = Panel()
-        summary.setMinimumHeight(178)
+        summary.setMinimumHeight(190)
         summary_layout = QVBoxLayout(summary)
         summary_layout.setContentsMargins(16, 14, 16, 14)
-        summary_layout.setSpacing(10)
+        summary_layout.setSpacing(9)
 
         summary_head = QHBoxLayout()
         heading = QVBoxLayout()
@@ -93,6 +94,14 @@ class MonitoringPage(QWidget):
         split.addWidget(known_box, 1)
         split.addWidget(unknown_box, 1)
         summary_layout.addLayout(split)
+
+        self.pipeline_detail = QLabel("DeepStream ishga tushmoqda")
+        self.pipeline_detail.setWordWrap(True)
+        self.pipeline_detail.setMaximumHeight(34)
+        self.pipeline_detail.setStyleSheet(
+            f"color:{C['muted']};font:9px 'DejaVu Sans Mono';"
+        )
+        summary_layout.addWidget(self.pipeline_detail)
         identity_rail.addWidget(summary)
 
         recent_panel = Panel()
@@ -140,6 +149,10 @@ class MonitoringPage(QWidget):
             color = C["offline"]
             bg = "#211215"
             border = "#4a2529"
+        elif state == "warning":
+            color = C["unknown"]
+            bg = "#211a0e"
+            border = "#58461f"
         else:
             color = C["unknown"]
             bg = "#201a0e"
@@ -175,11 +188,16 @@ class MonitoringPage(QWidget):
         if event.timerId() == self.poll_timer:
             status, metrics = self.controller.poll()
             self.wall.update_metrics(metrics)
+            self.wall.set_pipeline_status(status)
 
             state = str(getattr(status, "state", "STARTING") or "STARTING").upper()
+            detail = str(getattr(status, "detail", "") or "").strip()
             if state in {"LIVE", "VIDEO_BOUND", "FOCUS", "HEATMAP"}:
                 badge_state = "live"
                 badge_text = "● LIVE"
+            elif state == "PIPELINE_WARNING":
+                badge_state = "warning"
+                badge_text = "WARN"
             elif state in {"ERROR", "STOPPED"}:
                 badge_state = "error"
                 badge_text = state
@@ -188,6 +206,19 @@ class MonitoringPage(QWidget):
                 badge_text = "STARTING"
             self.live_badge.setText(badge_text)
             self.live_badge.setStyleSheet(self._status_style(badge_state))
+
+            if detail:
+                self.pipeline_detail.setText(detail)
+                self.pipeline_detail.setToolTip(detail)
+                self.pipeline_detail.setStyleSheet(
+                    f"color:{C['offline'] if badge_state == 'error' else C['muted']};"
+                    "font:9px 'DejaVu Sans Mono';"
+                )
+            else:
+                self.pipeline_detail.setText(
+                    "DeepStream live" if badge_state == "live" else "DeepStream ishga tushmoqda"
+                )
+                self.pipeline_detail.setToolTip("")
 
             known = max(0, int(metrics.get("known_people", 0) or 0))
             unknown = max(0, int(metrics.get("unknown_people", 0) or 0))
