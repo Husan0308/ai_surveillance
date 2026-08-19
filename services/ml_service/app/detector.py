@@ -95,12 +95,7 @@ def _parse_sm_arch(value: str) -> tuple[int, int] | None:
 def _compatible_arches(
     capability: tuple[int, int], compiled_arches: tuple[str, ...]
 ) -> tuple[str, ...]:
-    """Return cubin targets that can execute on this desktop GPU.
-
-    CUDA desktop cubins are binary-compatible within one compute-capability
-    major family when the device minor version is >= the cubin target minor.
-    Therefore an sm_60 cubin is compatible with an sm_61 GPU.
-    """
+    """Return same-major cubins that can execute on this desktop GPU."""
     gpu_major, gpu_minor = capability
     compatible: list[str] = []
     for arch in compiled_arches:
@@ -114,7 +109,7 @@ def _compatible_arches(
 
 
 def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
-    """CUDA-only child process. A native crash here must not kill ml_service."""
+    """CUDA-only child. A native CUDA/model crash must not kill ml_service."""
     try:
         import os
 
@@ -144,11 +139,6 @@ def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
         except Exception:
             pass
 
-        # Do not require an exact get_arch_list() match. NVIDIA desktop cubins
-        # are compatible forward across minor revisions of the same major
-        # compute capability (sm_60 -> sm_61). If no compatible cubin appears
-        # in the list, the real kernel below is still authoritative because
-        # the wheel may contain PTX that the driver can JIT for this device.
         if compiled_arches and not compatible_arches:
             result_q.put(
                 {
@@ -167,6 +157,9 @@ def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
         del probe
 
         model = YOLO(str(config["model"]))
+        # Keep PyTorch inference FP32 by omission. Ultralytics 8.4 deprecated
+        # the legacy `half` predict flag; precision/quantization is now an
+        # export/runtime concern. Passing half=False still emits a warning.
         predict_kwargs: dict[str, Any] = {
             "imgsz": (int(config["height"]), int(config["width"])),
             "classes": [0],
@@ -177,7 +170,6 @@ def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
             "verbose": False,
             "stream": False,
             "rect": True,
-            "half": bool(config["half"]),
         }
 
         warm = [
@@ -253,13 +245,7 @@ def _detector_worker(config: dict[str, Any], job_q, result_q) -> None:
 
 
 class PersonDetector:
-    """Latest-only person detection with CUDA isolated in a spawned process.
-
-    Camera ingest, FastAPI and MJPEG live in the ml_service parent process.
-    The child owns PyTorch/Ultralytics/CUDA. No tracker, ReID or face logic is
-    present here. At most one inference batch is in flight, so a slow detector
-    can never create an unbounded frame backlog.
-    """
+    """Latest-only person detection with CUDA isolated in a spawned process."""
 
     def __init__(self, config, stores: dict[str, LatestFrameStore]) -> None:
         self.config = config
@@ -292,10 +278,9 @@ class PersonDetector:
 
     def stop(self) -> None:
         self._stop.set()
-        job_q = self._job_q
-        if job_q is not None:
+        if self._job_q is not None:
             try:
-                job_q.put_nowait(None)
+                self._job_q.put_nowait(None)
             except Exception:
                 pass
 
@@ -339,10 +324,7 @@ class PersonDetector:
         }
 
     def snapshot_payload(self, camera_id: str) -> dict:
-        return {
-            "detector": self.metrics(),
-            "result": self.results.payload(camera_id),
-        }
+        return {"detector": self.metrics(), "result": self.results.payload(camera_id)}
 
     def _set_state(self, state: str, error: str = "") -> None:
         with self._lock:
@@ -359,7 +341,6 @@ class PersonDetector:
             "confidence": float(self.config.confidence),
             "iou": float(self.config.iou),
             "max_detections": int(self.config.max_detections),
-            "half": bool(self.config.half),
         }
 
     def _start_worker(self) -> None:
@@ -380,10 +361,8 @@ class PersonDetector:
     def _consume_message(self, message: dict, next_due: dict[str, float]) -> bool:
         kind = message.get("type")
         if kind == "warning":
-            warning = str(message.get("warning") or "detector compatibility warning")
-            print(f"[DETECT] warning: {warning}", flush=True)
+            print(f"[DETECT] warning: {message.get('warning')}", flush=True)
             return False
-
         if kind == "ready":
             with self._lock:
                 self._metrics.state = "ready"
@@ -400,13 +379,11 @@ class PersonDetector:
                 flush=True,
             )
             return False
-
         if kind == "fatal":
             error = str(message.get("error") or "detector worker failed")
             self._set_state("error", error)
             print(f"[DETECT] worker error: {error}", flush=True)
             return False
-
         if kind != "result":
             return False
 
@@ -422,15 +399,16 @@ class PersonDetector:
                 )
                 for row in item.get("detections") or ()
             )
-            snapshot = DetectionSnapshot(
-                camera_id=camera_id,
-                frame_id=int(item["frame_id"]),
-                captured_monotonic=float(item["captured_monotonic"]),
-                inferred_monotonic=finished,
-                batch_ms=batch_ms,
-                detections=rows,
+            self.results.put(
+                DetectionSnapshot(
+                    camera_id=camera_id,
+                    frame_id=int(item["frame_id"]),
+                    captured_monotonic=float(item["captured_monotonic"]),
+                    inferred_monotonic=finished,
+                    batch_ms=batch_ms,
+                    detections=rows,
+                )
             )
-            self.results.put(snapshot)
             next_due[camera_id] = finished + 1.0 / max(
                 0.1, float(self.config.target_fps_per_camera)
             )
@@ -460,13 +438,11 @@ class PersonDetector:
 
         try:
             self._start_worker()
-
             while not self._stop.is_set():
-                result_q = self._result_q
-                if result_q is not None:
+                if self._result_q is not None:
                     while True:
                         try:
-                            message = result_q.get_nowait()
+                            message = self._result_q.get_nowait()
                         except queue.Empty:
                             break
                         except Exception:
@@ -528,12 +504,11 @@ class PersonDetector:
                         for camera_id, frame, _version in selected
                     ]
                 }
-                job_q = self._job_q
-                if job_q is None:
+                if self._job_q is None:
                     self._set_state("error", "detector job queue unavailable")
                     return
                 try:
-                    job_q.put_nowait(payload)
+                    self._job_q.put_nowait(payload)
                 except queue.Full:
                     self._stop.wait(0.005)
                     continue
