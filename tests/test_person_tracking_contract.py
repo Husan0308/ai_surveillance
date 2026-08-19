@@ -52,6 +52,14 @@ def test_detector_keeps_bytetrack_second_stage_candidates() -> None:
     assert "new_track_thresh: 0.25" in config
 
 
+def test_close_people_are_not_aggressively_suppressed_before_tracking() -> None:
+    config = source("config/cameras.yaml")
+
+    # Keep heavily-overlapping same-class person candidates alive for ByteTrack.
+    assert "iou: 0.70" in config
+    assert "max_detections: 50" in config
+
+
 def test_tracking_is_exposed_but_not_global_identity() -> None:
     main = source("services/ml_service/app/main.py")
     pipeline = source("services/ml_service/app/deepstream/pipeline.py")
@@ -73,3 +81,19 @@ def test_tracking_exposes_churn_diagnostics() -> None:
     assert "same_count_id_changes" in stability
     assert "created_delta" in stability
     assert "PERSON_TRACK_STABILITY=PASS" in stability
+
+
+def test_presentation_keeps_bytetrack_ids_and_resists_lag_or_overshoot() -> None:
+    smoother = source("services/ml_service/app/presentation_smoother.py")
+    mmap = source("services/ml_service/app/mmap_publisher.py")
+
+    assert "ByteTrack remains the only identity/association owner" in smoother
+    assert "np.linalg.inv" in smoother
+    assert "snap_distance_boxes" in smoother
+    assert "reversal_damping" in smoother
+    assert "0.82 * measurement[0]" in smoother
+    assert "max_prediction_shift_boxes" in smoother
+    assert "_visual_envelope" in mmap
+    assert "side_ratio = 0.10 if aspect >= 0.62 else 0.065" in mmap
+    assert "Never deduplicate presentation tracks here" in mmap
+    assert '"overlay": "bytetrack-id-kalman-presentation"' in mmap
