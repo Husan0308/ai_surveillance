@@ -63,6 +63,7 @@ class TrackerMetrics:
     backend: str = "bytetrack"
     updates: int = 0
     active_tracks: int = 0
+    created_tracks: int = 0
     last_update_ms: float = 0.0
     last_error: str = ""
 
@@ -97,6 +98,7 @@ class PersonTracker:
         self._metrics = TrackerMetrics(state="disabled" if not config.enabled else "stopped")
         self._camera_updates = {camera_id: 0 for camera_id in self.camera_ids}
         self._camera_active = {camera_id: 0 for camera_id in self.camera_ids}
+        self._camera_created = {camera_id: 0 for camera_id in self.camera_ids}
 
     @property
     def enabled(self) -> bool:
@@ -137,6 +139,7 @@ class PersonTracker:
         with self._lock:
             updates = int(self._camera_updates.get(camera_id, 0))
             active = int(self._camera_active.get(camera_id, 0))
+            created = int(self._camera_created.get(camera_id, 0))
             state = self._metrics.state
             error = self._metrics.last_error
         return {
@@ -144,6 +147,7 @@ class PersonTracker:
             "backend": "bytetrack",
             "updates": updates,
             "active_tracks": active,
+            "created_tracks": created,
             "frame_id": snapshot.frame_id if snapshot else 0,
             "last_error": error if state == "error" else "",
         }
@@ -232,6 +236,9 @@ class PersonTracker:
                             local_id = next_local[camera_id]
                             next_local[camera_id] += 1
                             mapping[raw_id_int] = local_id
+                            with self._lock:
+                                self._camera_created[camera_id] += 1
+                                self._metrics.created_tracks += 1
                         output.append(
                             Track(
                                 track_id=local_id,
