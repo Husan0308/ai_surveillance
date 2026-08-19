@@ -5,7 +5,7 @@ on:
     branches: [rebuild/gpu-v2-clean, agent/production-runtime-cleanup]
   pull_request:
     paths:
-      - 'services/camera_v2/**'
+      - 'services/**'
       - 'tests/**'
       - 'scripts/**'
       - 'config/cameras.yaml'
@@ -22,10 +22,13 @@ jobs:
           python-version: '3.12'
 
       - name: Install lightweight test dependencies
-        run: python -m pip install PyYAML python-dotenv
+        run: python -m pip install PyYAML python-dotenv ruff
 
       - name: Compile all retained Python sources
-        run: python -m compileall -q services/camera_v2 scripts tests
+        run: python -m compileall -q services scripts tests
+
+      - name: Scan for critical Python bugs
+        run: ruff check services scripts tests --select E9,F63,F7,F82
 
       - name: Run config and persistence unit tests
         run: python -m unittest discover -s tests -v
