@@ -1,144 +1,155 @@
 # AI Surveillance — Sentinel Camera V2
 
-Current production branch: `rebuild/gpu-v2-clean`.
+Production base branch: `rebuild/gpu-v2-clean`.
 
-The live camera path is intentionally kept simple and GPU-native:
+This repository now keeps one production path instead of several competing camera, API, frontend, ReID and reference-UI experiments.
+
+## Production path
 
 ```text
+config/cameras.yaml
+        ↓
 6 RTSP cameras
-    ↓
-DeepStream / NVDEC
-    ↓
-YOLO26m sparse person detection (704x384, micro-batch 2)
-    ↓
-per-camera NvDCF local tracking
-    ↓
-OSD / 2x3 Sentinel wall
+        ↓
+DeepStream nvurisrcbin / NVDEC
+        ↓
+latest-frame queues + nvstreammux
+        ↓
+YOLO person detection
+        ↓
+per-camera NvDCF tracking
+        ↓
+native metadata / labels
+        ↓
+optional camera-space heatmap
+        ↓
+nvmultistreamtiler
+        ↓
+Sentinel PySide6 monitoring wall
 ```
 
-Cross-camera identity is a separate bounded side path so a slow model cannot stall
-camera ingest, detection, NvDCF or display:
-
-```text
-NvDCF track metadata + existing sparse detector frame mailbox
-    ↓
-5–10 temporally diverse person crops
-    ↓
-quality / overlap / truncation / duplicate gates
-    ↓
-diversity-aware top-3 evidence
-    ↓
-CPU ReID embedding + gallery candidate ranking
-    ↓
-room/time hard constraints + runner-up margin
-    ↓
-TENTATIVE Global ID
-    ↓
-Qwen-VL OLD-vs-NEW visual verification (async, optional)
-    ↓
-fresh evidence votes
-    ↓
-CONFIRMED Global ID / LOST / SUSPECT / rollback
-```
-
-## Camera topology
-
-`config/cameras.yaml` is authoritative:
-
-- `Devs`: CAM-01 + CAM-04
-- `Entrance`: CAM-02 + CAM-05
-- `Main Rooms`: CAM-03 + CAM-06
-
-Two cameras in the same room may observe the same Global ID simultaneously. Two
-active tracks in the same camera may not share one Global ID, and one Global ID may
-not be active in two different rooms at the same time.
-
-## ReID safety rules
-
-- Local NvDCF IDs remain authoritative inside each camera.
-- A local ID break does not mean the Global ID is lost.
-- Short chair/desk occlusions keep the previous Global ID during the bounded display
-  hold; a newly created local track is matched back against the same Global gallery.
-- Tentative evidence is quarantined and cannot poison a confirmed gallery.
-- Appearance matching uses multi-shot evidence and a runner-up margin, not one crop.
-- Qwen returns `SAME`, `DIFFERENT`, or `UNCERTAIN`; it is independent evidence and
-  cannot bypass room/time hard constraints.
-- False merges are treated as more dangerous than temporary false splits.
-- Confirmed assignments can enter `SUSPECT` and be rolled back after repeated
-  contradictory evidence.
-
-## ReID backend
-
-`config/reid.yaml` defaults to `backend: auto` and keeps ReID on CPU so the GTX GPU
-remains available to the live detector/tracker path.
-
-- Preferred when installed: OSNet-AIN x1.0 / MSMT17 through `torchreid`.
-- Safe fallback: Intel/OpenVINO `person-reidentification-retail-0288` through OpenCV
-  DNN, also CPU-only.
-
-Model files are stored under `.runtime/camera_v2/models/reid/` and are gitignored.
-
-Prepare and warm the selected model once:
-
-```bash
-python scripts/setup_camera_v2_reid.py
-```
-
-The first setup needs working DNS/internet if the selected model is not already under
-`.runtime/camera_v2/models/reid/`. A successful setup prints
-`CAMERA_V2_REID_SETUP=PASS`. Production launch also runs this warmup check so ReID
-cannot silently start without a usable embedding model.
-
-## Qwen verifier
-
-Qwen is optional at runtime and never blocks video. Point it at a real
-OpenAI-compatible Qwen-VL server. The following is a shell-safe example for a server
-listening on local port 8080:
-
-```bash
-export QWEN_REID_URL="http://127.0.0.1:8080/v1"
-export QWEN_REID_MODEL="qwen3-vl"
-```
-
-Change `8080` and `qwen3-vl` to the actual port/model exposed by your server. Do not
-copy documentation placeholders such as `<PORT>` or `<model name>` directly into
-Bash; angle brackets are shell redirection syntax.
-
-Until a Qwen-VL server is running, leave `QWEN_REID_URL` unset. ReID remains active
-and the Qwen branch degrades to `UNCERTAIN` instead of blocking identity or video.
-
-The verifier receives one compact JPEG contact sheet containing up to three OLD
-Global-ID crops on the first row and up to three NEW-track crops on the second row.
-Timeouts, invalid JSON or unavailable serving degrade to `UNCERTAIN` rather than
-blocking or forcing an identity decision.
-
-## Preflight
-
-After pulling code or changing native ReID metadata code:
-
-```bash
-rm -f .runtime/camera_v2/libcamera_v2_meta.so
-python scripts/setup_camera_v2_reid.py
-python scripts/preflight_camera_v2_reid.py
-```
-
-The ReID preflight checks camera/room topology, synthetic Global-ID behavior,
-same-camera occlusion reconnect, hard room conflict rules, crop quality, ctypes/C
-ABI sizes and compiles the native DeepStream metadata bridge on the target machine.
-
-## Run Sentinel
+The production launcher is:
 
 ```bash
 bash scripts/run_sentinel_vms.sh
 ```
 
-The launcher warms/verifies the ReID embedding model, then runs both ReID and UI
-preflights before opening Sentinel.
+It runs the static Sentinel/UI preflight and Camera V2 core preflight before starting:
 
-## Important calibration note
+```bash
+python -m services.camera_v2.monitor_ui
+```
 
-Values in `config/reid.yaml` are conservative starting thresholds. Similarity scores
-are model- and camera-domain dependent, so final deployment thresholds must be
-calibrated from labeled positive pairs and hard-negative pairs captured by these
-actual six cameras. Do not copy thresholds from another ReID model or site and treat
-them as universal.
+## What is intentionally not claimed
+
+Cross-camera person ReID, Qwen identity verification and face recognition are **not wired into the current production runtime**. They were removed from this cleanup because the active launcher did not use them and keeping experimental implementations next to production made failures and ownership ambiguous.
+
+The current monitoring metrics therefore must not pretend that a detected person is known. Enrollment persists a worker profile and ten selected face images locally, but it does not yet make the live detector recognize that person.
+
+When identity is added again, it should be integrated as one tested production component with explicit persistence, thresholds, failure behavior and end-to-end tests instead of another parallel pipeline.
+
+## Camera configuration
+
+`config/cameras.yaml` is authoritative for camera ID, display name, room, enabled state and RTSP URI.
+
+Current topology:
+
+- `Devs`: CAM-01 + CAM-04
+- `Entrance`: CAM-02 + CAM-05
+- `Main Rooms`: CAM-03 + CAM-06
+
+The Settings page writes the same configuration file. Up to 16 cameras can be configured, while the current monitoring wall supports at most 6 enabled cameras.
+
+RTSP credentials belong in `.env`, never in Git:
+
+```bash
+cp .env.example .env
+python scripts/setup_rtsp_auth.py
+```
+
+Global variables:
+
+```text
+SURVEILLANCE_RTSP_USERNAME
+SURVEILLANCE_RTSP_PASSWORD
+```
+
+Optional per-camera overrides use names such as `CAM_01_RTSP_USERNAME` and `CAM_01_RTSP_PASSWORD`.
+
+## Python environment
+
+DeepStream, NVIDIA GStreamer plugins and PyGObject/GI are system dependencies and must match the installed NVIDIA stack. Use the machine's working CUDA-compatible PyTorch installation rather than blindly replacing it.
+
+Application Python dependencies are listed in `requirements.txt`.
+
+Typical setup:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Before running the wall, verify CUDA from the same environment:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no CUDA')"
+```
+
+## Preflight
+
+Run these from the repository root:
+
+```bash
+python scripts/preflight_sentinel_ui.py
+python scripts/preflight_camera_v2_core.py
+```
+
+For RTSP/NVR authentication debugging:
+
+```bash
+python scripts/probe_rtsp_server.py
+```
+
+For DeepStream plugin checks:
+
+```bash
+bash scripts/check_deepstream.sh
+```
+
+## Run
+
+```bash
+bash scripts/run_sentinel_vms.sh
+```
+
+The launcher requires an X11 display for the native `nveglglessink` video overlay used by the PySide6 wall.
+
+## Local persistence
+
+Sentinel local state is stored under `.runtime/sentinel/` and is gitignored:
+
+```text
+.runtime/sentinel/sentinel.db
+.runtime/sentinel/people/
+.runtime/sentinel/events/
+```
+
+Enrollment copies the selected images into this directory and writes the profile to SQLite. Events are displayed only when real runtime code records them; the UI no longer manufactures demo people or demo event history.
+
+## Main code ownership
+
+```text
+services/camera_v2/config.py                 camera/deepstream config
+services/camera_v2/detection.py              YOLO worker + detector metadata
+services/camera_v2/person_tracking.py        NvDCF tracking layer
+services/camera_v2/person_tracking_final.py  final tracking/display behavior
+services/camera_v2/person_tracking_heatmap.py camera-space heatmap layer
+services/camera_v2/sentinel_video_pro.py     production pipeline process/controller
+services/camera_v2/sentinel_ui*.py           PySide6 application/pages
+services/camera_v2/sentinel_store.py         SQLite/profile/event persistence
+services/camera_v2/native_*.c                 active DeepStream native helpers
+```
+
+Do not add a second API/frontend/camera pipeline unless there is a concrete requirement that the production runtime cannot satisfy. A second implementation without a migration plan increases maintenance cost and makes bug reports ambiguous.
