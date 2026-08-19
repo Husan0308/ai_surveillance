@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
 
 from services.frontend.app.api_client import ApiClient
@@ -53,9 +53,10 @@ class MainWindow(QMainWindow):
         self.track_timer.timeout.connect(self.api.refresh_tracks)
         self.track_timer.start()
 
-        # Native GStreamer renders frames without Qt frame copies. This timer only
-        # polls renderer health; it also drives the MJPEG fallback when necessary.
+        # Proven mmap wall behavior: poll quickly with a PreciseTimer, but each
+        # tile repaints only when its mmap sequence changes. No frame backlog.
         self.frame_timer = QTimer(self)
+        self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.setInterval(self.settings.frame_refresh_interval_ms)
         self.frame_timer.timeout.connect(self.camera_wall.refresh_frames)
         self.frame_timer.start()
@@ -85,8 +86,6 @@ class MainWindow(QMainWindow):
             self.ml_status.setText(f"ML: unavailable ({reason})")
         elif request_name == "cameras":
             self.camera_count.setText(f"Cameras: unavailable ({reason})")
-        # Track overlay polling is deliberately non-fatal. Video must keep
-        # rendering smoothly even if one metadata request is delayed.
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.camera_wall.close_readers()
