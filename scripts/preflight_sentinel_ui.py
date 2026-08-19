@@ -19,7 +19,7 @@ from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.19-r10"
+EXPECTED_BUILD = "2026.08.19-r11"
 
 
 def _fail(message: str) -> None:
@@ -114,9 +114,9 @@ def main_preflight() -> int:
         "monitoring",
     )
 
-    # Native video binding is intentionally self-healing. QWidget native ids may
-    # change during show/window-state transitions, and a stale GstVideoOverlay
-    # handle produces a black wall while analytics continue to run.
+    # The EGL wall owns one native child XID. It is rebound only when Qt actually
+    # changes that XID; periodic same-handle rebinding is forbidden because it can
+    # disturb an otherwise-live nveglglessink surface.
     _require_all(
         monitoring_source,
         (
@@ -125,15 +125,23 @@ def main_preflight() -> int:
             "QEvent.Type.Show",
             "QEvent.Type.ParentChange",
             "def _ensure_video_binding",
-            "def _schedule_rebind",
+            "def _schedule_binding_check",
             "SENTINEL_UI_BIND action=",
-            'self._ensure_video_binding(True, "watchdog-5s")',
-            'self._schedule_rebind("fullscreen-enter")',
-            'self._schedule_rebind("fullscreen-exit")',
-            'self._bind_window_id(int(xid), force=True, reason="native-ready")',
+            'self._schedule_binding_check("fullscreen-enter")',
+            'self._schedule_binding_check("fullscreen-exit")',
+            'self._bind_window_id(int(xid), reason="native-ready")',
+            "xid == self._last_bound_xid",
         ),
-        "native video rebind",
+        "deterministic native video binding",
     )
+    for forbidden_binding in (
+        "watchdog-5s",
+        "_bind_watchdog_ticks",
+        "def _schedule_rebind",
+        "_ensure_video_binding(True",
+    ):
+        if forbidden_binding in monitoring_source:
+            _fail(f"same-XID rebinding regression returned: {forbidden_binding}")
 
     video_source = _source("services/camera_v2/sentinel_video_pro.py")
     _require_all(
@@ -193,8 +201,6 @@ def main_preflight() -> int:
         "camera-card/native-wall/fixed-HUD",
     )
 
-    # A full-size Qt backing-store widget over GstVideoOverlay can leave stale
-    # pixels and hide otherwise-live camera frames. Never reintroduce that design.
     for forbidden in (
         "cameraWallStateCover",
         "state_cover.show()",
@@ -205,6 +211,23 @@ def main_preflight() -> int:
             _fail(f"native wall can be blocked by stale opaque overlay: {forbidden}")
 
     base_video_source = _source("services/camera_v2/sentinel_video.py")
+    _require_all(
+        base_video_source,
+        (
+            "self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)",
+            "self.setAttribute(Qt.WA_NativeWindow, True)",
+            "QTimer.singleShot(100, lambda: self.nativeReady.emit(xid))",
+        ),
+        "single native video child",
+    )
+    for forbidden_native in (
+        "WA_PaintOnScreen",
+        "WA_NoSystemBackground",
+        "def paintEngine(",
+    ):
+        if forbidden_native in base_video_source:
+            _fail(f"stale native backing-store hack returned: {forbidden_native}")
+
     if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
         _fail("demo per-camera occupancy badge returned")
 
@@ -221,6 +244,7 @@ def main_preflight() -> int:
             "exec python -m services.camera_v2.monitor_ui",
             "export QT_QPA_PLATFORM=xcb",
             "SENTINEL_DISPLAY session=",
+            "expected_ui=2026.08.19-r11",
         ),
         "launcher",
     )
@@ -231,8 +255,8 @@ def main_preflight() -> int:
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
     print("SENTINEL_PREFLIGHT monitoring=compact-vms 2x3 header-bars right-rail=262px")
-    print("SENTINEL_PREFLIGHT native_video=direct no-wall-cover single-hover=PASS")
-    print("SENTINEL_PREFLIGHT native_binding=xcb+winid-change+show+fullscreen+watchdog PASS")
+    print("SENTINEL_PREFLIGHT native_video=single-native-child no-stale-page-pixels PASS")
+    print("SENTINEL_PREFLIGHT native_binding=xcb+rebind-only-on-new-xid PASS")
     print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
     print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
