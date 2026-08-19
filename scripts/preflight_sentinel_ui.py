@@ -118,13 +118,19 @@ def main_preflight() -> int:
             "source_track_counts",
             'CAMERA_V2_DETECT_WIDTH", "736"',
             'CAMERA_V2_DETECT_HEIGHT", "416"',
+            'CAMERA_V2_TRACKER_WIDTH", "512"',
+            'CAMERA_V2_TRACKER_HEIGHT", "288"',
             'CAMERA_V2_MIN_DISPLAY_TRACK_CONF", "0.28"',
             '"maxShadowTrackingAge": "12"',
             '"minTrackingConfidenceDuringInactive": "0.40"',
-            "Always publish the detector decision, including an empty list",
+            "def _publish_prepared(",
+            "self.pending[cid] = (",
+            "list(prepared),",
         ),
         "current NvDCF tracking",
     )
+    if "if not prepared:\n            return" in tracker_source:
+        _fail("empty detector results are still being dropped before NvDCF")
 
     dynamic_source = _source("services/camera_v2/dynamic_wall.py")
     _require_all(
@@ -186,15 +192,15 @@ def main_preflight() -> int:
         if forbidden_heat in heat_source:
             _fail(f"active heatmap has optional dependency: {forbidden_heat}")
 
-    # The old downstream smoother generated held/predicted rectangles after NvDCF.
-    # Production must now use the current NvDCF bbox only.
+    # Validate executable behavior, not comments/prose. The compatibility symbol
+    # may remain, but it must be a strict no-op and must not contain any old hold/
+    # prediction implementation state.
     smoother_source = _source("services/camera_v2/native_display_smoother.c")
     _require_all(
         smoother_source,
         (
-            "Intentionally a no-op",
-            "do not create, move, resize, or hold any metadata",
-            "return buffer_ptr ? 0 : -1",
+            "int camera_v2_smooth_display_boxes(uintptr_t buffer_ptr)",
+            "return buffer_ptr ? 0 : -1;",
         ),
         "NvDCF-only display bbox",
     )
@@ -203,6 +209,8 @@ def main_preflight() -> int:
         "add_display_hold",
         "display_cx",
         "display_w",
+        "display_h",
+        "display_cy",
     ):
         if forbidden_smoother in smoother_source:
             _fail(f"custom display predictor returned: {forbidden_smoother}")
@@ -268,7 +276,7 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
     print("SENTINEL_PREFLIGHT monitoring=2x3 fullscreen=16:9-renegotiated fixed-hud=PASS")
     print("SENTINEL_PREFLIGHT bbox=current-nvdcf-only custom_hold=OFF tracker_conf=0.28 shadow_age=12")
-    print("SENTINEL_PREFLIGHT detector=736x416 empty_results=authoritative latency_projection=conservative")
+    print("SENTINEL_PREFLIGHT detector=736x416 tracker=512x288 empty_results=authoritative")
     print("SENTINEL_PREFLIGHT people_count=visible-tracks->room-max->total known+unknown=consistent")
     print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
     print("SENTINEL_UI_PREFLIGHT=PASS")
