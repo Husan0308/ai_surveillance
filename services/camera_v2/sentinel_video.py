@@ -166,6 +166,12 @@ class LiveVideoWall(QFrame):
     def video_window_id(self) -> int:
         return int(self.video_surface.winId())
 
+    def winId(self):
+        # Python callers historically ask the wall for its XID. Keep that API
+        # pointing at the dedicated GstVideoOverlay child so fullscreen/show
+        # binding checks can never rebind EGL to the Qt container itself.
+        return self.video_surface.winId()
+
     def showEvent(self, event):
         super().showEvent(event)
         self.video_surface.show()
