@@ -68,11 +68,30 @@ def test_mmap_wall_repaints_only_new_frames_and_keeps_mjpeg_fallback() -> None:
     assert "MmapVideoCanvas" in wall
     assert "int(version) == self._version" in wall
     assert "WA_OpaquePaintEvent" in wall
-    assert "SmoothPixmapTransform" in wall  # comment documents it is deliberately OFF
     assert "SmoothMjpegReader" in wall
     assert "_start_fallback" in wall
     assert "Qt.TimerType.PreciseTimer" in operator
     assert "frame_refresh_interval_ms" in operator
+
+
+def test_focused_camera_gets_hq_scaling_without_six_feed_copy_load() -> None:
+    wall = source("services/frontend/app/camera_wall.py")
+    mmap_reader = source("services/frontend/app/mmap_frame_reader.py")
+
+    # Normal wall stays on the cheap painter path; only the single focused tile
+    # enables Qt's higher-quality scaling filter.
+    assert "set_smooth_scaling" in wall
+    assert "QPainter.RenderHint.SmoothPixmapTransform" in wall
+    assert "set_presentation_mode" in wall
+    assert "_apply_presentation_policy" in wall
+
+    # Hidden tiles stop converting every mmap packet into a QImage while one
+    # camera is focused, then immediately jump to the newest sequence on resume.
+    assert "def set_active" in mmap_reader
+    assert "if not self._active.is_set()" in mmap_reader
+    assert "self.mmap_reader.set_active(bool(active))" in wall
+    assert "if self._focused_camera:" in wall
+    assert "self.tiles[self._focused_camera].refresh()" in wall
 
 
 def test_tracking_overlay_uses_bytetrack_ids_plus_presentation_smoother() -> None:
