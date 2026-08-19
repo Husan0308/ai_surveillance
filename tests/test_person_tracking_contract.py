@@ -50,3 +50,15 @@ def test_tracking_is_exposed_but_not_global_identity() -> None:
     assert '@app.get("/tracks/{camera_id}")' in main
     assert "self.tracker = PersonTracker(" in pipeline
     assert 'text = f"T{int(track_id)} {detection.confidence:.2f}"' in publisher
+
+
+def test_tracking_exposes_churn_diagnostics() -> None:
+    tracking = source("services/ml_service/app/tracking.py")
+    stability = source("scripts/smoke_person_tracking_stability.py")
+
+    assert "created_tracks: int = 0" in tracking
+    assert '"created_tracks": created' in tracking
+    assert "self._metrics.created_tracks += 1" in tracking
+    assert "same_count_id_changes" in stability
+    assert "created_delta" in stability
+    assert "PERSON_TRACK_STABILITY=PASS" in stability
