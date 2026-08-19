@@ -55,6 +55,8 @@ jobs:
               assert text not in settings, f'stale Settings field: {text}'
 
           assert 'BUILD_TAG = "2026.08.19-r11"' in shell
+          assert 'QLabel("Estimated people")' in monitoring
+          assert 'QLabel("People in Building")' not in monitoring
           assert 'metrics.get("total_people"' in monitoring
           assert 'metrics.get("known_people"' in monitoring
           assert 'unknown = max(0, total - known)' in monitoring
@@ -70,6 +72,10 @@ jobs:
           for forbidden in ('\n    codec:', '\n    env_uri:', '\n    environment_uri:'):
               assert forbidden not in camera_config, f'stale camera config field: {forbidden.strip()}'
 
+          for path in [*Path('services').rglob('*.py'), *Path('scripts').rglob('*.py'), *Path('tests').rglob('*.py')]:
+              source = path.read_text(encoding='utf-8')
+              assert 'services.ml_service' not in source, f'legacy ml_service import remains: {path}'
+
           for removed in (
               'services/camera_v2/data.py',
               'services/camera_v2/sentinel_exact.py',
@@ -79,6 +85,7 @@ jobs:
               'services/camera_v2/reid_runtime.py',
               'services/api_service',
               'services/frontend',
+              'services/ml_service',
           ):
               assert not Path(removed).exists(), f'legacy production path returned: {removed}'
 
