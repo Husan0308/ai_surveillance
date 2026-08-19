@@ -45,15 +45,43 @@ static float clampf_local(float value, float low, float high) {
     return value;
 }
 
-static float env_margin(const char *name, float fallback) {
+static float env_float_local(const char *name, float fallback, float low, float high) {
     const char *value = g_getenv(name);
     if (!value || !value[0]) return fallback;
     char *end = NULL;
     double parsed = g_ascii_strtod(value, &end);
     if (end == value || !isfinite(parsed)) return fallback;
-    if (parsed < 0.0) parsed = 0.0;
-    if (parsed > 0.25) parsed = 0.25;
+    if (parsed < low) parsed = low;
+    if (parsed > high) parsed = high;
     return (float) parsed;
+}
+
+static float env_margin(const char *name, float fallback) {
+    return env_float_local(name, fallback, 0.0f, 0.25f);
+}
+
+static int is_displayable_track(const NvDsObjectMeta *obj, float min_tracker_conf) {
+    if (!obj) return 0;
+    if (obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) return 0;
+    /* 191 was used by the old downstream display-hold helper. Never treat such
+     * metadata as a real current tracker observation, even if an old .so is loaded. */
+    if (obj->unique_component_id == 191) return 0;
+    if (obj->rect_params.width <= 1.0f || obj->rect_params.height <= 1.0f) return 0;
+    /* NvDCF exposes tracker_confidence. A negative value means the plugin did not
+     * provide one for this object, so do not reject solely on that sentinel value. */
+    if (obj->tracker_confidence >= 0.0f && obj->tracker_confidence < min_tracker_conf) return 0;
+    return 1;
+}
+
+static void hide_track(NvDsObjectMeta *obj) {
+    if (!obj) return;
+    obj->rect_params.border_width = 0;
+    obj->rect_params.has_bg_color = 0;
+    if (obj->text_params.display_text) {
+        g_free(obj->text_params.display_text);
+        obj->text_params.display_text = NULL;
+    }
+    obj->text_params.set_bg_clr = 0;
 }
 
 static int add_boxes_to_frame(NvDsBatchMeta *batch_meta,
@@ -141,27 +169,35 @@ int camera_v2_style_and_count_tracked(uintptr_t buffer_ptr) {
     const float side_margin = env_margin("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", 0.0f);
     const float top_margin = env_margin("CAMERA_V2_TRACK_BOX_TOP_MARGIN", 0.0f);
     const float bottom_margin = env_margin("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", 0.0f);
+    const float min_tracker_conf = env_float_local(
+        "CAMERA_V2_MIN_DISPLAY_TRACK_CONF", 0.28f, 0.0f, 1.0f
+    );
     int count = 0;
 
     for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) fnode->data;
         if (!frame_meta) continue;
 
-        float frame_w = (float) frame_meta->source_frame_width;
-        float frame_h = (float) frame_meta->source_frame_height;
-        if (frame_w <= 1.0f) frame_w = (float) frame_meta->pipeline_width;
-        if (frame_h <= 1.0f) frame_h = (float) frame_meta->pipeline_height;
+        /* rect_params at this point are in the mux/pipeline coordinate system. */
+        float frame_w = frame_meta->pipeline_width > 1 ? (float) frame_meta->pipeline_width
+                                                        : (float) frame_meta->source_frame_width;
+        float frame_h = frame_meta->pipeline_height > 1 ? (float) frame_meta->pipeline_height
+                                                         : (float) frame_meta->source_frame_height;
         if (frame_w <= 1.0f || frame_h <= 1.0f) continue;
 
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *) onode->data;
             if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
 
+            if (!is_displayable_track(obj, min_tracker_conf)) {
+                hide_track(obj);
+                continue;
+            }
+
             float left = obj->rect_params.left;
             float top = obj->rect_params.top;
             float width = obj->rect_params.width;
             float height = obj->rect_params.height;
-            if (width <= 1.0f || height <= 1.0f) continue;
 
             float new_left = left - width * side_margin;
             float new_top = top - height * top_margin;
@@ -192,14 +228,17 @@ int camera_v2_copy_tracks(uintptr_t buffer_ptr,
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
     if (!batch_meta) return -1;
 
+    const float min_tracker_conf = env_float_local(
+        "CAMERA_V2_MIN_DISPLAY_TRACK_CONF", 0.28f, 0.0f, 1.0f
+    );
     int count = 0;
     for (NvDsMetaList *fnode = batch_meta->frame_meta_list; fnode != NULL; fnode = fnode->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) fnode->data;
         if (!frame_meta) continue;
         for (NvDsMetaList *onode = frame_meta->obj_meta_list; onode != NULL; onode = onode->next) {
             NvDsObjectMeta *obj = (NvDsObjectMeta *) onode->data;
-            if (!obj || obj->class_id != 0 || obj->object_id == UNTRACKED_OBJECT_ID) continue;
-            if (obj->rect_params.width <= 1.0f || obj->rect_params.height <= 1.0f) continue;
+            if (!is_displayable_track(obj, min_tracker_conf)) continue;
+            if (obj->rect_params.border_width == 0) continue;
             if (count >= max_rows) return count;
             CameraV2TrackRow *dst = &rows[count++];
             dst->object_id = (uint64_t)obj->object_id;
