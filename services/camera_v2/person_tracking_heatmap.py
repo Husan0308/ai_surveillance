@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import os
 
+# Pose recovery is disabled, so keep the stronger primary-person detector tuning
+# that was already useful for reclining/foreshortened people.
+os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "736")
+os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "416")
+os.environ.setdefault("CAMERA_V2_DETECT_CONF", "0.05")
+os.environ.setdefault("CAMERA_V2_MAX_DET", "40")
+
 from .heatmap_filter import NativeHeatmapFilter
 from .person_tracking_final import CameraPersonTrackingFinal
 
@@ -71,8 +78,6 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
             min(96, int(os.environ.get("CAMERA_V2_HEATMAP_POINTS", "84"))),
         )
 
-        # NativeMetaBridge is created by the base tracker runtime. Reuse it; no
-        # second model, second decoder, pose process, or ReID worker is started.
         self.bridge.configure_heatmap(
             deposit=deposit,
             decay=decay,
@@ -126,8 +131,6 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
         return mask
 
     def _tracker_probe(self, pad, info):
-        # First let the proven tracking path style/count NvDCF targets. Then feed
-        # exactly those tracked people into the native heatmap accumulator.
         result = super()._tracker_probe(pad, info)
         if not self.heatmap_enabled:
             return result
@@ -158,17 +161,11 @@ class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
     def _heatmap_render_probe(self, _pad, info):
         buffer = info.get_buffer()
         enabled_mask = self._enabled_mask()
-        if (
-            not self.heatmap_enabled
-            or enabled_mask == 0
-            or buffer is None
-        ):
+        if not self.heatmap_enabled or enabled_mask == 0 or buffer is None:
             return self.Gst.PadProbeReturn.OK
 
         focus_source = self._current_focus_source()
         self.focus_source = focus_source
-        # The native density renderer is camera-grid aware. Keep focused video
-        # geometrically clean instead of painting heat from a wrong tile mapping.
         if focus_source >= 0:
             return self.Gst.PadProbeReturn.OK
 
