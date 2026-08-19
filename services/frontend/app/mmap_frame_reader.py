@@ -9,11 +9,19 @@ from shared.mmap_frame import MmapFrameReader
 
 
 class SmoothMmapFrameReader:
-    """Decode-free latest-frame reader for the local Qt camera wall."""
+    """Decode-free latest-frame reader for the local Qt camera wall.
+
+    The reader can be suspended while its camera tile is hidden. This avoids
+    copying five 960x540 BGR frames into QImage objects on every camera cadence
+    while one camera is focused/fullscreen. Re-activation remains latest-only:
+    the next snapshot jumps straight to the newest committed mmap sequence.
+    """
 
     def __init__(self, camera_id: str):
         self.camera_id = str(camera_id)
         self._stop = threading.Event()
+        self._active = threading.Event()
+        self._active.set()
         self._lock = threading.Lock()
         self._image: QImage | None = None
         self._version = -1
@@ -27,6 +35,7 @@ class SmoothMmapFrameReader:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._active.set()
         self._thread = threading.Thread(
             target=self._run,
             name=f"ui-mmap-{self.camera_id}",
@@ -34,8 +43,19 @@ class SmoothMmapFrameReader:
         )
         self._thread.start()
 
+    def set_active(self, active: bool) -> None:
+        if active:
+            self._active.set()
+        else:
+            self._active.clear()
+
+    @property
+    def active(self) -> bool:
+        return self._active.is_set()
+
     def stop(self) -> None:
         self._stop.set()
+        self._active.set()
         if self._thread:
             self._thread.join(1.0)
 
@@ -49,6 +69,10 @@ class SmoothMmapFrameReader:
         last_change = time.monotonic()
         try:
             while not self._stop.is_set():
+                if not self._active.is_set():
+                    self._stop.wait(0.04)
+                    continue
+
                 if not reader.mapping_is_current():
                     if not reader.attach():
                         self.reconnects += 1
