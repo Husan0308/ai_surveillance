@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - 'services/**'
+      - 'shared/**'
       - 'tests/test_architecture_contract.py'
       - 'tests/test_ml_service_contract.py'
       - 'tests/test_person_detection_contract.py'
@@ -23,7 +24,7 @@ on:
       - 'scripts/smoke_person_tracking_stability.py'
       - 'scripts/smoke_api_service.py'
       - 'scripts/smoke_frontend_integration.py'
-      - 'scripts/smoke_shm_video.py'
+      - 'scripts/smoke_mmap_video.py'
       - 'scripts/run_ml_service.sh'
       - 'scripts/run_api_service.sh'
       - 'scripts/run_frontend.sh'
@@ -58,12 +59,16 @@ jobs:
       - name: Compile canonical service entrypoints
         run: |
           python -m py_compile \
+            shared/mmap_frame.py \
+            shared/safe_mmap_frame.py \
             services/ml_service/app/main.py \
             services/ml_service/app/config.py \
             services/ml_service/app/camera_worker.py \
             services/ml_service/app/detector.py \
             services/ml_service/app/tracking.py \
             services/ml_service/app/jpeg_publisher.py \
+            services/ml_service/app/fallback_jpeg.py \
+            services/ml_service/app/mmap_publisher.py \
             services/ml_service/app/deepstream/capture.py \
             services/ml_service/app/deepstream/pipeline.py \
             services/api_service/app/main.py \
@@ -73,7 +78,7 @@ jobs:
             services/frontend/app/api_client.py \
             services/frontend/app/config.py \
             services/frontend/app/camera_wall.py \
-            services/frontend/app/native_video.py \
+            services/frontend/app/mmap_frame_reader.py \
             services/frontend/app/mjpeg_reader.py \
             scripts/preflight_ml_service.py \
             scripts/preflight_person_detection.py \
@@ -85,7 +90,7 @@ jobs:
             scripts/smoke_person_tracking_stability.py \
             scripts/smoke_api_service.py \
             scripts/smoke_frontend_integration.py \
-            scripts/smoke_shm_video.py
+            scripts/smoke_mmap_video.py
 
       - name: Compile Sentinel Python sources
         run: |
