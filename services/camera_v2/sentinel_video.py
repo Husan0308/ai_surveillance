@@ -107,7 +107,15 @@ class LiveVideoWall(QFrame):
         self.people = list(people)
         self._native_emitted = False
         self._metrics: dict = {"cameras": []}
-        self.setObjectName("panel")
+        self._status_cache: dict[int, tuple[str, str]] = {}
+
+        # This QWidget is not a normal Qt-painted panel: nveglglessink owns its
+        # native X11 surface through GstVideoOverlay. Do not let the application
+        # QSS or Qt's background erase race with EGL video frames.
+        self.setObjectName("nativeVideoSurface")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setMinimumSize(640, 540)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
@@ -132,11 +140,12 @@ class LiveVideoWall(QFrame):
 
             status_label = QLabel("CONNECTING", self)
             status_label.setStyleSheet(
-                "background:rgba(8,14,20,210);color:#7e8c99;"
-                "border-radius:4px;padding:3px 6px;font:10px 'DejaVu Sans Mono';"
+                "background:transparent;border:0;color:#7e8c99;"
+                "padding:0;font:700 9px 'DejaVu Sans Mono';"
             )
             status_label.adjustSize()
             self.status_labels.append(status_label)
+            self._status_cache[index] = ("CONNECTING", "#7e8c99")
 
         self._layout_overlays()
 
@@ -197,21 +206,35 @@ class LiveVideoWall(QFrame):
             for row in self._metrics.get("cameras", [])
             if isinstance(row, dict)
         }
+
+        layout_needed = False
         for sid, status in enumerate(self.status_labels):
             row = by_source.get(sid)
             if not row:
                 text = "CONNECTING"
                 color = "#7e8c99"
             elif row.get("online"):
-                text = f"{float(row.get('fps', 0.0)):.1f} fps"
+                # The display does not need sub-frame FPS precision. Integer FPS
+                # prevents a 19.9/20.0/20.1 label from repainting the native video
+                # surface several times per second while the actual stream is fine.
+                text = f"{int(round(float(row.get('fps', 0.0))))} fps"
                 color = "#3ddc97"
             else:
                 text = "OFFLINE"
                 color = "#f06464"
+
+            render_key = (text, color)
+            if self._status_cache.get(sid) == render_key:
+                continue
+
+            self._status_cache[sid] = render_key
             status.setText(text)
             status.setStyleSheet(
-                f"background:rgba(8,14,20,210);color:{color};"
-                "border-radius:4px;padding:3px 6px;font:10px 'DejaVu Sans Mono';"
+                f"background:transparent;border:0;color:{color};"
+                "padding:0;font:700 9px 'DejaVu Sans Mono';"
             )
             status.adjustSize()
-        self._layout_overlays()
+            layout_needed = True
+
+        if layout_needed:
+            self._layout_overlays()
