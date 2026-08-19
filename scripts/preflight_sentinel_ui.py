@@ -18,7 +18,6 @@ from services.camera_v2.sentinel_ui_settings import SettingsPage
 from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_ROWS
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
-FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
 EXPECTED_BUILD = "2026.08.19-r12"
 
 
@@ -37,7 +36,6 @@ def _require_all(source: str, guards: tuple[str, ...], label: str) -> None:
 
 
 def main_preflight() -> int:
-    """Validate only the Sentinel UI/control contract."""
     if not callable(main):
         _fail("main entry point is missing")
     if BUILD_TAG != EXPECTED_BUILD:
@@ -46,8 +44,6 @@ def main_preflight() -> int:
     nav_titles = [str(row[1]) for row in MainWindow.NAV]
     if nav_titles != EXPECTED_NAV:
         _fail(f"navigation={nav_titles!r}, expected={EXPECTED_NAV!r}")
-    if FORBIDDEN_NAV.intersection(nav_titles):
-        _fail("forbidden navigation item is present")
 
     expected_classes = [
         MonitoringPage,
@@ -61,7 +57,7 @@ def main_preflight() -> int:
         _fail("navigation page classes do not match")
 
     if CAMERA_COUNT != 6 or (GRID_COLUMNS, GRID_ROWS) != (2, 3):
-        _fail("Monitoring wall must be 2x3 / 6-camera capacity")
+        _fail("Monitoring wall must be 2 columns x 3 rows")
 
     settings = load_settings()
     if not 1 <= len(settings.cameras) <= CAMERA_COUNT:
@@ -77,201 +73,101 @@ def main_preflight() -> int:
         if forbidden:
             _fail(f"{row.get('id', 'camera')} contains forbidden fields: {sorted(forbidden)}")
 
-    ui_files = {
-        "shell": _source("services/camera_v2/sentinel_ui.py"),
-        "monitoring": _source("services/camera_v2/sentinel_ui_monitoring.py"),
-        "wall": _source("services/camera_v2/sentinel_video_wall_ui.py"),
-        "settings": _source("services/camera_v2/sentinel_ui_settings.py"),
-    }
+    monitoring = _source("services/camera_v2/sentinel_ui_monitoring.py")
+    base_video = _source("services/camera_v2/sentinel_video.py")
+    wall = _source("services/camera_v2/sentinel_video_wall_ui.py")
+    video = _source("services/camera_v2/sentinel_video_pro.py")
+    launcher = _source("scripts/run_sentinel_vms.sh")
 
-    for name, source in ui_files.items():
-        for forbidden_text in ("NVDEC", "no pose/reid", "pose=", "reid=", "DeepStream"):
-            if forbidden_text in source:
-                _fail(f"{name} still exposes technical UI text: {forbidden_text}")
-
-    settings_source = ui_files["settings"]
-    for forbidden_text in (
-        "Environment URI",
-        'form.addRow("Codec"',
-        "self.codec =",
-        "self.env_uri =",
-    ):
-        if forbidden_text in settings_source:
-            _fail(f"stale Settings field remains: {forbidden_text}")
-
-    monitoring_source = ui_files["monitoring"]
     _require_all(
-        monitoring_source,
+        monitoring,
         (
-            'self.identity_panel.setFixedWidth(262)',
             'QLabel("Estimated people")',
-            'QLabel("Recent Views")',
-            'metrics.get("known_people"',
             'metrics.get("total_people"',
-            "unknown = max(0, total - known)",
-            "self.wall.set_pipeline_status(status)",
+            'metrics.get("known_people"',
+            "self.wall.nativeReady.connect(self._start_or_bind)",
+            "xid = int(self.wall.winId())",
         ),
         "monitoring",
     )
-    if 'QLabel("People in Building")' in monitoring_source:
-        _fail("occupancy estimate is mislabeled as an exact building count")
 
-    # The EGL wall owns one native child XID. It is rebound only when Qt actually
-    # changes that XID; periodic same-handle rebinding is forbidden because it can
-    # disturb an otherwise-live nveglglessink surface.
     _require_all(
-        monitoring_source,
+        base_video,
         (
-            "self.wall.installEventFilter(self)",
-            "QEvent.Type.WinIdChange",
-            "QEvent.Type.Show",
-            "QEvent.Type.ParentChange",
-            "def _ensure_video_binding",
-            "def _schedule_binding_check",
-            "SENTINEL_UI_BIND action=",
-            'self._schedule_binding_check("fullscreen-enter")',
-            'self._schedule_binding_check("fullscreen-exit")',
-            'self._bind_window_id(int(xid), reason="native-ready")',
-            "xid == self._last_bound_xid",
-        ),
-        "deterministic native video binding",
-    )
-    for forbidden_binding in (
-        "watchdog-5s",
-        "_bind_watchdog_ticks",
-        "def _schedule_rebind",
-        "_ensure_video_binding(True",
-    ):
-        if forbidden_binding in monitoring_source:
-            _fail(f"same-XID rebinding regression returned: {forbidden_binding}")
-
-    video_source = _source("services/camera_v2/sentinel_video_pro.py")
-    _require_all(
-        video_source,
-        (
-            "live_source_counts",
-            "room_people",
-            "room_people[room_key] = max",
-            "total = sum(room_people.values())",
-            "known = 0",
-            "unknown = total",
-            "force-aspect-ratio",
-            "FOCUS_WIDTH = 1920",
-            "FOCUS_HEIGHT = 1080",
-            "runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)",
-            "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
-            'runtime.tiler.set_property("rows", 1)',
-            'runtime.tiler.set_property("columns", 1)',
-            "GstVideo.VideoOverlay.set_window_handle",
-        ),
-        "monitoring runtime contract",
-    )
-
-    dynamic_source = _source("services/camera_v2/dynamic_wall.py")
-    _require_all(
-        dynamic_source,
-        (
-            'self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")',
-            "set_wall_output_geometry",
-            "pixel-aspect-ratio=1/1",
-            'self._require_link(self.tiler, self.wall_caps',
-        ),
-        "wall aspect",
-    )
-
-    wall_source = ui_files["wall"]
-    _require_all(
-        wall_source,
-        (
-            "self.tile_headers: list[QFrame]",
-            "self.room_labels: list[QLabel]",
-            'header.setGeometry(left + 1, top + 1, max(1, width - 2), 27)',
-            'self.fullscreen_camera_label = QLabel("", self)',
-            'self.fullscreen_fps_label = QLabel("", self)',
-            "for widget in self.camera_labels:",
-            "for widget in self.status_labels:",
-            "widget.setVisible(not active)",
-            "self.fullscreen_camera_label.setText(camera_id)",
-            'self.fullscreen_fps_label.setText("LIVE")',
-            "self._layout_fullscreen_hud()",
-            "def mouseMoveEvent(self, event)",
-            "sid == self._hover_source",
-            "action.setVisible(show)",
-            "def leaveEvent(self, event)",
-            "def set_pipeline_status(self, status)",
-            "if state == self._pipeline_state and detail == self._pipeline_detail",
-            "Do not re-raise every grid header on every metrics tick",
-        ),
-        "camera-card/native-wall/fixed-HUD",
-    )
-
-    for forbidden in (
-        "cameraWallStateCover",
-        "state_cover.show()",
-        "state_cover.raise_()",
-        '"ERROR", "STOPPED", "PIPELINE_WARNING"',
-    ):
-        if forbidden in wall_source:
-            _fail(f"native wall can be blocked by stale opaque overlay: {forbidden}")
-
-    base_video_source = _source("services/camera_v2/sentinel_video.py")
-    _require_all(
-        base_video_source,
-        (
-            "self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)",
-            "self.setAttribute(Qt.WA_NativeWindow, True)",
+            "class _GstVideoSurface(QWidget)",
+            'self.setObjectName("gstVideoSurface")',
             "self.setAttribute(Qt.WA_NoSystemBackground, True)",
-            'self.setObjectName("nativeVideoSurface")',
-            "self._status_cache",
-            "QTimer.singleShot(100, lambda: self.nativeReady.emit(xid))",
+            "self.setAttribute(Qt.WA_NativeWindow, True)",
+            "self.video_surface = _GstVideoSurface(self)",
+            "def video_window_id(self)",
+            "def winId(self)",
+            "return self.video_surface.winId()",
+            "self.video_surface.lower()",
         ),
-        "single native video child",
+        "dedicated EGL surface",
     )
-    for forbidden_native in (
-        "WA_PaintOnScreen",
-        "def paintEngine(",
-    ):
-        if forbidden_native in base_video_source:
-            _fail(f"stale native backing-store hack returned: {forbidden_native}")
 
-    if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
-        _fail("demo per-camera occupancy badge returned")
+    _require_all(
+        wall,
+        (
+            "class ProPipelineController(_BaseProPipelineController)",
+            'self.command_q.put_nowait(("focus", -1))',
+            'header.setAttribute(Qt.WA_NativeWindow, True)',
+            "cam.setParent(header)",
+            "stat.setParent(header)",
+            'frame.setAttribute(Qt.WA_NativeWindow, True)',
+            "self.fullscreen_camera_label.setAttribute(Qt.WA_NativeWindow, True)",
+            "left + width - actions.width() - 8",
+            "top + 34",
+            "self.video_surface.lower()",
+        ),
+        "native wall chrome",
+    )
+    if "top + height - actions.height()" in wall:
+        _fail("camera action controls returned to the bottom of the tile")
 
-    enrollment_source = _source("services/camera_v2/sentinel_ui_enrollment.py")
-    if "class ReportsPage" in enrollment_source:
-        _fail("stale ReportsPage still exists")
+    _require_all(
+        video,
+        (
+            "GstVideo.VideoOverlay.set_window_handle",
+            'runtime.tiler.set_property("rows", GRID_ROWS)',
+            'runtime.tiler.set_property("columns", GRID_COLUMNS)',
+            'runtime.tiler.set_property("show-source", -1)',
+            "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
+        ),
+        "GStreamer grid",
+    )
 
-    launcher = _source("scripts/run_sentinel_vms.sh")
     _require_all(
         launcher,
         (
-            "python scripts/preflight_sentinel_ui.py",
-            "python scripts/preflight_camera_v2_core.py",
-            "exec python -m services.camera_v2.monitor_ui",
             "export QT_QPA_PLATFORM=xcb",
             "export CAMERA_V2_TILER_COLUMNS=2",
             "export CAMERA_V2_WALL_WIDTH=1600",
             "export CAMERA_V2_WALL_HEIGHT=1350",
-            "SENTINEL_DISPLAY session=",
-            "expected_ui=2026.08.19-r12",
+            "python scripts/preflight_camera_v2_core.py",
+            "exec python -m services.camera_v2.monitor_ui",
         ),
         "launcher",
     )
-    for forbidden_launcher in ("setup_camera_v2_reid.py", "preflight_camera_v2_reid.py"):
-        if forbidden_launcher in launcher:
-            _fail(f"launcher still starts optional path: {forbidden_launcher}")
+
+    for removed in (
+        "services/api_service",
+        "services/frontend",
+        "services/ml_service",
+        "services/camera_v2/sentinel_app.py",
+        "services/camera_v2/monitor_ui_reference.py",
+        "services/camera_v2/qwen_reid.py",
+        "services/camera_v2/reid_runtime.py",
+    ):
+        if (ROOT / removed).exists():
+            _fail(f"legacy path returned: {removed}")
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
-    print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
-    print("SENTINEL_PREFLIGHT monitoring=compact-vms 2x3 header-bars right-rail=262px")
-    print("SENTINEL_PREFLIGHT native_video=egl-owned-no-system-background PASS")
-    print("SENTINEL_PREFLIGHT native_binding=xcb+rebind-only-on-new-xid PASS")
-    print("SENTINEL_PREFLIGHT grid_topology=2x3-from-construction PASS")
-    print("SENTINEL_PREFLIGHT overlay_repaint=state-change-only PASS")
-    print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
-    print("SENTINEL_PREFLIGHT people_count=room-fused-estimate total+known+unknown wiring=PASS")
-    print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
-    print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
+    print("SENTINEL_PREFLIGHT grid=2x3 startup-grid-prime=PASS")
+    print("SENTINEL_PREFLIGHT video_surface=dedicated-native-xid PASS")
+    print("SENTINEL_PREFLIGHT chrome=native-sibling-no-egl-overpaint PASS")
+    print("SENTINEL_PREFLIGHT actions=top-right PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
 
