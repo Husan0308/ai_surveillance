@@ -18,7 +18,7 @@ from services.camera_v2.sentinel_ui_settings import SettingsPage
 from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_ROWS
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
-EXPECTED_BUILD = "2026.08.19-r12"
+EXPECTED_BUILD = "2026.08.19-r13"
 
 
 def _fail(message: str) -> None:
