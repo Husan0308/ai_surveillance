@@ -35,7 +35,7 @@ static int is_generic_person_label(const char *label) {
  * all use the exact same current NvDCF rectangle. */
 static void sync_rect_from_tracker(NvDsObjectMeta *obj) {
     if (!obj) return;
-    NvOSD_RectParams *rect = &obj->tracker_bbox_info.org_bbox_coords;
+    const NvBbox_Coords *rect = &obj->tracker_bbox_info.org_bbox_coords;
     if (rect->width <= 1.0f || rect->height <= 1.0f) return;
     obj->rect_params.left = rect->left;
     obj->rect_params.top = rect->top;
