@@ -9,12 +9,13 @@ from .main import CameraWallV2, SourceRuntime
 
 
 class DynamicCameraWallV2(CameraWallV2):
-    """CameraWallV2 initialization without the historical exactly-six restriction.
+    """Dynamic camera wall with explicit, renegotiable display geometry.
 
-    The hot path stays identical: nvurisrcbin/NVDEC -> queue(1) -> nvstreammux ->
-    nvmultistreamtiler -> queue(1) -> nveglglessink. Only batch/grid dimensions are
-    derived from the enabled camera inventory so Settings can add or disable RTSP
-    cameras without a second video architecture.
+    Source frames are normalized by nvstreammux to the canonical camera aspect
+    (1280x720 by default). The 2x3 wall is rendered at 1280x1080, which gives
+    every tile a 640x360 16:9 viewport. A capsfilter after the tiler makes the
+    output geometry renegotiable while PLAYING, so single-camera fullscreen can
+    switch to 1280x720 instead of stretching a camera into the 2x3 wall canvas.
     """
 
     def __init__(self) -> None:
@@ -102,19 +103,22 @@ class DynamicCameraWallV2(CameraWallV2):
 
         self.mux = self._make("nvstreammux", "camera_v2_mux")
         self.tiler = self._make("nvmultistreamtiler", "camera_v2_tiler")
+        self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")
         self.wall_queue = self._make("queue", "camera_v2_wall_queue")
         self.sink = self._make("nveglglessink", "camera_v2_sink")
 
         self._configure_mux()
         self._configure_tiler()
+        self._configure_wall_caps(self.wall_width, self.wall_height)
         self._configure_wall_queue()
         self._configure_sink()
 
-        for element in (self.mux, self.tiler, self.wall_queue, self.sink):
+        for element in (self.mux, self.tiler, self.wall_caps, self.wall_queue, self.sink):
             self.pipeline.add(element)
 
         self._require_link(self.mux, self.tiler, "nvstreammux -> nvmultistreamtiler")
-        self._require_link(self.tiler, self.wall_queue, "nvmultistreamtiler -> wall queue")
+        self._require_link(self.tiler, self.wall_caps, "nvmultistreamtiler -> wall caps")
+        self._require_link(self.wall_caps, self.wall_queue, "wall caps -> wall queue")
         self._require_link(self.wall_queue, self.sink, "wall queue -> nveglglessink")
 
         for index, camera in enumerate(self.cameras):
@@ -131,6 +135,8 @@ class DynamicCameraWallV2(CameraWallV2):
         self._set_if(self.mux, "live-source", True)
         self._set_if(self.mux, "width", self.frame_width)
         self._set_if(self.mux, "height", self.frame_height)
+        # Camera sources are 16:9 and mux geometry is also 16:9. Padding is not
+        # needed and would waste pixels; importantly, no stage changes aspect.
         self._set_if(self.mux, "enable-padding", False)
         self._set_if(self.mux, "batched-push-timeout", self.mux_timeout_us)
         self._set_if(self.mux, "sync-inputs", False)
@@ -146,3 +152,24 @@ class DynamicCameraWallV2(CameraWallV2):
         self._set_if(self.tiler, "height", self.wall_height)
         self._set_if(self.tiler, "gpu-id", self.gpu_id)
         self._set_if(self.tiler, "nvbuf-memory-type", 2)
+
+    def _wall_caps_value(self, width: int, height: int):
+        return self.Gst.Caps.from_string(
+            "video/x-raw(memory:NVMM),"
+            f"width={int(width)},height={int(height)},pixel-aspect-ratio=1/1"
+        )
+
+    def _configure_wall_caps(self, width: int, height: int) -> None:
+        self.wall_caps.set_property("caps", self._wall_caps_value(width, height))
+
+    def set_wall_output_geometry(self, width: int, height: int) -> None:
+        """Change native wall geometry and force caps renegotiation while PLAYING."""
+        width = max(320, int(width))
+        height = max(180, int(height))
+        self.wall_width = width
+        self.wall_height = height
+        self.tiler.set_property("width", width)
+        self.tiler.set_property("height", height)
+        # Changing capsfilter caps while PLAYING sends RECONFIGURE upstream. This
+        # is the critical step missing from the previous fullscreen implementation.
+        self.wall_caps.set_property("caps", self._wall_caps_value(width, height))
