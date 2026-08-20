@@ -22,6 +22,15 @@ from services.camera_v2.pascal_safe_pipeline import CameraPascalSafeRuntime  # n
 from services.ml_service.app.config import load_settings  # noqa: E402
 
 
+def _detector_contract() -> tuple[str, tuple[int, int, int]]:
+    backend = os.environ.get("CAMERA_V2_DETECT_BACKEND", "rfdetr-s").strip().lower()
+    if backend in {"stable-yolo26m", "yolo26m", "stable-yolo"}:
+        return "YOLO26m-person-only", (704, 448, 2)
+    if backend in {"rfdetr-s", "rfdetr", "rf-detr-s", ""}:
+        return "RF-DETR-S", (672, 384, 1)
+    raise RuntimeError(f"unsupported CAMERA_V2_DETECT_BACKEND={backend!r}")
+
+
 def main() -> int:
     settings = load_settings()
     camera_count = len(settings.cameras)
@@ -51,9 +60,13 @@ def main() -> int:
         )
     if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
         raise RuntimeError(f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
-    if (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH) != (672, 384, 1):
+
+    detector_label, expected_detector = _detector_contract()
+    actual_detector = (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH)
+    if actual_detector != expected_detector:
+        ew, eh, eb = expected_detector
         raise RuntimeError(
-            "RF-DETR-S geometry must be 672x384 micro-batch=1, got "
+            f"{detector_label} geometry must be {ew}x{eh} micro-batch={eb}, got "
             f"{INFER_WIDTH}x{INFER_HEIGHT} micro={MICRO_BATCH}"
         )
 
@@ -115,7 +128,7 @@ def main() -> int:
         "CAMERA_INFER_LAYOUT",
     ):
         if required not in sample_source:
-            raise RuntimeError(f"analysis-wall RF-DETR capture is missing: {required}")
+            raise RuntimeError(f"analysis-wall detector capture is missing: {required}")
 
     display_source = (ROOT / "services/camera_v2/dynamic_wall.py").read_text(
         encoding="utf-8"
@@ -146,7 +159,7 @@ def main() -> int:
         f"rtsp={transport} latency={latency}ms mux={mux_width}x{mux_height} "
         f"grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
-        f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
+        f"detector={detector_label}@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
         "detector_path=analysis-tiler demux=disabled mux_retention=bounded "
         "source_ingest=isolated dynamic_pad=late-caps-safe "
         "tracker=motion-predictor nvtracker=disabled capture=analysis-grid "
