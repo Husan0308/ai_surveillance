@@ -24,14 +24,18 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
 
     assert "class CameraPascalSafeRuntime(CameraDetectionV2)" in pascal
     assert "SecureCameraWallV2._add_camera(self, index, camera)" in pascal
-    assert "def _install_postmux_inference(self)" in pascal
-    assert "pascal_postmux_tee" in pascal
-    assert "nvstreamdemux" in pascal
-    assert 'self._request_src_pad(demux, f"src_{index}")' in pascal
-    assert "CAMERA_DETECT_PATH mode=postmux-demux" in pascal
+    assert "def _install_analysis_inference(self)" in pascal
+    assert "pascal_mux_tee" in pascal
+    assert "pascal_analysis_tiler" in pascal
+    assert "def _analysis_gate_probe" in pascal
+    assert "def _on_analysis_sample" in pascal
+    assert "CAMERA_DETECT_PATH mode=analysis-tiler" in pascal
     assert "source_path=direct-to-nvstreammux" in pascal
+    assert "demux=disabled" in pascal
+    assert "mux_batch_retention=bounded" in pascal
     assert "mapped_size" in pascal
     assert "row_stride" in pascal
+    assert "analysis_frames" in pascal
     assert "safe_mux_batches" in pascal
     assert "safe_wall_frames" in pascal
     assert "safe_sink_buffers" in pascal
@@ -39,6 +43,8 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert "nvtracker=disabled" in pascal
 
     for forbidden in (
+        "nvstreamdemux",
+        "pascal_infer_demux",
         "CameraPersonTrackingV2",
         "CameraPersonTrackingFinal",
         "libnvds_nvmultiobjecttracker",
@@ -64,7 +70,8 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert "export CAMERA_V2_RTSP_LATENCY_MS=250" in launcher
     assert "rtsp=tcp latency=250ms" in launcher
     assert "export CAMERA_V2_PASCAL_SAFE=1" in launcher
-    assert "detector_path=postmux-demux" in launcher
+    assert "detector_path=analysis-tiler" in launcher
+    assert "demux=disabled" in launcher
     assert "nvtracker=disabled" in launcher
     assert "detector=RF-DETR-S@672x384" in launcher
     assert "ui=camera-only-2x3-click-fullscreen" in launcher
@@ -98,6 +105,6 @@ def test_ui_clicks_camera_into_fullscreen_and_escape_restores_grid() -> None:
     ):
         assert forbidden not in native
 
-    assert 'BUILD_TAG = "2026.08.20-r18-rtsp-tcp"' in shell
+    assert 'BUILD_TAG = "2026.08.20-r19-analysis-tiler"' in shell
     assert "self.monitoring_page = MonitoringPage()" in shell
     assert "window.showMaximized()" in shell
