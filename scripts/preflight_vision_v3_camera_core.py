@@ -56,8 +56,15 @@ def main() -> int:
             fail(f"{cid} missing usable display/source RTSP URI")
         feeds.append(f"{cid}={uri.rsplit('/', 1)[-1]}")
         username = expand_env(row.get("username")) or os.environ.get("SURVEILLANCE_RTSP_USERNAME", "")
-        if username:
+        password = expand_env(row.get("password")) or os.environ.get("SURVEILLANCE_RTSP_PASSWORD", "")
+        if username and password:
             auth_count += 1
+
+    if auth_count != 6:
+        fail(
+            "RTSP credentials unresolved for one or more cameras; set "
+            "SURVEILLANCE_RTSP_USERNAME and SURVEILLANCE_RTSP_PASSWORD in the local .env"
+        )
 
     cfg = dict(core_data.get("camera_core") or {})
     if int(cfg.get("queue_buffers", 0)) != 1:
