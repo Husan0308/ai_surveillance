@@ -42,14 +42,15 @@ def main() -> int:
     for token in (
         "class CameraPascalSafeRuntime(CameraDetectionV2)",
         "SecureCameraWallV2._add_camera(self, index, camera)",
-        "def _install_postmux_inference(self)",
-        "pascal_postmux_tee",
-        "pascal_infer_demux",
-        "CAMERA_DETECT_PATH mode=postmux-demux",
+        "def _install_analysis_inference(self)",
+        "pascal_analysis_tiler",
+        "def _analysis_gate_probe",
+        "def _on_analysis_sample",
+        "CAMERA_DETECT_PATH mode=analysis-tiler",
         "source_path=direct-to-nvstreammux",
-        "def _on_infer_sample(self, sink, cid: str)",
-        "mapped_size",
-        "row_stride",
+        "demux=disabled",
+        "mux_batch_retention=bounded",
+        "analysis_frames",
         "safe_mux_batches",
         "safe_wall_frames",
         "safe_sink_buffers",
@@ -63,13 +64,15 @@ def main() -> int:
             return fail(f"missing runtime contract: {token}")
 
     for forbidden in (
+        "nvstreamdemux",
+        "pascal_infer_demux",
         "CameraPersonTrackingV2",
         "CameraPersonTrackingFinal",
         "libnvds_nvmultiobjecttracker",
         "config_tracker_NvDCF",
     ):
         if forbidden in runtime:
-            return fail(f"Pascal runtime still depends on NvDCF path: {forbidden}")
+            return fail(f"Pascal runtime leaked forbidden dependency: {forbidden}")
 
     for token in (
         'CAMERA_V2_RTSP_TRANSPORT',
@@ -114,7 +117,8 @@ def main() -> int:
         "export CAMERA_V2_RTSP_LATENCY_MS=250",
         "rtsp=tcp latency=250ms",
         "export CAMERA_V2_PASCAL_SAFE=1",
-        "detector_path=postmux-demux",
+        "detector_path=analysis-tiler",
+        "demux=disabled",
         "tracker=motion-predictor",
         "nvtracker=disabled",
         "export CAMERA_V2_DISPLAY_BACKEND=egl",
@@ -129,7 +133,15 @@ def main() -> int:
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
         Gst.init(None)
-        for plugin in ("nvurisrcbin", "nvstreammux", "nvstreamdemux", "nveglglessink", "ximagesink"):
+        for plugin in (
+            "nvurisrcbin",
+            "nvstreammux",
+            "nvmultistreamtiler",
+            "nvvideoconvert",
+            "appsink",
+            "nveglglessink",
+            "ximagesink",
+        ):
             if Gst.ElementFactory.find(plugin) is None:
                 return fail(f"required plugin unavailable: {plugin}")
     except Exception as exc:
@@ -149,7 +161,8 @@ def main() -> int:
     print(
         "PASCAL_SAFE_PREFLIGHT=PASS "
         f"gpu={gpu!r} runtime=CameraPascalSafeRuntime "
-        "rtsp=tcp latency>=200ms source_path=direct-to-mux detector_path=postmux-demux "
+        "rtsp=tcp latency>=200ms source_path=direct-to-mux "
+        "detector_path=analysis-tiler demux=disabled mux_retention=bounded "
         "tracker=motion-predictor nvtracker=disabled "
         "display=egl-primary+x11-zero-render-fallback fullscreen=click+escape"
     )
