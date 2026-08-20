@@ -12,6 +12,7 @@ on:
       - 'services/camera_v2/detection.py'
       - 'services/camera_v2/dynamic_wall.py'
       - 'services/camera_v2/main.py'
+      - 'services/camera_v2/secure.py'
       - 'services/camera_v2/sentinel_ui.py'
       - 'services/camera_v2/sentinel_ui_monitoring_native.py'
       - 'scripts/preflight_rfdetr_core.py'
@@ -41,6 +42,7 @@ jobs:
             services/camera_v2/detection.py \
             services/camera_v2/dynamic_wall.py \
             services/camera_v2/main.py \
+            services/camera_v2/secure.py \
             services/camera_v2/sentinel_ui.py \
             services/camera_v2/sentinel_ui_monitoring_native.py \
             scripts/preflight_rfdetr_core.py \
@@ -57,6 +59,7 @@ jobs:
 
           pascal = Path('services/camera_v2/pascal_safe_pipeline.py').read_text()
           controller = Path('services/camera_v2/camera_wall_runtime.py').read_text()
+          secure = Path('services/camera_v2/secure.py').read_text()
           ui = Path('services/camera_v2/sentinel_ui_monitoring_native.py').read_text()
           shell = Path('services/camera_v2/sentinel_ui.py').read_text()
           launcher = Path('scripts/run_sentinel_vms.sh').read_text()
@@ -80,6 +83,12 @@ jobs:
           ):
               assert forbidden not in pascal, forbidden
 
+          assert 'CAMERA_V2_RTSP_TRANSPORT' in secure
+          assert 'select-rtp-protocol' in secure
+          assert 'self._set_if(element, "protocols", 4)' in secure
+          assert 'def _source_pad_added' in secure
+          assert 'caps.is_any()' in secure
+
           assert 'def set_focus(source_id: int)' in controller
           assert 'runtime.tiler.set_property("show-source", sid)' in controller
           assert 'def focus(self, source_id: int)' in controller
@@ -89,7 +98,10 @@ jobs:
           assert 'def _grid_source_at' in ui
           assert 'window.showFullScreen()' in ui
           assert 'window.showMaximized()' in ui
-          assert 'BUILD_TAG = "2026.08.20-r17-postmux-fullscreen"' in shell
+          assert 'BUILD_TAG = "2026.08.20-r18-rtsp-tcp"' in shell
+          assert 'export CAMERA_V2_RTSP_TRANSPORT=tcp' in launcher
+          assert 'export CAMERA_V2_RTSP_LATENCY_MS=250' in launcher
+          assert 'rtsp=tcp latency=250ms' in launcher
           assert 'export CAMERA_V2_PASCAL_SAFE=1' in launcher
           assert 'detector_path=postmux-demux' in launcher
           assert 'ui=camera-only-2x3-click-fullscreen' in launcher
