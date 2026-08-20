@@ -2,9 +2,9 @@ from __future__ import annotations
 
 """Optical-flow assisted short-term person tracking.
 
-RF-DETR remains the source of truth for person detections.  Between detector
+RF-DETR remains the source of truth for person detections. Between detector
 corrections this tracker accepts small frame-to-frame motion measurements from a
-continuous low-resolution optical-flow branch.  Recent optical flow suppresses
+continuous low-resolution optical-flow branch. Recent optical flow suppresses
 open-loop velocity prediction, so display boxes follow measured image motion
 instead of running ahead of or lagging behind the person.
 """
@@ -19,11 +19,11 @@ class FlowAssistedPersonTracker(AnchoredPersonTracker):
 
     def __init__(self, width: int, height: int) -> None:
         super().__init__(width, height)
-        # A confirmed person may be temporarily missed while seated, bent over,
-        # back-facing or partially occluded.  Optical flow bridges motion, while
-        # RF-DETR still has to refresh the track within this bounded hard window.
+        # The previous 4.8 s display hold made a bad one-off detection visibly
+        # linger in a static room. Keep the hard detector refresh window bounded.
+        # Invisible probation candidates still use the base tentative window.
         if "CAMERA_V2_TRACK_HOLD_SEC" not in os.environ:
-            self.max_age = 4.8
+            self.max_age = 2.8
         self.flow_recent_sec = float(
             os.environ.get("CAMERA_V2_FLOW_RECENT_SEC", "0.18")
         )
@@ -35,22 +35,24 @@ class FlowAssistedPersonTracker(AnchoredPersonTracker):
     def _predict_state(self, track, when: float):
         last_flow_t = float(getattr(track, "last_flow_t", 0.0) or 0.0)
         if last_flow_t > 0.0 and float(when) - last_flow_t <= self.flow_recent_sec:
-            # The current center already came from measured frame motion.  Do
-            # not add detector-era velocity again or the box will overshoot.
+            # The current center already came from measured frame motion. Do not
+            # add detector-era velocity again or the box will overshoot.
             return track.cx, track.cy, track.w, track.h
         return super()._predict_state(track, when)
 
     def flow_regions(self, cid: str, now: float):
-        """Return active source-space boxes used to seed optical-flow features."""
+        """Return source-space boxes that optical flow may follow.
+
+        Only detector-confirmed people are exposed to the continuous flow branch.
+        A one-frame RF-DETR false positive therefore cannot acquire a long-lived
+        background feature track before it passes birth probation.
+        """
         with self.lock:
             current = self.tracks.get(cid, {})
             rows = []
             for tid, track in current.items():
                 age = max(0.0, float(now) - track.last_det_t)
-                limit = self.max_age if track.confirmed else self.tentative_age
-                if age > limit:
-                    continue
-                if not track.confirmed and track.confidence < 0.30:
+                if age > self.max_age or not track.confirmed:
                     continue
                 x1, y1, x2, y2 = self._predict_box(track, now)
                 if x2 <= x1 or y2 <= y1:
@@ -59,7 +61,7 @@ class FlowAssistedPersonTracker(AnchoredPersonTracker):
                     {
                         "track_id": int(tid),
                         "box": (float(x1), float(y1), float(x2), float(y2)),
-                        "confirmed": bool(track.confirmed),
+                        "confirmed": True,
                         "age": float(age),
                     }
                 )
@@ -82,15 +84,14 @@ class FlowAssistedPersonTracker(AnchoredPersonTracker):
         with self.lock:
             current = self.tracks.get(cid, {})
             track = current.get(int(track_id))
-            if track is None:
+            if track is None or not track.confirmed:
                 return False
 
             age = max(0.0, float(now) - track.last_det_t)
-            limit = self.max_age if track.confirmed else self.tentative_age
-            if age > limit:
+            if age > self.max_age:
                 return False
 
-            # One 20-FPS frame should never teleport a track.  These limits are
+            # One 20-FPS frame should never teleport a track. These limits are
             # deliberately generous for a fast walking person but reject LK
             # failures that lock onto a monitor/chair/background edge.
             max_dx = self.width * 0.045
