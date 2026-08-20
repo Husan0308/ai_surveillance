@@ -100,6 +100,16 @@ def main_preflight() -> int:
     if "nvstreamdemux" in pascal:
         fail("zero-copy nvstreamdemux must not return to the production detector path")
 
+    backend = source("services/camera_v2/rfdetr_backend.py")
+    for token in (
+        "RFDETRRawBoxManager",
+        "detection.SmoothBoxManager = RFDETRRawBoxManager",
+        "detection.CameraDetectionV2._inject_boxes_probe = _inject_rfdetr_truth_probe",
+        "tracker=OFF flow=OFF reid=OFF",
+    ):
+        if token not in backend:
+            fail(f"RF-DETR detector-only guard missing: {token}")
+
     secure = source("services/camera_v2/secure.py")
     for token in (
         'CAMERA_V2_RTSP_TRANSPORT',
@@ -121,9 +131,11 @@ def main_preflight() -> int:
         "expected_ui=2026.08.20-r19-analysis-tiler",
         "export CAMERA_V2_RTSP_TRANSPORT=tcp",
         "export CAMERA_V2_RTSP_LATENCY_MS=250",
+        "export CAMERA_V2_DETECT_BACKEND=rfdetr-s",
         "rtsp=tcp latency=250ms",
         "detector_path=analysis-tiler",
         "demux=disabled",
+        "raw_truth=1 tracker=OFF flow=OFF reid=OFF",
         "ui=camera-only-2x3-click-fullscreen",
     ):
         if token not in launcher:
@@ -133,8 +145,8 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT wall=6-camera fixed-2x3 click-fullscreen PASS")
     print("SENTINEL_PREFLIGHT native_video=direct-QWidget-xid idempotent-bind PASS")
     print("SENTINEL_PREFLIGHT rtsp=tcp latency=250ms dynamic-pad=late-caps-safe PASS")
-    print("SENTINEL_PREFLIGHT detector=analysis-tiler demux=disabled mux-retention=bounded PASS")
-    print("SENTINEL_PREFLIGHT runtime=pascal-safe RF-DETR motion-predictor no-nvtracker PASS")
+    print("SENTINEL_PREFLIGHT detector=RF-DETR-S analysis-tiler demux=disabled mux-retention=bounded PASS")
+    print("SENTINEL_PREFLIGHT runtime=pascal-safe tracker=OFF flow=OFF reid=OFF nvtracker=disabled PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
 
