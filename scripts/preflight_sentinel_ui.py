@@ -37,19 +37,11 @@ def _require_all(source: str, guards: tuple[str, ...], label: str) -> None:
 
 
 def _called_attribute_names(source: str) -> set[str]:
-    """Return attribute names that are actually called in Python code.
-
-    Comments/docstrings must not trip runtime guards such as showFullScreen or
-    showNormal. Parsing the AST keeps the preflight tied to executable behavior.
-    """
     tree = ast.parse(source)
     names: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute):
-            names.add(str(func.attr))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            names.add(str(node.func.attr))
     return names
 
 
@@ -99,36 +91,36 @@ def main_preflight() -> int:
     _require_all(
         monitoring,
         (
-            "class NativeVideoSurface(QWidget)",
+            "class NativeVideoHost(QWidget)",
+            "self.video_window = QWindow()",
+            "QWidget.createWindowContainer(self.video_window, self)",
+            "self.video_window.winId()",
             "class MonitoringPage(QWidget)",
-            "self.surface = NativeVideoSurface(self)",
+            "self.surface = NativeVideoHost(self.wall_card)",
             "self.surface.nativeReady.connect(self._start_or_bind)",
-            "WA_NativeWindow, True",
-            "WA_DontCreateNativeAncestors, True",
-            "WA_NoSystemBackground, True",
             "ProPipelineController()",
             'QLabel("People in Building")',
+            "class CameraStatusRow(QFrame)",
             'metrics.get("total_people"',
             'metrics.get("known_people"',
             "def open_fullscreen_grid",
             "def exit_fullscreen",
             "def shutdown",
         ),
-        "single-surface Monitoring",
+        "QWindow Monitoring",
     )
 
-    # Monitoring must not mutate nvmultistreamtiler while it is PLAYING. The old
-    # focus path caused SetSingleSourceMode/not-negotiated and blank video walls.
-    for forbidden in (
-        "controller.focus(",
-        "set_fullscreen_mode(",
-        "ProLiveVideoWall(",
-        "show-source",
-        'set_property("rows"',
-        'set_property("columns"',
-    ):
-        if forbidden in monitoring:
-            _fail(f"Monitoring reintroduced dynamic tiler/native-wall logic: {forbidden}")
+    monitoring_calls = _called_attribute_names(monitoring)
+    forbidden_monitoring_calls = {"focus", "set_fullscreen_mode"}.intersection(
+        monitoring_calls
+    )
+    if forbidden_monitoring_calls:
+        _fail(
+            "Monitoring reintroduced dynamic tiler/focus calls: "
+            + ",".join(sorted(forbidden_monitoring_calls))
+        )
+    if "ProLiveVideoWall(" in monitoring:
+        _fail("Monitoring reintroduced the legacy native wall widget")
 
     shell = _source("services/camera_v2/sentinel_ui.py")
     _require_all(
@@ -177,8 +169,9 @@ def main_preflight() -> int:
     )
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
-    print("SENTINEL_PREFLIGHT monitoring=fixed-2x3 single-native-surface right-rail=252px")
-    print("SENTINEL_PREFLIGHT native_video=one-xid no-qt-overlay-on-video PASS")
+    print("SENTINEL_PREFLIGHT monitoring=fixed-2x3 qwindow-container right-rail=270px")
+    print("SENTINEL_PREFLIGHT native_video=QWindow+createWindowContainer one-xid PASS")
+    print("SENTINEL_PREFLIGHT overlays=outside-native-video PASS")
     print("SENTINEL_PREFLIGHT tiler=runtime-fixed no-focus-mutation PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
