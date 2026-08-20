@@ -19,7 +19,7 @@ from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_R
 from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
-EXPECTED_BUILD = "2026.08.20-r13-rfdetr"
+EXPECTED_BUILD = "2026.08.20-r14-monitoring-host"
 
 
 def _fail(message: str) -> None:
@@ -127,11 +127,29 @@ def main_preflight() -> int:
         shell,
         (
             "from .sentinel_ui_monitoring_native import MonitoringPage",
+            "BUILD_TAG = \"2026.08.20-r14-monitoring-host\"",
+            "self.monitoring_host = QWidget(self.content)",
+            "self.monitoring_page = MonitoringPage()",
+            "monitoring_layout.addWidget(self.monitoring_page, 1)",
+            "self.pages = [self.monitoring_page]",
+            "for _, _, _, klass in self.NAV[1:]",
+            "self.stack.hide()",
+            "self.monitoring_host.hide()",
+            "self.stack.setCurrentIndex(index - 1)",
+            "self.monitoring_host.show()",
             "window.showMaximized()",
             "def set_monitoring_fullscreen",
         ),
-        "shell",
+        "native-safe shell",
     )
+
+    # The native QWindow must never be inserted into QStackedWidget. Only the
+    # ordinary Qt pages from NAV[1:] may be added to the stack.
+    if "self.stack.addWidget(self.monitoring_page)" in shell:
+        _fail("Monitoring QWindow was reinserted into QStackedWidget")
+    if "for _, _, _, klass in self.NAV:" in shell:
+        _fail("shell again stacks Monitoring with ordinary pages")
+
     shell_calls = _called_attribute_names(shell)
     forbidden_window_calls = {"showFullScreen", "showNormal"}.intersection(shell_calls)
     if forbidden_window_calls:
@@ -169,6 +187,7 @@ def main_preflight() -> int:
     )
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
+    print("SENTINEL_PREFLIGHT shell=Monitoring-outside-QStackedWidget PASS")
     print("SENTINEL_PREFLIGHT monitoring=fixed-2x3 qwindow-container right-rail=270px")
     print("SENTINEL_PREFLIGHT native_video=QWindow+createWindowContainer one-xid PASS")
     print("SENTINEL_PREFLIGHT overlays=outside-native-video PASS")
