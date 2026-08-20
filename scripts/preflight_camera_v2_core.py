@@ -9,105 +9,85 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Importing the active runtime pins the canonical production geometry but does
-# not construct/start a GStreamer pipeline.
-import services.camera_v2.person_tracking_heatmap  # noqa: F401,E402
-from services.camera_v2.detection import INFER_HEIGHT, INFER_WIDTH  # noqa: E402
-from services.camera_v2.heatmap_filter import ensure_heatmap_filter  # noqa: E402
+from services.camera_v2.camera_wall_runtime import (  # noqa: E402
+    CAMERA_COUNT,
+    GRID_COLUMNS,
+    GRID_ROWS,
+    WALL_HEIGHT,
+    WALL_WIDTH,
+)
+from services.camera_v2.detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH  # noqa: E402
 from services.camera_v2.native_bridge import ensure_bridge  # noqa: E402
-from services.camera_v2.person_tracking_final import CameraPersonTrackingFinal  # noqa: E402
-from services.camera_v2.sentinel_video import WALL_HEIGHT, WALL_WIDTH  # noqa: E402
+from services.camera_v2.pascal_safe_pipeline import CameraPascalSafeRuntime  # noqa: E402
 from services.ml_service.app.config import load_settings  # noqa: E402
 
 
 def main() -> int:
     settings = load_settings()
     camera_count = len(settings.cameras)
-    if not 1 <= camera_count <= 6:
-        raise RuntimeError(f"camera wall requires 1..6 enabled cameras, got {camera_count}")
+    if camera_count != CAMERA_COUNT:
+        raise RuntimeError(
+            f"production camera wall requires exactly {CAMERA_COUNT} enabled cameras, got {camera_count}"
+        )
+
+    if os.environ.get("CAMERA_V2_PASCAL_SAFE", "0") != "1":
+        raise RuntimeError("production launcher must set CAMERA_V2_PASCAL_SAFE=1")
 
     mux_width = int(os.environ.get("CAMERA_V2_FRAME_WIDTH", "0"))
     mux_height = int(os.environ.get("CAMERA_V2_FRAME_HEIGHT", "0"))
-    tracker_width = int(os.environ.get("CAMERA_V2_TRACKER_WIDTH", "0"))
-    tracker_height = int(os.environ.get("CAMERA_V2_TRACKER_HEIGHT", "0"))
-
     if (mux_width, mux_height) != (2560, 1440):
         raise RuntimeError(
             f"source-preserving mux must be 2560x1440, got {mux_width}x{mux_height}"
         )
     if (WALL_WIDTH, WALL_HEIGHT) != (1600, 1350):
         raise RuntimeError(
-            f"monitoring wall must be 1600x1350 (800x450/tile), got {WALL_WIDTH}x{WALL_HEIGHT}"
+            f"monitoring wall must be 1600x1350, got {WALL_WIDTH}x{WALL_HEIGHT}"
         )
-    if (INFER_WIDTH, INFER_HEIGHT) != (672, 384):
+    if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
         raise RuntimeError(
-            f"RF-DETR-S detector geometry must be 672x384, got {INFER_WIDTH}x{INFER_HEIGHT}"
+            f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}"
         )
-    if (tracker_width, tracker_height) != (512, 288):
+    if (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH) != (672, 384, 1):
         raise RuntimeError(
-            f"tracker geometry must be 512x288, got {tracker_width}x{tracker_height}"
+            "RF-DETR-S geometry must be 672x384 micro-batch=1, got "
+            f"{INFER_WIDTH}x{INFER_HEIGHT} micro={MICRO_BATCH}"
         )
 
-    sample_source = inspect.getsource(CameraPersonTrackingFinal._on_infer_sample)
-    for required in ("mapped_size", "row_stride", "tight_stride", "CAMERA_INFER_LAYOUT"):
+    runtime_source = (ROOT / "services/camera_v2/pascal_safe_pipeline.py").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        "class CameraPascalSafeRuntime(CameraDetectionV2)",
+        "self.wall_queue.unlink(self.sink)",
+        "if queue_src.is_linked()",
+        "pascal_wall_convert",
+        "pascal_osd",
+        "safe_mux_batches",
+        "safe_wall_frames",
+        "tracker=motion-predictor",
+        "nvtracker=disabled",
+    ):
+        if required not in runtime_source:
+            raise RuntimeError(f"Pascal-safe runtime guard missing: {required}")
+
+    for forbidden in (
+        "CameraPersonTrackingV2",
+        "CameraPersonTrackingFinal",
+        "libnvds_nvmultiobjecttracker",
+        "config_tracker_NvDCF",
+    ):
+        if forbidden in runtime_source:
+            raise RuntimeError(f"Pascal-safe runtime leaked tracker dependency: {forbidden}")
+
+    sample_source = inspect.getsource(CameraPascalSafeRuntime._on_infer_sample)
+    for required in (
+        "mapped_size",
+        "row_stride",
+        "tight_stride",
+        "CAMERA_INFER_LAYOUT",
+    ):
         if required not in sample_source:
-            raise RuntimeError(f"stride-safe detector copy is missing: {required}")
-
-    tracker_source = (ROOT / "services/camera_v2/person_tracking_final.py").read_text(
-        encoding="utf-8"
-    )
-    for required in (
-        "CAMERA_V2_MAX_DETECT_RESULT_AGE_MS",
-        '"interpolation-method", 2',
-    ):
-        if required not in tracker_source:
-            raise RuntimeError(f"fresh detector path guard missing: {required}")
-
-    # The display smoother is intentionally active again. It may only rewrite
-    # rect_params of REAL current-frame NvDCF objects; it must never manufacture
-    # metadata, IDs or a separate temporal tracker.
-    native_bridge_source = (ROOT / "services/camera_v2/native_bridge.py").read_text(
-        encoding="utf-8"
-    )
-    for required in ("SMOOTHER_SOURCE", "camera_v2_smooth_display_boxes"):
-        if required not in native_bridge_source:
-            raise RuntimeError(f"display smoother wiring missing: {required}")
-
-    smoother_source = (ROOT / "services/camera_v2/native_display_smoother.c").read_text(
-        encoding="utf-8"
-    )
-    for required in (
-        "Display-only smoother for REAL current-frame NvDCF objects",
-        "It never creates metadata",
-        "obj->rect_params.left = left",
-        "obj->rect_params.top = top",
-        "obj->rect_params.width = right - left",
-        "obj->rect_params.height = bottom - top",
-    ):
-        if required not in smoother_source:
-            raise RuntimeError(f"display-only smoother contract missing: {required}")
-    for forbidden in (
-        "nvds_acquire_obj_meta_from_pool",
-        "nvds_add_obj_meta_to_frame",
-    ):
-        if forbidden in smoother_source:
-            raise RuntimeError(f"display smoother must not create object metadata: {forbidden}")
-
-    # nvtracker is the last truth-geometry component before the display-only
-    # smoother and nvmultistreamtiler. The label layer styles borders/text only.
-    label_source = (ROOT / "services/camera_v2/native_label_style.c").read_text(
-        encoding="utf-8"
-    )
-    if "sync_rect_from_tracker" in label_source:
-        raise RuntimeError("label layer still rewrites NvDCF bbox geometry")
-    for forbidden in (
-        "obj->rect_params.left = rect->left",
-        "obj->rect_params.top = rect->top",
-        "obj->rect_params.width = rect->width",
-        "obj->rect_params.height = rect->height",
-    ):
-        if forbidden in label_source:
-            raise RuntimeError(f"label layer still mutates bbox geometry: {forbidden}")
+            raise RuntimeError(f"stride-safe RF-DETR capture is missing: {required}")
 
     display_source = (ROOT / "services/camera_v2/dynamic_wall.py").read_text(
         encoding="utf-8"
@@ -117,35 +97,29 @@ def main() -> int:
         'self._set_if(self.tiler, "interpolation-method", 4)',
         'self._set_if(self.mux, "compute-hw", 1)',
         'self._set_if(self.tiler, "compute-hw", 1)',
+    ):
+        if required not in display_source:
+            raise RuntimeError(f"GPU display scaling guard missing: {required}")
+
+    main_source = (ROOT / "services/camera_v2/main.py").read_text(encoding="utf-8")
+    for required in (
+        'self._set_if(self.sink, "sync", False)',
+        'self._set_if(self.sink, "qos", False)',
+        'self._set_if(self.sink, "async", False)',
         'self._set_if(self.sink, "force-aspect-ratio", True)',
     ):
-        if required not in display_source and required not in (
-            ROOT / "services/camera_v2/main.py"
-        ).read_text(encoding="utf-8"):
-            raise RuntimeError(f"display quality/aspect guard missing: {required}")
-
-    focus_source = (ROOT / "services/camera_v2/sentinel_video_pro.py").read_text(
-        encoding="utf-8"
-    )
-    for required in (
-        "FOCUS_WIDTH = 1920",
-        "FOCUS_HEIGHT = 1080",
-        "runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)",
-        'runtime.tiler.set_property("show-source", sid)',
-    ):
-        if required not in focus_source:
-            raise RuntimeError(f"fullscreen focus contract missing: {required}")
+        if required not in main_source:
+            raise RuntimeError(f"live EGL sink guard missing: {required}")
 
     ensure_bridge()
-    ensure_heatmap_filter()
 
     print(
-        f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=PASS "
+        f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=OFF "
         f"mux={mux_width}x{mux_height} grid={WALL_WIDTH}x{WALL_HEIGHT} "
-        f"tile={WALL_WIDTH // 2}x{WALL_HEIGHT // 3} focus=1920x1080 "
-        f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT} "
-        f"tracker={tracker_width}x{tracker_height} "
-        "stride_safe=PASS bbox=nvdcf-truth+display-only-smoother scaling=lanczos"
+        f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
+        f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
+        "tracker=motion-predictor nvtracker=disabled stride_safe=PASS "
+        "stage_counters=mux+wall+sink scaling=lanczos"
     )
     print("CAMERA_PREFLIGHT=PASS")
     return 0
