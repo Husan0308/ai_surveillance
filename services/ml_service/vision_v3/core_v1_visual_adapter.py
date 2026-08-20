@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 
-from .visual_tracker import VisualBox, VisualTracker
+from .sparse_visual_tracker import SparseCadenceVisualTracker
+from .visual_tracker import VisualBox
 
 
 class CoreV1VisualAdapter:
@@ -20,10 +21,10 @@ class CoreV1VisualAdapter:
         self.width = float(width)
         self.height = float(height)
         self.cfg = dict(cfg or {})
-        self.trackers: dict[str, VisualTracker] = {}
+        self.trackers: dict[str, SparseCadenceVisualTracker] = {}
         self.frame_ids: dict[str, int] = {}
 
-    def _tracker(self, camera_id: str) -> VisualTracker:
+    def _tracker(self, camera_id: str) -> SparseCadenceVisualTracker:
         tracker = self.trackers.get(camera_id)
         if tracker is not None:
             return tracker
@@ -35,7 +36,8 @@ class CoreV1VisualAdapter:
         camera_birth_zones = dict(cfg.get("camera_new_track_zones") or {})
         camera_exclusion = dict(cfg.get("camera_exclusion_zones") or {})
 
-        tracker = VisualTracker(
+        tracker = SparseCadenceVisualTracker(
+            birth_candidate_ttl_ms=int(cfg.get("birth_candidate_ttl_ms", 5000)),
             hold_ms=int(cfg.get("hold_ms", 2200)),
             memory_ms=int(cfg.get("memory_ms", 5000)),
             prediction_ms=int(cfg.get("prediction_ms", 1000)),
@@ -51,16 +53,16 @@ class CoreV1VisualAdapter:
             fragment_min_vertical_overlap=float(cfg.get("fragment_min_vertical_overlap", 0.20)),
             fragment_max_vertical_gap=float(cfg.get("fragment_max_vertical_gap", 0.06)),
             low_conf_confirm=float(camera_low.get(camera_id, cfg.get("low_conf_confirm", 0.06))),
-            start_conf=float(camera_start.get(camera_id, cfg.get("start_conf", 0.24))),
-            new_track_min_conf=float(cfg.get("new_track_min_conf", 0.14)),
-            strong_confirm_hits=int(cfg.get("strong_confirm_hits", 2)),
-            weak_confirm_hits=int(cfg.get("weak_confirm_hits", 3)),
-            byte_high_conf=float(cfg.get("byte_high_conf", 0.16)),
+            start_conf=float(camera_start.get(camera_id, cfg.get("start_conf", 0.18))),
+            new_track_min_conf=float(cfg.get("new_track_min_conf", 0.08)),
+            strong_confirm_hits=int(cfg.get("strong_confirm_hits", 1)),
+            weak_confirm_hits=int(cfg.get("weak_confirm_hits", 2)),
+            byte_high_conf=float(cfg.get("byte_high_conf", 0.08)),
             byte_low_conf=float(cfg.get("byte_low_conf", 0.06)),
             byte_second_match_iou=float(cfg.get("byte_second_match_iou", 0.04)),
             byte_match_center=float(cfg.get("byte_match_center", 0.70)),
             byte_second_match_center=float(cfg.get("byte_second_match_center", 0.50)),
-            low_match_max_age_ms=int(cfg.get("low_match_max_age_ms", 1800)),
+            low_match_max_age_ms=int(cfg.get("low_match_max_age_ms", 2200)),
             process_noise=float(cfg.get("process_noise", 0.85)),
             measurement_noise=float(cfg.get("measurement_noise", 0.90)),
             velocity_damping=float(cfg.get("velocity_damping", 0.96)),
@@ -141,4 +143,8 @@ class CoreV1VisualAdapter:
 
     def metrics(self, camera_id: str):
         tracker = self.trackers.get(camera_id)
-        return tracker.metrics() if tracker is not None else {"algorithm": "adaptive-kalman-byte-visual-v2", "active_tracks": 0}
+        return tracker.metrics() if tracker is not None else {
+            "algorithm": "adaptive-kalman-byte-visual-v2-sparse",
+            "active_tracks": 0,
+            "birth_candidate_ttl_ms": float(self.cfg.get("birth_candidate_ttl_ms", 5000)),
+        }
