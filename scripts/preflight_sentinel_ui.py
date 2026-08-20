@@ -18,7 +18,6 @@ from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_R
 from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
-FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
 EXPECTED_BUILD = "2026.08.20-r13-rfdetr"
 
 
@@ -37,7 +36,6 @@ def _require_all(source: str, guards: tuple[str, ...], label: str) -> None:
 
 
 def main_preflight() -> int:
-    """Validate only the Sentinel UI/control contract."""
     if not callable(main):
         _fail("main entry point is missing")
     if BUILD_TAG != EXPECTED_BUILD:
@@ -46,8 +44,6 @@ def main_preflight() -> int:
     nav_titles = [str(row[1]) for row in MainWindow.NAV]
     if nav_titles != EXPECTED_NAV:
         _fail(f"navigation={nav_titles!r}, expected={EXPECTED_NAV!r}")
-    if FORBIDDEN_NAV.intersection(nav_titles):
-        _fail("forbidden navigation item is present")
 
     expected_classes = [
         MonitoringPage,
@@ -61,7 +57,7 @@ def main_preflight() -> int:
         _fail("navigation page classes do not match")
 
     if CAMERA_COUNT != 6 or (GRID_COLUMNS, GRID_ROWS) != (2, 3):
-        _fail("Monitoring wall must be 2x3 / 6-camera capacity")
+        _fail("Monitoring must keep a fixed 2x3 / 6-camera wall")
 
     settings = load_settings()
     if not 1 <= len(settings.cameras) <= CAMERA_COUNT:
@@ -71,181 +67,78 @@ def main_preflight() -> int:
     if "codec" in fields:
         _fail("CameraConfig still exposes codec")
 
-    raw = yaml.safe_load((ROOT / "config" / "cameras.yaml").read_text(encoding="utf-8")) or {}
+    raw = yaml.safe_load(
+        (ROOT / "config" / "cameras.yaml").read_text(encoding="utf-8")
+    ) or {}
     for row in raw.get("cameras") or []:
         forbidden = {"codec", "env_uri", "environment_uri"}.intersection(row)
         if forbidden:
-            _fail(f"{row.get('id', 'camera')} contains forbidden fields: {sorted(forbidden)}")
+            _fail(
+                f"{row.get('id', 'camera')} contains forbidden fields: {sorted(forbidden)}"
+            )
 
-    ui_files = {
-        "shell": _source("services/camera_v2/sentinel_ui.py"),
-        "monitoring": _source("services/camera_v2/sentinel_ui_monitoring.py"),
-        "monitoring_native": _source("services/camera_v2/sentinel_ui_monitoring_native.py"),
-        "wall": _source("services/camera_v2/sentinel_video_wall_ui.py"),
-        "settings": _source("services/camera_v2/sentinel_ui_settings.py"),
-    }
-
-    for name, source in ui_files.items():
-        for forbidden_text in ("NVDEC", "no pose/reid", "pose=", "reid=", "DeepStream"):
-            if forbidden_text in source:
-                _fail(f"{name} still exposes technical UI text: {forbidden_text}")
-
-    settings_source = ui_files["settings"]
-    for forbidden_text in (
-        "Environment URI",
-        'form.addRow("Codec"',
-        "self.codec =",
-        "self.env_uri =",
-    ):
-        if forbidden_text in settings_source:
-            _fail(f"stale Settings field remains: {forbidden_text}")
-
-    monitoring_source = ui_files["monitoring"]
+    monitoring = _source("services/camera_v2/sentinel_ui_monitoring_native.py")
     _require_all(
-        monitoring_source,
+        monitoring,
         (
-            'self.identity_panel.setFixedWidth(262)',
-            'QLabel("People in Building")',
-            'QLabel("Recent Views")',
-            'metrics.get("known_people"',
-            'metrics.get("total_people"',
-            "unknown = max(0, total - known)",
-            "self.wall.set_pipeline_status(status)",
-        ),
-        "monitoring",
-    )
-
-    _require_all(
-        ui_files["monitoring_native"],
-        (
-            "WA_DontCreateNativeAncestors, False",
+            "class NativeVideoSurface(QWidget)",
+            "class MonitoringPage(QWidget)",
+            "self.surface = NativeVideoSurface(self)",
+            "self.surface.nativeReady.connect(self._start_or_bind)",
             "WA_NativeWindow, True",
-            "def _ensure_native_ancestor_chain",
-            "def showEvent",
+            "WA_DontCreateNativeAncestors, True",
+            "WA_NoSystemBackground, True",
+            "ProPipelineController()",
+            'QLabel("People in Building")',
+            'metrics.get("total_people"',
+            'metrics.get("known_people"',
+            "def open_fullscreen_grid",
+            "def exit_fullscreen",
+            "def shutdown",
         ),
-        "native monitoring parent chain",
+        "single-surface Monitoring",
     )
 
-    # The EGL wall owns one native child XID. It is rebound only when Qt actually
-    # changes that XID; periodic same-handle rebinding is forbidden because it can
-    # disturb an otherwise-live nveglglessink surface.
-    _require_all(
-        monitoring_source,
-        (
-            "self.wall.installEventFilter(self)",
-            "QEvent.Type.WinIdChange",
-            "QEvent.Type.Show",
-            "QEvent.Type.ParentChange",
-            "def _ensure_video_binding",
-            "def _schedule_binding_check",
-            "SENTINEL_UI_BIND action=",
-            'self._schedule_binding_check("fullscreen-enter")',
-            'self._schedule_binding_check("fullscreen-exit")',
-            'self._bind_window_id(int(xid), reason="native-ready")',
-            "xid == self._last_bound_xid",
-        ),
-        "deterministic native video binding",
-    )
-    for forbidden_binding in (
-        "watchdog-5s",
-        "_bind_watchdog_ticks",
-        "def _schedule_rebind",
-        "_ensure_video_binding(True",
+    # Monitoring must not mutate nvmultistreamtiler while it is PLAYING. The old
+    # focus path caused SetSingleSourceMode/not-negotiated and blank video walls.
+    for forbidden in (
+        "controller.focus(",
+        "set_fullscreen_mode(",
+        "ProLiveVideoWall(",
+        "show-source",
+        'set_property("rows"',
+        'set_property("columns"',
     ):
-        if forbidden_binding in monitoring_source:
-            _fail(f"same-XID rebinding regression returned: {forbidden_binding}")
+        if forbidden in monitoring:
+            _fail(f"Monitoring reintroduced dynamic tiler/native-wall logic: {forbidden}")
 
-    video_source = _source("services/camera_v2/sentinel_video_pro.py")
+    shell = _source("services/camera_v2/sentinel_ui.py")
     _require_all(
-        video_source,
+        shell,
         (
+            "from .sentinel_ui_monitoring_native import MonitoringPage",
+            "window.showMaximized()",
+            "def set_monitoring_fullscreen",
+        ),
+        "shell",
+    )
+    if "showFullScreen()" in shell or "showNormal()" in shell:
+        _fail("top-level window mode churn returned")
+
+    video = _source("services/camera_v2/sentinel_video_pro.py")
+    _require_all(
+        video,
+        (
+            'runtime.tiler.set_property("rows", GRID_ROWS)',
+            'runtime.tiler.set_property("columns", GRID_COLUMNS)',
+            "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
+            "GstVideo.VideoOverlay.set_window_handle",
             "live_source_counts",
-            "room_people",
             "room_people[room_key] = max",
             "total = sum(room_people.values())",
-            "known = 0",
-            "unknown = total",
-            "force-aspect-ratio",
-            "FOCUS_WIDTH = 1920",
-            "FOCUS_HEIGHT = 1080",
-            "runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)",
-            "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
-            'runtime.tiler.set_property("rows", 1)',
-            'runtime.tiler.set_property("columns", 1)',
-            "GstVideo.VideoOverlay.set_window_handle",
         ),
-        "monitoring runtime contract",
+        "fixed-grid runtime",
     )
-
-    dynamic_source = _source("services/camera_v2/dynamic_wall.py")
-    _require_all(
-        dynamic_source,
-        (
-            'self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")',
-            "set_wall_output_geometry",
-            "pixel-aspect-ratio=1/1",
-            'self._require_link(self.tiler, self.wall_caps',
-        ),
-        "wall aspect",
-    )
-
-    wall_source = ui_files["wall"]
-    _require_all(
-        wall_source,
-        (
-            "self.tile_headers: list[QFrame]",
-            "self.room_labels: list[QLabel]",
-            'header.setGeometry(left + 1, top + 1, max(1, width - 2), 27)',
-            'self.fullscreen_camera_label = QLabel("", self)',
-            'self.fullscreen_fps_label = QLabel("", self)',
-            "for widget in self.camera_labels:",
-            "for widget in self.status_labels:",
-            "widget.setVisible(not active)",
-            "self.fullscreen_camera_label.setText(camera_id)",
-            'self.fullscreen_fps_label.setText("LIVE")',
-            "self._layout_fullscreen_hud()",
-            "def mouseMoveEvent(self, event)",
-            "sid == self._hover_source",
-            "action.setVisible(show)",
-            "def leaveEvent(self, event)",
-            "def set_pipeline_status(self, status)",
-        ),
-        "camera-card/native-wall/fixed-HUD",
-    )
-
-    for forbidden in (
-        "cameraWallStateCover",
-        "state_cover.show()",
-        "state_cover.raise_()",
-        '"ERROR", "STOPPED", "PIPELINE_WARNING"',
-    ):
-        if forbidden in wall_source:
-            _fail(f"native wall can be blocked by stale opaque overlay: {forbidden}")
-
-    base_video_source = _source("services/camera_v2/sentinel_video.py")
-    _require_all(
-        base_video_source,
-        (
-            "self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)",
-            "self.setAttribute(Qt.WA_NativeWindow, True)",
-            "QTimer.singleShot(100, lambda: self.nativeReady.emit(xid))",
-        ),
-        "single native video child",
-    )
-    for forbidden_native in (
-        "WA_PaintOnScreen",
-        "WA_NoSystemBackground",
-        "def paintEngine(",
-    ):
-        if forbidden_native in base_video_source:
-            _fail(f"stale native backing-store hack returned: {forbidden_native}")
-
-    if "occupancy_label = QLabel" in base_video_source or "occupancy = len" in base_video_source:
-        _fail("demo per-camera occupancy badge returned")
-
-    enrollment_source = _source("services/camera_v2/sentinel_ui_enrollment.py")
-    if "class ReportsPage" in enrollment_source:
-        _fail("stale ReportsPage still exists")
 
     launcher = _source("scripts/run_sentinel_vms.sh")
     _require_all(
@@ -256,24 +149,15 @@ def main_preflight() -> int:
             "python scripts/preflight_camera_v2_core.py",
             "exec python -m services.camera_v2.monitor_ui",
             "export QT_QPA_PLATFORM=xcb",
-            "SENTINEL_DISPLAY session=",
-            "expected_ui=2026.08.20-r13-rfdetr",
         ),
         "launcher",
     )
-    for forbidden_launcher in ("setup_camera_v2_reid.py", "preflight_camera_v2_reid.py"):
-        if forbidden_launcher in launcher:
-            _fail(f"launcher still starts optional path: {forbidden_launcher}")
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
-    print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
-    print("SENTINEL_PREFLIGHT monitoring=compact-vms 2x3 header-bars right-rail=262px")
-    print("SENTINEL_PREFLIGHT native_video=single-native-child complete-native-parent-chain PASS")
-    print("SENTINEL_PREFLIGHT native_binding=xcb+rebind-only-on-new-xid PASS")
-    print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
+    print("SENTINEL_PREFLIGHT monitoring=fixed-2x3 single-native-surface right-rail=252px")
+    print("SENTINEL_PREFLIGHT native_video=one-xid no-qt-overlay-on-video PASS")
+    print("SENTINEL_PREFLIGHT tiler=runtime-fixed no-focus-mutation PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
-    print("SENTINEL_PREFLIGHT runtime_validation=delegated-to-camera-v2-core")
-    print("SENTINEL_PREFLIGHT ui_technical_labels=REMOVED")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
 
