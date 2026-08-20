@@ -15,7 +15,7 @@ from services.camera_v2.camera_wall_runtime import (  # noqa: E402
 from services.camera_v2.sentinel_ui import BUILD_TAG, MainWindow, main  # noqa: E402
 from services.ml_service.app.config import load_settings  # noqa: E402
 
-EXPECTED_BUILD = "2026.08.20-r18-rtsp-tcp"
+EXPECTED_BUILD = "2026.08.20-r19-analysis-tiler"
 
 
 def fail(message: str) -> None:
@@ -42,7 +42,7 @@ def main_preflight() -> int:
 
     shell = source("services/camera_v2/sentinel_ui.py")
     for token in (
-        'BUILD_TAG = "2026.08.20-r18-rtsp-tcp"',
+        'BUILD_TAG = "2026.08.20-r19-analysis-tiler"',
         "self.monitoring_page = MonitoringPage()",
         "self.setCentralWidget(self.monitoring_page)",
         "self.monitoring_page.shutdown()",
@@ -88,13 +88,17 @@ def main_preflight() -> int:
     pascal = source("services/camera_v2/pascal_safe_pipeline.py")
     for token in (
         "SecureCameraWallV2._add_camera(self, index, camera)",
-        "pascal_postmux_tee",
-        "nvstreamdemux",
-        "CAMERA_DETECT_PATH mode=postmux-demux",
+        "pascal_mux_tee",
+        "pascal_analysis_tiler",
+        "CAMERA_DETECT_PATH mode=analysis-tiler",
         "source_path=direct-to-nvstreammux",
+        "demux=disabled",
+        "mux_batch_retention=bounded",
     ):
         if token not in pascal:
             fail(f"display-first detector guard missing: {token}")
+    if "nvstreamdemux" in pascal:
+        fail("zero-copy nvstreamdemux must not return to the production detector path")
 
     secure = source("services/camera_v2/secure.py")
     for token in (
@@ -114,11 +118,12 @@ def main_preflight() -> int:
         "python scripts/preflight_sentinel_ui.py",
         "python scripts/preflight_camera_v2_core.py",
         "exec python -m services.camera_v2.monitor_ui",
-        "expected_ui=2026.08.20-r18-rtsp-tcp",
+        "expected_ui=2026.08.20-r19-analysis-tiler",
         "export CAMERA_V2_RTSP_TRANSPORT=tcp",
         "export CAMERA_V2_RTSP_LATENCY_MS=250",
         "rtsp=tcp latency=250ms",
-        "detector_path=postmux-demux",
+        "detector_path=analysis-tiler",
+        "demux=disabled",
         "ui=camera-only-2x3-click-fullscreen",
     ):
         if token not in launcher:
@@ -128,7 +133,7 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT wall=6-camera fixed-2x3 click-fullscreen PASS")
     print("SENTINEL_PREFLIGHT native_video=direct-QWidget-xid idempotent-bind PASS")
     print("SENTINEL_PREFLIGHT rtsp=tcp latency=250ms dynamic-pad=late-caps-safe PASS")
-    print("SENTINEL_PREFLIGHT detector=postmux-demux source-ingest-isolated PASS")
+    print("SENTINEL_PREFLIGHT detector=analysis-tiler demux=disabled mux-retention=bounded PASS")
     print("SENTINEL_PREFLIGHT runtime=pascal-safe RF-DETR motion-predictor no-nvtracker PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
