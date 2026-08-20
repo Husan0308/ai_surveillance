@@ -12,7 +12,7 @@ class CameraPersonDetectionV2(CameraDetectionV2):
 
     def _install_osd_and_meta(self) -> None:
         # Gst.Element.unlink() is void in PyGObject; call it directly.
-        self.wall_queue.unlink(self.sink)
+        self.unlink_display_source(self.wall_queue)
 
         convert = self._make("nvvideoconvert", "detect_wall_convert")
         caps = self._make("capsfilter", "detect_wall_caps")
@@ -38,8 +38,8 @@ class CameraPersonDetectionV2(CameraDetectionV2):
             raise RuntimeError("failed nvvideoconvert -> RGBA caps")
         if not caps.link(osd):
             raise RuntimeError("failed RGBA caps -> nvdsosd")
-        if not osd.link(self.sink):
-            raise RuntimeError("failed nvdsosd -> nveglglessink")
+        if not self.link_display_source(osd):
+            raise RuntimeError("failed nvdsosd -> display adapter")
 
         self.mux.get_static_pad("src").add_probe(
             self.Gst.PadProbeType.BUFFER,

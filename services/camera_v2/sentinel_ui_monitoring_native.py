@@ -61,7 +61,7 @@ class NativeVideoSurface(QWidget):
         self.setAutoFillBackground(False)
 
         # Qt must not preserve or repaint backing-store pixels over this child.
-        # nveglglessink is the only painter and receives this widget's stable XID.
+        # GstVideoOverlay is the only painter and receives this widget's stable XID.
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)

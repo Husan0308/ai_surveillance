@@ -124,6 +124,22 @@ def main() -> int:
         ).read_text(encoding="utf-8"):
             raise RuntimeError(f"display quality/aspect guard missing: {required}")
 
+    for required in (
+        'CAMERA_V2_RENDER_SINK", "ximage"',
+        '"ximagesink", "camera_v2_sink"',
+        'Gst.Caps.from_string("video/x-raw,format=BGRx")',
+        "self.display_input = self.display_convert",
+        "def link_display_source(self, source)",
+    ):
+        if required not in display_source:
+            raise RuntimeError(f"remote-visible display guard missing: {required}")
+
+    tracking_display_source = (
+        ROOT / "services/camera_v2/person_tracking.py"
+    ).read_text(encoding="utf-8")
+    if "self.link_display_source(osd)" not in tracking_display_source:
+        raise RuntimeError("NvDCF OSD is not connected to the display adapter")
+
     focus_source = (ROOT / "services/camera_v2/sentinel_video_pro.py").read_text(
         encoding="utf-8"
     )
@@ -145,7 +161,8 @@ def main() -> int:
         f"tile={WALL_WIDTH // 2}x{WALL_HEIGHT // 3} focus=1920x1080 "
         f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT} "
         f"tracker={tracker_width}x{tracker_height} "
-        "stride_safe=PASS bbox=nvdcf-truth+display-only-smoother scaling=lanczos"
+        "stride_safe=PASS bbox=nvdcf-truth+display-only-smoother scaling=lanczos "
+        "display=ximagesink-remote-visible"
     )
     print("CAMERA_PREFLIGHT=PASS")
     return 0

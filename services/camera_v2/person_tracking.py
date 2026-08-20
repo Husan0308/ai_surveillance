@@ -181,7 +181,7 @@ class CameraPersonTrackingV2(CameraDetectionV2):
             raise RuntimeError("failed nvtracker -> nvmultistreamtiler")
 
         # Preserve the same final GPU OSD path used by the working detection test.
-        self.wall_queue.unlink(self.sink)
+        self.unlink_display_source(self.wall_queue)
         convert = self._make("nvvideoconvert", "track_wall_convert")
         caps = self._make("capsfilter", "track_wall_caps")
         osd = self._make("nvdsosd", "track_osd")
@@ -203,8 +203,8 @@ class CameraPersonTrackingV2(CameraDetectionV2):
             raise RuntimeError("failed nvvideoconvert -> RGBA caps")
         if not caps.link(osd):
             raise RuntimeError("failed RGBA caps -> nvdsosd")
-        if not osd.link(self.sink):
-            raise RuntimeError("failed nvdsosd -> nveglglessink")
+        if not self.link_display_source(osd):
+            raise RuntimeError("failed nvdsosd -> display adapter")
 
         self.mux.get_static_pad("src").add_probe(
             self.Gst.PadProbeType.BUFFER,

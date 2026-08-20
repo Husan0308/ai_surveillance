@@ -24,7 +24,7 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.20-r17-camera-only"
+BUILD_TAG = "2026.08.20-r18-ximage-visible"
 
 
 class MainWindow(QMainWindow):

@@ -25,6 +25,10 @@ class DynamicCameraWallV2(CameraWallV2):
         Gst.init(None)
         self.Gst = Gst
         self.GLib = GLib
+        render_mode = os.environ.get("CAMERA_V2_RENDER_SINK", "ximage").strip().lower()
+        self.render_sink_factory = (
+            "nveglglessink" if render_mode in {"egl", "nveglglessink"} else "ximagesink"
+        )
         self.settings = load_settings()
         self.cameras = list(self.settings.cameras)
         if not 1 <= len(self.cameras) <= 16:
@@ -103,7 +107,30 @@ class DynamicCameraWallV2(CameraWallV2):
         self.tiler = self._make("nvmultistreamtiler", "camera_v2_tiler")
         self.wall_caps = self._make("capsfilter", "camera_v2_wall_geometry")
         self.wall_queue = self._make("queue", "camera_v2_wall_queue")
-        self.sink = self._make("nveglglessink", "camera_v2_sink")
+        self.display_convert = None
+        self.display_caps = None
+        if self.render_sink_factory == "ximagesink":
+            # EGL surfaces can be invisible to desktop compositors/remote-display
+            # capture even while frames are being rendered. Convert only the final
+            # tiled wall from NVMM to a normal XImage; decoding, inference, NvDCF,
+            # tiling and OSD all remain on the GPU.
+            self.display_convert = self._make(
+                "nvvideoconvert", "camera_v2_ximage_convert"
+            )
+            self.display_caps = self._make("capsfilter", "camera_v2_ximage_caps")
+            self.display_caps.set_property(
+                "caps",
+                Gst.Caps.from_string("video/x-raw,format=BGRx"),
+            )
+            self._set_if(self.display_convert, "gpu-id", self.gpu_id)
+            self._set_if(self.display_convert, "compute-hw", 1)
+            self.sink = self._make("ximagesink", "camera_v2_sink")
+            self.display_input = self.display_convert
+            display_elements = (self.display_convert, self.display_caps, self.sink)
+        else:
+            self.sink = self._make("nveglglessink", "camera_v2_sink")
+            self.display_input = self.sink
+            display_elements = (self.sink,)
 
         self._configure_mux()
         self._configure_tiler()
@@ -111,13 +138,31 @@ class DynamicCameraWallV2(CameraWallV2):
         self._configure_wall_queue()
         self._configure_sink()
 
-        for element in (self.mux, self.tiler, self.wall_caps, self.wall_queue, self.sink):
+        for element in (self.mux, self.tiler, self.wall_caps, self.wall_queue, *display_elements):
             self.pipeline.add(element)
 
         self._require_link(self.mux, self.tiler, "nvstreammux -> nvmultistreamtiler")
         self._require_link(self.tiler, self.wall_caps, "nvmultistreamtiler -> wall caps")
         self._require_link(self.wall_caps, self.wall_queue, "wall caps -> wall queue")
-        self._require_link(self.wall_queue, self.sink, "wall queue -> nveglglessink")
+        self._require_link(self.wall_queue, self.display_input, "wall queue -> display input")
+        if self.render_sink_factory == "ximagesink":
+            self._require_link(
+                self.display_convert,
+                self.display_caps,
+                "display nvvideoconvert -> raw BGRx caps",
+            )
+            self._require_link(
+                self.display_caps,
+                self.sink,
+                "raw BGRx caps -> ximagesink",
+            )
+
+        print(
+            "CAMERA_DISPLAY_SINK "
+            f"mode={'ximage-remote-safe' if self.render_sink_factory == 'ximagesink' else 'egl'} "
+            f"factory={self.render_sink_factory}",
+            flush=True,
+        )
 
         for index, camera in enumerate(self.cameras):
             self._add_camera(index, camera)
@@ -166,6 +211,14 @@ class DynamicCameraWallV2(CameraWallV2):
 
     def _configure_wall_caps(self, width: int, height: int) -> None:
         self.wall_caps.set_property("caps", self._wall_caps_value(width, height))
+
+    def unlink_display_source(self, source) -> None:
+        """Detach the element currently feeding the final display adapter."""
+        source.unlink(self.display_input)
+
+    def link_display_source(self, source) -> bool:
+        """Link OSD output to the selected EGL/XImage display adapter."""
+        return bool(source.link(self.display_input))
 
     def set_wall_output_geometry(self, width: int, height: int) -> None:
         """Change native wall geometry and force caps renegotiation while PLAYING."""

@@ -458,8 +458,7 @@ class CameraDetectionV2(SecureCameraWallV2):
         return self.Gst.FlowReturn.OK
 
     def _install_osd_and_meta(self) -> None:
-        if not self.wall_queue.unlink(self.sink):
-            raise RuntimeError("could not detach baseline sink for OSD")
+        self.unlink_display_source(self.wall_queue)
         convert = self._make("nvvideoconvert", "detect_wall_convert")
         caps = self._make("capsfilter", "detect_wall_caps")
         osd = self._make("nvdsosd", "detect_osd")
@@ -472,8 +471,13 @@ class CameraDetectionV2(SecureCameraWallV2):
         self._set_if(osd, "gpu-id", self.gpu_id)
         for element in (convert, caps, osd):
             self.pipeline.add(element)
-        if not self.wall_queue.link(convert) or not convert.link(caps) or not caps.link(osd) or not osd.link(self.sink):
-            raise RuntimeError("failed wall queue -> convert -> OSD -> EGL link")
+        if (
+            not self.wall_queue.link(convert)
+            or not convert.link(caps)
+            or not caps.link(osd)
+            or not self.link_display_source(osd)
+        ):
+            raise RuntimeError("failed wall queue -> convert -> OSD -> display link")
         self.mux.get_static_pad("src").add_probe(self.Gst.PadProbeType.BUFFER, self._inject_boxes_probe)
         osd.get_static_pad("src").add_probe(self.Gst.PadProbeType.BUFFER, self._wall_probe)
         self.osd = osd

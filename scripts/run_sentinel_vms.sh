@@ -5,16 +5,21 @@ cd "$(dirname "$0")/.."
 
 HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
-echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.20-r17-camera-only"
+echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.20-r18-ximage-visible"
 
-# nveglglessink's GstVideoOverlay path needs a stable X11 window handle. On a
-# Wayland desktop DISPLAY normally points at XWayland, so run this one native
-# video application through Qt's xcb backend unless the operator explicitly set
-# another platform. This keeps QWidget.winId() compatible with the EGL sink.
+# ximagesink draws the final wall into the real X11 drawable, which remains
+# visible through desktop compositors and remote-display tools. The rest of the
+# DeepStream pipeline stays GPU/NVMM. Operators can explicitly select "egl" for
+# local zero-copy rendering, but the production default is the visible XImage path.
+export CAMERA_V2_RENDER_SINK="${CAMERA_V2_RENDER_SINK:-ximage}"
+
+# GstVideoOverlay needs a stable X11 window handle. On a Wayland desktop DISPLAY
+# normally points at XWayland, so run this native video application through Qt's
+# xcb backend unless the operator explicitly selected another platform.
 if [[ -n "${DISPLAY:-}" && -z "${QT_QPA_PLATFORM:-}" ]]; then
   export QT_QPA_PLATFORM=xcb
 fi
-echo "SENTINEL_DISPLAY session=${XDG_SESSION_TYPE:-unknown} qt_platform=${QT_QPA_PLATFORM:-auto} display=${DISPLAY:-unset}"
+echo "SENTINEL_DISPLAY session=${XDG_SESSION_TYPE:-unknown} qt_platform=${QT_QPA_PLATFORM:-auto} display=${DISPLAY:-unset} sink=${CAMERA_V2_RENDER_SINK}"
 
 # Canonical core profile. Main streams stay 4MP, RF-DETR-S receives a lightweight
 # 16:9 inference copy, and NvDCF owns per-frame continuity between detector hits.

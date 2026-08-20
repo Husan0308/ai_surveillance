@@ -50,6 +50,8 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
 def test_monitoring_uses_one_native_x11_video_target() -> None:
     native = source("services/camera_v2/sentinel_ui_monitoring_native.py")
     shell = source("services/camera_v2/sentinel_ui.py")
+    display = source("services/camera_v2/dynamic_wall.py")
+    launcher = source("scripts/run_sentinel_vms.sh")
 
     assert "class NativeVideoSurface(QWidget)" in native
     assert "WA_NativeWindow, True" in native
@@ -84,3 +86,10 @@ def test_monitoring_uses_one_native_x11_video_target() -> None:
     video = source("services/camera_v2/sentinel_video_pro.py")
     assert "GstVideo.VideoOverlay.set_window_handle" in video
     assert "GstVideo.VideoOverlay.expose" in video
+
+    assert 'CAMERA_V2_RENDER_SINK", "ximage"' in display
+    assert '"ximagesink", "camera_v2_sink"' in display
+    assert 'Gst.Caps.from_string("video/x-raw,format=BGRx")' in display
+    assert "self.display_input = self.display_convert" in display
+    assert "self.link_display_source(osd)" in source("services/camera_v2/person_tracking.py")
+    assert 'CAMERA_V2_RENDER_SINK="${CAMERA_V2_RENDER_SINK:-ximage}"' in launcher

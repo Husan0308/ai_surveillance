@@ -116,7 +116,18 @@ class CameraWallV2:
         GLib.timeout_add_seconds(5, self._print_stats)
 
     def _preflight(self) -> None:
-        required = ("nvurisrcbin", "nvstreammux", "nvmultistreamtiler", "nveglglessink", "queue")
+        render_sink = str(
+            getattr(self, "render_sink_factory", "nveglglessink")
+        )
+        required = [
+            "nvurisrcbin",
+            "nvstreammux",
+            "nvmultistreamtiler",
+            render_sink,
+            "queue",
+        ]
+        if render_sink == "ximagesink":
+            required.extend(("nvvideoconvert", "capsfilter"))
         missing = [name for name in required if self.Gst.ElementFactory.find(name) is None]
         if missing:
             raise RuntimeError("Missing DeepStream/GStreamer plugins: " + ", ".join(missing))

@@ -19,7 +19,7 @@ from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_R
 from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
-EXPECTED_BUILD = "2026.08.20-r17-camera-only"
+EXPECTED_BUILD = "2026.08.20-r18-ximage-visible"
 
 
 def _fail(message: str) -> None:
@@ -137,7 +137,7 @@ def main_preflight() -> int:
         shell,
         (
             "from .sentinel_ui_monitoring_native import MonitoringPage",
-            "BUILD_TAG = \"2026.08.20-r17-camera-only\"",
+            "BUILD_TAG = \"2026.08.20-r18-ximage-visible\"",
             "self.monitoring_host = QWidget(self.content)",
             "self.monitoring_page = MonitoringPage()",
             "monitoring_layout.addWidget(self.monitoring_page, 1)",
@@ -186,6 +186,21 @@ def main_preflight() -> int:
         "fixed-grid runtime",
     )
 
+    display = _source("services/camera_v2/dynamic_wall.py")
+    _require_all(
+        display,
+        (
+            'CAMERA_V2_RENDER_SINK", "ximage"',
+            '"ximagesink", "camera_v2_sink"',
+            'Gst.Caps.from_string("video/x-raw,format=BGRx")',
+            "self.display_input = self.display_convert",
+            "def unlink_display_source(self, source)",
+            "def link_display_source(self, source)",
+            "mode={'ximage-remote-safe'",
+        ),
+        "remote-visible display sink",
+    )
+
     launcher = _source("scripts/run_sentinel_vms.sh")
     _require_all(
         launcher,
@@ -195,6 +210,7 @@ def main_preflight() -> int:
             "python scripts/preflight_camera_v2_core.py",
             "exec python -m services.camera_v2.monitor_ui",
             "export QT_QPA_PLATFORM=xcb",
+            'export CAMERA_V2_RENDER_SINK="${CAMERA_V2_RENDER_SINK:-ximage}"',
         ),
         "launcher",
     )
@@ -203,6 +219,7 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT shell=Monitoring-outside-QStackedWidget PASS")
     print("SENTINEL_PREFLIGHT monitoring=camera-only 2x3 native-qwidget")
     print("SENTINEL_PREFLIGHT native_video=one-X11-XID paint-on-screen PASS")
+    print("SENTINEL_PREFLIGHT display=ximagesink remote-visible BGRx PASS")
     print("SENTINEL_PREFLIGHT interaction=click-focus click-or-escape-grid PASS")
     print("SENTINEL_PREFLIGHT overlays=outside-native-video PASS")
     print("SENTINEL_PREFLIGHT tiler=2x3-grid click-focus command-safe PASS")
