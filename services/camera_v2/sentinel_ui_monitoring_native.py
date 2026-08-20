@@ -2,20 +2,20 @@ from __future__ import annotations
 
 """Camera-only Qt host for the fixed six-camera DeepStream wall.
 
-This module intentionally contains no dashboard widgets, overlays, navigation,
-counts, cards, or stacked pages. GstVideoOverlay renders into exactly one QWindow
-embedded by Qt. The RF-DETR/NvDCF/DeepStream runtime remains unchanged.
+The dashboard is intentionally absent. GstVideoOverlay renders directly into one
+native QWidget X11 window; there is no QWindow/createWindowContainer layer, no
+stacked pages and no Qt child painted over the video surface. RF-DETR/NvDCF and
+the DeepStream runtime remain separate from this display host.
 """
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
-from PySide6.QtGui import QWindow
 from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from .sentinel_video_wall_ui import ProPipelineController
 
 
 class NativeVideoHost(QWidget):
-    """Own one embedded native QWindow and expose its X11 window id once."""
+    """One native QWidget used directly as the GstVideoOverlay X11 target."""
 
     nativeReady = Signal(int)
 
@@ -26,40 +26,35 @@ class NativeVideoHost(QWidget):
         self.setMinimumSize(640, 480)
         self._last_emitted_xid = 0
 
-        self.video_window = QWindow()
-        self.video_window.setObjectName("sentinelVideoWindow")
+        # This widget is the render target. Do not let Qt's backing store paint
+        # over EGL, and do not create another embedded native window layer.
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
+        self.setAutoFillBackground(False)
 
-        self.container = QWidget.createWindowContainer(self.video_window, self)
-        self.container.setObjectName("nativeVideoContainer")
-        self.container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.container.setMinimumSize(640, 480)
-        self.container.setStyleSheet("background:#000000;border:0;")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.container, 1)
+    def paintEngine(self):
+        # External GstVideoOverlay/EGL owns all pixels in this widget.
+        return None
 
     def _publish_xid(self) -> None:
         if not self.isVisible():
             return
         try:
-            self.video_window.create()
-            xid = int(self.video_window.winId())
+            xid = int(self.winId())
         except Exception as exc:
             print(
                 f"SENTINEL_VIDEO_SURFACE xid_error={type(exc).__name__}:{exc}",
                 flush=True,
             )
             return
-
         if xid <= 0 or xid == self._last_emitted_xid:
             return
-
         self._last_emitted_xid = xid
         print(
-            f"SENTINEL_VIDEO_SURFACE mode=camera-only-qwindow xid={xid} "
+            f"SENTINEL_VIDEO_SURFACE mode=direct-native-qwidget xid={xid} "
             f"size={self.width()}x{self.height()}",
             flush=True,
         )
@@ -67,13 +62,13 @@ class NativeVideoHost(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        QTimer.singleShot(120, self._publish_xid)
-        QTimer.singleShot(500, self._publish_xid)
+        QTimer.singleShot(80, self._publish_xid)
+        QTimer.singleShot(300, self._publish_xid)
 
     def event(self, event) -> bool:
         result = super().event(event)
-        if event.type() in (QEvent.Type.Show, QEvent.Type.ParentChange):
-            QTimer.singleShot(100, self._publish_xid)
+        if event.type() == QEvent.Type.WinIdChange and self.isVisible():
+            QTimer.singleShot(0, self._publish_xid)
         return result
 
 
@@ -94,10 +89,9 @@ class MonitoringPage(QWidget):
         self.surface.nativeReady.connect(self._start_or_bind)
         layout.addWidget(self.surface, 1)
 
-        # Keep draining runtime status/metrics so the IPC queue cannot accumulate,
-        # but intentionally render none of it in this temporary camera-only UI.
+        # Drain status/metrics IPC but render none of it in this camera-only UI.
         self.poll_timer = self.startTimer(250)
-        QTimer.singleShot(250, self._ensure_started)
+        QTimer.singleShot(200, self._ensure_started)
 
     def _start_or_bind(self, xid: int) -> None:
         xid = int(xid)
@@ -135,7 +129,3 @@ class MonitoringPage(QWidget):
         except Exception:
             pass
         self.controller.stop()
-        try:
-            self.surface.video_window.close()
-        except Exception:
-            pass
