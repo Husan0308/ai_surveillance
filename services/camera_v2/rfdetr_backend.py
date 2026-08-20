@@ -14,8 +14,31 @@ import time
 import numpy as np
 
 
+def _person_mask(detections, class_id: np.ndarray) -> np.ndarray:
+    """Resolve the person class across RF-DETR checkpoint label layouts.
+
+    Current pretrained COCO checkpoints can expose sparse raw COCO category IDs
+    (where person is category 1), while fine-tuned checkpoints can expose zero-
+    based class IDs. RF-DETR also publishes class_name in Detections.data, so use
+    that semantic label whenever available and only fall back to IDs.
+    """
+    data = getattr(detections, "data", None)
+    if isinstance(data, dict):
+        names = data.get("class_name")
+        if names is not None:
+            names = np.asarray(names).astype(str)
+            if len(names) == len(class_id):
+                normalized = np.char.lower(np.char.strip(names))
+                return normalized == "person"
+
+    # Pretrained COCO: raw sparse IDs use 1 for person. Older/remapped or
+    # fine-tuned one-class checkpoints commonly use 0. Accept both only as a
+    # compatibility fallback when semantic class names are unavailable.
+    return np.isin(class_id, (0, 1))
+
+
 def _person_rows(detections, max_det: int) -> list[tuple[list[float], float]]:
-    """Return COCO person detections only, highest-confidence first."""
+    """Return person detections only, highest-confidence first."""
     xyxy = np.asarray(getattr(detections, "xyxy", []), dtype=np.float32)
     confidence = np.asarray(getattr(detections, "confidence", []), dtype=np.float32)
     class_id = np.asarray(getattr(detections, "class_id", []), dtype=np.int64)
@@ -25,8 +48,7 @@ def _person_rows(detections, max_det: int) -> list[tuple[list[float], float]]:
     if len(xyxy) != len(confidence) or len(xyxy) != len(class_id):
         return []
 
-    person = class_id == 0
-    indices = np.flatnonzero(person)
+    indices = np.flatnonzero(_person_mask(detections, class_id))
     if not len(indices):
         return []
     indices = indices[np.argsort(confidence[indices])[::-1]]
@@ -128,7 +150,9 @@ def rfdetr_worker(job_q, result_q) -> None:
             try:
                 # RF-DETR documents NumPy input as RGB. The inference side branch
                 # delivers BGR from BGRx, so convert without touching display data.
-                rgb_frames = [np.ascontiguousarray(frame[..., ::-1]) for frame in job["frames"]]
+                rgb_frames = [
+                    np.ascontiguousarray(frame[..., ::-1]) for frame in job["frames"]
+                ]
                 with torch.inference_mode():
                     predictions = model.predict(
                         rgb_frames,
