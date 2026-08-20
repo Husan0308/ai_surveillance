@@ -64,7 +64,14 @@ jobs:
           assert 'class CameraPascalSafeRuntime(CameraDetectionV2)' in pascal
           assert 'self.wall_queue.unlink(self.sink)' in pascal
           assert 'mapped_size' in pascal and 'row_stride' in pascal
-          assert 'safe_mux_batches' in pascal and 'safe_wall_frames' in pascal
+          assert 'safe_mux_batches' in pascal
+          assert 'safe_wall_frames' in pascal
+          assert 'safe_sink_buffers' in pascal
+          assert 'factory = "ximagesink"' in pascal
+          assert 'pascal_x11_download' in pascal
+          assert 'video/x-raw,format=BGRx' in pascal
+          assert 'def _display_watchdog(self)' in pascal
+          assert 'display_failover_requested = True' in pascal
           for forbidden in (
               'CameraPersonTrackingV2',
               'CameraPersonTrackingFinal',
@@ -74,12 +81,18 @@ jobs:
               assert forbidden not in pascal, forbidden
 
           assert 'from .pascal_safe_pipeline import CameraPascalSafeRuntime' in controller
+          assert 'def _run_backend(' in controller
           assert 'if target == bound_xid' in controller
           assert 'GstVideo.VideoOverlay.set_window_handle' in controller
+          assert 'rc, _ = _run_backend(window_id, command_q, status_q, "x11")' in controller
+          assert 'gc.collect()' in controller
           assert 'from .camera_wall_runtime import CameraWallController' in ui
           assert 'ProPipelineController' not in ui
           assert 'BUILD_TAG = "2026.08.20-r16-pascal-safe"' in shell
           assert 'export CAMERA_V2_PASCAL_SAFE=1' in launcher
+          assert 'export CAMERA_V2_DISPLAY_BACKEND=egl' in launcher
+          assert 'export CAMERA_V2_EGL_FAILOVER_SEC=8.0' in launcher
+          assert 'display=egl->x11-on-zero-render' in launcher
           assert 'nvtracker=disabled' in launcher
           print('SENTINEL_CAMERA_WALL_STATIC=PASS')
           PY
