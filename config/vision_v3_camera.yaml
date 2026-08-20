@@ -1,0 +1,26 @@
+camera_core:
+  gpu_id: 0
+  source_fps: 20
+  rtsp_latency_ms: 100
+  udp_buffer_size: 8388608
+  decoder_extra_surfaces: 6
+  low_latency_mode: false
+
+  # Keep decode GPU-native. nvstreammux scales to this working resolution so
+  # six 4MP sources do not force the rest of the pipeline to process 4MP frames.
+  working_width: 1280
+  working_height: 720
+
+  # 3x2 wall, each tile 16:9.
+  tiler_columns: 3
+  tiler_rows: 2
+  wall_width: 1920
+  wall_height: 720
+
+  # Live CCTV policy: never build latency by queueing old frames.
+  queue_buffers: 1
+  sync_inputs: false
+  sink_sync: false
+  sink_qos: false
+
+  stats_interval_sec: 5
