@@ -38,6 +38,13 @@ export CAMERA_V2_DETECT_GPU_DUTY_MAX=0.30
 export CAMERA_V2_PASCAL_SAFE=1
 export CAMERA_V2_HEATMAP=0
 
+# Display starts on NVIDIA EGL. If source -> mux -> OSD -> sink-pad flow is proven
+# but nveglglessink still reports rendered=0 for 8 seconds, the child runtime
+# releases EGL completely and restarts once through the X11 fallback. This is
+# important on hybrid Intel/NVIDIA desktops and remote X11 sessions.
+export CAMERA_V2_DISPLAY_BACKEND=egl
+export CAMERA_V2_EGL_FAILOVER_SEC=8.0
+
 # Bounded temporal smoothing between sparse RF-DETR observations. These values
 # affect only the display/motion predictor; detector truth remains unchanged.
 export CAMERA_V2_BOX_SIDE_MARGIN=0.08
@@ -46,7 +53,7 @@ export CAMERA_V2_BOX_BOTTOM_MARGIN=0.10
 export CAMERA_V2_BOX_MAX_AGE=1.6
 export CAMERA_V2_BOX_MAX_PREDICT=0.55
 
-echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 detector=RF-DETR-S@672x384 threshold=0.18 batch=1 scheduler=adaptive-duty:12-30% tracker=motion-predictor nvtracker=disabled pascal_safe=1 ui=camera-only-2x3"
+echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 detector=RF-DETR-S@672x384 threshold=0.18 batch=1 scheduler=adaptive-duty:12-30% tracker=motion-predictor nvtracker=disabled display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3"
 
 python scripts/preflight_rfdetr_core.py
 python scripts/preflight_pascal_safe.py
