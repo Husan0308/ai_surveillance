@@ -1,45 +1,57 @@
 # AI Surveillance — Sentinel Camera V2
 
-Current production branch: `rebuild/gpu-v2-clean`.
+Current stabilization branch: `agent/rfdetr-s-core-final`.
 
-The live camera path is intentionally kept simple and GPU-native:
+## Canonical production path
+
+The deployment machine uses a GTX 1050 Ti. DeepStream 7.1 does not list Pascal in
+its validated x86 dGPU matrix, and the hardware smoke logs showed NvDCF stopping
+downstream after the first tracker batch while RTSP, NVDEC, nvstreammux and
+RF-DETR continued to work. The production launcher therefore does **not** insert
+`gst-nvtracker` on this machine.
 
 ```text
 6 RTSP cameras
     ↓
-DeepStream / NVDEC
+nvurisrcbin / NVDEC
     ↓
-YOLO26m sparse person detection (704x384, micro-batch 2)
-    ↓
-per-camera NvDCF local tracking
-    ↓
-OSD / 2x3 Sentinel wall
+per-camera latest-frame tee
+    ├── sparse RF-DETR-S side capture (672x384, micro-batch 1)
+    └── GPU display path
+            ↓
+        nvstreammux (2560x1440)
+            ↓
+        bounded motion-predictor bbox metadata
+            ↓
+        nvmultistreamtiler (2 columns x 3 rows)
+            ↓
+        nvvideoconvert -> RGBA NVMM
+            ↓
+        nvdsosd
+            ↓
+        nveglglessink
+            ↓
+        one persistent Qt/X11 native QWidget XID
 ```
 
-Cross-camera identity is a separate bounded side path so a slow model cannot stall
-camera ingest, detection, NvDCF or display:
+The active UI is intentionally camera-only. It does not instantiate the legacy
+Sentinel dashboard, People/Events/Rooms pages, MJPEG frontend or old Qt runtime.
 
-```text
-NvDCF track metadata + existing sparse detector frame mailbox
-    ↓
-5–10 temporally diverse person crops
-    ↓
-quality / overlap / truncation / duplicate gates
-    ↓
-diversity-aware top-3 evidence
-    ↓
-CPU ReID embedding + gallery candidate ranking
-    ↓
-room/time hard constraints + runner-up margin
-    ↓
-TENTATIVE Global ID
-    ↓
-Qwen-VL OLD-vs-NEW visual verification (async, optional)
-    ↓
-fresh evidence votes
-    ↓
-CONFIRMED Global ID / LOST / SUSPECT / rollback
-```
+## Active files
+
+- `scripts/run_sentinel_vms.sh` — production launcher and hardware profile.
+- `services/camera_v2/sentinel_ui.py` — minimal maximized Qt shell.
+- `services/camera_v2/sentinel_ui_monitoring_native.py` — one native video host.
+- `services/camera_v2/camera_wall_runtime.py` — process-isolated XID/GStreamer controller.
+- `services/camera_v2/pascal_safe_pipeline.py` — no-NvDCF RF-DETR runtime.
+- `services/camera_v2/rfdetr_backend.py` — RF-DETR-S CUDA worker.
+- `services/camera_v2/detection.py` — side-capture scheduler and motion predictor.
+- `services/camera_v2/dynamic_wall.py` / `main.py` / `secure.py` — RTSP/NVDEC/mux/tiler/EGL core.
+- `config/cameras.yaml` — authoritative six-camera topology.
+
+Legacy ReID, NvDCF, historical Sentinel UI and MJPEG service modules remain in the
+repository for later migration/cleanup, but they are not part of the production
+launcher above.
 
 ## Camera topology
 
@@ -49,96 +61,63 @@ CONFIRMED Global ID / LOST / SUSPECT / rollback
 - `Entrance`: CAM-02 + CAM-05
 - `Main Rooms`: CAM-03 + CAM-06
 
-Two cameras in the same room may observe the same Global ID simultaneously. Two
-active tracks in the same camera may not share one Global ID, and one Global ID may
-not be active in two different rooms at the same time.
+RTSP usernames/passwords are loaded from `.env`, normally through:
 
-## ReID safety rules
-
-- Local NvDCF IDs remain authoritative inside each camera.
-- A local ID break does not mean the Global ID is lost.
-- Short chair/desk occlusions keep the previous Global ID during the bounded display
-  hold; a newly created local track is matched back against the same Global gallery.
-- Tentative evidence is quarantined and cannot poison a confirmed gallery.
-- Appearance matching uses multi-shot evidence and a runner-up margin, not one crop.
-- Qwen returns `SAME`, `DIFFERENT`, or `UNCERTAIN`; it is independent evidence and
-  cannot bypass room/time hard constraints.
-- False merges are treated as more dangerous than temporary false splits.
-- Confirmed assignments can enter `SUSPECT` and be rolled back after repeated
-  contradictory evidence.
-
-## ReID backend
-
-`config/reid.yaml` defaults to `backend: auto` and keeps ReID on CPU so the GTX GPU
-remains available to the live detector/tracker path.
-
-- Preferred when installed: OSNet-AIN x1.0 / MSMT17 through `torchreid`.
-- Safe fallback: Intel/OpenVINO `person-reidentification-retail-0288` through OpenCV
-  DNN, also CPU-only.
-
-Model files are stored under `.runtime/camera_v2/models/reid/` and are gitignored.
-
-Prepare and warm the selected model once:
-
-```bash
-python scripts/setup_camera_v2_reid.py
+```text
+SURVEILLANCE_RTSP_USERNAME=...
+SURVEILLANCE_RTSP_PASSWORD=...
 ```
 
-The first setup needs working DNS/internet if the selected model is not already under
-`.runtime/camera_v2/models/reid/`. A successful setup prints
-`CAMERA_V2_REID_SETUP=PASS`. Production launch also runs this warmup check so ReID
-cannot silently start without a usable embedding model.
+Do not commit real credentials.
 
-## Qwen verifier
+## Why NvDCF is disabled on this deployment
 
-Qwen is optional at runtime and never blocks video. Point it at a real
-OpenAI-compatible Qwen-VL server. The following is a shell-safe example for a server
-listening on local port 8080:
+The observed failure was not an RTSP or detector failure. All six streams reached
+~20 FPS, RF-DETR produced detections, and external inference metadata was marked,
+but NvDCF stopped advancing while the EGL sink remained at zero rendered frames.
 
-```bash
-export QWEN_REID_URL="http://127.0.0.1:8080/v1"
-export QWEN_REID_MODEL="qwen3-vl"
-```
-
-Change `8080` and `qwen3-vl` to the actual port/model exposed by your server. Do not
-copy documentation placeholders such as `<PORT>` or `<model name>` directly into
-Bash; angle brackets are shell redirection syntax.
-
-Until a Qwen-VL server is running, leave `QWEN_REID_URL` unset. ReID remains active
-and the Qwen branch degrades to `UNCERTAIN` instead of blocking identity or video.
-
-The verifier receives one compact JPEG contact sheet containing up to three OLD
-Global-ID crops on the first row and up to three NEW-track crops on the second row.
-Timeouts, invalid JSON or unavailable serving degrade to `UNCERTAIN` rather than
-blocking or forcing an identity decision.
+For the GTX 1050 Ti stabilization path, temporal continuity is therefore provided
+by the existing bounded `SmoothBoxManager` motion predictor. It does not use pixel
+features or DeepStream's low-level tracker library. This is a display/local-motion
+fallback, not cross-camera ReID.
 
 ## Preflight
 
-After pulling code or changing native ReID metadata code:
+The launcher runs these checks automatically:
 
 ```bash
-rm -f .runtime/camera_v2/libcamera_v2_meta.so
-python scripts/setup_camera_v2_reid.py
-python scripts/preflight_camera_v2_reid.py
+python scripts/preflight_rfdetr_core.py
+python scripts/preflight_pascal_safe.py
+python scripts/preflight_sentinel_ui.py
+python scripts/preflight_camera_v2_core.py
 ```
 
-The ReID preflight checks camera/room topology, synthetic Global-ID behavior,
-same-camera occlusion reconnect, hard room conflict rules, crop quality, ctypes/C
-ABI sizes and compiles the native DeepStream metadata bridge on the target machine.
+Important runtime diagnostics after startup:
 
-## Run Sentinel
+```text
+CAMERA_INFER_LAYOUT ... stride=... tight=...
+CAMERA_PASCAL_SAFE mux_batches=... wall_frames=... rendered=...
+```
+
+`mux_batches` and `wall_frames` must continually increase. If they increase while
+`rendered` stays at zero, the remaining problem is isolated to EGL/X11 presentation
+rather than RTSP, detector or tracking.
+
+## Run
 
 ```bash
-bash scripts/run_sentinel_vms.sh
+source .venv/bin/activate
+bash scripts/run_sentinel_vms.sh 2>&1 | tee /tmp/camera-direct.log
 ```
 
-The launcher warms/verifies the ReID embedding model, then runs both ReID and UI
-preflights before opening Sentinel.
+Expected startup markers include:
 
-## Important calibration note
+```text
+RFDETR_PREFLIGHT=PASS
+PASCAL_SAFE_PREFLIGHT=PASS
+SENTINEL_UI_PREFLIGHT=PASS
+CAMERA_PREFLIGHT=PASS
+CAMERA_PASCAL_SAFE ready backend=RF-DETR-S tracker=motion-predictor nvtracker=disabled
+```
 
-Values in `config/reid.yaml` are conservative starting thresholds. Similarity scores
-are model- and camera-domain dependent, so final deployment thresholds must be
-calibrated from labeled positive pairs and hard-negative pairs captured by these
-actual six cameras. Do not copy thresholds from another ReID model or site and treat
-them as universal.
+The production wall is fixed at six cameras in a 2x3 layout.
