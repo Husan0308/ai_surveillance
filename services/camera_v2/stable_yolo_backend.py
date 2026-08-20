@@ -11,6 +11,7 @@ and CameraDetectionV2's existing source-space scaling remains correct.
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -81,8 +82,6 @@ def stable_yolo_worker(job_q, result_q) -> None:
             "stream": False,
         }
 
-        # Warm on the actual capture geometry. Ultralytics performs its own
-        # aspect-preserving letterbox to imgsz and maps results back to source.
         warm = [
             np.zeros((int(det.INFER_HEIGHT), int(det.INFER_WIDTH), 3), dtype=np.uint8)
             for _ in range(int(det.MICRO_BATCH))
@@ -199,8 +198,32 @@ def install() -> None:
     from . import detection
     from .stable_visual_adapter import StableVisualFlowBoxManager
 
+    class PascalStableVisualFlowBoxManager(StableVisualFlowBoxManager):
+        """Expose legacy counter fields expected by CameraPascalSafeRuntime stats."""
+
+        @property
+        def max_age(self):
+            return self.flow_hard_age_sec
+
+        @property
+        def tracks(self):
+            # Stats only: map exact old tracker state into the tiny legacy shape
+            # used by _active_motion_counts. This does not alter tracking truth.
+            output = {}
+            with self.lock:
+                for cid, tracker in self._trackers.items():
+                    with tracker._lock:
+                        output[cid] = {
+                            int(tid): SimpleNamespace(
+                                last_det_t=float(track.last_observation)
+                            )
+                            for tid, track in tracker._tracks.items()
+                            if track.hits >= tracker.strong_confirm_hits
+                        }
+            return output
+
     detection._yolo_worker = stable_yolo_worker
-    detection.SmoothBoxManager = StableVisualFlowBoxManager
+    detection.SmoothBoxManager = PascalStableVisualFlowBoxManager
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
 
     pascal_safe = os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
