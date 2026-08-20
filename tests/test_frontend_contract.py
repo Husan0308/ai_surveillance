@@ -78,10 +78,12 @@ def test_focused_camera_gets_hq_scaling_without_six_feed_copy_load() -> None:
     wall = source("services/frontend/app/camera_wall.py")
     mmap_reader = source("services/frontend/app/mmap_frame_reader.py")
 
-    # Normal wall stays on the cheap painter path; only the single focused tile
-    # enables Qt's higher-quality scaling filter.
-    assert "set_smooth_scaling" in wall
+    # Restore the old acd673ba policy: normal six-camera wall uses the cheap
+    # painter path; only the single focused tile enables HQ scaling.
+    assert "self._smooth_scaling = False" in wall
+    assert "set_smooth_scaling(bool(focused))" in wall
     assert "QPainter.RenderHint.SmoothPixmapTransform" in wall
+    assert "Qt.TransformationMode.FastTransformation" in wall
     assert "set_presentation_mode" in wall
     assert "_apply_presentation_policy" in wall
 
