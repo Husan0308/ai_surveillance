@@ -36,10 +36,10 @@ class MmapVideoCanvas(QWidget):
         super().__init__(parent)
         self._image: QImage | None = None
         self._version = -1
-        # The old clear wall always used SmoothPixmapTransform. Keep that visual
-        # quality for every visible tile; hidden focus-mode tiles are suspended
-        # before they can incur any repaint/copy cost.
-        self._smooth_scaling = True
+        # Restore the old acd673ba smooth-wall policy: six continuously changing
+        # tiles use the cheap painter path. Only a single focused camera enables
+        # Qt's SmoothPixmapTransform filter.
+        self._smooth_scaling = False
         self.setMinimumSize(320, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
@@ -83,8 +83,6 @@ class MmapVideoCanvas(QWidget):
             x = (target_w - draw_w) // 2
             y = (target_h - draw_h) // 2
 
-            # Match the old clear camera wall. High-quality filtering is used on
-            # all currently visible camera tiles instead of only fullscreen.
             if self._smooth_scaling:
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.drawImage(QRect(x, y, draw_w, draw_h), image)
@@ -180,9 +178,9 @@ class CameraTile(QFrame):
 
     def set_presentation_mode(self, *, active: bool, focused: bool) -> None:
         self._focused = bool(focused)
-        # Every visible tile uses the old clear high-quality scaler. In focus
-        # mode only one tile remains active, so the other five do no work.
-        self.mmap_canvas.set_smooth_scaling(bool(active))
+        # Old smooth six-wall: normal tiles use the cheap transform. A single
+        # focused camera may use HQ scaling because the other five readers pause.
+        self.mmap_canvas.set_smooth_scaling(bool(focused))
         if self.mmap_reader is not None:
             self.mmap_reader.set_active(bool(active))
 
@@ -249,10 +247,15 @@ class CameraTile(QFrame):
             pixmap = QPixmap.fromImage(image)
             target = self.fallback_video.size()
             if target.width() > 0 and target.height() > 0:
+                transform = (
+                    Qt.TransformationMode.SmoothTransformation
+                    if self._focused
+                    else Qt.TransformationMode.FastTransformation
+                )
                 pixmap = pixmap.scaled(
                     target,
                     Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
+                    transform,
                 )
             self.fallback_video.setPixmap(pixmap)
             self.status.setText("FALLBACK")
@@ -270,7 +273,7 @@ class CameraTile(QFrame):
 
 
 class CameraWall(QWidget):
-    """Two-camera-per-row wall with old clear scaling and latest-only mmap."""
+    """Two-camera-per-row wall with old smooth latest-only mmap presentation."""
 
     COLUMNS = 2
     focusChanged = Signal(bool, str)
