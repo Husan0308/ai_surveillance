@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import sys
 import time
@@ -11,13 +12,12 @@ from typing import Any
 
 import yaml
 
-# DeepStream 7.1: keep the legacy nvstreammux. It gives deterministic width,
-# height, live-source and memory/pool controls on the target machine.
 os.environ.pop("USE_NEW_NVSTREAMMUX", None)
 
 ROOT = Path(__file__).resolve().parents[3]
 CAMERAS_PATH = ROOT / "config" / "cameras.yaml"
 CORE_PATH = ROOT / "config" / "vision_v3_camera.yaml"
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 @dataclass(frozen=True)
@@ -39,15 +39,12 @@ class SourceStats:
 
 
 class SixCameraCore:
-    """Single production camera owner for Vision V3.
+    """GPU-native, bounded-latency six-camera baseline for Vision V3.
 
-    Hot path:
-      6x RTSP -> nvurisrcbin/NVDEC -> queue(1, leaky) -> nvstreammux(batch=6)
-      -> nvmultistreamtiler -> queue(1, leaky) -> nveglglessink
+    6x RTSP -> nvurisrcbin/NVDEC -> queue(1, leaky) -> nvstreammux(batch=6)
+    -> nvmultistreamtiler -> queue(1, leaky) -> nveglglessink
 
-    There is intentionally no detector, tracker, ReID, face recognition, JPEG,
-    NumPy frame copy, HTTP or Qt logic in this module. The sole acceptance target
-    is a smooth, bounded-latency six-camera GPU-native wall.
+    No detector/tracker/ReID/face/JPEG/NumPy/HTTP/Qt is allowed here.
     """
 
     def __init__(self) -> None:
@@ -59,11 +56,10 @@ class SixCameraCore:
         Gst.init(None)
         self.Gst = Gst
         self.GLib = GLib
-
-        self.cameras = self._load_cameras()
         self.cfg = self._load_core_config()
+        self.cameras = self._load_cameras()
         if len(self.cameras) != 6:
-            raise RuntimeError(f"Vision V3 camera core requires exactly 6 enabled cameras, found {len(self.cameras)}")
+            raise RuntimeError(f"Vision V3 requires exactly 6 cameras, found {len(self.cameras)}")
 
         self.gpu_id = int(self.cfg.get("gpu_id", 0))
         self.source_fps = max(1, int(self.cfg.get("source_fps", 20)))
@@ -73,15 +69,11 @@ class SixCameraCore:
         self.low_latency_mode = bool(self.cfg.get("low_latency_mode", False))
         self.working_width = max(320, int(self.cfg.get("working_width", 1280)))
         self.working_height = max(180, int(self.cfg.get("working_height", 720)))
-        self.tiler_columns = int(self.cfg.get("tiler_columns", 3))
-        self.tiler_rows = int(self.cfg.get("tiler_rows", 2))
+        self.tiler_columns = max(1, int(self.cfg.get("tiler_columns", 3)))
+        self.tiler_rows = max(1, int(self.cfg.get("tiler_rows", 2)))
         self.wall_width = max(960, int(self.cfg.get("wall_width", 1920)))
         self.wall_height = max(360, int(self.cfg.get("wall_height", 720)))
         self.stats_interval = max(1, int(self.cfg.get("stats_interval_sec", 5)))
-        self.queue_buffers = max(1, int(self.cfg.get("queue_buffers", 1)))
-        self.sync_inputs = bool(self.cfg.get("sync_inputs", False))
-        self.sink_sync = bool(self.cfg.get("sink_sync", False))
-        self.sink_qos = bool(self.cfg.get("sink_qos", False))
         self.mux_timeout_us = max(5_000, round(1_000_000 / self.source_fps))
 
         self._stopping = False
@@ -102,12 +94,11 @@ class SixCameraCore:
 
         self._configure_mux()
         self._configure_tiler()
-        self._configure_queue(self.wall_queue)
+        self._configure_latest_queue(self.wall_queue)
         self._configure_sink()
 
         for element in (self.mux, self.tiler, self.wall_queue, self.sink):
             self.pipeline.add(element)
-
         self._require_link(self.mux, self.tiler, "nvstreammux -> nvmultistreamtiler")
         self._require_link(self.tiler, self.wall_queue, "nvmultistreamtiler -> wall queue")
         self._require_link(self.wall_queue, self.sink, "wall queue -> nveglglessink")
@@ -128,27 +119,31 @@ class SixCameraCore:
         with path.open("r", encoding="utf-8") as fh:
             value = yaml.safe_load(fh) or {}
         if not isinstance(value, dict):
-            raise RuntimeError(f"invalid YAML root in {path}")
+            raise RuntimeError(f"invalid YAML root: {path}")
         return value
+
+    @staticmethod
+    def _expand_env(value: object) -> str:
+        text = str(value or "").strip()
+        return _ENV_PATTERN.sub(lambda m: os.environ.get(m.group(1), ""), text)
 
     def _load_core_config(self) -> dict:
         return dict(self._yaml(CORE_PATH).get("camera_core") or {})
 
     def _load_cameras(self) -> list[CameraSpec]:
-        data = self._yaml(CAMERAS_PATH)
-        rows = data.get("cameras") or []
-        global_user = os.environ.get("RTSP_USERNAME", "")
-        global_pw = os.environ.get("RTSP_PASSWORD", "")
+        rows = self._yaml(CAMERAS_PATH).get("cameras") or []
         cameras: list[CameraSpec] = []
         for row in rows:
-            if not isinstance(row, dict) or row.get("enabled", True) is False:
+            if not isinstance(row, dict):
+                continue
+            if row.get("enabled", True) is False or row.get("online", True) is False:
                 continue
             camera_id = str(row.get("id") or row.get("camera_id") or "").strip()
-            uri = str(row.get("uri") or "").strip()
-            if not camera_id or not uri:
-                raise RuntimeError("every enabled camera needs id and uri")
-            username = str(row.get("username") or global_user or "")
-            password = str(row.get("password") or global_pw or "")
+            uri = str(row.get("display_source") or row.get("source") or row.get("uri") or "").strip()
+            username = self._expand_env(row.get("username")) or os.environ.get("SURVEILLANCE_RTSP_USERNAME", "")
+            password = self._expand_env(row.get("password")) or os.environ.get("SURVEILLANCE_RTSP_PASSWORD", "")
+            if not camera_id or not uri.startswith("rtsp://"):
+                raise RuntimeError(f"invalid camera row: id={camera_id!r} uri={uri!r}")
             cameras.append(CameraSpec(camera_id, uri, username, password))
         return cameras
 
@@ -157,15 +152,11 @@ class SixCameraCore:
         missing = [name for name in required if self.Gst.ElementFactory.find(name) is None]
         if missing:
             raise RuntimeError("Missing DeepStream/GStreamer plugins: " + ", ".join(missing))
-
         try:
             with open("/proc/sys/net/core/rmem_max", "r", encoding="utf-8") as fh:
                 rmem_max = int(fh.read().strip())
             if rmem_max < self.udp_buffer_size:
-                print(
-                    f"V3 WARNING kernel rmem_max={rmem_max} < requested UDP buffer {self.udp_buffer_size}",
-                    flush=True,
-                )
+                print(f"V3 WARNING rmem_max={rmem_max} < udp_buffer={self.udp_buffer_size}", flush=True)
         except Exception:
             pass
 
@@ -187,23 +178,23 @@ class SixCameraCore:
         if not src.link(dst):
             raise RuntimeError(f"Failed to link {label}")
 
-    def _configure_queue(self, queue) -> None:
-        self._set_if(queue, "max-size-buffers", self.queue_buffers)
+    def _configure_latest_queue(self, queue) -> None:
+        self._set_if(queue, "max-size-buffers", 1)
         self._set_if(queue, "max-size-bytes", 0)
         self._set_if(queue, "max-size-time", 0)
-        self._set_if(queue, "leaky", 2)  # downstream: keep newest buffer
+        self._set_if(queue, "leaky", 2)
         self._set_if(queue, "silent", True)
 
     def _configure_mux(self) -> None:
-        self._set_if(self.mux, "batch-size", len(self.cameras))
+        self._set_if(self.mux, "batch-size", 6)
         self._set_if(self.mux, "live-source", True)
         self._set_if(self.mux, "width", self.working_width)
         self._set_if(self.mux, "height", self.working_height)
         self._set_if(self.mux, "enable-padding", False)
         self._set_if(self.mux, "batched-push-timeout", self.mux_timeout_us)
-        self._set_if(self.mux, "sync-inputs", self.sync_inputs)
+        self._set_if(self.mux, "sync-inputs", False)
         self._set_if(self.mux, "max-latency", 0)
-        self._set_if(self.mux, "buffer-pool-size", max(8, len(self.cameras) + 2))
+        self._set_if(self.mux, "buffer-pool-size", 8)
         self._set_if(self.mux, "nvbuf-memory-type", 2)
         self._set_if(self.mux, "gpu-id", self.gpu_id)
 
@@ -216,8 +207,8 @@ class SixCameraCore:
         self._set_if(self.tiler, "nvbuf-memory-type", 2)
 
     def _configure_sink(self) -> None:
-        self._set_if(self.sink, "sync", self.sink_sync)
-        self._set_if(self.sink, "qos", self.sink_qos)
+        self._set_if(self.sink, "sync", False)
+        self._set_if(self.sink, "qos", False)
         self._set_if(self.sink, "async", False)
         self._set_if(self.sink, "enable-last-sample", False)
         self._set_if(self.sink, "max-lateness", -1)
@@ -247,20 +238,16 @@ class SixCameraCore:
         self._set_if(element, "drop-on-latency", True)
         self._set_if(element, "udp-buffer-size", self.udp_buffer_size)
         self._set_if(element, "buffer-mode", 3)
-        print(
-            f"V3 {camera.camera_id} rtspsrc configured auth={'yes' if camera.username else 'no'} latency={self.rtsp_latency_ms}ms",
-            flush=True,
-        )
+        print(f"V3 {camera.camera_id} rtspsrc auth={'yes' if camera.username else 'no'} latency={self.rtsp_latency_ms}ms", flush=True)
 
     def _add_camera(self, index: int, camera: CameraSpec) -> None:
         source = self._make("nvurisrcbin", f"v3_source_{index}")
         queue = self._make("queue", f"v3_source_queue_{index}")
-        self._configure_queue(queue)
-
+        self._configure_latest_queue(queue)
         source.connect("deep-element-added", self._configure_rtsp_child, camera)
         source.set_property("uri", camera.uri)
         self._set_if(source, "disable-audio", True)
-        self._set_if(source, "select-rtp-protocol", 0)  # automatic UDP/TCP selection
+        self._set_if(source, "select-rtp-protocol", 0)
         self._set_if(source, "latency", self.rtsp_latency_ms)
         self._set_if(source, "drop-on-latency", True)
         self._set_if(source, "low-latency-mode", self.low_latency_mode)
@@ -274,12 +261,10 @@ class SixCameraCore:
 
         self.pipeline.add(source)
         self.pipeline.add(queue)
-
         mux_pad = self._request_mux_pad(index)
         qsrc = queue.get_static_pad("src")
         if qsrc.link(mux_pad) != self.Gst.PadLinkReturn.OK:
             raise RuntimeError(f"{camera.camera_id}: queue -> nvstreammux link failed")
-
         qsrc.add_probe(self.Gst.PadProbeType.BUFFER, self._source_probe, camera.camera_id)
         source.connect("pad-added", self._source_pad_added, queue, camera.camera_id)
         self.sources[camera.camera_id] = source
@@ -303,13 +288,11 @@ class SixCameraCore:
         row = self.stats[camera_id]
         row.frames += 1
         buffer = info.get_buffer()
-
         if row.negotiated_caps == "pending":
             caps = pad.get_current_caps()
             if caps is not None:
                 row.negotiated_caps = caps.to_string()
                 print(f"V3 {camera_id} negotiated={row.negotiated_caps}", flush=True)
-
         if buffer is not None and buffer.pts != self.Gst.CLOCK_TIME_NONE:
             pts_ns = int(buffer.pts)
             previous = row.last_pts_ns
@@ -325,8 +308,7 @@ class SixCameraCore:
         if not values:
             return None
         ordered = sorted(values)
-        index = min(len(ordered) - 1, int(round((len(ordered) - 1) * p)))
-        return ordered[index]
+        return ordered[min(len(ordered) - 1, int(round((len(ordered) - 1) * p)))]
 
     def _print_stats(self) -> bool:
         if self._stopping:
@@ -334,59 +316,47 @@ class SixCameraCore:
         now = time.monotonic()
         pieces: list[str] = []
         for camera in self.cameras:
-            cid = camera.camera_id
-            row = self.stats[cid]
+            row = self.stats[camera.camera_id]
             elapsed = max(0.001, now - row.last_stat_t)
             fps = (row.frames - row.last_frames) / elapsed
             row.last_frames = row.frames
             row.last_stat_t = now
             p50 = self._percentile(row.intervals_ms, 0.50)
             p95 = self._percentile(row.intervals_ms, 0.95)
-            q = int(self.queues[cid].get_property("current-level-buffers"))
+            q = int(self.queues[camera.camera_id].get_property("current-level-buffers"))
             cadence = "?" if p50 is None else f"{p50:.1f}/{p95:.1f}ms"
-            pieces.append(f"{cid}:{fps:.1f}fps pts50/95={cadence} q={q}")
+            pieces.append(f"{camera.camera_id}:{fps:.1f}fps pts50/95={cadence} q={q}")
         print("V3_STATS " + " | ".join(pieces), flush=True)
         return True
 
     def _on_bus_message(self, _bus, message) -> None:
-        kind = message.type
-        if kind == self.Gst.MessageType.ERROR:
+        if message.type == self.Gst.MessageType.ERROR:
             err, debug = message.parse_error()
             source_name = message.src.get_name() if message.src else "unknown"
             print(f"V3 ERROR source={source_name}: {err}; debug={debug}", file=sys.stderr, flush=True)
-        elif kind == self.Gst.MessageType.WARNING:
+        elif message.type == self.Gst.MessageType.WARNING:
             err, debug = message.parse_warning()
             source_name = message.src.get_name() if message.src else "unknown"
             print(f"V3 WARNING source={source_name}: {err}; debug={debug}", file=sys.stderr, flush=True)
-        elif kind == self.Gst.MessageType.EOS:
-            print("V3 EOS", file=sys.stderr, flush=True)
 
     def stop(self) -> None:
         if self._stopping:
             return
         self._stopping = True
-        try:
-            self.pipeline.set_state(self.Gst.State.NULL)
-        finally:
-            for pad in self._request_pads:
-                try:
-                    self.mux.release_request_pad(pad)
-                except Exception:
-                    pass
-            if self.loop.is_running():
-                self.loop.quit()
+        self.pipeline.set_state(self.Gst.State.NULL)
+        for pad in self._request_pads:
+            try:
+                self.mux.release_request_pad(pad)
+            except Exception:
+                pass
+        if self.loop.is_running():
+            self.loop.quit()
 
     def run(self) -> int:
-        print(
-            "V3_CAMERA_CORE starting cameras="
-            + ",".join(cam.camera_id for cam in self.cameras)
-            + f" work={self.working_width}x{self.working_height} wall={self.wall_width}x{self.wall_height}",
-            flush=True,
-        )
-        result = self.pipeline.set_state(self.Gst.State.PLAYING)
-        if result == self.Gst.StateChangeReturn.FAILURE:
+        print("V3_CAMERA_CORE starting " + ",".join(c.camera_id for c in self.cameras), flush=True)
+        if self.pipeline.set_state(self.Gst.State.PLAYING) == self.Gst.StateChangeReturn.FAILURE:
             self.stop()
-            raise RuntimeError("DeepStream pipeline failed to enter PLAYING")
+            raise RuntimeError("pipeline failed to enter PLAYING")
 
         def _signal(_signum, _frame):
             self.GLib.idle_add(self._stop_from_glib)
