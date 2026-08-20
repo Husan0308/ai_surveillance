@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -33,6 +34,23 @@ def _require_all(source: str, guards: tuple[str, ...], label: str) -> None:
     for guard in guards:
         if guard not in source:
             _fail(f"{label} guard missing: {guard}")
+
+
+def _called_attribute_names(source: str) -> set[str]:
+    """Return attribute names that are actually called in Python code.
+
+    Comments/docstrings must not trip runtime guards such as showFullScreen or
+    showNormal. Parsing the AST keeps the preflight tied to executable behavior.
+    """
+    tree = ast.parse(source)
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            names.add(str(func.attr))
+    return names
 
 
 def main_preflight() -> int:
@@ -122,8 +140,13 @@ def main_preflight() -> int:
         ),
         "shell",
     )
-    if "showFullScreen()" in shell or "showNormal()" in shell:
-        _fail("top-level window mode churn returned")
+    shell_calls = _called_attribute_names(shell)
+    forbidden_window_calls = {"showFullScreen", "showNormal"}.intersection(shell_calls)
+    if forbidden_window_calls:
+        _fail(
+            "top-level window mode churn returned: "
+            + ",".join(sorted(forbidden_window_calls))
+        )
 
     video = _source("services/camera_v2/sentinel_video_pro.py")
     _require_all(
