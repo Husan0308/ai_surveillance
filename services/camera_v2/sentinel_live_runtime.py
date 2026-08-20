@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import threading
 import time
 from collections import deque
@@ -31,21 +30,19 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
         self._camera_last_change: dict[str, float] = {}
         self.ui_bridge = NativeUIBridge()
 
-        os.environ.setdefault("CAMERA_V2_WALL_WIDTH", "1024")
-        os.environ.setdefault("CAMERA_V2_WALL_HEIGHT", "864")
+        # qt_runtime installs final source/wall geometry and 2-column tiler shape
+        # before this module is imported. Do not overwrite it with the historical
+        # 1024x864 wall after the DeepStream graph has already been constructed.
         super().__init__()
 
-        self.wall_width = 1024
-        self.wall_height = 864
         self._set_if(self.tiler, "rows", 3)
         self._set_if(self.tiler, "columns", 2)
         self._set_if(self.tiler, "width", self.wall_width)
         self._set_if(self.tiler, "height", self.wall_height)
         if self.tiler.find_property("show-source") is not None:
             self.tiler.set_property("show-source", -1)
-        # The 2x3 wall is made from 16:9 camera tiles. Preserve that geometry at
-        # the EGL sink instead of horizontally stretching the wall to whatever Qt
-        # rectangle happens to be available; stretching softens small CCTV detail.
+        # The native Qt child is itself laid out at the exact 32:27 wall aspect,
+        # so the EGL sink never needs to stretch the 16:9 camera cells.
         self._set_if(self.sink, "force-aspect-ratio", True)
 
         now = time.monotonic()
