@@ -20,8 +20,11 @@ def called_attributes(text: str) -> set[str]:
 def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     backend = source("services/camera_v2/rfdetr_backend.py")
     heatmap = source("services/camera_v2/person_tracking_heatmap.py")
+    sparse = source("services/camera_v2/sparse_tracker_contract.py")
+    sparse_native = source("services/camera_v2/native_sparse_tracker_contract.c")
     launcher = source("scripts/run_sentinel_vms.sh")
     preflight = source("scripts/preflight_rfdetr_core.py")
+    sparse_preflight = source("scripts/preflight_sparse_tracker_contract.py")
 
     assert "from rfdetr import RFDETRSmall" in backend
     assert 'RFDETRSmall(device="cuda:0")' in backend
@@ -36,6 +39,18 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert "requested = bool(self.capture_requested.get(cid, False))" in backend
     assert "CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample" in backend
 
+    # Sparse external inference must still complete the DeepStream detector
+    # contract for every muxed video frame so NvDCF can consume the full 20 FPS
+    # stream between fresh RF-DETR observations.
+    assert "install_sparse_tracker_contract()" in backend
+    assert "camera_v2_mark_batch_infer_done" in sparse
+    assert "marker.mark_batch_infer_done(buffer)" in sparse
+    assert "original_inject(self, pad, info)" in sparse
+    assert "CAMERA_TRACK_INPUT" in sparse
+    assert "frame_meta->bInferDone = TRUE" in sparse_native
+    assert "batch_meta->frame_meta_list" in sparse_native
+    assert "SPARSE_TRACKER_PREFLIGHT=PASS" in sparse_preflight
+
     assert "_install_rfdetr_backend()" in heatmap
     assert '"CAMERA_V2_DETECT_WIDTH": "672"' in heatmap
     assert '"CAMERA_V2_DETECT_HEIGHT": "384"' in heatmap
@@ -44,6 +59,7 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
 
     assert "detector=RF-DETR-S@672x384" in launcher
     assert "python scripts/preflight_rfdetr_core.py" in launcher
+    assert "python scripts/preflight_sparse_tracker_contract.py" in launcher
     assert "RFDETR_PREFLIGHT=PASS" in preflight
 
 
