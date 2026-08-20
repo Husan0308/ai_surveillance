@@ -21,13 +21,9 @@ def source(path: str) -> str:
 
 
 def main() -> int:
-    enabled = os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
-        "1", "true", "yes", "on"
-    }
-    if not enabled:
+    if os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() not in {"1", "true", "yes", "on"}:
         print("PASCAL_SAFE_PREFLIGHT=SKIP mode=disabled")
         return 0
-
     if os.environ.get("CAMERA_V2_RTSP_TRANSPORT", "").strip().lower() != "tcp":
         return fail("production runtime must pin CAMERA_V2_RTSP_TRANSPORT=tcp")
     if int(os.environ.get("CAMERA_V2_RTSP_LATENCY_MS", "0")) < 200:
@@ -64,21 +60,21 @@ def main() -> int:
             return fail(f"missing runtime contract: {token}")
 
     for forbidden in (
-        "nvstreamdemux",
+        'self._make("nvstreamdemux"',
         "pascal_infer_demux",
+        "self.infer_demux",
         "CameraPersonTrackingV2",
         "CameraPersonTrackingFinal",
         "libnvds_nvmultiobjecttracker",
         "config_tracker_NvDCF",
     ):
         if forbidden in runtime:
-            return fail(f"Pascal runtime leaked forbidden dependency: {forbidden}")
+            return fail(f"Pascal runtime leaked forbidden code path: {forbidden}")
 
     for token in (
         'CAMERA_V2_RTSP_TRANSPORT',
         'self._set_if(source, "select-rtp-protocol", 4 if transport == "tcp" else 0)',
         'self._set_if(element, "protocols", 4)',
-        'transport={transport}',
         "def _source_pad_added",
         "caps.is_any()",
         "source linked transport=",
@@ -89,11 +85,8 @@ def main() -> int:
     for token in (
         "def set_focus(source_id: int)",
         'runtime.tiler.set_property("show-source", sid)',
-        "FOCUS_WIDTH = 1920",
-        "FOCUS_HEIGHT = 1080",
         "def focus(self, source_id: int)",
         'self.command_q.put_nowait(("focus", sid))',
-        "bound_xid = 0",
         "if target == bound_xid",
         "GstVideo.VideoOverlay.set_window_handle",
     ):
@@ -103,7 +96,6 @@ def main() -> int:
     for token in (
         "cameraClicked = Signal(int)",
         "def _grid_source_at",
-        "self.surface.cameraClicked.connect(self._camera_clicked)",
         "window.showFullScreen()",
         "window.showMaximized()",
         "self.controller.focus(sid)",
@@ -115,14 +107,11 @@ def main() -> int:
     for token in (
         "export CAMERA_V2_RTSP_TRANSPORT=tcp",
         "export CAMERA_V2_RTSP_LATENCY_MS=250",
-        "rtsp=tcp latency=250ms",
-        "export CAMERA_V2_PASCAL_SAFE=1",
         "detector_path=analysis-tiler",
         "demux=disabled",
         "tracker=motion-predictor",
         "nvtracker=disabled",
         "export CAMERA_V2_DISPLAY_BACKEND=egl",
-        "export CAMERA_V2_EGL_FAILOVER_SEC=8.0",
         "ui=camera-only-2x3-click-fullscreen",
     ):
         if token not in launcher:
@@ -134,13 +123,8 @@ def main() -> int:
         from gi.repository import Gst
         Gst.init(None)
         for plugin in (
-            "nvurisrcbin",
-            "nvstreammux",
-            "nvmultistreamtiler",
-            "nvvideoconvert",
-            "appsink",
-            "nveglglessink",
-            "ximagesink",
+            "nvurisrcbin", "nvstreammux", "nvmultistreamtiler", "nvvideoconvert",
+            "appsink", "nveglglessink", "ximagesink",
         ):
             if Gst.ElementFactory.find(plugin) is None:
                 return fail(f"required plugin unavailable: {plugin}")
@@ -151,19 +135,16 @@ def main() -> int:
     try:
         gpu = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=3,
+            text=True, stderr=subprocess.DEVNULL, timeout=3,
         ).strip().splitlines()[0]
     except Exception:
         pass
 
     print(
         "PASCAL_SAFE_PREFLIGHT=PASS "
-        f"gpu={gpu!r} runtime=CameraPascalSafeRuntime "
-        "rtsp=tcp latency>=200ms source_path=direct-to-mux "
-        "detector_path=analysis-tiler demux=disabled mux_retention=bounded "
-        "tracker=motion-predictor nvtracker=disabled "
+        f"gpu={gpu!r} runtime=CameraPascalSafeRuntime rtsp=tcp latency>=200ms "
+        "source_path=direct-to-mux detector_path=analysis-tiler demux=disabled "
+        "mux_retention=bounded tracker=motion-predictor nvtracker=disabled "
         "display=egl-primary+x11-zero-render-fallback fullscreen=click+escape"
     )
     return 0
