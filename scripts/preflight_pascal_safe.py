@@ -56,9 +56,16 @@ def main() -> int:
 
     for token in (
         "class CameraPascalSafeRuntime(CameraDetectionV2)",
+        "def _on_infer_sample(self, sink, cid: str)",
+        "mapped_size",
+        "row_stride",
+        "tight_stride",
+        "CAMERA_INFER_LAYOUT",
         "def _install_osd_and_meta(self)",
         "self.wall_queue.unlink(self.sink)",
         "if queue_src.is_linked()",
+        "pascal_wall_convert",
+        "pascal_osd",
         "CAMERA_PASCAL_SAFE",
         "nvtracker=disabled",
         "tracker=motion-predictor",
@@ -68,7 +75,6 @@ def main() -> int:
         if token not in runtime:
             return fail(f"missing runtime contract: {token}")
 
-    # The dedicated safe runtime must not depend on the DeepStream tracker stack.
     for forbidden in (
         "CameraPersonTrackingV2",
         "CameraPersonTrackingFinal",
@@ -86,6 +92,7 @@ def main() -> int:
         "bound_xid = 0",
         "if target == bound_xid",
         "GstVideo.VideoOverlay.set_window_handle",
+        "runtime.bus.set_sync_handler",
         "GRID_COLUMNS = 2",
         "GRID_ROWS = 3",
     ):
@@ -99,6 +106,7 @@ def main() -> int:
 
     for token in (
         "export CAMERA_V2_PASCAL_SAFE=1",
+        "export CAMERA_V2_BOX_MAX_AGE=1.6",
         "tracker=motion-predictor",
         "nvtracker=disabled",
         "python scripts/preflight_pascal_safe.py",
@@ -120,8 +128,8 @@ def main() -> int:
     print(
         "PASCAL_SAFE_PREFLIGHT=PASS "
         f"gpu={gpu!r} runtime=CameraPascalSafeRuntime "
-        "tracker=motion-predictor nvtracker=disabled "
-        "video_path=RTSP-NVDEC-mux-tiler-OSD-EGL xid=idempotent"
+        "tracker=motion-predictor nvtracker=disabled stride_safe=1 "
+        "video_path=RTSP-NVDEC-mux-tiler-OSD-EGL xid=idempotent stage_counters=1"
     )
     return 0
 
