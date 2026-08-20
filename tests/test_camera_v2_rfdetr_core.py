@@ -22,9 +22,10 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     heatmap = source("services/camera_v2/person_tracking_heatmap.py")
     sparse = source("services/camera_v2/sparse_tracker_contract.py")
     sparse_native = source("services/camera_v2/native_sparse_tracker_contract.c")
+    pascal = source("services/camera_v2/pascal_safe_pipeline.py")
     launcher = source("scripts/run_sentinel_vms.sh")
     preflight = source("scripts/preflight_rfdetr_core.py")
-    sparse_preflight = source("scripts/preflight_sparse_tracker_contract.py")
+    pascal_preflight = source("scripts/preflight_pascal_safe.py")
 
     assert "from rfdetr import RFDETRSmall" in backend
     assert 'RFDETRSmall(device="cuda:0")' in backend
@@ -39,17 +40,23 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert "requested = bool(self.capture_requested.get(cid, False))" in backend
     assert "CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample" in backend
 
-    # Sparse external inference must still complete the DeepStream detector
-    # contract for every muxed video frame so NvDCF can consume the full 20 FPS
-    # stream between fresh RF-DETR observations.
+    # Supported GPUs can still use the sparse external-inference NvDCF contract.
     assert "install_sparse_tracker_contract()" in backend
     assert "camera_v2_mark_batch_infer_done" in sparse
     assert "marker.mark_batch_infer_done(buffer)" in sparse
     assert "original_inject(self, pad, info)" in sparse
-    assert "CAMERA_TRACK_INPUT" in sparse
     assert "frame_meta->bInferDone = TRUE" in sparse_native
-    assert "batch_meta->frame_meta_list" in sparse_native
-    assert "SPARSE_TRACKER_PREFLIGHT=PASS" in sparse_preflight
+
+    # The deployment GTX 1050 Ti runs DeepStream 7.1 outside NVIDIA's validated
+    # dGPU matrix. Its NvDCF stage demonstrably stalls, so production launcher must
+    # select the detector motion-predictor path and never insert gst-nvtracker.
+    assert "install_pascal_safe_pipeline()" in backend
+    assert "CameraDetectionV2._install_osd_and_meta(self)" in pascal
+    assert "CameraPersonTrackingV2._install_osd_and_meta = _install_osd_without_nvtracker" in pascal
+    assert "CameraPersonTrackingFinal._scheduler = CameraDetectionV2._scheduler" in pascal
+    assert "CameraPersonTrackingFinal._inject_boxes_probe = _inject_boxes_with_counts" in pascal
+    assert "nvtracker=disabled" in pascal
+    assert "PASCAL_SAFE_PREFLIGHT=PASS" in pascal_preflight
 
     assert "_install_rfdetr_backend()" in heatmap
     assert '"CAMERA_V2_DETECT_WIDTH": "672"' in heatmap
@@ -58,8 +65,12 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert '"CAMERA_V2_DETECT_CONF": "0.18"' in heatmap
 
     assert "detector=RF-DETR-S@672x384" in launcher
+    assert "export CAMERA_V2_PASCAL_SAFE=1" in launcher
+    assert "tracker=motion-predictor" in launcher
+    assert "nvtracker=disabled" in launcher
     assert "python scripts/preflight_rfdetr_core.py" in launcher
-    assert "python scripts/preflight_sparse_tracker_contract.py" in launcher
+    assert "python scripts/preflight_pascal_safe.py" in launcher
+    assert "python scripts/preflight_sparse_tracker_contract.py" not in launcher
     assert "RFDETR_PREFLIGHT=PASS" in preflight
 
 
