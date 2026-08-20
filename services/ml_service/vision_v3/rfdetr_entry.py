@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 
 from . import rfdetr_detection as runtime
+from .stable_boxes import StableFullBodyManager
 
 # Keep the runtime module focused on detector logic while this entrypoint owns
 # process-level stderr/exit handling.
@@ -64,9 +65,11 @@ def _install_osd_pygi(self) -> None:
     self.osd = osd
 
 
-# Compatibility fix is applied before runtime.main() constructs SixCameraRFDETR.
-# This avoids duplicating the camera/detector runtime while keeping the fix tiny.
+# Apply compatibility + the proven core-v1 visual-continuity design before
+# SixCameraRFDETR is constructed. Raw RF-DETR boxes are still untouched; only
+# the display manager is replaced.
 runtime.SixCameraRFDETR._install_osd = _install_osd_pygi
+runtime.ProtectiveBoxManager = StableFullBodyManager
 
 
 def main() -> int:
