@@ -19,27 +19,6 @@ import time
 
 import numpy as np
 
-
-def _enabled() -> bool:
-    return os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def install_pascal_safe_pipeline() -> bool:
-    """Compatibility hook retained for rfdetr_backend.install().
-
-    Older code installed a monkey patch here. The active Sentinel controller now
-    constructs :class:`CameraPascalSafeRuntime` directly, so this hook must not
-    import tracker classes or modify their methods.
-    """
-
-    return _enabled()
-
-
 from .rfdetr_backend import install as _install_rfdetr_backend
 
 _install_rfdetr_backend()
@@ -236,7 +215,13 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
 
 
 def main() -> int:
-    if not _enabled():
+    enabled = os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not enabled:
         raise RuntimeError("CAMERA_V2_PASCAL_SAFE=1 is required")
     return CameraPascalSafeRuntime().run()
 
