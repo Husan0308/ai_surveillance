@@ -9,12 +9,14 @@ def source(path: str) -> str:
 
 def test_native_wall_keeps_one_k_tile_and_1080p_source_canvas() -> None:
     runtime = source("services/camera_v2/qt_runtime.py")
+    live = source("services/camera_v2/sentinel_live_runtime.py")
     assert "TILE_WIDTH = 1024" in runtime
     assert "TILE_HEIGHT = 576" in runtime
     assert "SOURCE_WIDTH = 1920" in runtime
     assert "SOURCE_HEIGHT = 1080" in runtime
     assert 'os.environ["CAMERA_V2_FRAME_WIDTH"] = str(SOURCE_WIDTH)' in runtime
     assert "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)" in runtime
+    assert 'self._set_if(self.sink, "force-aspect-ratio", True)' in live
 
 
 def test_native_video_surface_has_one_painter_owner_without_resize_expose() -> None:
@@ -47,6 +49,7 @@ def test_native_bbox_smoother_is_restored_and_wired() -> None:
 def test_nvdcf_continuity_does_not_hide_short_pose_misses() -> None:
     tracking = source("services/camera_v2/person_tracking_final.py")
     profile = source("services/camera_v2/tracker_profile.py")
+    live = source("services/camera_v2/sentinel_live_runtime.py")
 
     assert 'CAMERA_V2_MIN_DISPLAY_TRACK_CONF", "0.12"' in tracking
     assert '"minTrackerConfidence": "0.15"' in tracking
@@ -57,3 +60,4 @@ def test_nvdcf_continuity_does_not_hide_short_pose_misses() -> None:
     assert '"maxShadowTrackingAge": "40"' in profile
     assert '"minTrackingConfidenceDuringInactive": "0.12"' in profile
     assert '"outputShadowTracks", "0"' in profile
+    assert "UI_TRACK_HOLD_SEC = 2.0" in live
