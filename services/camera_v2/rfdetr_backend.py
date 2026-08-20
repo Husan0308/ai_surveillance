@@ -3,8 +3,9 @@ from __future__ import annotations
 """RF-DETR-S detector backend for the Camera V2 core.
 
 The rest of the live pipeline keeps its existing latest-only DeepStream capture,
-NvDCF tracker and OSD contract. This module only replaces the sparse detector
-worker while preserving the result schema expected by the tracker scheduler.
+NvDCF tracker and OSD contract. This module replaces the sparse detector worker
+while preserving the result schema expected by the tracker scheduler, and installs
+the external-detector frame contract required by NvDCF between sparse detections.
 """
 
 import importlib.metadata
@@ -225,8 +226,10 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
 
 
 def install() -> None:
-    """Make RF-DETR-S the detector worker for the active Camera V2 runtime."""
+    """Make RF-DETR-S + the sparse NvDCF contract active for Camera V2."""
     from . import detection
+    from .sparse_tracker_contract import install_sparse_tracker_contract
 
     detection._yolo_worker = rfdetr_worker
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
+    install_sparse_tracker_contract()
