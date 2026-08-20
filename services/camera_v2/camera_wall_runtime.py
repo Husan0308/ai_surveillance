@@ -3,9 +3,16 @@ from __future__ import annotations
 """Minimal process-isolated controller for the production 2x3 camera wall.
 
 This module deliberately imports no legacy Sentinel presentation classes. The
-child process owns GStreamer/DeepStream and binds one nveglglessink to the XID
-supplied by the Qt host. On the deployment GTX 1050 Ti it always constructs the
-dedicated no-NvDCF Pascal runtime.
+child process owns GStreamer/DeepStream and binds one display sink to the XID
+supplied by the Qt host. On the deployment GTX 1050 Ti it constructs the dedicated
+no-NvDCF Pascal runtime.
+
+Display policy is deterministic:
+1. Start with NVIDIA nveglglessink.
+2. Re-use the same stable Qt XID and never rebind an unchanged handle.
+3. If the runtime proves that buffers reach EGL but rendered remains zero, restart
+   once with the X11 system-memory fallback. This covers hybrid Intel/NVIDIA X11
+   desktops without penalizing the normal GPU-native path.
 """
 
 import multiprocessing as mp
@@ -55,6 +62,11 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
         os.environ["CAMERA_V2_WALL_WIDTH"] = str(WALL_WIDTH)
         os.environ["CAMERA_V2_WALL_HEIGHT"] = str(WALL_HEIGHT)
 
+        display_backend = os.environ.get("CAMERA_V2_DISPLAY_BACKEND", "egl").strip().lower()
+        if display_backend not in {"egl", "x11"}:
+            display_backend = "egl"
+        os.environ["CAMERA_V2_DISPLAY_BACKEND"] = display_backend
+
         import gi
 
         gi.require_version("Gst", "1.0")
@@ -97,9 +109,14 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
             except Exception:
                 pass
             bound_xid = target
-            print(f"CAMERA_VIDEO_BIND xid={target} action=bind", flush=True)
+            print(
+                f"CAMERA_VIDEO_BIND xid={target} action=bind backend={display_backend}",
+                flush=True,
+            )
             return True
 
+        # Give the sink its target before PLAYING. The sync handler repeats this
+        # only if the actual sink asks through prepare-window-handle.
         bind_overlay(runtime.sink, current_xid)
 
         def on_sync_message(_bus, message, _data=None):
@@ -112,7 +129,11 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
                 return Gst.BusSyncReply.PASS
             try:
                 bind_overlay(message.src)
-                _put_latest(status_q, "VIDEO_BOUND", "Cameras ready")
+                _put_latest(
+                    status_q,
+                    "VIDEO_BOUND",
+                    {"backend": display_backend, "xid": current_xid},
+                )
                 return Gst.BusSyncReply.DROP
             except Exception as exc:
                 print(
@@ -129,15 +150,27 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
                 try:
                     _old, new, _pending = message.parse_state_changed()
                     if new == Gst.State.PLAYING:
-                        _put_latest(status_q, "LIVE", "Cameras live")
+                        _put_latest(
+                            status_q,
+                            "LIVE",
+                            {"backend": display_backend},
+                        )
                 except Exception:
                     pass
             elif message.type == Gst.MessageType.ERROR:
                 try:
                     err, _debug = message.parse_error()
                     source = message.src.get_name() if message.src else "unknown"
-                    print(f"CAMERA_PIPELINE_ERROR source={source} message={err.message}", flush=True)
-                    _put_latest(status_q, "PIPELINE_WARNING", err.message)
+                    print(
+                        f"CAMERA_PIPELINE_ERROR source={source} "
+                        f"backend={display_backend} message={err.message}",
+                        flush=True,
+                    )
+                    _put_latest(
+                        status_q,
+                        "PIPELINE_WARNING",
+                        {"backend": display_backend, "message": err.message},
+                    )
                 except Exception:
                     pass
 
@@ -161,7 +194,11 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
 
             if latest_bind is not None and latest_bind > 0:
                 if bind_overlay(runtime.sink, latest_bind):
-                    _put_latest(status_q, "VIDEO_BOUND", "Cameras rebound")
+                    _put_latest(
+                        status_q,
+                        "VIDEO_BOUND",
+                        {"backend": display_backend, "xid": latest_bind},
+                    )
 
             if stop_requested:
                 runtime.stop()
@@ -169,9 +206,38 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
             return True
 
         runtime.GLib.timeout_add(50, poll_commands)
-        _put_latest(status_q, "STARTING", "Camera wall starting")
+        _put_latest(
+            status_q,
+            "STARTING",
+            {"backend": display_backend},
+        )
         rc = runtime.run()
-        _put_latest(status_q, "STOPPED", rc)
+
+        if (
+            display_backend == "egl"
+            and bool(getattr(runtime, "display_failover_requested", False))
+        ):
+            # Camera/mux/OSD/sink-pad flow was proven, but EGL rendered zero.
+            # Restart once in the same child process using the same Qt XID and
+            # the fallback that downloads only the final tiled wall.
+            print(
+                "CAMERA_DISPLAY_FAILOVER action=restart backend=x11",
+                flush=True,
+            )
+            _put_latest(
+                status_q,
+                "DISPLAY_FAILOVER",
+                {"from": "egl", "to": "x11"},
+            )
+            os.environ["CAMERA_V2_DISPLAY_BACKEND"] = "x11"
+            runtime = None
+            return _camera_wall_process(window_id, command_q, status_q)
+
+        _put_latest(
+            status_q,
+            "STOPPED",
+            {"backend": display_backend, "rc": rc},
+        )
     except BaseException as exc:
         print(f"CAMERA_RUNTIME_ERROR {type(exc).__name__}: {exc}", flush=True)
         _put_latest(status_q, "ERROR", f"{type(exc).__name__}: {exc}")
