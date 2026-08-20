@@ -15,16 +15,42 @@ def test_native_wall_keeps_one_k_tile_and_1080p_source_canvas() -> None:
     assert "SOURCE_WIDTH = 1920" in runtime
     assert "SOURCE_HEIGHT = 1080" in runtime
     assert 'os.environ["CAMERA_V2_FRAME_WIDTH"] = str(SOURCE_WIDTH)' in runtime
-    assert "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)" in runtime
+    assert 'os.environ["CAMERA_V2_TILER_COLUMNS"] = str(GRID_COLUMNS)' in runtime
+    assert "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)" not in runtime
+    assert 'CAMERA_V2_WALL_WIDTH", "1024"' not in live
+    assert "self.wall_width = 1024" not in live
     assert 'self._set_if(self.sink, "force-aspect-ratio", True)' in live
 
 
-def test_native_video_surface_has_one_painter_owner_without_resize_expose() -> None:
+def test_native_video_uses_one_persistent_child_surface() -> None:
     app = source("services/camera_v2/sentinel_app.py")
-    assert "GstVideoOverlay/nveglglessink is the single owner" in app
-    assert "event.accept()" in app
-    assert "super().paintEvent(event)" not in app
-    assert "self.controller.expose" not in app
+    runtime = source("services/camera_v2/qt_runtime.py")
+
+    assert "class NativeVideoSurface" in app
+    assert "class StableLiveWall" in app
+    assert "WA_DontCreateNativeAncestors" in app
+    assert "self.video.xidChanged.connect" in app
+    assert "self.controller.start(xid)" in app
+    assert "self.controller.bind_window(xid)" in app
+    assert "ExactCameraTile" not in app
+    assert "WA_PaintOnScreen" not in app
+    assert "def paintEngine" not in app
+    assert "showFullScreen()" not in app
+    assert "window.showMaximized()" in app
+
+    # A continuously PLAYING EGL sink owns redraw. Do not force expose/rebind on
+    # ordinary resize/focus or re-send the same native window id.
+    assert "GstVideo.VideoOverlay.expose" not in runtime
+    assert "request_expose" not in runtime
+    assert "win_id == self._window_handle" in runtime
+    assert "bound_xid[0] == target" in runtime
+
+
+def test_grid_surface_preserves_exact_two_by_three_aspect() -> None:
+    app = source("services/camera_v2/sentinel_app.py")
+    assert "GRID_ASPECT = (16.0 * 2.0) / (9.0 * 3.0)" in app
+    assert "FOCUS_ASPECT = 16.0 / 9.0" in app
+    assert "self.video.setGeometry" in app
 
 
 def test_gpu_tiler_uses_high_quality_scaling() -> None:
