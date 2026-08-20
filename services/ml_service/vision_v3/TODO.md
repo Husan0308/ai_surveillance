@@ -1,0 +1,3 @@
+- Build six-camera DeepStream core
+- Add metrics and soak test
+- Add RF-DETR-S only after camera core is stable
