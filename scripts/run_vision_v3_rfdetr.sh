@@ -21,4 +21,4 @@ fi
 echo "VISION_V3_RFDETR branch=$(git branch --show-current 2>/dev/null || echo unknown) head=$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 python scripts/preflight_vision_v3_camera_core.py
 python scripts/preflight_vision_v3_rfdetr.py
-exec python -m services.ml_service.vision_v3.rfdetr_entry
+exec python -m services.ml_service.vision_v3.rfdetr_runtime
