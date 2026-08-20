@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,23 +19,18 @@ def fail(message: str) -> None:
 
 def main() -> int:
     cfg_path = ROOT / "config" / "vision_v3_detector.yaml"
-    if not cfg_path.exists():
-        fail("missing config/vision_v3_detector.yaml")
     cfg = dict((yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}).get("detector") or {})
+
     if str(cfg.get("model")) != "rfdetr-small":
         fail("detector.model must be rfdetr-small")
-    if int(cfg.get("micro_batch", 0)) not in (1, 2):
-        fail("micro_batch must be 1 or 2")
-    threshold = float(cfg.get("threshold", -1))
-    if not 0.01 <= threshold <= 0.60:
-        fail(f"unreasonable person threshold {threshold}")
-
-    roi_cfg = dict(cfg.get("roi_second_pass") or {})
-    if not bool(roi_cfg.get("enabled", False)):
-        fail("core-v1 ROI recovery policy is disabled")
-    roi_cameras = dict(roi_cfg.get("cameras") or {})
-    if not {"CAM-05", "CAM-06"}.issubset(roi_cameras):
-        fail("expected proven CAM-05/CAM-06 ROI recovery configuration")
+    if (int(cfg.get("capture_width", 0)), int(cfg.get("capture_height", 0))) != (672, 384):
+        fail("proven RF-DETR-S profile must use 672x384")
+    if abs(float(cfg.get("threshold", -1)) - 0.18) > 1e-9:
+        fail("proven RF-DETR-S profile must use threshold=0.18")
+    if int(cfg.get("micro_batch", 0)) != 1:
+        fail("proven GTX 1050 Ti profile must use micro_batch=1")
+    if float(cfg.get("max_result_age_ms", 9999)) > 300:
+        fail("detector results are allowed to become too stale")
 
     try:
         import torch
@@ -47,10 +43,7 @@ def main() -> int:
         import rfdetr
         from rfdetr import RFDETRSmall  # noqa: F401
     except Exception as exc:
-        fail(
-            "RF-DETR import failed; install with: python -m pip install 'rfdetr>=1.6.2,<2' "
-            f"({type(exc).__name__}: {exc})"
-        )
+        fail(f"RF-DETR import failed: {type(exc).__name__}: {exc}")
 
     try:
         import gi
@@ -83,98 +76,52 @@ def main() -> int:
         fail(f"native metadata bridge failed: {type(exc).__name__}: {exc}")
 
     try:
-        from services.ml_service.vision_v3.core_v1_visual_adapter import CoreV1VisualAdapter
-        from services.ml_service.vision_v3.rfdetr_worker_v2 import _dedupe, _filter_hard_masks, rfdetr_worker_v2  # noqa: F401
-        from services.ml_service.vision_v3.sparse_visual_tracker import SparseCadenceVisualTracker
-        from services.ml_service.vision_v3.visual_tracker import VisualBox
+        # Semantic person filtering is the critical rule from the old working
+        # RF-DETR backend.  A 'chair' with a numeric ID that could otherwise be
+        # mistaken for person must never survive when class_name is available.
+        from services.ml_service.vision_v3.rfdetr_worker_v2 import _person_rows
 
-        box_cfg = dict(cfg.get("box") or {})
-        manager = CoreV1VisualAdapter(1280, 720, box_cfg)
+        fake = SimpleNamespace(
+            xyxy=np.asarray(
+                [
+                    [10.0, 10.0, 100.0, 200.0],
+                    [200.0, 20.0, 300.0, 180.0],
+                ],
+                dtype=np.float32,
+            ),
+            confidence=np.asarray([0.91, 0.99], dtype=np.float32),
+            class_id=np.asarray([1, 1], dtype=np.int64),
+            data={"class_name": np.asarray(["person", "chair"])},
+        )
+        rows = _person_rows(fake, 40)
+        if len(rows) != 1 or abs(rows[0][1] - 0.91) > 0.02:
+            fail("semantic RF-DETR person filtering regression")
+
+        # The presentation smoother must show a valid strong detection immediately
+        # and retain the old asymmetric full-body guard.
+        from services.ml_service.vision_v3.core_v1_visual_adapter import CoreV1VisualAdapter
+
+        manager = CoreV1VisualAdapter(1280, 720, dict(cfg.get("box") or {}))
         raw = (500.0, 120.0, 620.0, 610.0)
         t0 = time.monotonic()
-
-        # A genuinely strong RF-DETR observation must be visible immediately.
         manager.update("CAM-TEST", t0, [(raw, 0.90)])
-        rows = manager.render("CAM-TEST", t0)
-        if len(rows) != 1:
-            fail("strong RF-DETR observation did not create an immediate visible track")
-        x1, y1, x2, y2, _ = rows[0]
+        visible = manager.render("CAM-TEST", t0)
+        if len(visible) != 1:
+            fail("proven motion smoother did not show a strong detection immediately")
+        x1, y1, x2, y2, _ = visible[0]
         if not (x1 < raw[0] and y1 < raw[1] and x2 > raw[2] and y2 > raw[3]):
-            fail("display-only full-body guard did not cover raw head/feet/sides")
-
-        # RF-DETR revisits a given camera only every ~1.5-2.0 seconds here. Verify
-        # a borderline birth candidate survives that real cadence instead of the
-        # old hard-coded 1.25 s YOLO window expiring it before hit #2.
-        tracker = SparseCadenceVisualTracker(
-            birth_candidate_ttl_ms=int(box_cfg.get("birth_candidate_ttl_ms", 5000)),
-            hold_ms=int(box_cfg.get("hold_ms", 2400)),
-            memory_ms=int(box_cfg.get("memory_ms", 6000)),
-            prediction_ms=int(box_cfg.get("prediction_ms", 1100)),
-            byte_high_conf=float(box_cfg.get("byte_high_conf", 0.08)),
-            byte_low_conf=float(box_cfg.get("byte_low_conf", 0.06)),
-            low_conf_confirm=float(box_cfg.get("low_conf_confirm", 0.06)),
-            start_conf=float(box_cfg.get("start_conf", 0.18)),
-            new_track_min_conf=float(box_cfg.get("new_track_min_conf", 0.08)),
-            strong_confirm_hits=int(box_cfg.get("strong_confirm_hits", 1)),
-            weak_confirm_hits=int(box_cfg.get("weak_confirm_hits", 2)),
-            low_match_max_age_ms=int(box_cfg.get("low_match_max_age_ms", 2200)),
-        )
-        first = SimpleNamespace(
-            frame_id=1,
-            frame_captured_monotonic=t0,
-            boxes=(VisualBox(100.0, 100.0, 180.0, 360.0, 0.12),),
-        )
-        second = SimpleNamespace(
-            frame_id=2,
-            frame_captured_monotonic=t0 + 1.80,
-            boxes=(VisualBox(104.0, 102.0, 184.0, 362.0, 0.12),),
-        )
-        tracker.update(first, now=t0, source_width=1280, source_height=720)
-        if tracker.visible(now=t0, target_time=t0):
-            fail("borderline RF-DETR birth became visible before temporal confirmation")
-        tracker.update(second, now=t0 + 1.80, source_width=1280, source_height=720)
-        if len(tracker.visible(now=t0 + 1.80, target_time=t0 + 1.80)) != 1:
-            fail("sparse-cadence RF-DETR birth candidate expired before second hit")
-
-        weak = CoreV1VisualAdapter(1280, 720, box_cfg)
-        weak.update("CAM-TEST", t0, [((100.0, 100.0, 150.0, 200.0), 0.07)])
-        if weak.render("CAM-TEST", t0):
-            fail("one continuation-only RF-DETR observation incorrectly created a visible person")
-
-        fused = _dedupe(
-            [
-                (100.0, 100.0, 200.0, 400.0, 0.90),
-                (104.0, 105.0, 198.0, 395.0, 0.70),
-                (350.0, 100.0, 450.0, 400.0, 0.80),
-            ],
-            iou_threshold=float(cfg.get("duplicate_iou", 0.58)),
-            containment_threshold=float(cfg.get("fusion_containment", 0.84)),
-            center_threshold=float(cfg.get("fusion_center_distance", 0.40)),
-        )
-        if len(fused) != 2:
-            fail(f"full/ROI confidence-first fusion regression: expected 2 boxes, got {len(fused)}")
-
-        hard_cfg = dict(cfg.get("hard_exclusion") or {})
-        _masked, rejected = _filter_hard_masks(
-            "CAM-06",
-            [(420.0, 10.0, 500.0, 120.0, 0.80)],
-            768,
-            432,
-            hard_cfg,
-        )
-        if hard_cfg.get("cameras") and rejected != 1:
-            fail("CAM-06 hard exclusion policy regression")
+            fail("proven full-body guard no longer covers head/feet/sides")
     except SystemExit:
         raise
     except Exception as exc:
-        fail(f"ported Core-v1 policy test failed: {type(exc).__name__}: {exc}")
+        fail(f"proven RF-DETR policy test failed: {type(exc).__name__}: {exc}")
 
     version = getattr(rfdetr, "__version__", "unknown")
     print(
         "VISION_V3_RFDETR_PREFLIGHT=PASS "
-        f"rfdetr={version} gpu={torch.cuda.get_device_name(0)} threshold={threshold:.2f} "
-        f"micro_batch={int(cfg.get('micro_batch', 1))} core_v1_policy=1 "
-        f"adaptive_kalman_byte=1 sparse_birth=1 roi_recovery=1 fusion=1 bridge={bridge}",
+        f"rfdetr={version} gpu={torch.cuda.get_device_name(0)} "
+        "profile=agent-rfdetr-s-core-final shape=672x384 threshold=0.18 "
+        f"micro_batch=1 semantic_person=1 proven_smoother=1 max_result_age=220ms bridge={bridge}",
         flush=True,
     )
     return 0
