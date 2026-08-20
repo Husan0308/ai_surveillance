@@ -1,0 +1,3 @@
+# Camera V2 person detector. Keep the existing project PyTorch/CUDA install;
+# install this file into that same environment rather than replacing torch.
+rfdetr>=1.9.3,<2
