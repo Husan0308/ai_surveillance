@@ -102,8 +102,6 @@ def rfdetr_worker(job_q, result_q) -> None:
         if startup_delay > 0:
             time.sleep(startup_delay)
 
-        # Keep the current 16:9 detector branch. RF-DETR supports a non-square
-        # predict shape, and 736x416 is valid for RF-DETR-S's patch/window grid.
         infer_shape = (int(det.INFER_HEIGHT), int(det.INFER_WIDTH))
         threshold = float(det.CONF)
         max_det = int(det.MAX_DET)
@@ -112,8 +110,6 @@ def rfdetr_worker(job_q, result_q) -> None:
 
         # The target GPU is memory constrained. Avoid JIT/deep-copy optimization
         # during bring-up; eager FP32 is the accuracy-safe baseline on Pascal.
-        # Once the real six-camera smoke is clean we can separately benchmark an
-        # FP16/TensorRT engine without changing tracker behavior.
         warm = np.zeros((infer_shape[0], infer_shape[1], 3), dtype=np.uint8)
         with torch.inference_mode():
             model.predict(
@@ -210,8 +206,27 @@ def rfdetr_worker(job_q, result_q) -> None:
         )
 
 
+def _capture_gate_until_sample(self, _pad, _info, cid: str):
+    """Pass buffers while a capture request is armed; scheduler clears the gate.
+
+    The old one-shot gate cleared ``capture_requested`` before downstream
+    nvvideoconvert/appsink had actually delivered a sample. During startup caps
+    negotiation that single admitted buffer can be consumed without producing an
+    appsink sample, leaving the scheduler in an endless timeout loop. Keep the
+    request armed until the mailbox receives a sample (or the scheduler times out
+    and clears the request) so downstream has more than one chance to complete the
+    requested capture.
+    """
+    with self.capture_lock:
+        requested = bool(self.capture_requested.get(cid, False))
+    if not requested:
+        return self.Gst.PadProbeReturn.DROP
+    return self.Gst.PadProbeReturn.OK
+
+
 def install() -> None:
     """Make RF-DETR-S the detector worker for the active Camera V2 runtime."""
     from . import detection
 
     detection._yolo_worker = rfdetr_worker
+    detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
