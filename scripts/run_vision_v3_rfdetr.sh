@@ -18,7 +18,7 @@ if [[ -n "${DISPLAY:-}" && -z "${QT_QPA_PLATFORM:-}" ]]; then
   export QT_QPA_PLATFORM=xcb
 fi
 
-echo "VISION_V3_RFDETR branch=$(git branch --show-current 2>/dev/null || echo unknown) head=$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+echo "VISION_V3_RFDETR branch=$(git branch --show-current 2>/dev/null || echo unknown) head=$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown) profile=agent-rfdetr-s-core-final"
 python scripts/preflight_vision_v3_camera_core.py
 python scripts/preflight_vision_v3_rfdetr.py
-exec python -m services.ml_service.vision_v3.rfdetr_runtime
+exec python -m services.ml_service.vision_v3.rfdetr_proven_entry
