@@ -7,8 +7,12 @@ RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
 # Local NvDCF tuning only. ReID/re-association is forcibly disabled below.
-# The detector is sparse, so confirmed local tracks need enough visual recovery
-# time to survive a short bend/turn/occlusion without blinking off the live wall.
+#
+# The detector is deliberately sparse. Once a person is confirmed, NvDCF must
+# remain the visual owner between YOLO observations. A short bend/turn/partial
+# occlusion may move a target from ACTIVE to SHADOW even while the person is still
+# plainly visible. We therefore keep that tracker state alive long enough and,
+# critically, allow its current-frame bbox metadata to continue downstream.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "0",
@@ -149,10 +153,11 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing)
         )
 
-    # Shadow state stays inside NvDCF; the normal current-frame tracker output is
-    # allowed to survive at lower confidence instead of being hidden by a second
-    # UI threshold. No ReID or cross-camera memory is enabled here.
-    _set_section_key(output, "TargetManagement", "outputShadowTracks", "0")
+    # This is the key continuity rule. A shadow target is not a synthetic UI box:
+    # it is NvDCF's own current-frame localization for an already-established ID
+    # while detector evidence is temporarily absent/weak. Keeping it downstream
+    # prevents the visible bbox from blinking off between sparse YOLO updates.
+    _set_section_key(output, "TargetManagement", "outputShadowTracks", "1")
     _disable_reid(output)
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -160,7 +165,8 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     header = [
         f"# Auto-generated from {stock.name}.",
         "# Camera V2 local NvDCF profile; cross-camera ReID is intentionally absent.",
-        "# maxShadowTrackingAge=40; outputShadowTracks=0; continuity-first local tracking.",
+        "# maxShadowTrackingAge=40; outputShadowTracks=1; continuity-first local tracking.",
+        "# Shadow output is real NvDCF current-frame metadata, not a fabricated hold box.",
         "# TrajectoryManagement.enableReAssoc=0; ReID.reidType=0; outputReidTensor=0.",
         "# No ReID model, TensorRT engine, gallery, sidecar or room topology is loaded.",
         "# Optional patches applied: "
