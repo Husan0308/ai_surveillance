@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
 
 from services.camera_v2.sentinel_ui import BUILD_TAG, MainWindow, main
 from services.camera_v2.sentinel_ui_enrollment import EnrollmentPage
-from services.camera_v2.sentinel_ui_monitoring import MonitoringPage
+from services.camera_v2.sentinel_ui_monitoring_native import MonitoringPage
 from services.camera_v2.sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from services.camera_v2.sentinel_ui_settings import SettingsPage
 from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_ROWS
@@ -19,7 +19,7 @@ from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
 FORBIDDEN_NAV = {"Cameras", "Heatmap", "Diagnostics", "Reports"}
-EXPECTED_BUILD = "2026.08.19-r11"
+EXPECTED_BUILD = "2026.08.20-r13-rfdetr"
 
 
 def _fail(message: str) -> None:
@@ -80,6 +80,7 @@ def main_preflight() -> int:
     ui_files = {
         "shell": _source("services/camera_v2/sentinel_ui.py"),
         "monitoring": _source("services/camera_v2/sentinel_ui_monitoring.py"),
+        "monitoring_native": _source("services/camera_v2/sentinel_ui_monitoring_native.py"),
         "wall": _source("services/camera_v2/sentinel_video_wall_ui.py"),
         "settings": _source("services/camera_v2/sentinel_ui_settings.py"),
     }
@@ -112,6 +113,17 @@ def main_preflight() -> int:
             "self.wall.set_pipeline_status(status)",
         ),
         "monitoring",
+    )
+
+    _require_all(
+        ui_files["monitoring_native"],
+        (
+            "WA_DontCreateNativeAncestors, False",
+            "WA_NativeWindow, True",
+            "def _ensure_native_ancestor_chain",
+            "def showEvent",
+        ),
+        "native monitoring parent chain",
     )
 
     # The EGL wall owns one native child XID. It is rebound only when Qt actually
@@ -239,12 +251,13 @@ def main_preflight() -> int:
     _require_all(
         launcher,
         (
+            "python scripts/preflight_rfdetr_core.py",
             "python scripts/preflight_sentinel_ui.py",
             "python scripts/preflight_camera_v2_core.py",
             "exec python -m services.camera_v2.monitor_ui",
             "export QT_QPA_PLATFORM=xcb",
             "SENTINEL_DISPLAY session=",
-            "expected_ui=2026.08.19-r11",
+            "expected_ui=2026.08.20-r13-rfdetr",
         ),
         "launcher",
     )
@@ -255,7 +268,7 @@ def main_preflight() -> int:
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT camera_form=id,name,room,rtsp,status")
     print("SENTINEL_PREFLIGHT monitoring=compact-vms 2x3 header-bars right-rail=262px")
-    print("SENTINEL_PREFLIGHT native_video=single-native-child no-stale-page-pixels PASS")
+    print("SENTINEL_PREFLIGHT native_video=single-native-child complete-native-parent-chain PASS")
     print("SENTINEL_PREFLIGHT native_binding=xcb+rebind-only-on-new-xid PASS")
     print("SENTINEL_PREFLIGHT fullscreen=1080p-16:9 fixed-hud=PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
