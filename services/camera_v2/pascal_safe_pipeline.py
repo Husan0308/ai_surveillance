@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-"""Pascal-safe Camera V2 runtime adapter.
+"""Pascal-safe RF-DETR camera runtime with no gst-nvtracker dependency.
 
-DeepStream 7.1's validated dGPU matrix does not include Pascal/GTX 10-series.
-On the deployment GTX 1050 Ti the RTSP/NVDEC/mux path is healthy, while NvDCF
-accepts mux input and then stops producing downstream buffers.  This adapter
-therefore removes gst-nvtracker from the hot path on that machine and reuses the
-existing CameraDetectionV2 motion stabilizer between sparse RF-DETR observations.
+The deployment GPU is a GTX 1050 Ti (Pascal). DeepStream 7.1 does not list
+Pascal in its validated dGPU matrix and the hardware smoke log shows NvDCF
+accepting the first mux batch and then stalling downstream. This runtime keeps
+only the stages that are proven healthy on that machine:
 
-The video path remains GPU-native:
-RTSP -> NVDEC -> nvstreammux -> nvmultistreamtiler -> NVMM OSD -> EGL.
-Only the unsupported NvDCF stage is bypassed.
+RTSP -> NVDEC -> nvstreammux -> RF-DETR side capture -> motion predictor
+     -> nvmultistreamtiler -> NVMM RGBA -> nvdsosd -> nveglglessink
+
+It intentionally does not import person_tracking.py and never resolves or loads
+libnvds_nvmultiobjecttracker.so / NvDCF configuration files.
 """
 
 import os
@@ -27,38 +28,117 @@ def _enabled() -> bool:
 
 
 def install_pascal_safe_pipeline() -> bool:
-    """Install the no-NvDCF fallback before CameraPersonTrackingFinal is built."""
-    if not _enabled():
-        return False
+    """Compatibility hook retained for rfdetr_backend.install().
 
-    from .detection import CameraDetectionV2
-    from .person_tracking import CameraPersonTrackingV2
-    from .person_tracking_final import CameraPersonTrackingFinal
+    Older code installed a monkey patch here. The active Sentinel controller now
+    constructs :class:`CameraPascalSafeRuntime` directly, so this hook must not
+    import tracker classes or modify their methods.
+    """
 
-    if getattr(CameraPersonTrackingFinal, "_pascal_safe_installed", False):
-        return True
+    return _enabled()
 
-    def _install_osd_without_nvtracker(self) -> None:
-        # Use the known-good detector presentation chain directly.  This inserts
-        # no nvtracker element, so unsupported NvDCF CUDA/pixel processing cannot
-        # block mux output before the tiler/sink.
-        CameraDetectionV2._install_osd_and_meta(self)
-        self.tracker = None
+
+# Install RF-DETR before CameraDetectionV2 starts its worker process. During this
+# import rfdetr_backend calls install_pascal_safe_pipeline(); the compatibility
+# hook above is already defined, so the circular import is harmless and no
+# tracker module is imported.
+from .rfdetr_backend import install as _install_rfdetr_backend
+
+_install_rfdetr_backend()
+
+from .detection import CameraDetectionV2
+
+
+class CameraPascalSafeRuntime(CameraDetectionV2):
+    """Dedicated GTX 10-series runtime: RF-DETR + bounded motion prediction."""
+
+    def __init__(self) -> None:
+        self.safe_wall_frames = 0
+        self.safe_mux_batches = 0
+        self.source_track_counts: dict[int, int] = {}
+        self.tracked_now = 0
+        super().__init__()
+        self.source_track_counts = {
+            int(source_id): 0 for source_id in self.camera_index.values()
+        }
         self.tracker_backend = "motion-predictor"
-        print(
-            "CAMERA_TRACK_FALLBACK backend=motion-predictor nvtracker=disabled "
-            "reason=pascal-deepstream71-safe-mode",
-            flush=True,
+        self.tracker = None
+
+    def _install_osd_and_meta(self) -> None:
+        """Insert OSD without relying on gst-nvtracker.
+
+        Gst.Element.unlink() has no boolean return value. The previous fallback
+        called ``if not wall_queue.unlink(sink)`` and therefore always raised.
+        Detach first, verify pad state, then build the presentation chain.
+        """
+
+        queue_src = self.wall_queue.get_static_pad("src")
+        sink_pad = self.sink.get_static_pad("sink")
+        if queue_src is None or sink_pad is None:
+            raise RuntimeError("could not inspect baseline wall -> EGL pads")
+
+        if queue_src.is_linked():
+            self.wall_queue.unlink(self.sink)
+        if queue_src.is_linked() or sink_pad.is_linked():
+            raise RuntimeError("could not detach baseline wall -> EGL link")
+
+        convert = self._make("nvvideoconvert", "pascal_wall_convert")
+        caps = self._make("capsfilter", "pascal_wall_caps")
+        osd = self._make("nvdsosd", "pascal_osd")
+
+        self._set_if(convert, "gpu-id", self.gpu_id)
+        self._set_if(convert, "compute-hw", 1)
+        caps.set_property(
+            "caps",
+            self.Gst.Caps.from_string("video/x-raw(memory:NVMM),format=RGBA"),
         )
+        self._set_if(osd, "process-mode", 1)
+        self._set_if(osd, "display-bbox", True)
+        self._set_if(osd, "display-text", False)
+        self._set_if(osd, "display-mask", False)
+        self._set_if(osd, "gpu-id", self.gpu_id)
+
+        for element in (convert, caps, osd):
+            self.pipeline.add(element)
+
+        if not self.wall_queue.link(convert):
+            raise RuntimeError("failed wall queue -> nvvideoconvert")
+        if not convert.link(caps):
+            raise RuntimeError("failed nvvideoconvert -> RGBA caps")
+        if not caps.link(osd):
+            raise RuntimeError("failed RGBA caps -> nvdsosd")
+        if not osd.link(self.sink):
+            raise RuntimeError("failed nvdsosd -> nveglglessink")
+
+        mux_src = self.mux.get_static_pad("src")
+        osd_src = osd.get_static_pad("src")
+        if mux_src is None or osd_src is None:
+            raise RuntimeError("could not obtain mux/OSD probe pads")
+        mux_src.add_probe(
+            self.Gst.PadProbeType.BUFFER,
+            self._pascal_mux_probe,
+        )
+        osd_src.add_probe(
+            self.Gst.PadProbeType.BUFFER,
+            self._pascal_wall_probe,
+        )
+        self.osd = osd
+
+    def _pascal_mux_probe(self, pad, info):
+        self.safe_mux_batches += 1
+        return CameraDetectionV2._inject_boxes_probe(self, pad, info)
+
+    def _pascal_wall_probe(self, pad, info):
+        self.safe_wall_frames += 1
+        return CameraDetectionV2._wall_probe(self, pad, info)
 
     def _active_motion_counts(self) -> dict[int, int]:
         now = time.monotonic()
-        output: dict[int, int] = {
-            int(source_id): 0 for source_id in self.camera_index.values()
-        }
+        output = {int(source_id): 0 for source_id in self.camera_index.values()}
         boxes = getattr(self, "boxes", None)
         if boxes is None:
             return output
+
         with boxes.lock:
             for cid, source_id in self.camera_index.items():
                 active = 0
@@ -68,49 +148,44 @@ def install_pascal_safe_pipeline() -> bool:
                 output[int(source_id)] = active
         return output
 
-    def _inject_boxes_with_counts(self, pad, info):
-        result = CameraDetectionV2._inject_boxes_probe(self, pad, info)
-        counts = _active_motion_counts(self)
+    def live_source_counts(self) -> dict[int, int]:
+        counts = self._active_motion_counts()
         with self.det_lock:
             self.source_track_counts = counts
             self.tracked_now = sum(counts.values())
-            self.tracker_frames += 1
-        return result
+        return dict(counts)
 
-    def _pascal_print_stats(self) -> bool:
+    def _print_stats(self) -> bool:
         keep = CameraDetectionV2._print_stats(self)
-        counts = _active_motion_counts(self)
-        with self.det_lock:
-            self.source_track_counts = counts
-            self.tracked_now = sum(counts.values())
-            tracked_now = int(self.tracked_now)
-            frames = int(self.tracker_frames)
+        counts = self.live_source_counts()
+        rendered, dropped = self._sink_stats()
         print(
-            "CAMERA_TRACK_FALLBACK "
-            f"backend=motion-predictor tracked_now={tracked_now} "
-            f"wall_batches={frames} source_counts={counts} nvtracker=0",
+            "CAMERA_PASCAL_SAFE "
+            f"mux_batches={self.safe_mux_batches} "
+            f"wall_frames={self.safe_wall_frames} "
+            f"tracked_now={self.tracked_now} source_counts={counts} "
+            f"rendered={rendered if rendered is not None else '?'} "
+            f"dropped={dropped if dropped is not None else '?'} "
+            "nvtracker=0 tracker=motion-predictor",
             flush=True,
         )
         return keep
 
-    def _pascal_live_source_counts(self) -> dict[int, int]:
-        counts = _active_motion_counts(self)
-        with self.det_lock:
-            self.source_track_counts = counts
-            self.tracked_now = sum(counts.values())
-        return counts
+    def run(self) -> int:
+        print(
+            "CAMERA_PASCAL_SAFE ready backend=RF-DETR-S "
+            "tracker=motion-predictor nvtracker=disabled "
+            "path=RTSP-NVDEC-mux-tiler-OSD-EGL",
+            flush=True,
+        )
+        return super().run()
 
-    # CameraDetectionV2.__init__ dispatches _install_osd_and_meta dynamically.
-    # Replacing the tracking-class implementation before construction prevents
-    # gst-nvtracker from ever being inserted into this process.
-    CameraPersonTrackingV2._install_osd_and_meta = _install_osd_without_nvtracker
 
-    # The Final scheduler normally publishes detections into NvDCF metadata.
-    # In safe mode use the already-tested detector scheduler, which updates the
-    # per-camera SmoothBoxManager and lets its prediction render on every mux frame.
-    CameraPersonTrackingFinal._scheduler = CameraDetectionV2._scheduler
-    CameraPersonTrackingFinal._inject_boxes_probe = _inject_boxes_with_counts
-    CameraPersonTrackingFinal._print_stats = _pascal_print_stats
-    CameraPersonTrackingFinal.live_source_counts = _pascal_live_source_counts
-    CameraPersonTrackingFinal._pascal_safe_installed = True
-    return True
+def main() -> int:
+    if not _enabled():
+        raise RuntimeError("CAMERA_V2_PASCAL_SAFE=1 is required")
+    return CameraPascalSafeRuntime().run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
