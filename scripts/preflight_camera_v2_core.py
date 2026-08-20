@@ -45,9 +45,9 @@ def main() -> int:
         raise RuntimeError(
             f"source-preserving mux must be 2560x1440, got {mux_width}x{mux_height}"
         )
-    if (WALL_WIDTH, WALL_HEIGHT) != (1600, 1350):
+    if (WALL_WIDTH, WALL_HEIGHT) != (1600, 1352):
         raise RuntimeError(
-            f"monitoring wall must be 1600x1350, got {WALL_WIDTH}x{WALL_HEIGHT}"
+            f"monitoring wall must be NVMM-aligned 1600x1352, got {WALL_WIDTH}x{WALL_HEIGHT}"
         )
     if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
         raise RuntimeError(f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
