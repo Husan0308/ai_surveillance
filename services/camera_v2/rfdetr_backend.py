@@ -6,6 +6,11 @@ The detector worker is process-isolated and preserves the existing CameraDetecti
 job/result schema. Tracker selection is intentionally outside this module: the GTX
 1050 Ti production controller constructs CameraPascalSafeRuntime directly, while
 other runtimes may opt into the sparse NvDCF contract.
+
+Set ``CAMERA_V2_DETECT_BACKEND=stable-yolo26m`` to keep CameraDetectionV2's
+built-in YOLO26m person-only worker and baseline temporal tracker unchanged. This
+provides a clean A/B path against the earlier stable detection behavior without
+changing the proven DeepStream display pipeline.
 """
 
 import importlib.metadata
@@ -197,7 +202,16 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
 
 
 def install() -> None:
-    """Install RF-DETR-S and Pascal-safe anchored + optical-flow tracking."""
+    """Install the selected detector/tracker backend."""
+
+    selected = os.environ.get("CAMERA_V2_DETECT_BACKEND", "rfdetr-s").strip().lower()
+    if selected in {"stable-yolo26m", "yolo26m", "yolo", "stable-yolo"}:
+        print(
+            "CAMERA_DETECT_BACKEND selected=stable-yolo26m "
+            "rfdetr_patch=0 flow_patch=0 worker=builtin-yolo26m tracker=builtin-baseline",
+            flush=True,
+        )
+        return
 
     from . import detection
     from .flow_assisted_tracker import FlowAssistedPersonTracker
