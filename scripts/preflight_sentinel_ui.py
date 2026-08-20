@@ -68,7 +68,6 @@ def main_preflight() -> int:
         "camera-only shell",
     )
 
-    # No dashboard/navigation widgets may be instantiated in the temporary shell.
     for forbidden in (
         "QStackedWidget",
         "QButtonGroup",
@@ -94,9 +93,14 @@ def main_preflight() -> int:
         monitoring,
         (
             "class NativeVideoHost(QWidget)",
-            "self.video_window = QWindow()",
-            "QWidget.createWindowContainer(self.video_window, self)",
-            "self.video_window.winId()",
+            "WA_NativeWindow, True",
+            "WA_DontCreateNativeAncestors, True",
+            "WA_NoSystemBackground, True",
+            "WA_OpaquePaintEvent, True",
+            "WA_PaintOnScreen, True",
+            "def paintEngine(self)",
+            "xid = int(self.winId())",
+            "mode=direct-native-qwidget",
             "class MonitoringPage(QWidget)",
             "self.surface = NativeVideoHost(self)",
             "self.surface.nativeReady.connect(self._start_or_bind)",
@@ -104,10 +108,12 @@ def main_preflight() -> int:
             "self.controller.poll()",
             "def shutdown",
         ),
-        "camera-only Monitoring",
+        "direct-native camera Monitoring",
     )
 
     for forbidden in (
+        "QWindow",
+        "createWindowContainer",
         "QFrame",
         "QLabel",
         "CameraStatusRow",
@@ -120,7 +126,7 @@ def main_preflight() -> int:
         "ProLiveVideoWall(",
     ):
         if forbidden in monitoring:
-            _fail(f"Monitoring still contains non-camera UI: {forbidden}")
+            _fail(f"Monitoring still contains unwanted UI/native layer: {forbidden}")
 
     video = _source("services/camera_v2/sentinel_video_pro.py")
     _require_all(
@@ -149,7 +155,7 @@ def main_preflight() -> int:
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT shell=camera-only no-dashboard PASS")
-    print("SENTINEL_PREFLIGHT native_video=QWindow+createWindowContainer one-xid PASS")
+    print("SENTINEL_PREFLIGHT native_video=direct-QWidget-xid paint-on-screen PASS")
     print("SENTINEL_PREFLIGHT wall=6-camera fixed-2x3 PASS")
     print("SENTINEL_PREFLIGHT architecture=detector+tracker+pipeline untouched PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
