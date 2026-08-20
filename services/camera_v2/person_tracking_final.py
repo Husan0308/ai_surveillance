@@ -21,7 +21,10 @@ os.environ.setdefault("CAMERA_V2_TRACKER_HEIGHT", "288")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_SIDE_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_TOP_MARGIN", "0.00")
 os.environ.setdefault("CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN", "0.00")
-os.environ.setdefault("CAMERA_V2_MIN_DISPLAY_TRACK_CONF", "0.28")
+# Do not make the visible bbox blink merely because NvDCF confidence dips for a
+# few frames during a turn, bend or partial occlusion. NvDCF termination still
+# decides when the track is truly gone.
+os.environ.setdefault("CAMERA_V2_MIN_DISPLAY_TRACK_CONF", "0.12")
 os.environ.setdefault("CAMERA_V2_DEDUP_IOU", "0.82")
 os.environ.setdefault("CAMERA_V2_DEDUP_CONTAINMENT", "0.94")
 
@@ -77,13 +80,16 @@ class CameraPersonTrackingFinal(_BaseTracking):
         self.latency_compensator = DetectorLatencyCompensator(
             self.frame_width, self.frame_height
         )
-        # NvDCF is the temporal tracker. Keep detector projection tiny so a pose
-        # change cannot manufacture a large center shift before tracker fusion.
-        self.latency_compensator.max_projection_s = 0.08
-        self.latency_compensator.projection_gain = 0.20
+        # Restore the responsive legacy compensation. YOLO runs asynchronously;
+        # a walking person may move materially before its result is injected into
+        # the current NvDCF frame. DetectorLatencyCompensator already gates this
+        # projection on stable box geometry, so bends/pose changes do not blindly
+        # become velocity.
+        self.latency_compensator.max_projection_s = 0.16
+        self.latency_compensator.projection_gain = 0.62
 
-        # The inference branch downsizes a 1440p CCTV image. GPU cubic scaling
-        # preserves edges/person silhouettes better than the default nearest mode.
+        # The inference branch downsizes the CCTV image. GPU cubic scaling keeps
+        # person silhouettes cleaner than nearest-neighbour scaling.
         for index in range(len(self.cameras)):
             converter = self.pipeline.get_by_name(f"detect_convert_{index}")
             if converter is not None:
@@ -91,12 +97,7 @@ class CameraPersonTrackingFinal(_BaseTracking):
                 self._set_if(converter, "compute-hw", 1)
 
     def _on_infer_sample(self, sink, cid: str):
-        """Copy packed BGRx respecting the real GStreamer row stride.
-
-        GPU/video buffers may pad every row. Treating such a buffer as tightly
-        packed width*4 bytes shears the detector image line-by-line, which makes
-        otherwise valid YOLO boxes appear vertically displaced on the live video.
-        """
+        """Copy packed BGRx respecting the real GStreamer row stride."""
         sample = sink.emit("pull-sample")
         if sample is None:
             with self.capture_lock:
@@ -124,8 +125,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
             if mapped_size % height == 0:
                 row_stride = mapped_size // height
             else:
-                # Packed BGRx normally maps to height*stride. If an allocator
-                # adds tail padding only, the tight layout is the safe fallback.
                 row_stride = tight_stride
 
             if row_stride < tight_stride:
@@ -154,14 +153,17 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
+        # Confirmed targets should survive a short YOLO miss while bending,
+        # turning or passing behind furniture. At ~20 FPS, 40 shadow frames are
+        # about two seconds: long enough for continuity without a long ghost tail.
         replacements = {
             "enableBboxUnClipping": "0",
             "minIouDiff4NewTarget": "0.72",
-            "minTrackerConfidence": "0.28",
-            "probationAge": "2",
-            "maxShadowTrackingAge": "12",
-            "earlyTerminationAge": "1",
-            "minTrackingConfidenceDuringInactive": "0.40",
+            "minTrackerConfidence": "0.15",
+            "probationAge": "1",
+            "maxShadowTrackingAge": "40",
+            "earlyTerminationAge": "2",
+            "minTrackingConfidenceDuringInactive": "0.12",
             "minIou4TargetDuplicate": "0.94",
             "targetDuplicateRunInterval": "5",
         }
@@ -210,7 +212,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
         captured_t: float,
         prepared: list[PreparedDetection],
     ) -> None:
-        # Always publish the detector decision, including an empty list.
+        # Always publish the detector decision, including an empty list. NvDCF
+        # owns continuity after that detector observation.
         with self.pending_lock:
             self.pending_seq += 1
             self.pending[cid] = (
@@ -242,7 +245,6 @@ class CameraPersonTrackingFinal(_BaseTracking):
 
             age_ms = max(0.0, (now - captured_t) * 1000.0)
             if age_ms > self.max_detector_result_age_ms:
-                # Never keep retrying an old correction on newer live frames.
                 self.injected_seq[cid] = seq
                 stale += 1
                 continue
@@ -274,6 +276,8 @@ class CameraPersonTrackingFinal(_BaseTracking):
             return self.Gst.PadProbeReturn.OK
 
         try:
+            # style_and_count_tracked also applies the restored display-only
+            # smoother. It never creates an ID: NvDCF stays authoritative.
             count = self.bridge.style_and_count_tracked(buffer)
             self.bridge.apply_local_track_style(buffer)
 
