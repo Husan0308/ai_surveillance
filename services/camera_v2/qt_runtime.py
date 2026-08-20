@@ -20,9 +20,8 @@ TILE_HEIGHT = 576
 WALL_WIDTH = TILE_WIDTH * GRID_COLUMNS
 WALL_HEIGHT = TILE_HEIGHT * GRID_ROWS
 
-# Preserve a 1080p GPU/NVMM working canvas through nvstreammux. Detection still
-# owns its independent 736x416 inference canvas, so this is presentation detail,
-# not a request to run YOLO at 1080p.
+# Preserve a 1080p GPU/NVMM working canvas through nvstreammux. Detection keeps
+# its independent 736x416 inference branch.
 SOURCE_WIDTH = 1920
 SOURCE_HEIGHT = 1080
 
@@ -49,13 +48,14 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
         if int(window_id) <= 0:
             raise RuntimeError("invalid Qt native window id")
 
-        # The spawned child imports Camera V2 after these values are installed,
-        # therefore the native DeepStream graph is created at the intended
-        # high-detail geometry rather than being upscaled later in Qt.
+        # Install final geometry BEFORE importing/constructing Camera V2. The
+        # pipeline is born as 2 columns x 3 rows and never has to renegotiate from
+        # the old 1024x864/3x2 startup geometry while entering PLAYING.
         os.environ["CAMERA_V2_FRAME_WIDTH"] = str(SOURCE_WIDTH)
         os.environ["CAMERA_V2_FRAME_HEIGHT"] = str(SOURCE_HEIGHT)
         os.environ["CAMERA_V2_WALL_WIDTH"] = str(WALL_WIDTH)
         os.environ["CAMERA_V2_WALL_HEIGHT"] = str(WALL_HEIGHT)
+        os.environ["CAMERA_V2_TILER_COLUMNS"] = str(GRID_COLUMNS)
 
         import gi
 
@@ -69,35 +69,27 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
         if len(runtime.cameras) != CAMERA_COUNT:
             raise RuntimeError(f"Sentinel UI requires 6 cameras, found {len(runtime.cameras)}")
 
-        runtime.tiler.set_property("rows", GRID_ROWS)
-        runtime.tiler.set_property("columns", GRID_COLUMNS)
-        runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)
         if runtime.tiler.find_property("show-source") is not None:
             runtime.tiler.set_property("show-source", -1)
 
         current_xid = [int(window_id)]
-
-        def expose_overlay(overlay=None) -> None:
-            target = overlay or runtime.sink
-            try:
-                # GstVideoOverlay explicitly exposes this operation for damaged
-                # native windows. It redraws the latest displayed frame instead
-                # of waiting for Qt/X11 repaint races to settle by themselves.
-                GstVideo.VideoOverlay.expose(target)
-            except Exception:
-                pass
+        bound_xid = [0]
 
         def bind_overlay(overlay, xid: int | None = None) -> None:
             target = int(current_xid[0] if xid is None else xid)
             if target <= 0:
                 raise RuntimeError("invalid video window id")
             current_xid[0] = target
+            # Re-setting the same XID while EGL is rendering is unnecessary and
+            # can blank/recreate the drawable under X11/remote desktop compositors.
+            if bound_xid[0] == target:
+                return
             GstVideo.VideoOverlay.set_window_handle(overlay, target)
             try:
                 GstVideo.VideoOverlay.handle_events(overlay, False)
             except Exception:
                 pass
-            expose_overlay(overlay)
+            bound_xid[0] = target
 
         bind_overlay(runtime.sink)
 
@@ -124,7 +116,6 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
             latest_focus = None
             got_focus = False
             latest_bind = None
-            request_expose = False
 
             while True:
                 try:
@@ -139,8 +130,6 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
                     got_focus = True
                 elif command == "bind":
                     latest_bind = int(value)
-                elif command == "expose":
-                    request_expose = True
 
             if latest_bind is not None and latest_bind > 0:
                 try:
@@ -152,12 +141,9 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
             if got_focus and runtime.tiler.find_property("show-source") is not None:
                 source_id = latest_focus if 0 <= latest_focus < CAMERA_COUNT else -1
                 runtime.tiler.set_property("show-source", source_id)
-                # Focus changes damage/recompose the native wall. Force the last
-                # completed EGL frame back onto the X11 surface immediately.
-                request_expose = True
-
-            if request_expose:
-                expose_overlay(runtime.sink)
+                # Do not force GstVideoOverlay.expose() here. PLAYING video will
+                # deliver the next frame itself; forced expose during composition
+                # changes caused intermittent black/corrupted native surfaces.
 
             if stop_requested:
                 runtime.stop()
@@ -179,7 +165,7 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
                 "STARTING",
                 f"DeepStream 2x3 wall {WALL_WIDTH}x{WALL_HEIGHT} "
                 f"({TILE_WIDTH}x{TILE_HEIGHT}/camera); source={SOURCE_WIDTH}x{SOURCE_HEIGHT}; "
-                "YOLO26m + NvDCF; frame_copy=0 mjpeg=0",
+                "YOLO26m + NvDCF; frame_copy=0 mjpeg=0 stable_xid=1",
             ),
         )
 
@@ -196,10 +182,10 @@ def _pipeline_process(window_id: int, command_q, state_q, status_q) -> None:
 
 
 class CameraQtController:
-    """Process-isolated controller used by the exact Sentinel Qt shell.
+    """Process-isolated controller used by the Sentinel Qt shell.
 
-    Qt stays in the parent process. The proven DeepStream/YOLO/NvDCF pipeline runs
-    in a spawned child and renders directly into the Qt X11 WId with GstVideoOverlay.
+    Qt stays in the parent process. The DeepStream/YOLO/NvDCF pipeline runs in a
+    spawned child and renders directly into one persistent Qt native child WId.
     UI state crosses the process boundary only as small dictionaries.
     """
 
@@ -280,11 +266,11 @@ class CameraQtController:
             self._error = "invalid Qt video window id"
             return
 
-        self._window_handle = win_id
         if self.process is not None and self.process.is_alive():
             self.bind_window(win_id)
             return
 
+        self._window_handle = win_id
         self.process = self.ctx.Process(
             target=_pipeline_process,
             args=(win_id, self.command_q, self.state_q, self.status_q),
@@ -297,7 +283,7 @@ class CameraQtController:
 
     def bind_window(self, win_id: int) -> None:
         win_id = int(win_id)
-        if win_id <= 0:
+        if win_id <= 0 or win_id == self._window_handle:
             return
         self._window_handle = win_id
         if self.process is not None and self.process.is_alive():
@@ -307,12 +293,9 @@ class CameraQtController:
                 pass
 
     def expose(self) -> None:
-        """Ask GstVideoOverlay to redraw the latest native frame."""
-        if self.process is not None and self.process.is_alive():
-            try:
-                self.command_q.put_nowait(("expose", 0))
-            except queue.Full:
-                pass
+        # Kept for compatibility with older shells. Stable PLAYING video should
+        # never need an explicit expose command during ordinary resize/focus.
+        return
 
     def set_focus_source(self, source_id: int | None) -> None:
         self._focus_source = source_id
@@ -326,8 +309,6 @@ class CameraQtController:
     def focus_source(self) -> int | None:
         return self._focus_source
 
-    # Compatibility with the historical shell. The supplied exact UI contains no
-    # heatmap control, so these do not alter the native video.
     def set_heatmap_enabled(self, source_id: int, enabled: bool) -> None:
         source_id = int(source_id)
         if 0 <= source_id < CAMERA_COUNT:
