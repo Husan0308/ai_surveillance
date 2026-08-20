@@ -3,9 +3,9 @@ from __future__ import annotations
 """Camera-only Qt host for the fixed six-camera DeepStream wall.
 
 The dashboard is intentionally absent. GstVideoOverlay renders directly into one
-native QWidget X11 window; there is no QWindow/createWindowContainer layer, no
-stacked pages and no Qt child painted over the video surface. RF-DETR/NvDCF and
-the DeepStream runtime remain separate from this display host.
+native QWidget X11 window. There are no stacked pages and no Qt children painted
+over the video surface. RF-DETR/NvDCF and the DeepStream runtime remain separate
+from this display host.
 """
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
