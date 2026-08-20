@@ -8,14 +8,13 @@ import os
 _CANONICAL_RUNTIME = {
     "CAMERA_V2_FRAME_WIDTH": "2560",
     "CAMERA_V2_FRAME_HEIGHT": "1440",
-    "CAMERA_V2_DETECT_WIDTH": "736",
-    "CAMERA_V2_DETECT_HEIGHT": "416",
+    "CAMERA_V2_DETECT_WIDTH": "672",
+    "CAMERA_V2_DETECT_HEIGHT": "384",
     "CAMERA_V2_DETECT_CONF": "0.18",
     "CAMERA_V2_DETECT_IOU": "0.65",
     "CAMERA_V2_MAX_DET": "40",
-    # GTX 1050 Ti has 4 GB VRAM. Start RF-DETR-S at batch 1; NvDCF carries
-    # continuity between detector observations. Hardware smoke may later prove
-    # that micro-batch 2 is safe, but production must not depend on that.
+    # GTX 1050 Ti hardware smoke proved batch 1 is faster than batch 2 for
+    # RF-DETR-S. NvDCF carries continuity between sparse detector observations.
     "CAMERA_V2_MICRO_BATCH": "1",
     "CAMERA_V2_TRACKER_WIDTH": "512",
     "CAMERA_V2_TRACKER_HEIGHT": "288",
@@ -31,7 +30,7 @@ if _stale_runtime_values:
     print(
         "CAMERA_RUNTIME_PROFILE stale_env_overridden="
         + ",".join(_stale_runtime_values)
-        + " canonical=mux:2560x1440,detector:RF-DETR-S@736x416,tracker:512x288",
+        + " canonical=mux:2560x1440,detector:RF-DETR-S@672x384,tracker:512x288",
         flush=True,
     )
 
