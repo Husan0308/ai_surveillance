@@ -47,7 +47,7 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert "RFDETR_PREFLIGHT=PASS" in preflight
 
 
-def test_monitoring_uses_one_embedded_qwindow_video_target() -> None:
+def test_ui_is_camera_only_and_uses_one_embedded_qwindow_target() -> None:
     native = source("services/camera_v2/sentinel_ui_monitoring_native.py")
     shell = source("services/camera_v2/sentinel_ui.py")
 
@@ -55,17 +55,38 @@ def test_monitoring_uses_one_embedded_qwindow_video_target() -> None:
     assert "self.video_window = QWindow()" in native
     assert "QWidget.createWindowContainer(self.video_window, self)" in native
     assert "self.video_window.winId()" in native
-    assert "self.surface = NativeVideoHost(self.wall_card)" in native
+    assert "self.surface = NativeVideoHost(self)" in native
     assert "self.surface.nativeReady.connect(self._start_or_bind)" in native
-    assert "class CameraStatusRow(QFrame)" in native
     assert "ProPipelineController()" in native
+    assert "self.controller.poll()" in native
+
+    for forbidden in (
+        "QFrame",
+        "QLabel",
+        "CameraStatusRow",
+        "People in Building",
+        "open_fullscreen_grid",
+        "ProLiveVideoWall(",
+    ):
+        assert forbidden not in native
 
     native_calls = called_attributes(native)
     assert "focus" not in native_calls
     assert "set_fullscreen_mode" not in native_calls
-    assert "ProLiveVideoWall(" not in native
 
-    assert "from .sentinel_ui_monitoring_native import MonitoringPage" in shell
+    assert "self.monitoring_page = MonitoringPage()" in shell
+    assert "self.setCentralWidget(self.monitoring_page)" in shell
+    for forbidden in (
+        "QStackedWidget",
+        "PeoplePage",
+        "EventsPage",
+        "RoomsPage",
+        "EnrollmentPage",
+        "SettingsPage",
+        "sidebar",
+    ):
+        assert forbidden not in shell
+
     shell_calls = called_attributes(shell)
     assert "showFullScreen" not in shell_calls
     assert "showNormal" not in shell_calls
