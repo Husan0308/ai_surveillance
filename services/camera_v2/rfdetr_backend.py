@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-"""RF-DETR-S detector backend for Camera V2.
+"""Selectable detector backend for Camera V2.
 
-The detector worker is process-isolated and preserves the existing CameraDetectionV2
-job/result schema. Tracker selection is intentionally outside this module: the GTX
-1050 Ti production controller constructs CameraPascalSafeRuntime directly, while
-other runtimes may opt into the sparse NvDCF contract.
-
-Set ``CAMERA_V2_DETECT_BACKEND=stable-yolo26m`` to keep CameraDetectionV2's
-built-in YOLO26m person-only worker and baseline temporal tracker unchanged. This
-provides a clean A/B path against the earlier stable detection behavior without
-changing the proven DeepStream display pipeline.
+RF-DETR-S remains the production comparison path.  Setting
+``CAMERA_V2_DETECT_BACKEND=stable-yolo26m`` installs the restored old-stable
+YOLO26m person-only detector plus the exact adaptive-Kalman/Byte visual tracker
+core, while keeping the proven Pascal DeepStream camera/display graph intact.
 """
 
 import importlib.metadata
@@ -48,8 +43,6 @@ def rfdetr_worker(job_q, result_q) -> None:
             pass
         torch.backends.cudnn.benchmark = True
 
-        # Import after the child owns CUDA. This keeps the parent Qt/DeepStream
-        # process free of detector-side CUDA model state.
         from . import detection as det
 
         startup_delay = float(os.environ.get("CAMERA_V2_DETECT_STARTUP_DELAY", "3.0"))
@@ -65,8 +58,6 @@ def rfdetr_worker(job_q, result_q) -> None:
         )
 
         model = RFDETRSmall(device="cuda:0")
-
-        # Eager FP32 is the compatibility baseline for the Pascal deployment.
         warm = np.zeros((infer_shape[0], infer_shape[1], 3), dtype=np.uint8)
         with torch.inference_mode():
             model.predict(
@@ -102,7 +93,6 @@ def rfdetr_worker(job_q, result_q) -> None:
 
             started = time.monotonic()
             try:
-                # The GStreamer side branch supplies BGR; RF-DETR NumPy input is RGB.
                 rgb_frames = [
                     np.ascontiguousarray(frame[..., ::-1]) for frame in job["frames"]
                 ]
@@ -170,10 +160,7 @@ def rfdetr_worker(job_q, result_q) -> None:
                 except Exception:
                     pass
                 result_q.put(
-                    {
-                        "type": "batch_error",
-                        "error": f"RF-DETR-S CUDA OOM: {exc}",
-                    }
+                    {"type": "batch_error", "error": f"RF-DETR-S CUDA OOM: {exc}"}
                 )
             except BaseException as exc:
                 result_q.put(
@@ -184,16 +171,11 @@ def rfdetr_worker(job_q, result_q) -> None:
                 )
     except BaseException as exc:
         result_q.put(
-            {
-                "type": "fatal",
-                "error": f"RF-DETR-S {type(exc).__name__}: {exc}",
-            }
+            {"type": "fatal", "error": f"RF-DETR-S {type(exc).__name__}: {exc}"}
         )
 
 
 def _capture_gate_until_sample(self, _pad, _info, cid: str):
-    """Pass buffers while a capture request is armed; scheduler clears the gate."""
-
     with self.capture_lock:
         requested = bool(self.capture_requested.get(cid, False))
     if not requested:
@@ -202,15 +184,13 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
 
 
 def install() -> None:
-    """Install the selected detector/tracker backend."""
+    """Install the selected detector/tracker backend before CameraDetectionV2 init."""
 
     selected = os.environ.get("CAMERA_V2_DETECT_BACKEND", "rfdetr-s").strip().lower()
     if selected in {"stable-yolo26m", "yolo26m", "yolo", "stable-yolo"}:
-        print(
-            "CAMERA_DETECT_BACKEND selected=stable-yolo26m "
-            "rfdetr_patch=0 flow_patch=0 worker=builtin-yolo26m tracker=builtin-baseline",
-            flush=True,
-        )
+        from .stable_yolo_backend import install as install_stable_yolo
+
+        install_stable_yolo()
         return
 
     from . import detection
@@ -218,11 +198,6 @@ def install() -> None:
 
     detection._yolo_worker = rfdetr_worker
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
-
-    # CameraDetectionV2 resolves SmoothBoxManager from its module globals at
-    # runtime. RF-DETR owns detector corrections; the replacement tracker adds
-    # a persistent center anchor and accepts measured 20-FPS optical flow between
-    # sparse detector calls.
     detection.SmoothBoxManager = FlowAssistedPersonTracker
 
     pascal_safe = os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
@@ -233,10 +208,6 @@ def install() -> None:
     }
 
     if pascal_safe:
-        # CameraPascalSafeRuntime is defined after this installer runs. Wrapping
-        # its CameraDetectionV2 base initializer lets the normal Pascal virtual
-        # _install_osd_and_meta() build the proven display/analysis tee first;
-        # only then do we attach a third leaky continuous motion branch.
         if not getattr(detection.CameraDetectionV2, "_camera_v2_flow_init_wrapped", False):
             original_init = detection.CameraDetectionV2.__init__
 
@@ -249,9 +220,6 @@ def install() -> None:
             detection.CameraDetectionV2.__init__ = _init_with_motion_flow
             detection.CameraDetectionV2._camera_v2_flow_init_wrapped = True
     else:
-        # Supported/non-Pascal runtimes may still use the existing sparse external
-        # detector contract with NvDCF. The GTX 1050 Ti production controller
-        # never imports that tracker path.
         from .sparse_tracker_contract import install_sparse_tracker_contract
 
         install_sparse_tracker_contract()
