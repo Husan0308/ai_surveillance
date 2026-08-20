@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Native-X11-safe MonitoringPage for the GstVideoOverlay wall."""
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtWidgets import QWidget
 
 from .sentinel_ui_monitoring import MonitoringPage as _MonitoringPage
@@ -15,10 +15,16 @@ class MonitoringPage(_MonitoringPage):
     hover controls. GstVideoOverlay renders into one separate native QWidget below
     those overlays. This prevents Qt backing-store repaints from painting the dark
     panel background over an otherwise-live EGL image.
+
+    Temporary core-debug mode deliberately avoids the unstable 2x3 tiler grid and
+    focuses CAM-01 after startup. This keeps a usable live native surface available
+    while RF-DETR/NvDCF continuity is being finished. The normal grid can be
+    restored later without touching the detector/tracker core.
     """
 
     def __init__(self) -> None:
         super().__init__()
+        self._temporary_single_camera_started = False
 
         self._video_surface = QWidget(self.wall)
         self._video_surface.setObjectName("nativeVideoSurface")
@@ -128,6 +134,22 @@ class MonitoringPage(_MonitoringPage):
         # bind GstVideoOverlay only to the dedicated non-painting child surface.
         self._ensure_video_binding("native-ready-dedicated-surface")
 
+    def _temporary_single_camera_mode(self) -> None:
+        """Use one stable source while the production 2x3 grid is parked."""
+        if self._temporary_single_camera_started:
+            return
+        self._temporary_single_camera_started = True
+        self._focused_source = 0
+        try:
+            self.controller.focus(0)
+            self.wall.set_fullscreen_mode(True, 0)
+            print("SENTINEL_UI_TEMP_MODE source=CAM-01 mode=single-camera", flush=True)
+        except Exception as exc:
+            print(
+                f"SENTINEL_UI_TEMP_MODE warning={type(exc).__name__}:{exc}",
+                flush=True,
+            )
+
     def eventFilter(self, watched, event):
         event_type = event.type()
         surface = getattr(self, "_video_surface", None)
@@ -149,3 +171,5 @@ class MonitoringPage(_MonitoringPage):
         self._ensure_native_ancestor_chain()
         self._sync_video_surface_geometry()
         super().showEvent(event)
+        if not self._temporary_single_camera_started:
+            QTimer.singleShot(900, self._temporary_single_camera_mode)
