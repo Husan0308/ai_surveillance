@@ -48,6 +48,7 @@ export CAMERA_V2_DISPLAY_BOX_BOTTOM_MARGIN=0.10
 
 echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} inherited_tracker=${INHERITED_TRACKER} effective_mux=2560x1440 focus=1920x1080 detector=RF-DETR-S@736x416 threshold=0.18 batch=1 tracker=NvDCF@512x288 display_box=adaptive-8/4/10"
 
+python scripts/preflight_rfdetr_core.py
 python scripts/preflight_sentinel_ui.py
 python scripts/preflight_camera_v2_core.py
 
