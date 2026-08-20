@@ -11,11 +11,12 @@ from dataclasses import dataclass
 CAMERA_COUNT = 6
 GRID_COLUMNS = 2
 GRID_ROWS = 3
-WALL_WIDTH = 1600
-# nvmultistreamtiler/NVMM aligns the requested 1350 surface to 1352 on the
-# target Pascal stack. Keep the production caps geometry aligned with the
-# negotiated surface so downstream caps do not fail with not-negotiated (-4).
-WALL_HEIGHT = 1352
+# The target native QWidget is 1600x900. A 2x3 wall of 16:9 feeds only occupies
+# about 1067x900 after aspect-fit. Keep the GPU wall near that final visible size
+# so nvmultistreamtiler performs the main Lanczos downscale once and EGL does not
+# blur the grid with a second large resize. Both dimensions are NVMM-safe/aligned.
+WALL_WIDTH = 1072
+WALL_HEIGHT = 904
 FOCUS_WIDTH = 1920
 FOCUS_HEIGHT = 1080
 
