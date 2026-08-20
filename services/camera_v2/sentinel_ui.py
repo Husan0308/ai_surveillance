@@ -8,15 +8,11 @@ from PySide6.QtWidgets import QApplication, QMainWindow
 from .sentinel_ui_monitoring_native import MonitoringPage
 
 
-BUILD_TAG = "2026.08.20-r15-camera-only"
+BUILD_TAG = "2026.08.20-r16-pascal-safe"
 
 
 class MainWindow(QMainWindow):
-    """Temporary camera-only shell.
-
-    The rest of the project UI modules remain in the repository untouched; they
-    are simply not instantiated while the camera wall is being stabilized.
-    """
+    """Production camera-only shell for the six-camera native wall."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -48,7 +44,7 @@ def run() -> int:
         "QWidget#nativeVideoHost{background:#000000;}"
     )
     print(
-        f"SENTINEL_QT platform={app.platformName()} "
+        f"SENTINEL_QT build={BUILD_TAG} platform={app.platformName()} "
         f"display={os.environ.get('DISPLAY', 'unset')} mode=camera-only",
         flush=True,
     )
