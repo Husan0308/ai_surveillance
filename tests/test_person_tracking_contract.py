@@ -83,17 +83,46 @@ def test_tracking_exposes_churn_diagnostics() -> None:
     assert "PERSON_TRACK_STABILITY=PASS" in stability
 
 
-def test_presentation_keeps_bytetrack_ids_and_resists_lag_or_overshoot() -> None:
+def test_presentation_keeps_bytetrack_ids_and_restores_responsive_motion() -> None:
     smoother = source("services/ml_service/app/presentation_smoother.py")
     mmap = source("services/ml_service/app/mmap_publisher.py")
 
     assert "ByteTrack remains the only identity/association owner" in smoother
-    assert "np.linalg.inv" in smoother
-    assert "snap_distance_boxes" in smoother
+    assert "measurement_response" in smoother
+    assert "velocity_response" in smoother
+    assert "self.measurement_response" in smoother
+    assert "self.velocity_response" in smoother
+    assert "_damped_displacement" in smoother
+    assert "prediction_sec" in smoother
     assert "reversal_damping" in smoother
-    assert "0.82 * measurement[0]" in smoother
     assert "max_prediction_shift_boxes" in smoother
+    assert "measurement_response=0.96" in mmap
+    assert "velocity_response=0.65" in mmap
+    assert "prediction_ms=200" in mmap
     assert "_visual_envelope" in mmap
     assert "side_ratio = 0.10 if aspect >= 0.62 else 0.065" in mmap
     assert "Never deduplicate presentation tracks here" in mmap
-    assert '"overlay": "bytetrack-id-kalman-presentation"' in mmap
+    assert '"overlay": "bytetrack-id-responsive-presentation"' in mmap
+
+
+def test_frontend_camera_wall_is_two_columns() -> None:
+    wall = source("services/frontend/app/camera_wall.py")
+    assert "COLUMNS = 2" in wall
+    assert "divmod(index, self.COLUMNS)" in wall
+    assert "for row in range(3)" in wall
+
+
+def test_frontend_launcher_preflight_and_mmap_smoke_exist() -> None:
+    launcher = source("scripts/run_frontend.sh")
+    preflight = source("scripts/preflight_frontend.py")
+    integration = source("scripts/smoke_frontend_integration.py")
+    mmap_smoke = source("scripts/smoke_mmap_video.py")
+
+    assert "python scripts/preflight_frontend.py" in launcher
+    assert "services.frontend.app.main" in launcher
+    assert "FRONTEND_PREFLIGHT=PASS" in preflight
+    assert "FRONTEND_MMAP" in preflight
+    assert '"/api/v1/cameras"' in integration
+    assert "FRONTEND_SMOKE=PASS" in integration
+    assert "MMAP_VIDEO_SMOKE=PASS" in mmap_smoke
+    assert "960" not in mmap_smoke
