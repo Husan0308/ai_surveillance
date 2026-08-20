@@ -3,8 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Keep the camera baseline deterministic. RF-DETR/NvDCF/ReID are intentionally
-# absent from this launcher until the six-camera core passes soak testing.
+# Load the existing gitignored local credentials when present. Do not print them.
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 export PYTHONUNBUFFERED=1
 
 if [[ -n "${DISPLAY:-}" && -z "${QT_QPA_PLATFORM:-}" ]]; then
