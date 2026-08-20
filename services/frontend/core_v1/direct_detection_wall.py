@@ -4,15 +4,17 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 from PySide6.QtCore import Qt, QTimer, QRectF
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QGridLayout, QMainWindow, QWidget
 
-from shared.config import camera_config
+from shared.config import PROJECT_ENV_LOADED, camera_config
 from services.ml_service.core_v1.manager import CameraManager
 from services.ml_service.core_v1.stable_detector import StableYoloDetectorWorker
+from services.ml_service.cameras.deepstream import deepstream_available
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -34,11 +36,12 @@ def _load_core() -> dict:
         base = _expand(yaml.safe_load(handle) or {}).get("core_v1", {})
     core = dict(base)
     # Direct-view mode has one owner for each camera pipeline and no frame IPC.
-    # 960x540 is the presentation/capture canvas; YOLO keeps its own configured
-    # input size and receives a resized copy only when inference is scheduled.
+    # Force the validated DeepStream/NVDEC backend so a hidden fallback cannot
+    # make camera-start failures ambiguous.
     core.update(
         {
             "profile": "direct-camera-detection-v1",
+            "capture_backend": "deepstream",
             "capture_output_width": 960,
             "capture_output_height": 540,
             "drop_on_latency": True,
@@ -61,8 +64,9 @@ def _load_core() -> dict:
         {
             "enabled": True,
             "batch_size": 2,
-            # Keep GPU headroom for NVDEC/nvvideoconvert and the desktop. The
-            # detector remains latest-only, so this never creates a backlog.
+            # Give all six NVDEC sessions time to negotiate before CUDA model
+            # warmup starts. Detection remains latest-only after startup.
+            "start_delay_sec": 2.0,
             "min_submit_interval_ms": 85,
             "max_submit_age_ms": 260,
             "max_result_age_ms": 700,
@@ -87,6 +91,97 @@ def _load_cameras() -> list[dict]:
         camera["drop_on_latency"] = True
         cameras.append(camera)
     return cameras
+
+
+def _camera_preflight(cameras: list[dict]) -> None:
+    ids = [str(camera.get("id", "")) for camera in cameras]
+    if ids != CAMERA_IDS:
+        raise RuntimeError(f"DIRECT_PREFLIGHT expected={CAMERA_IDS} got={ids}")
+
+    if not deepstream_available():
+        raise RuntimeError("DIRECT_PREFLIGHT DeepStream nvurisrcbin plugin is unavailable")
+
+    missing_auth = []
+    bad_sources = []
+    for camera in cameras:
+        cid = str(camera.get("id", "?"))
+        source = str(camera.get("display_source") or camera.get("source") or "")
+        parsed = urlsplit(source) if source else None
+        if not source.lower().startswith(("rtsp://", "rtsps://")):
+            bad_sources.append(cid)
+            continue
+        embedded_auth = bool(parsed and "@" in parsed.netloc)
+        if not embedded_auth and (not camera.get("username") or not camera.get("password")):
+            missing_auth.append(cid)
+
+    if bad_sources:
+        raise RuntimeError("DIRECT_PREFLIGHT invalid RTSP source: " + ",".join(bad_sources))
+    if missing_auth:
+        raise RuntimeError(
+            "DIRECT_PREFLIGHT RTSP credentials are empty for "
+            + ",".join(missing_auth)
+            + f"; project_env_loaded={int(PROJECT_ENV_LOADED)}; "
+            "check .env SURVEILLANCE_RTSP_USERNAME/SURVEILLANCE_RTSP_PASSWORD"
+        )
+
+    print(
+        "DIRECT_PREFLIGHT=PASS "
+        f"cameras={len(cameras)} auth={len(cameras) - len(missing_auth)}/{len(cameras)} "
+        f"env_file={int(PROJECT_ENV_LOADED)} backend=deepstream-nvurisrcbin "
+        "latest_queue=1 display=960x540",
+        flush=True,
+    )
+
+
+def _wait_camera_start(manager: CameraManager, timeout_sec: float = 15.0) -> int:
+    """Let camera/NVDEC negotiation finish before CUDA detector warmup.
+
+    The window should never silently sit on six black tiles. If no camera can
+    produce a first frame, fail with the real per-camera backend errors instead.
+    """
+
+    deadline = time.monotonic() + max(1.0, float(timeout_sec))
+    next_report = 0.0
+    last_metrics = {}
+    while time.monotonic() < deadline:
+        last_metrics = manager.metrics()
+        online = [cid for cid, item in last_metrics.items() if bool(item.get("online"))]
+        if len(online) == len(manager.workers):
+            print(f"DIRECT_CAMERA_START=PASS online={len(online)}/{len(manager.workers)}", flush=True)
+            return len(online)
+
+        now = time.monotonic()
+        if now >= next_report:
+            states = []
+            for cid in CAMERA_IDS:
+                item = last_metrics.get(cid) or {}
+                if item.get("online"):
+                    states.append(f"{cid}:LIVE")
+                elif item.get("last_error"):
+                    error = str(item.get("last_error")).replace("\n", " ")
+                    states.append(f"{cid}:ERR[{error[:120]}]")
+                else:
+                    states.append(f"{cid}:WAIT")
+            print("DIRECT_CAMERA_START " + " | ".join(states), flush=True)
+            next_report = now + 1.0
+        time.sleep(0.10)
+
+    last_metrics = manager.metrics()
+    online = [cid for cid, item in last_metrics.items() if bool(item.get("online"))]
+    if online:
+        print(
+            f"DIRECT_CAMERA_START=PARTIAL online={len(online)}/{len(manager.workers)} "
+            "continuing_without_blocking_healthy_cameras=1",
+            flush=True,
+        )
+        return len(online)
+
+    errors = []
+    for cid in CAMERA_IDS:
+        item = last_metrics.get(cid) or {}
+        detail = str(item.get("last_error") or "no first frame")
+        errors.append(f"{cid}={detail}")
+    raise RuntimeError("DIRECT_CAMERA_START=FAIL " + " | ".join(errors))
 
 
 class DirectCameraTile(QWidget):
@@ -123,9 +218,6 @@ class DirectCameraTile(QWidget):
                 frame.width,
                 frame.height,
             )
-        # Zero transport / zero JPEG: QImage points directly at the owned numpy
-        # frame. Keeping the Frame object alive guarantees the backing bytes stay
-        # valid until this tile switches to a newer frame on the GUI thread.
         image = QImage(
             array.data,
             int(frame.width),
@@ -182,8 +274,6 @@ class DirectCameraTile(QWidget):
             dh = max(1, round(sh * scale))
             x = (self.width() - dw) / 2.0
             y = (self.height() - dh) / 2.0
-            # Keep SmoothPixmapTransform disabled. Simple raster scaling is one
-            # of Qt's explicitly optimized QPainter paths.
             painter.drawImage(QRectF(x, y, dw, dh), image)
             self._draw_detection(painter, x, y, scale)
         else:
@@ -236,7 +326,6 @@ class DirectDetectionWindow(QMainWindow):
         self.render_timer = QTimer(self)
         self.render_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.render_timer.timeout.connect(self._render)
-        # 30 Hz GUI polling, repaint only when a camera has a newer frame.
         self.render_timer.start(33)
 
         self.metrics_timer = QTimer(self)
@@ -253,7 +342,10 @@ class DirectDetectionWindow(QMainWindow):
         parts = []
         for cid in CAMERA_IDS:
             item = camera_metrics.get(cid) or {}
-            parts.append(f"{cid}:{float(item.get('source_fps') or 0):.1f}fps")
+            parts.append(
+                f"{cid}:{float(item.get('source_fps') or 0):.1f}fps"
+                f"/{str(item.get('capture_backend') or '?')}"
+            )
         print(
             "DIRECT_CAMERA " + " ".join(parts)
             + f" | detector_ready={bool(detector.get('ready'))}"
@@ -283,6 +375,8 @@ class DirectDetectionWindow(QMainWindow):
 def run() -> int:
     core = _load_core()
     cameras = _load_cameras()
+    _camera_preflight(cameras)
+
     manager = CameraManager(cameras, core)
     detector = StableYoloDetectorWorker(manager.stores, dict(core.get("detector") or {}), ROOT)
 
@@ -290,13 +384,13 @@ def run() -> int:
     app.setApplicationName("AI Surveillance Direct Detection")
 
     manager.start()
-    detector.start()
-    window = DirectDetectionWindow(manager, detector)
-    window.showMaximized()
     try:
+        _wait_camera_start(manager)
+        detector.start()
+        window = DirectDetectionWindow(manager, detector)
+        window.showMaximized()
         return app.exec()
     finally:
-        # closeEvent normally owns shutdown; this catches startup/display errors.
         detector.stop()
         detector.join(10)
         manager.stop()
