@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow
 from .sentinel_ui_monitoring_native import MonitoringPage
 
 
-BUILD_TAG = "2026.08.20-r16-pascal-safe"
+BUILD_TAG = "2026.08.20-r17-postmux-fullscreen"
 
 
 class MainWindow(QMainWindow):
