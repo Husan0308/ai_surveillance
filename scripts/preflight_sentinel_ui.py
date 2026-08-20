@@ -15,7 +15,7 @@ from services.camera_v2.camera_wall_runtime import (  # noqa: E402
 from services.camera_v2.sentinel_ui import BUILD_TAG, MainWindow, main  # noqa: E402
 from services.ml_service.app.config import load_settings  # noqa: E402
 
-EXPECTED_BUILD = "2026.08.20-r17-postmux-fullscreen"
+EXPECTED_BUILD = "2026.08.20-r18-rtsp-tcp"
 
 
 def fail(message: str) -> None:
@@ -42,7 +42,7 @@ def main_preflight() -> int:
 
     shell = source("services/camera_v2/sentinel_ui.py")
     for token in (
-        'BUILD_TAG = "2026.08.20-r17-postmux-fullscreen"',
+        'BUILD_TAG = "2026.08.20-r18-rtsp-tcp"',
         "self.monitoring_page = MonitoringPage()",
         "self.setCentralWidget(self.monitoring_page)",
         "self.monitoring_page.shutdown()",
@@ -96,6 +96,17 @@ def main_preflight() -> int:
         if token not in pascal:
             fail(f"display-first detector guard missing: {token}")
 
+    secure = source("services/camera_v2/secure.py")
+    for token in (
+        'CAMERA_V2_RTSP_TRANSPORT',
+        'self._set_if(source, "select-rtp-protocol", 4 if transport == "tcp" else 0)',
+        'self._set_if(element, "protocols", 4)',
+        "def _source_pad_added",
+        "caps.is_any()",
+    ):
+        if token not in secure:
+            fail(f"RTSP transport/link guard missing: {token}")
+
     launcher = source("scripts/run_sentinel_vms.sh")
     for token in (
         "python scripts/preflight_rfdetr_core.py",
@@ -103,7 +114,10 @@ def main_preflight() -> int:
         "python scripts/preflight_sentinel_ui.py",
         "python scripts/preflight_camera_v2_core.py",
         "exec python -m services.camera_v2.monitor_ui",
-        "expected_ui=2026.08.20-r17-postmux-fullscreen",
+        "expected_ui=2026.08.20-r18-rtsp-tcp",
+        "export CAMERA_V2_RTSP_TRANSPORT=tcp",
+        "export CAMERA_V2_RTSP_LATENCY_MS=250",
+        "rtsp=tcp latency=250ms",
         "detector_path=postmux-demux",
         "ui=camera-only-2x3-click-fullscreen",
     ):
@@ -113,6 +127,7 @@ def main_preflight() -> int:
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT wall=6-camera fixed-2x3 click-fullscreen PASS")
     print("SENTINEL_PREFLIGHT native_video=direct-QWidget-xid idempotent-bind PASS")
+    print("SENTINEL_PREFLIGHT rtsp=tcp latency=250ms dynamic-pad=late-caps-safe PASS")
     print("SENTINEL_PREFLIGHT detector=postmux-demux source-ingest-isolated PASS")
     print("SENTINEL_PREFLIGHT runtime=pascal-safe RF-DETR motion-predictor no-nvtracker PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
