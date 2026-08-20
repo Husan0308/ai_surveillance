@@ -11,7 +11,7 @@ from . import sentinel_exact as ui
 
 
 def _install_reference_contract() -> None:
-    from PySide6.QtCore import QEvent, QTimer, Qt
+    from PySide6.QtCore import QEvent, Qt
     from PySide6.QtWidgets import QWidget
 
     # Exact names/capacities from the supplied data.py. Camera V2 has two physical
@@ -22,8 +22,6 @@ def _install_reference_contract() -> None:
         {"id": 3, "name": "Ombor", "capacity": 15, "sources": (4, 5)},
     )
 
-    # Match the uploaded ui.py stylesheet contract exactly where the historical
-    # realtime fork had omitted two selectors.
     if "QPlainTextEdit" not in ui.APP_QSS:
         ui.APP_QSS = ui.APP_QSS.replace(
             "QLineEdit, QComboBox, QTextEdit",
@@ -46,13 +44,8 @@ def _install_reference_contract() -> None:
     class ExactCameraTile(BaseCameraTile):
         """Input-only transparent tile above the native DeepStream wall.
 
-        The previous version painted borders/status/badges on six translucent Qt
-        child widgets while nveglglessink painted the same X11 area underneath.
-        That gives two independent painters ownership of overlapping native pixels
-        and is visible as intermittent background flashing over AnyDesk/X11.
-
-        DeepStream OSD already owns camera/person graphics, so these child widgets
-        now exist only for hit-testing/double-click focus. They never paint.
+        DeepStream OSD owns all video/person graphics. The Qt children exist only
+        for hit-testing and double-click focus, so they never repaint live pixels.
         """
 
         def __init__(self, source_id: int, parent=None):
@@ -75,8 +68,6 @@ def _install_reference_contract() -> None:
             QWidget.resizeEvent(self, event)
 
         def paintEvent(self, event):
-            # Native GstVideoOverlay owns every video pixel. Do not let Qt erase,
-            # border, dim, antialias or otherwise touch the live surface.
             event.accept()
 
     class ExactLiveWall(BaseLiveWall):
@@ -93,19 +84,16 @@ def _install_reference_contract() -> None:
             _ = int(self.winId())
 
         def paintEngine(self):
-            # GstVideoOverlay / nveglglessink owns this native X11 surface.
             return None
 
         def paintEvent(self, event):
             event.accept()
 
         def resizeEvent(self, event):
-            # Keep BaseLiveWall's hit-test tile layout, but do not ask Qt to paint
-            # the video. After X11 changes the native drawable size, explicitly
-            # ask GstVideoOverlay to redraw the latest completed frame.
+            # Relayout transparent mouse-hit tiles only. The continuously PLAYING
+            # EGL sink redraws video itself; forcing GstVideoOverlay.expose() on
+            # every resize can race with native surface reconfiguration.
             BaseLiveWall.resizeEvent(self, event)
-            if getattr(self, "controller", None) is not None:
-                QTimer.singleShot(0, self.controller.expose)
 
         def event(self, event):
             result = super().event(event)
@@ -114,20 +102,15 @@ def _install_reference_contract() -> None:
                     xid = int(self.winId())
                     if xid > 0 and getattr(self, "controller", None) is not None:
                         self.controller.bind_window(xid)
-                        QTimer.singleShot(0, self.controller.expose)
                 except Exception:
                     pass
             return result
 
-    # MainWindow -> MonitoringPage resolves these names at instantiation time, so
-    # this keeps the historical shell intact and swaps only video integration.
     ui.CameraTile = ExactCameraTile
     ui.LiveWall = ExactLiveWall
 
 
 def main() -> int:
-    # Current deployment is Kubuntu/AnyDesk X11. GstVideoOverlay expects a native
-    # XID in this integration; leave an explicitly chosen QPA untouched.
     if os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
@@ -143,8 +126,6 @@ def main() -> int:
     app.setStyleSheet(ui.APP_QSS)
 
     window = ui.MainWindow()
-    # Match the uploaded main.py: normal window first, rather than forcing a
-    # different maximized layout before the operator chooses it.
     window.show()
     return app.exec()
 
