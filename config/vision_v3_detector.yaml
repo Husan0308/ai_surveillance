@@ -2,16 +2,19 @@ detector:
   model: rfdetr-small
   device: cuda:0
 
-  # High-recall raw detector gate. This is intentionally low: low-confidence
-  # person observations may recover an existing visual track, while the stable
-  # Byte/Kalman display manager prevents weak one-frame noise from becoming a box.
+  # Core-v1 rule: detector floor stays low for difficult/occluded people.  Weak
+  # observations can continue an existing track, while temporal birth confirmation
+  # prevents one noisy RF-DETR frame from becoming a visible person.
   capture_width: 768
   capture_height: 432
   threshold: 0.06
   person_class_id: 1
+  max_det: 50
+  camera_thresholds: {}
 
-  # GTX 1050 Ti 4GB safety profile. One image per forward pass keeps VRAM spikes
-  # bounded while all six NVDEC streams stay independent from detector latency.
+  # GTX 1050 Ti 4GB safety profile.  Camera decode/display never waits for this
+  # worker.  The parent scheduler is latest-only and automatically reduces duty if
+  # wall cadence degrades.
   micro_batch: 1
   gpu_duty: 0.30
   gpu_duty_min: 0.12
@@ -20,48 +23,118 @@ detector:
   result_timeout_sec: 12
   optimize_for_inference: false
 
-  # Display-only visual continuity, adapted from the previously stable core-v1
-  # Paddle/Byte-style Kalman tracker. Raw RF-DETR boxes are NOT changed and remain
-  # available for future NvDCF/geometry.
+  # Exact Core-v1 full-frame + ROI fusion policy.  These guards run on RAW RF-DETR
+  # detections before presentation tracking.
+  duplicate_iou: 0.58
+  fusion_containment: 0.84
+  fusion_center_distance: 0.40
+
+  # Known static false-positive region retained from the proven six-camera setup.
+  # It only rejects small boxes; a large real person crossing the region is kept.
+  hard_exclusion:
+    max_box_height_ratio: 0.30
+    overlap_threshold: 0.15
+    cameras:
+      CAM-06:
+        - [0.50, 0.00, 0.78, 0.22]
+
+  # Selective high-resolution recovery from Core-v1.  It is intentionally limited
+  # to the two historically difficult views, so six-camera GPU load stays bounded.
+  # verify: replace full-frame detections inside ROI with the crop result.
+  # augment: keep full-frame detections and add crop-only misses.
+  roi_second_pass:
+    enabled: true
+    every_n: 2
+    trigger_max_full_roi_persons: 1
+    accept_conf: 0.06
+    cameras:
+      CAM-05:
+        mode: verify
+        every_n: 2
+        always_run: false
+        accept_conf: 0.11
+        rotations: [0]
+        trigger_max_full_roi_persons: 1
+        box: [0.27, 0.00, 0.72, 0.54]
+      CAM-06:
+        mode: augment
+        every_n: 2
+        always_run: false
+        accept_conf: 0.075
+        rotations: [0]
+        trigger_max_full_roi_persons: 0
+        box: [0.36, 0.12, 0.74, 0.48]
+
+  # Mature Core-v1 adaptive Kalman + Byte visual policy.  The algorithm itself is
+  # copied from core_v1/visual_tracker.py.  Timing is widened only because one
+  # RF-DETR-S pass on this GTX 1050 Ti is much slower than the old YOLO pass.
+  # This state is DISPLAY-ONLY; raw RF-DETR geometry remains authoritative for the
+  # future NvDCF/room-geometry pipeline.
   box:
+    hold_ms: 2200
+    memory_ms: 5000
+    prediction_ms: 1000
+
+    match_iou: 0.12
+    reacquire_distance: 1.05
+    byte_match_center: 0.70
+    byte_second_match_iou: 0.04
+    byte_second_match_center: 0.50
+    low_match_max_age_ms: 1800
+
     byte_high_conf: 0.16
     byte_low_conf: 0.06
-    start_conf: 0.30
-    new_track_min_conf: 0.16
-    birth_hits: 2
-
-    match_iou: 0.10
-    second_match_iou: 0.04
-    match_center: 0.82
-    second_match_center: 0.62
-    low_match_max_age_sec: 1.80
+    low_conf_confirm: 0.06
+    start_conf: 0.24
+    new_track_min_conf: 0.14
+    strong_confirm_hits: 2
+    weak_confirm_hits: 3
 
     process_noise: 0.85
-    measurement_noise: 0.95
-    velocity_damping: 0.97
+    measurement_noise: 0.90
+    velocity_damping: 0.96
+    size_velocity_damping: 0.60
     max_prediction_shift_boxes: 0.70
     max_prediction_size_ratio: 0.10
-    shrink_measure_alpha: 0.28
+
+    adaptive_error_low: 0.08
+    adaptive_error_high: 0.25
+    center_response_slow: 0.42
+    center_response_fast: 0.88
+    size_response: 0.30
+    snap_distance_boxes: 0.65
+    reversal_damping: 0.15
 
     duplicate_iou: 0.68
     duplicate_containment: 0.90
     duplicate_center_distance: 0.20
+    fragment_duplicate_cameras: [CAM-03, CAM-05, CAM-06]
+    fragment_horizontal_overlap: 0.78
+    fragment_x_center: 0.18
+    fragment_max_area_ratio: 0.55
+    fragment_min_vertical_overlap: 0.20
+    fragment_max_vertical_gap: 0.06
 
-    # RF-DETR-S currently revisits each camera roughly once per 1-2 seconds on the
-    # 1050 Ti, so display hold/prediction must bridge that cadence without flicker.
-    hold_sec: 2.20
-    memory_sec: 5.0
-    predict_sec: 1.00
+    exclusion_max_box_height: 0.30
+    exclusion_overlap_threshold: 0.15
+    camera_exclusion_zones:
+      CAM-06:
+        - [0.50, 0.00, 0.78, 0.22]
 
-    # Full-body display guard. Head and shoes get extra room, but the rectangle is
-    # intentionally tighter than the first RF-DETR prototype.
-    side_margin: 0.08
-    top_margin: 0.07
-    bottom_margin: 0.10
+    camera_start_conf: {}
+    camera_low_conf_confirm: {}
+    camera_new_track_zones: {}
+
+    # Final OSD-only body envelope.  This does not feed back into detection or the
+    # future tracker; it just prevents a tight model box clipping visible head,
+    # hands or shoes.
+    display_side_margin: 0.08
+    display_top_margin: 0.07
+    display_bottom_margin: 0.10
     sitting_extra_side: 0.04
     sitting_extra_bottom: 0.04
     sitting_aspect_threshold: 1.55
 
-  # If display cadence becomes unhealthy, detector work backs off automatically.
+  # Display is always higher priority than detector throughput.
   wall_p95_slow_ms: 72
   wall_p95_fast_ms: 60
