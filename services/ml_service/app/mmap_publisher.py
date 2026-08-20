@@ -13,7 +13,7 @@ class MmapFramePublisher(LatestJpegPublisher):
     """Event-driven latest-only local presentation transport.
 
     Video is the proven SIGBUS-safe mmap path. ByteTrack owns identity; the
-    presentation Kalman only projects each authoritative T-ID between detector
+    presentation layer only bridges each authoritative T-ID between detector
     updates. The visual envelope is padded at draw time only, so it cannot alter
     association or merge two nearby people into one track.
     """
@@ -43,17 +43,21 @@ class MmapFramePublisher(LatestJpegPublisher):
         self.presentation_overlay_max_age_sec = max(
             0.0, float(overlay_max_age_ms) / 1000.0
         )
+        # Restored from the old responsive presentation profile that tracked the
+        # visible person closely: measurement dominates, velocity only bridges a
+        # short detector gap, and stale momentum is heavily damped on reversal.
         self.smoother = PresentationSmoother(
             hold_ms=700,
-            memory_ms=2800,
-            prediction_ms=280,
-            process_noise=1.0,
-            measurement_noise=0.70,
-            velocity_damping=0.985,
-            max_prediction_shift_boxes=0.48,
+            memory_ms=6000,
+            prediction_ms=200,
+            velocity_damping=0.96,
+            max_prediction_shift_boxes=0.35,
             max_prediction_size_ratio=0.08,
-            snap_distance_boxes=0.42,
-            reversal_damping=0.12,
+            snap_distance_boxes=0.55,
+            reversal_damping=0.15,
+            measurement_response=0.96,
+            velocity_response=0.65,
+            size_response=0.70,
         )
         self.max_width = max(1, int(max_width))
         self.max_height = max(1, int(max_height))
@@ -79,7 +83,7 @@ class MmapFramePublisher(LatestJpegPublisher):
                 "version": self._version,
                 "publisher_mode": "event-driven-mmap-latest-only",
                 "transport": "mmap-bgr-double-buffer-sigbus-safe",
-                "overlay": "bytetrack-id-kalman-presentation",
+                "overlay": "bytetrack-id-responsive-presentation",
                 "mmap_path": str(self.writer.path),
                 "event_wakeups": self.event_wakeups,
                 "coalesced_frames": self.coalesced_frames,
@@ -265,7 +269,7 @@ class MmapFramePublisher(LatestJpegPublisher):
                     print(
                         f"[MMAP] {self.camera_id} first frame "
                         f"{image.shape[1]}x{image.shape[0]} bytes={int(packet['payload_bytes'])} "
-                        "overlay=bytetrack-kalman",
+                        "overlay=bytetrack-responsive",
                         flush=True,
                     )
         finally:
