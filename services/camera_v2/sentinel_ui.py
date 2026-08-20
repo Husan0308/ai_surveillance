@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow
 from .sentinel_ui_monitoring_native import MonitoringPage
 
 
-BUILD_TAG = "2026.08.20-r18-rtsp-tcp"
+BUILD_TAG = "2026.08.20-r19-analysis-tiler"
 
 
 class MainWindow(QMainWindow):
