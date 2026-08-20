@@ -28,10 +28,16 @@ def main() -> int:
         print("PASCAL_SAFE_PREFLIGHT=SKIP mode=disabled")
         return 0
 
+    if os.environ.get("CAMERA_V2_RTSP_TRANSPORT", "").strip().lower() != "tcp":
+        return fail("production runtime must pin CAMERA_V2_RTSP_TRANSPORT=tcp")
+    if int(os.environ.get("CAMERA_V2_RTSP_LATENCY_MS", "0")) < 200:
+        return fail("production RTSP latency must be at least 200 ms")
+
     runtime = source("services/camera_v2/pascal_safe_pipeline.py")
     controller = source("services/camera_v2/camera_wall_runtime.py")
     ui = source("services/camera_v2/sentinel_ui_monitoring_native.py")
     launcher = source("scripts/run_sentinel_vms.sh")
+    secure = source("services/camera_v2/secure.py")
 
     for token in (
         "class CameraPascalSafeRuntime(CameraDetectionV2)",
@@ -66,6 +72,18 @@ def main() -> int:
             return fail(f"Pascal runtime still depends on NvDCF path: {forbidden}")
 
     for token in (
+        'CAMERA_V2_RTSP_TRANSPORT',
+        'self._set_if(source, "select-rtp-protocol", 4 if transport == "tcp" else 0)',
+        'self._set_if(element, "protocols", 4)',
+        'transport={transport}',
+        "def _source_pad_added",
+        "caps.is_any()",
+        "source linked transport=",
+    ):
+        if token not in secure:
+            return fail(f"missing RTSP TCP/dynamic-pad contract: {token}")
+
+    for token in (
         "def set_focus(source_id: int)",
         'runtime.tiler.set_property("show-source", sid)',
         "FOCUS_WIDTH = 1920",
@@ -92,6 +110,9 @@ def main() -> int:
             return fail(f"missing click-fullscreen UI contract: {token}")
 
     for token in (
+        "export CAMERA_V2_RTSP_TRANSPORT=tcp",
+        "export CAMERA_V2_RTSP_LATENCY_MS=250",
+        "rtsp=tcp latency=250ms",
         "export CAMERA_V2_PASCAL_SAFE=1",
         "detector_path=postmux-demux",
         "tracker=motion-predictor",
@@ -108,7 +129,7 @@ def main() -> int:
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
         Gst.init(None)
-        for plugin in ("nvstreamdemux", "nveglglessink", "ximagesink"):
+        for plugin in ("nvurisrcbin", "nvstreammux", "nvstreamdemux", "nveglglessink", "ximagesink"):
             if Gst.ElementFactory.find(plugin) is None:
                 return fail(f"required plugin unavailable: {plugin}")
     except Exception as exc:
@@ -128,7 +149,7 @@ def main() -> int:
     print(
         "PASCAL_SAFE_PREFLIGHT=PASS "
         f"gpu={gpu!r} runtime=CameraPascalSafeRuntime "
-        "source_path=direct-to-mux detector_path=postmux-demux "
+        "rtsp=tcp latency>=200ms source_path=direct-to-mux detector_path=postmux-demux "
         "tracker=motion-predictor nvtracker=disabled "
         "display=egl-primary+x11-zero-render-fallback fullscreen=click+escape"
     )
