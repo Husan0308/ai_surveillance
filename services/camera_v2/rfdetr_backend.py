@@ -206,30 +206,47 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
 
 
 def install() -> None:
-    """Install RF-DETR-S and the Pascal-safe anchored temporal tracker."""
+    """Install RF-DETR-S and Pascal-safe anchored + optical-flow tracking."""
 
     from . import detection
-    from .temporal_tracker import AnchoredPersonTracker
+    from .flow_assisted_tracker import FlowAssistedPersonTracker
 
     detection._yolo_worker = rfdetr_worker
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
 
     # CameraDetectionV2 resolves SmoothBoxManager from its module globals at
-    # runtime. Replacing that factory preserves the existing detector/metadata
-    # contract while giving the Pascal path a persistent body-center anchor,
-    # posture-tolerant association and bounded latency compensation.
-    detection.SmoothBoxManager = AnchoredPersonTracker
+    # runtime.  RF-DETR owns detector corrections; the replacement tracker adds
+    # a persistent center anchor and accepts measured 20-FPS optical flow between
+    # sparse detector calls.
+    detection.SmoothBoxManager = FlowAssistedPersonTracker
 
-    # Supported/non-Pascal runtimes may still use the existing sparse external
-    # detector contract with NvDCF. The production GTX 1050 Ti controller never
-    # imports those tracker runtimes, so safe mode has no tracker side effect.
     pascal_safe = os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
-    if not pascal_safe:
+
+    if pascal_safe:
+        # CameraPascalSafeRuntime is defined after this installer runs.  Wrapping
+        # its CameraDetectionV2 base initializer lets the normal Pascal virtual
+        # _install_osd_and_meta() build the proven display/analysis tee first;
+        # only then do we attach a third leaky continuous motion branch.
+        if not getattr(detection.CameraDetectionV2, "_camera_v2_flow_init_wrapped", False):
+            original_init = detection.CameraDetectionV2.__init__
+
+            def _init_with_motion_flow(self, *args, **kwargs):
+                original_init(self, *args, **kwargs)
+                from .motion_flow_branch import attach_motion_flow
+
+                attach_motion_flow(self)
+
+            detection.CameraDetectionV2.__init__ = _init_with_motion_flow
+            detection.CameraDetectionV2._camera_v2_flow_init_wrapped = True
+    else:
+        # Supported/non-Pascal runtimes may still use the existing sparse external
+        # detector contract with NvDCF.  The GTX 1050 Ti production controller
+        # never imports that tracker path.
         from .sparse_tracker_contract import install_sparse_tracker_contract
 
         install_sparse_tracker_contract()
