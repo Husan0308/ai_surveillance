@@ -4,3 +4,5 @@ PyYAML>=6.0,<7
 python-dotenv>=1.0,<2
 numpy>=1.26,<3
 opencv-python-headless>=4.10,<5
+ultralytics>=8.3,<9
+# CUDA-enabled PyTorch is provisioned on the GPU machine; do not pin a CPU wheel here.

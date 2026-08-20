@@ -23,6 +23,12 @@ class CameraMetrics:
     transport: str = ""
     backend: str = ""
     auth_configured: bool = False
+    latency_ms: int = 0
+    render_width: int = 0
+    render_height: int = 0
+    render_format: str = ""
+    render_fps: float = 0.0
+    render_socket: str = ""
 
 
 class CameraWorker:
@@ -64,6 +70,18 @@ class CameraWorker:
             self._thread.join(timeout)
 
     def metrics(self) -> dict:
+        cap = self._capture
+        if cap is not None:
+            try:
+                render = cap.render_info()
+                with self._lock:
+                    self._metrics.render_width = int(render.get("width") or 0)
+                    self._metrics.render_height = int(render.get("height") or 0)
+                    self._metrics.render_format = str(render.get("format") or "")
+                    self._metrics.render_fps = float(render.get("fps") or 0.0)
+                    self._metrics.render_socket = str(render.get("socket") or "")
+            except Exception:
+                pass
         with self._lock:
             data = asdict(self._metrics)
             if self._last_frame_mono:
@@ -76,24 +94,25 @@ class CameraWorker:
     def _run(self) -> None:
         backoff = max(0.5, self.ds.reconnect_delay_sec)
         transport = self.ds.rtsp_transport
+        camera_latency = int(self.camera.latency_ms or self.ds.latency_ms)
 
         while not self._stop.is_set():
             cap = None
             try:
                 print(
                     f"[CAMERA] {self.camera.camera_id} opening {self.camera.uri} "
-                    f"codec={self.camera.codec} transport={transport} "
+                    f"backend=nvurisrcbin transport={transport} latency={camera_latency}ms "
                     f"auth={'yes' if self.camera.username else 'no'}",
                     flush=True,
                 )
                 cap = DeepStreamCapture(
                     self.camera.camera_id,
                     self.camera.uri,
-                    self.camera.codec,
                     self.ds,
                     transport=transport,
                     username=self.camera.username,
                     password=self.camera.password,
+                    latency_ms=camera_latency,
                 )
                 self._capture = cap
                 opened_at = time.monotonic()
@@ -104,6 +123,7 @@ class CameraWorker:
                     self._metrics.backend = cap.backend
                     self._metrics.transport = transport
                     self._metrics.auth_configured = bool(self.camera.username)
+                    self._metrics.latency_ms = camera_latency
 
                 while not self._stop.is_set():
                     ok, image = cap.read()
@@ -131,6 +151,7 @@ class CameraWorker:
                     backoff = max(0.5, self.ds.reconnect_delay_sec)
                     mono = time.monotonic()
                     height, width = image.shape[:2]
+                    render = cap.render_info()
 
                     with self._lock:
                         self._metrics.online = True
@@ -140,6 +161,11 @@ class CameraWorker:
                         self._metrics.width = width
                         self._metrics.height = height
                         self._metrics.queue_buffers = cap.current_queue_buffers()
+                        self._metrics.render_width = int(render.get("width") or 0)
+                        self._metrics.render_height = int(render.get("height") or 0)
+                        self._metrics.render_format = str(render.get("format") or "")
+                        self._metrics.render_fps = float(render.get("fps") or 0.0)
+                        self._metrics.render_socket = str(render.get("socket") or "")
                         self._last_frame_mono = mono
                         self._fps_frames += 1
                         elapsed = mono - self._fps_started
@@ -152,7 +178,7 @@ class CameraWorker:
                     if frame_id == 1:
                         print(
                             f"[CAMERA] {self.camera.camera_id} first frame {width}x{height} "
-                            f"backend={cap.backend} transport={transport}",
+                            f"backend={cap.backend} transport={transport} latency={camera_latency}ms",
                             flush=True,
                         )
 

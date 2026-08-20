@@ -10,6 +10,7 @@ class ApiClient(QObject):
     api_health_received = Signal(dict)
     ml_health_received = Signal(dict)
     cameras_received = Signal(dict)
+    tracks_received = Signal(dict)
     request_failed = Signal(str, str)
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
@@ -23,6 +24,9 @@ class ApiClient(QObject):
         self._get("api_health", "/health")
         self._get("ml_health", "/api/v1/ml/health")
         self._get("cameras", "/api/v1/cameras")
+
+    def refresh_tracks(self) -> None:
+        self._get("tracks", "/api/v1/tracks")
 
     def _get(self, request_name: str, path: str) -> None:
         if request_name in self._inflight:
@@ -53,6 +57,8 @@ class ApiClient(QObject):
                 self.ml_health_received.emit(data)
             elif request_name == "cameras":
                 self.cameras_received.emit(data)
+            elif request_name == "tracks":
+                self.tracks_received.emit(data)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             self.request_failed.emit(request_name, str(exc))
         finally:
