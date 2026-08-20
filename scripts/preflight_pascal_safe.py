@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
@@ -16,6 +17,23 @@ def fail(message: str) -> int:
     return 1
 
 
+def source(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def imports_module(text: str, suffix: str) -> bool:
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if str(node.module).endswith(suffix):
+                return True
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if str(alias.name).endswith(suffix):
+                    return True
+    return False
+
+
 def main() -> int:
     enabled = os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
         "1", "true", "yes", "on"
@@ -24,25 +42,69 @@ def main() -> int:
         print("PASCAL_SAFE_PREFLIGHT=SKIP mode=disabled")
         return 0
 
-    module = ROOT / "services/camera_v2/pascal_safe_pipeline.py"
-    backend = ROOT / "services/camera_v2/rfdetr_backend.py"
-    if not module.exists():
+    runtime_path = ROOT / "services/camera_v2/pascal_safe_pipeline.py"
+    controller_path = ROOT / "services/camera_v2/camera_wall_runtime.py"
+    if not runtime_path.exists():
         return fail("missing pascal_safe_pipeline.py")
+    if not controller_path.exists():
+        return fail("missing camera_wall_runtime.py")
 
-    source = module.read_text(encoding="utf-8")
-    backend_source = backend.read_text(encoding="utf-8")
+    runtime = runtime_path.read_text(encoding="utf-8")
+    controller = controller_path.read_text(encoding="utf-8")
+    ui = source("services/camera_v2/sentinel_ui_monitoring_native.py")
+    launcher = source("scripts/run_sentinel_vms.sh")
+
     for token in (
-        "CameraDetectionV2._install_osd_and_meta(self)",
-        "CameraPersonTrackingV2._install_osd_and_meta = _install_osd_without_nvtracker",
-        "CameraPersonTrackingFinal._scheduler = CameraDetectionV2._scheduler",
-        "CameraPersonTrackingFinal._inject_boxes_probe = _inject_boxes_with_counts",
+        "class CameraPascalSafeRuntime(CameraDetectionV2)",
+        "def _install_osd_and_meta(self)",
+        "self.wall_queue.unlink(self.sink)",
+        "if queue_src.is_linked()",
+        "CAMERA_PASCAL_SAFE",
         "nvtracker=disabled",
+        "tracker=motion-predictor",
+        "safe_mux_batches",
+        "safe_wall_frames",
     ):
-        if token not in source:
-            return fail(f"missing safe-mode contract: {token}")
+        if token not in runtime:
+            return fail(f"missing runtime contract: {token}")
 
-    if "install_pascal_safe_pipeline()" not in backend_source:
-        return fail("RF-DETR backend does not install Pascal safe mode")
+    # The dedicated safe runtime must not depend on the DeepStream tracker stack.
+    for forbidden in (
+        "CameraPersonTrackingV2",
+        "CameraPersonTrackingFinal",
+        "libnvds_nvmultiobjecttracker",
+        "config_tracker_NvDCF",
+    ):
+        if forbidden in runtime:
+            return fail(f"Pascal runtime still depends on NvDCF path: {forbidden}")
+    if imports_module(runtime, "person_tracking") or imports_module(runtime, "person_tracking_final"):
+        return fail("Pascal runtime imports a tracker module")
+
+    for token in (
+        "from .pascal_safe_pipeline import CameraPascalSafeRuntime",
+        "runtime = CameraPascalSafeRuntime()",
+        "bound_xid = 0",
+        "if target == bound_xid",
+        "GstVideo.VideoOverlay.set_window_handle",
+        "GRID_COLUMNS = 2",
+        "GRID_ROWS = 3",
+    ):
+        if token not in controller:
+            return fail(f"missing camera-wall controller contract: {token}")
+
+    if "from .camera_wall_runtime import CameraWallController" not in ui:
+        return fail("UI is not routed through camera_wall_runtime")
+    if "ProPipelineController" in ui:
+        return fail("legacy ProPipelineController is still active in camera-only UI")
+
+    for token in (
+        "export CAMERA_V2_PASCAL_SAFE=1",
+        "tracker=motion-predictor",
+        "nvtracker=disabled",
+        "python scripts/preflight_pascal_safe.py",
+    ):
+        if token not in launcher:
+            return fail(f"launcher missing safe-mode contract: {token}")
 
     gpu = "unknown"
     try:
@@ -57,8 +119,9 @@ def main() -> int:
 
     print(
         "PASCAL_SAFE_PREFLIGHT=PASS "
-        f"gpu={gpu!r} tracker=motion-predictor nvtracker=disabled "
-        "video_path=RTSP-NVDEC-mux-tiler-OSD-EGL"
+        f"gpu={gpu!r} runtime=CameraPascalSafeRuntime "
+        "tracker=motion-predictor nvtracker=disabled "
+        "video_path=RTSP-NVDEC-mux-tiler-OSD-EGL xid=idempotent"
     )
     return 0
 
