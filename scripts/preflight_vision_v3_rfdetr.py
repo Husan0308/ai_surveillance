@@ -74,27 +74,32 @@ def main() -> int:
         fail(f"native metadata bridge failed: {type(exc).__name__}: {exc}")
 
     try:
-        from services.ml_service.vision_v3.rfdetr_detection import ProtectiveBoxManager
+        from services.ml_service.vision_v3.stable_boxes import StableFullBodyManager
         box_cfg = dict(cfg.get("box") or {})
-        manager = ProtectiveBoxManager(1280, 720, box_cfg)
+        manager = StableFullBodyManager(1280, 720, box_cfg)
         raw = (500.0, 120.0, 620.0, 610.0)
-        manager.update("CAM-TEST", 1.0, [(raw, 0.9)])
+        manager.update("CAM-TEST", 1.0, [(raw, 0.90)])
         rows = manager.render("CAM-TEST", 1.0)
         if len(rows) != 1:
-            fail("protective envelope synthetic test produced no box")
+            fail("stable Kalman display test produced no strong box")
         x1, y1, x2, y2, _ = rows[0]
         if not (x1 < raw[0] and y1 < raw[1] and x2 > raw[2] and y2 > raw[3]):
-            fail("protective envelope did not cover raw head/feet/sides")
+            fail("stable display envelope did not cover raw head/feet/sides")
+
+        weak = StableFullBodyManager(1280, 720, box_cfg)
+        weak.update("CAM-TEST", 1.0, [((100.0, 100.0, 150.0, 200.0), 0.08)])
+        if weak.render("CAM-TEST", 1.0):
+            fail("one weak RF-DETR observation incorrectly created a visible track")
     except SystemExit:
         raise
     except Exception as exc:
-        fail(f"protective box test failed: {type(exc).__name__}: {exc}")
+        fail(f"stable box test failed: {type(exc).__name__}: {exc}")
 
     version = getattr(rfdetr, "__version__", "unknown")
     print(
         "VISION_V3_RFDETR_PREFLIGHT=PASS "
         f"rfdetr={version} gpu={torch.cuda.get_device_name(0)} threshold={threshold:.2f} "
-        f"micro_batch={int(cfg.get('micro_batch', 1))} bridge={bridge}",
+        f"micro_batch={int(cfg.get('micro_batch', 1))} stable_kalman=1 bridge={bridge}",
         flush=True,
     )
     return 0
