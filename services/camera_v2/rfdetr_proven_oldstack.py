@@ -2,17 +2,9 @@ from __future__ import annotations
 
 """RF-DETR-S backend on the exact rebuild/gpu-v2-clean detection/tracking stack.
 
-This module deliberately does NOT replace the old detection logic. It changes only
-`detection._yolo_worker` to RF-DETR-S. Everything after detector output remains the
-proven stack from rebuild/gpu-v2-clean:
-
-fresh-frame ticket capture -> dedup/full-body guard -> detector latency compensation
--> fresh metadata injection -> per-frame NvDCF -> tracker-current OSD -> display-only
-padding in higher runtimes.
-
-There is no Pascal-safe motion-predictor fallback here. This branch exists to prove
-or disprove the exact old behavior on the deployment machine before anything is
-ported back into the clean Vision V3 branch.
+Only the detector model is changed. Capture scheduling, duplicate suppression,
+latency compensation, detector metadata injection, NvDCF, tracker-current OSD and
+display-only bbox padding all come from the earlier working Camera V2 design.
 """
 
 import importlib.metadata
@@ -160,19 +152,58 @@ def rfdetr_worker(job_q, result_q) -> None:
 
 
 def main() -> int:
+    # Patch ONLY the detector worker before importing the old final tracking class.
     from . import detection
     detection._yolo_worker = rfdetr_worker
 
     from .person_tracking_final import CameraPersonTrackingFinal
 
+    class ProvenRFDETRTracking(CameraPersonTrackingFinal):
+        """Old NvDCF truth + old display-only body envelope."""
+
+        def __init__(self) -> None:
+            self.display_box_side_margin = float(
+                os.environ.get("CAMERA_V2_DISPLAY_BOX_SIDE_MARGIN", "0.08")
+            )
+            self.display_box_top_margin = float(
+                os.environ.get("CAMERA_V2_DISPLAY_BOX_TOP_MARGIN", "0.04")
+            )
+            self.display_box_bottom_margin = float(
+                os.environ.get("CAMERA_V2_DISPLAY_BOX_BOTTOM_MARGIN", "0.10")
+            )
+            super().__init__()
+
+        def _tracker_probe(self, pad, info):
+            result = super()._tracker_probe(pad, info)
+            buffer = info.get_buffer()
+            if buffer is None:
+                return result
+            # Exact old rule: expand only the OSD rectangle AFTER tracker truth has
+            # already been counted/read. Never feed this padding back into NvDCF.
+            try:
+                expanded = self.bridge.expand_display_boxes(
+                    buffer,
+                    side_margin=self.display_box_side_margin,
+                    top_margin=self.display_box_top_margin,
+                    bottom_margin=self.display_box_bottom_margin,
+                )
+                if expanded > 0:
+                    self.bridge.apply_local_track_style(buffer)
+            except Exception as exc:
+                print(
+                    f"PROVEN_DISPLAY_BOX warning={type(exc).__name__}:{exc}",
+                    flush=True,
+                )
+            return result
+
     print(
         "PROVEN_DETECTION_STACK source=rebuild/gpu-v2-clean "
         f"detector=RF-DETR-S input={detection.INFER_WIDTH}x{detection.INFER_HEIGHT} "
         f"threshold={detection.CONF:.3f} micro_batch={detection.MICRO_BATCH} "
-        "dedup=old latency_comp=old nvdcf=old display_smoother=none",
+        "dedup=old latency_comp=old nvdcf=old display_padding=old no_custom_smoother=1",
         flush=True,
     )
-    return CameraPersonTrackingFinal().run()
+    return ProvenRFDETRTracking().run()
 
 
 if __name__ == "__main__":
