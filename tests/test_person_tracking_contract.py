@@ -83,26 +83,32 @@ def test_tracking_exposes_churn_diagnostics() -> None:
     assert "PERSON_TRACK_STABILITY=PASS" in stability
 
 
-def test_presentation_keeps_bytetrack_ids_and_restores_responsive_motion() -> None:
+def test_presentation_keeps_bytetrack_ids_and_old_adaptive_motion() -> None:
     smoother = source("services/ml_service/app/presentation_smoother.py")
     mmap = source("services/ml_service/app/mmap_publisher.py")
 
     assert "ByteTrack remains the only identity/association owner" in smoother
-    assert "measurement_response" in smoother
-    assert "velocity_response" in smoother
-    assert "self.measurement_response" in smoother
-    assert "self.velocity_response" in smoother
-    assert "_damped_displacement" in smoother
-    assert "prediction_sec" in smoother
+    assert "_damped_motion" in smoother
+    assert "_adaptive_center_response" in smoother
+    assert "adaptive_error_low" in smoother
+    assert "adaptive_error_high" in smoother
+    assert "center_response_slow" in smoother
+    assert "center_response_fast" in smoother
     assert "reversal_damping" in smoother
     assert "max_prediction_shift_boxes" in smoother
-    assert "measurement_response=0.96" in mmap
-    assert "velocity_response=0.65" in mmap
-    assert "prediction_ms=200" in mmap
+    assert "last_observation" in smoother
+    assert "prediction_ms=340" in mmap
+    assert "hold_ms=850" in mmap
+    assert "memory_ms=2800" in mmap
+    assert "velocity_damping=0.95" in mmap
+    assert "max_prediction_shift_boxes=0.55" in mmap
+    assert "center_response_slow=0.42" in mmap
+    assert "center_response_fast=0.84" in mmap
+    assert "snap_distance_boxes=0.62" in mmap
     assert "_visual_envelope" in mmap
     assert "side_ratio = 0.10 if aspect >= 0.62 else 0.065" in mmap
     assert "Never deduplicate presentation tracks here" in mmap
-    assert '"overlay": "bytetrack-id-responsive-presentation"' in mmap
+    assert '"overlay": "bytetrack-id-old-adaptive-presentation"' in mmap
 
 
 def test_frontend_camera_wall_is_two_columns() -> None:
