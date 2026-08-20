@@ -1,21 +1,30 @@
-name: Sentinel UI Static
+name: Sentinel Camera Wall Static
 
 on:
   push:
-    branches: [rebuild/gpu-v2-clean]
+    branches:
+      - agent/rfdetr-s-core-final
   pull_request:
     paths:
-      - 'services/camera_v2/sentinel_*.py'
-      - 'services/camera_v2/person_tracking_final.py'
-      - 'services/camera_v2/person_tracking_heatmap.py'
+      - 'services/camera_v2/camera_wall_runtime.py'
+      - 'services/camera_v2/pascal_safe_pipeline.py'
+      - 'services/camera_v2/rfdetr_backend.py'
+      - 'services/camera_v2/detection.py'
+      - 'services/camera_v2/dynamic_wall.py'
+      - 'services/camera_v2/main.py'
+      - 'services/camera_v2/sentinel_ui.py'
+      - 'services/camera_v2/sentinel_ui_monitoring_native.py'
+      - 'scripts/preflight_rfdetr_core.py'
+      - 'scripts/preflight_pascal_safe.py'
       - 'scripts/preflight_sentinel_ui.py'
       - 'scripts/preflight_camera_v2_core.py'
       - 'scripts/run_sentinel_vms.sh'
-      - 'config/cameras.yaml'
+      - 'tests/test_camera_v2_rfdetr_core.py'
+      - 'tests/test_camera_v2_native_presentation.py'
       - '.github/workflows/sentinel-ui-static.yml'
 
 jobs:
-  static-ui:
+  static-camera-wall:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,59 +32,54 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Compile Sentinel Python sources
+      - name: Compile active Python sources
         run: |
           python -m py_compile \
+            services/camera_v2/camera_wall_runtime.py \
+            services/camera_v2/pascal_safe_pipeline.py \
+            services/camera_v2/rfdetr_backend.py \
+            services/camera_v2/detection.py \
+            services/camera_v2/dynamic_wall.py \
+            services/camera_v2/main.py \
             services/camera_v2/sentinel_ui.py \
-            services/camera_v2/sentinel_ui_base.py \
-            services/camera_v2/sentinel_ui_monitoring.py \
-            services/camera_v2/sentinel_ui_settings.py \
-            services/camera_v2/sentinel_ui_enrollment.py \
-            services/camera_v2/sentinel_ui_pages.py \
-            services/camera_v2/sentinel_video.py \
-            services/camera_v2/sentinel_video_pro.py \
-            services/camera_v2/sentinel_video_wall_ui.py \
-            services/camera_v2/person_tracking_final.py \
-            services/camera_v2/person_tracking_heatmap.py \
+            services/camera_v2/sentinel_ui_monitoring_native.py \
+            scripts/preflight_rfdetr_core.py \
+            scripts/preflight_pascal_safe.py \
             scripts/preflight_sentinel_ui.py \
-            scripts/preflight_camera_v2_core.py
+            scripts/preflight_camera_v2_core.py \
+            tests/test_camera_v2_rfdetr_core.py \
+            tests/test_camera_v2_native_presentation.py
 
-      - name: Enforce UI contract
+      - name: Enforce active architecture contract
         run: |
           python - <<'PY'
           from pathlib import Path
 
+          pascal = Path('services/camera_v2/pascal_safe_pipeline.py').read_text()
+          controller = Path('services/camera_v2/camera_wall_runtime.py').read_text()
+          ui = Path('services/camera_v2/sentinel_ui_monitoring_native.py').read_text()
           shell = Path('services/camera_v2/sentinel_ui.py').read_text()
-          monitoring = Path('services/camera_v2/sentinel_ui_monitoring.py').read_text()
-          settings = Path('services/camera_v2/sentinel_ui_settings.py').read_text()
-          wall = Path('services/camera_v2/sentinel_video_wall_ui.py').read_text()
-          video = Path('services/camera_v2/sentinel_video_pro.py').read_text()
-          tracker = Path('services/camera_v2/person_tracking_final.py').read_text()
-          heatmap = Path('services/camera_v2/person_tracking_heatmap.py').read_text()
-          camera_config = Path('config/cameras.yaml').read_text()
+          launcher = Path('scripts/run_sentinel_vms.sh').read_text()
 
-          for source in (shell, monitoring, settings, wall):
-              for text in ('NVDEC', 'no pose/reid', 'pose=', 'reid=', 'DeepStream'):
-                  assert text not in source, f'technical UI label returned: {text}'
+          assert 'class CameraPascalSafeRuntime(CameraDetectionV2)' in pascal
+          assert 'self.wall_queue.unlink(self.sink)' in pascal
+          assert 'mapped_size' in pascal and 'row_stride' in pascal
+          assert 'safe_mux_batches' in pascal and 'safe_wall_frames' in pascal
+          for forbidden in (
+              'CameraPersonTrackingV2',
+              'CameraPersonTrackingFinal',
+              'libnvds_nvmultiobjecttracker',
+              'config_tracker_NvDCF',
+          ):
+              assert forbidden not in pascal, forbidden
 
-          for text in ('Environment URI', 'self.env_uri =', 'self.codec =', 'form.addRow("Codec"'):
-              assert text not in settings, f'stale Settings field: {text}'
-
-          assert 'BUILD_TAG = "2026.08.19-r7"' in shell
-          assert 'metrics.get("total_people"' in monitoring
-          assert 'metrics.get("known_people"' in monitoring
-          assert 'unknown = max(0, total - known)' in monitoring
-          assert 'live_source_counts' in tracker
-          assert 'source_track_counts' in tracker
-          assert 'room_people[room_key] = max' in video
-          assert 'total = sum(room_people.values())' in video
-          assert 'known = 0' in video
-          assert 'unknown = total' in video
-          assert 'self.bridge.heatmap_update(buffer)' in heatmap
-          assert 'PoseHeatmapBridge' not in heatmap
-
-          for forbidden in ('\n    codec:', '\n    env_uri:', '\n    environment_uri:'):
-              assert forbidden not in camera_config, f'stale camera config field: {forbidden.strip()}'
-
-          print('SENTINEL_UI_STATIC=PASS')
+          assert 'from .pascal_safe_pipeline import CameraPascalSafeRuntime' in controller
+          assert 'if target == bound_xid' in controller
+          assert 'GstVideo.VideoOverlay.set_window_handle' in controller
+          assert 'from .camera_wall_runtime import CameraWallController' in ui
+          assert 'ProPipelineController' not in ui
+          assert 'BUILD_TAG = "2026.08.20-r16-pascal-safe"' in shell
+          assert 'export CAMERA_V2_PASCAL_SAFE=1' in launcher
+          assert 'nvtracker=disabled' in launcher
+          print('SENTINEL_CAMERA_WALL_STATIC=PASS')
           PY
