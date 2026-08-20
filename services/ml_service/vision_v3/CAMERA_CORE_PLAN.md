@@ -1,0 +1,1 @@
+Six-camera smooth core first; RF-DETR-S second.
