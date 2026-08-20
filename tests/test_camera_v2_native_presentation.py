@@ -7,84 +7,71 @@ def source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_native_wall_keeps_one_k_tile_and_1080p_source_canvas() -> None:
-    runtime = source("services/camera_v2/qt_runtime.py")
-    live = source("services/camera_v2/sentinel_live_runtime.py")
-    assert "TILE_WIDTH = 1024" in runtime
-    assert "TILE_HEIGHT = 576" in runtime
-    assert "SOURCE_WIDTH = 1920" in runtime
-    assert "SOURCE_HEIGHT = 1080" in runtime
-    assert 'os.environ["CAMERA_V2_FRAME_WIDTH"] = str(SOURCE_WIDTH)' in runtime
-    assert 'os.environ["CAMERA_V2_TILER_COLUMNS"] = str(GRID_COLUMNS)' in runtime
-    assert "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)" not in runtime
-    assert 'CAMERA_V2_WALL_WIDTH", "1024"' not in live
-    assert "self.wall_width = 1024" not in live
-    assert 'self._set_if(self.sink, "force-aspect-ratio", True)' in live
+def test_active_native_wall_is_fixed_two_by_three() -> None:
+    runtime = source("services/camera_v2/camera_wall_runtime.py")
+    assert "CAMERA_COUNT = 6" in runtime
+    assert "GRID_COLUMNS = 2" in runtime
+    assert "GRID_ROWS = 3" in runtime
+    assert "WALL_WIDTH = 1600" in runtime
+    assert "WALL_HEIGHT = 1350" in runtime
+    assert "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)" in runtime
 
 
-def test_native_video_uses_one_persistent_child_surface() -> None:
-    app = source("services/camera_v2/sentinel_app.py")
-    runtime = source("services/camera_v2/qt_runtime.py")
+def test_active_native_video_uses_one_persistent_child_surface() -> None:
+    app = source("services/camera_v2/sentinel_ui_monitoring_native.py")
+    runtime = source("services/camera_v2/camera_wall_runtime.py")
 
-    assert "class NativeVideoSurface" in app
-    assert "class StableLiveWall" in app
-    assert "WA_DontCreateNativeAncestors" in app
-    assert "self.video.xidChanged.connect" in app
-    assert "self.controller.start(xid)" in app
-    assert "self.controller.bind_window(xid)" in app
-    assert "ExactCameraTile" not in app
-    assert "WA_PaintOnScreen" not in app
-    assert "def paintEngine" not in app
-    assert "showFullScreen()" not in app
-    assert "window.showMaximized()" in app
+    assert "class NativeVideoHost(QWidget)" in app
+    assert "WA_NativeWindow, True" in app
+    assert "WA_DontCreateNativeAncestors, True" in app
+    assert "self.surface.nativeReady.connect(self._start_or_bind)" in app
+    assert "from .camera_wall_runtime import CameraWallController" in app
+    assert "ProPipelineController" not in app
+    assert "QWindow" not in app
+    assert "createWindowContainer" not in app
 
-    # A continuously PLAYING EGL sink owns redraw. Do not force expose/rebind on
-    # ordinary resize/focus or re-send the same native window id.
-    assert "GstVideo.VideoOverlay.expose" not in runtime
-    assert "request_expose" not in runtime
-    assert "win_id == self._window_handle" in runtime
-    assert "bound_xid[0] == target" in runtime
+    # The XID contract is idempotent at both Qt and GStreamer controller layers.
+    assert "xid == self._last_emitted_xid" in app
+    assert "xid == self._last_bound_xid" in app
+    assert "bound_xid = 0" in runtime
+    assert "if target == bound_xid" in runtime
+    assert "GstVideo.VideoOverlay.set_window_handle" in runtime
+    assert "runtime.bus.set_sync_handler" in runtime
 
 
-def test_grid_surface_preserves_exact_two_by_three_aspect() -> None:
-    app = source("services/camera_v2/sentinel_app.py")
-    assert "GRID_ASPECT = (16.0 * 2.0) / (9.0 * 3.0)" in app
-    assert "FOCUS_ASPECT = 16.0 / 9.0" in app
-    assert "self.video.setGeometry" in app
+def test_pascal_runtime_has_no_nvdcf_hot_path() -> None:
+    runtime = source("services/camera_v2/pascal_safe_pipeline.py")
+    assert "class CameraPascalSafeRuntime(CameraDetectionV2)" in runtime
+    assert "tracker=motion-predictor" in runtime
+    assert "nvtracker=disabled" in runtime
+    for forbidden in (
+        "CameraPersonTrackingV2",
+        "CameraPersonTrackingFinal",
+        "libnvds_nvmultiobjecttracker",
+        "config_tracker_NvDCF",
+    ):
+        assert forbidden not in runtime
+
+
+def test_pascal_runtime_preserves_stride_safe_detector_capture() -> None:
+    runtime = source("services/camera_v2/pascal_safe_pipeline.py")
+    assert "mapped_size" in runtime
+    assert "row_stride" in runtime
+    assert "tight_stride" in runtime
+    assert "CAMERA_INFER_LAYOUT" in runtime
+    assert "raw.reshape((height, row_stride))" in runtime
+
+
+def test_pascal_runtime_tracks_each_display_stage() -> None:
+    runtime = source("services/camera_v2/pascal_safe_pipeline.py")
+    assert "safe_mux_batches" in runtime
+    assert "safe_wall_frames" in runtime
+    assert "CAMERA_PASCAL_SAFE" in runtime
+    assert "rendered=" in runtime
+    assert "dropped=" in runtime
 
 
 def test_gpu_tiler_uses_high_quality_scaling() -> None:
     wall = source("services/camera_v2/dynamic_wall.py")
     assert 'self._set_if(self.tiler, "compute-hw", 1)' in wall
     assert 'self._set_if(self.tiler, "interpolation-method", 4)' in wall
-
-
-def test_native_bbox_smoother_is_restored_and_wired() -> None:
-    smoother = source("services/camera_v2/native_display_smoother.c")
-    bridge = source("services/camera_v2/native_bridge.py")
-
-    assert "const float center_alpha_1f = 0.86f" in smoother
-    assert "const float velocity_alpha = 0.45f" in smoother
-    assert "const float lead_frames = 0.12f" in smoother
-    assert "Intentionally a no-op" not in smoother
-    assert "SMOOTHER_SOURCE" in bridge
-    assert "camera_v2_smooth_display_boxes" in bridge
-    assert "self.lib.camera_v2_smooth_display_boxes(buffer_ptr)" in bridge
-
-
-def test_nvdcf_continuity_does_not_hide_short_pose_misses() -> None:
-    tracking = source("services/camera_v2/person_tracking_final.py")
-    profile = source("services/camera_v2/tracker_profile.py")
-    live = source("services/camera_v2/sentinel_live_runtime.py")
-
-    assert 'CAMERA_V2_MIN_DISPLAY_TRACK_CONF", "0.12"' in tracking
-    assert '"minTrackerConfidence": "0.15"' in tracking
-    assert '"maxShadowTrackingAge": "40"' in tracking
-    assert '"minTrackingConfidenceDuringInactive": "0.12"' in tracking
-    assert "self.latency_compensator.max_projection_s = 0.16" in tracking
-    assert "self.latency_compensator.projection_gain = 0.62" in tracking
-    assert '"maxShadowTrackingAge": "40"' in profile
-    assert '"minTrackingConfidenceDuringInactive": "0.12"' in profile
-    assert '_set_section_key(output, "TargetManagement", "outputShadowTracks", "1")' in profile
-    assert "outputShadowTracks=1" in profile
-    assert "UI_TRACK_HOLD_SEC = 2.0" in live
