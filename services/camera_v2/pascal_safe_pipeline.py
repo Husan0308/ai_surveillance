@@ -8,12 +8,12 @@ external detector:
     RTSP/NVDEC -> nvstreammux -> tee -> display queue -> display tiler -> OSD -> sink
                                 \\-> analysis queue -> analysis tiler -> appsink
 
-The old detector branch used nvstreamdemux. That plugin is zero-copy and keeps
-the original nvstreammux batch alive until every demuxed child buffer is returned.
+The old detector design used a zero-copy per-source split after nvstreammux. Its
+child buffers kept the original mux batch alive until all children were returned.
 With sparse gated per-camera queues this could retain several different parent
 batches at once and exhaust the mux buffer pool. The hardware log stopped at
 seven mux batches with an eight-buffer mux pool, exactly matching that failure
-mode. The analysis branch below therefore never uses nvstreamdemux.
+mode. The analysis branch below has no zero-copy per-source split.
 
 It produces one temporary 2x3 analysis wall only when the detector scheduler has
 armed a capture request. Each tile is exactly RF-DETR's input size, so Python only
@@ -111,8 +111,9 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
 
         Both branches consume the same batched mux buffer, but the detector branch
         immediately drops unrequested batches. Requested batches are fully consumed
-        by a second tiler, which creates its own 2x3 output surface. No zero-copy
-        demux child buffers exist, so the mux buffer can always return to its pool.
+        by a second tiler, which creates its own 2x3 output surface. No retained
+        per-source child buffers exist, so the mux buffer can always return to its
+        pool after the analysis wall is produced.
         """
 
         mux_src = self.mux.get_static_pad("src")
