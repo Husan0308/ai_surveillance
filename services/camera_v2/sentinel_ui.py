@@ -24,7 +24,7 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.20-r12-rfdetr"
+BUILD_TAG = "2026.08.20-r13-rfdetr"
 
 
 class MainWindow(QMainWindow):
