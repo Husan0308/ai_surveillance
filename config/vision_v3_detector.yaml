@@ -2,9 +2,9 @@ detector:
   model: rfdetr-small
   device: cuda:0
 
-  # Core-v1 rule: detector floor stays low for difficult/occluded people.  Weak
+  # Core-v1 rule: detector floor stays low for difficult/occluded people. Weak
   # observations can continue an existing track, while temporal birth confirmation
-  # prevents one noisy RF-DETR frame from becoming a visible person.
+  # prevents persistent low-score noise from becoming a visible person.
   capture_width: 768
   capture_height: 432
   threshold: 0.06
@@ -12,8 +12,8 @@ detector:
   max_det: 50
   camera_thresholds: {}
 
-  # GTX 1050 Ti 4GB safety profile.  Camera decode/display never waits for this
-  # worker.  The parent scheduler is latest-only and automatically reduces duty if
+  # GTX 1050 Ti 4GB safety profile. Camera decode/display never waits for this
+  # worker. The parent scheduler is latest-only and automatically reduces duty if
   # wall cadence degrades.
   micro_batch: 1
   gpu_duty: 0.30
@@ -21,9 +21,10 @@ detector:
   gpu_duty_max: 0.45
   startup_timeout_sec: 90
   result_timeout_sec: 12
+  max_result_age_ms: 900
   optimize_for_inference: false
 
-  # Exact Core-v1 full-frame + ROI fusion policy.  These guards run on RAW RF-DETR
+  # Exact Core-v1 full-frame + ROI fusion policy. These guards run on RAW RF-DETR
   # detections before presentation tracking.
   duplicate_iou: 0.58
   fusion_containment: 0.84
@@ -38,7 +39,7 @@ detector:
       CAM-06:
         - [0.50, 0.00, 0.78, 0.22]
 
-  # Selective high-resolution recovery from Core-v1.  It is intentionally limited
+  # Selective high-resolution recovery from Core-v1. It is intentionally limited
   # to the two historically difficult views, so six-camera GPU load stays bounded.
   # verify: replace full-frame detections inside ROI with the crop result.
   # augment: keep full-frame detections and add crop-only misses.
@@ -65,30 +66,36 @@ detector:
         trigger_max_full_roi_persons: 0
         box: [0.36, 0.12, 0.74, 0.48]
 
-  # Mature Core-v1 adaptive Kalman + Byte visual policy.  The algorithm itself is
-  # copied from core_v1/visual_tracker.py.  Timing is widened only because one
-  # RF-DETR-S pass on this GTX 1050 Ti is much slower than the old YOLO pass.
+  # Mature Core-v1 adaptive Kalman + Byte visual policy. RF-DETR-S revisits one
+  # camera far more slowly than the old YOLO worker, so track birth and recovery
+  # windows are explicitly sized for the observed ~1.5-2.0 s/camera cadence.
   # This state is DISPLAY-ONLY; raw RF-DETR geometry remains authoritative for the
   # future NvDCF/room-geometry pipeline.
   box:
-    hold_ms: 2200
-    memory_ms: 5000
-    prediction_ms: 1000
+    hold_ms: 2400
+    memory_ms: 6000
+    prediction_ms: 1100
+    birth_candidate_ttl_ms: 5000
 
     match_iou: 0.12
     reacquire_distance: 1.05
     byte_match_center: 0.70
     byte_second_match_iou: 0.04
     byte_second_match_center: 0.50
-    low_match_max_age_ms: 1800
+    low_match_max_age_ms: 2200
 
-    byte_high_conf: 0.16
+    # RF-DETR confidence scale is lower than the previous YOLO detector. Keep
+    # 0.06-0.08 observations continuation-only; >=0.08 may create a track.
+    # Clearly strong observations (>=0.18) appear immediately. Borderline births
+    # require a second spatially consistent observation and can survive the full
+    # six-camera round-robin interval.
+    byte_high_conf: 0.08
     byte_low_conf: 0.06
     low_conf_confirm: 0.06
-    start_conf: 0.24
-    new_track_min_conf: 0.14
-    strong_confirm_hits: 2
-    weak_confirm_hits: 3
+    start_conf: 0.18
+    new_track_min_conf: 0.08
+    strong_confirm_hits: 1
+    weak_confirm_hits: 2
 
     process_noise: 0.85
     measurement_noise: 0.90
@@ -125,7 +132,7 @@ detector:
     camera_low_conf_confirm: {}
     camera_new_track_zones: {}
 
-    # Final OSD-only body envelope.  This does not feed back into detection or the
+    # Final OSD-only body envelope. This does not feed back into detection or the
     # future tracker; it just prevents a tight model box clipping visible head,
     # hands or shoes.
     display_side_margin: 0.08
