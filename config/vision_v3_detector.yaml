@@ -32,24 +32,26 @@ detector:
 
     match_iou: 0.10
     second_match_iou: 0.04
-    match_center: 0.75
-    second_match_center: 0.52
-    low_match_max_age_sec: 0.85
+    match_center: 0.82
+    second_match_center: 0.62
+    low_match_max_age_sec: 1.80
 
     process_noise: 0.85
-    measurement_noise: 0.90
-    velocity_damping: 0.96
-    max_prediction_shift_boxes: 0.55
-    max_prediction_size_ratio: 0.08
+    measurement_noise: 0.95
+    velocity_damping: 0.97
+    max_prediction_shift_boxes: 0.70
+    max_prediction_size_ratio: 0.10
     shrink_measure_alpha: 0.28
 
     duplicate_iou: 0.68
     duplicate_containment: 0.90
     duplicate_center_distance: 0.20
 
-    hold_sec: 1.20
-    memory_sec: 3.0
-    predict_sec: 0.55
+    # RF-DETR-S currently revisits each camera roughly once per 1-2 seconds on the
+    # 1050 Ti, so display hold/prediction must bridge that cadence without flicker.
+    hold_sec: 2.20
+    memory_sec: 5.0
+    predict_sec: 1.00
 
     # Full-body display guard. Head and shoes get extra room, but the rectangle is
     # intentionally tighter than the first RF-DETR prototype.
