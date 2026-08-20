@@ -5,8 +5,10 @@ from __future__ import annotations
 Vision V3 keeps its clean six-camera owner, but detector-side details below are
 copied from ``agent/rfdetr-s-core-final``: keep the capture gate armed until an
 appsink sample really arrives, respect padded BGRx row stride, and use GPU cubic
-resize for the detector tap.  These changes do not touch the live display branch.
+resize for the detector tap. These changes do not touch the live display branch.
 """
+
+import time
 
 import numpy as np
 
@@ -73,10 +75,9 @@ def _on_infer_sample_stride_safe(self, sink, camera_id: str):
     finally:
         buffer.unmap(mapped)
 
-    # Clear only after a real image has been copied into the newest-frame mailbox.
     with self.capture_lock:
         self.capture_requested[camera_id] = False
-    self.mailbox.put(camera_id, self.time_monotonic() if hasattr(self, "time_monotonic") else __import__("time").monotonic(), frame)
+    self.mailbox.put(camera_id, time.monotonic(), frame)
     return self.Gst.FlowReturn.OK
 
 
