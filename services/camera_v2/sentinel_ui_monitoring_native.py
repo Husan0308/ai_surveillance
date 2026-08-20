@@ -12,7 +12,7 @@ pipeline is PLAYING.
 """
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QWindow
+from PySide6.QtGui import QWindow
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -42,13 +42,13 @@ class NativeVideoHost(QWidget):
 
         self.video_window = QWindow()
         self.video_window.setObjectName("sentinelVideoWindow")
-        self.video_window.setColor(QColor("#020507"))
 
         self.container = QWidget.createWindowContainer(self.video_window, self)
         self.container.setObjectName("nativeVideoContainer")
         self.container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.container.setMinimumSize(640, 540)
+        self.container.setStyleSheet("background:#020507;border:0;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
