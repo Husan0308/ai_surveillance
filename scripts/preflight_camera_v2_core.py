@@ -22,12 +22,14 @@ from services.camera_v2.pascal_safe_pipeline import CameraPascalSafeRuntime  # n
 from services.ml_service.app.config import load_settings  # noqa: E402
 
 
-def _detector_contract() -> tuple[str, tuple[int, int, int]]:
+def _detector_contract() -> tuple[str, tuple[int, int, int], tuple[int, int] | None]:
     backend = os.environ.get("CAMERA_V2_DETECT_BACKEND", "rfdetr-s").strip().lower()
-    if backend in {"stable-yolo26m", "yolo26m", "stable-yolo"}:
-        return "YOLO26m-person-only", (704, 448, 2)
+    if backend in {"stable-yolo26m", "yolo26m", "yolo", "stable-yolo"}:
+        # Capture is kept ~16:9; Ultralytics performs the final old-stable
+        # aspect-preserving letterbox to model imgsz 448x704.
+        return "YOLO26m-person-only", (704, 400, 2), (704, 448)
     if backend in {"rfdetr-s", "rfdetr", "rf-detr-s", ""}:
-        return "RF-DETR-S", (672, 384, 1)
+        return "RF-DETR-S", (672, 384, 1), None
     raise RuntimeError(f"unsupported CAMERA_V2_DETECT_BACKEND={backend!r}")
 
 
@@ -61,14 +63,26 @@ def main() -> int:
     if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
         raise RuntimeError(f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
 
-    detector_label, expected_detector = _detector_contract()
-    actual_detector = (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH)
-    if actual_detector != expected_detector:
-        ew, eh, eb = expected_detector
+    detector_label, expected_capture, model_geometry = _detector_contract()
+    actual_capture = (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH)
+    if actual_capture != expected_capture:
+        ew, eh, eb = expected_capture
         raise RuntimeError(
-            f"{detector_label} geometry must be {ew}x{eh} micro-batch={eb}, got "
+            f"{detector_label} capture geometry must be {ew}x{eh} micro-batch={eb}, got "
             f"{INFER_WIDTH}x{INFER_HEIGHT} micro={MICRO_BATCH}"
         )
+
+    model_text = ""
+    if model_geometry is not None:
+        expected_model_w, expected_model_h = model_geometry
+        model_w = int(os.environ.get("CAMERA_V2_YOLO_IMGSZ_WIDTH", "0"))
+        model_h = int(os.environ.get("CAMERA_V2_YOLO_IMGSZ_HEIGHT", "0"))
+        if (model_w, model_h) != (expected_model_w, expected_model_h):
+            raise RuntimeError(
+                f"{detector_label} model imgsz must be "
+                f"{expected_model_w}x{expected_model_h}, got {model_w}x{model_h}"
+            )
+        model_text = f" model_imgsz={model_w}x{model_h}"
 
     runtime_source = (ROOT / "services/camera_v2/pascal_safe_pipeline.py").read_text(
         encoding="utf-8"
@@ -154,15 +168,20 @@ def main() -> int:
 
     ensure_bridge()
 
+    tracker_label = (
+        "old-stable-adaptive-kalman-byte+lk"
+        if detector_label.startswith("YOLO26m")
+        else "motion-predictor"
+    )
     print(
         f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=OFF "
         f"rtsp={transport} latency={latency}ms mux={mux_width}x{mux_height} "
         f"grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
-        f"detector={detector_label}@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
-        "detector_path=analysis-tiler demux=disabled mux_retention=bounded "
-        "source_ingest=isolated dynamic_pad=late-caps-safe "
-        "tracker=motion-predictor nvtracker=disabled capture=analysis-grid "
+        f"detector={detector_label} capture={INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH}"
+        f"{model_text} detector_path=analysis-tiler demux=disabled "
+        f"mux_retention=bounded source_ingest=isolated dynamic_pad=late-caps-safe "
+        f"tracker={tracker_label} nvtracker=disabled capture=analysis-grid "
         "stage_counters=source+mux+wall+sink+analysis scaling=lanczos"
     )
     print("CAMERA_PREFLIGHT=PASS")
