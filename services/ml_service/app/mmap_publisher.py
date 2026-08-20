@@ -43,21 +43,25 @@ class MmapFramePublisher(LatestJpegPublisher):
         self.presentation_overlay_max_age_sec = max(
             0.0, float(overlay_max_age_ms) / 1000.0
         )
-        # Restored from the old responsive presentation profile that tracked the
-        # visible person closely: measurement dominates, velocity only bridges a
-        # short detector gap, and stale momentum is heavily damped on reversal.
+        # Proven old visual-tracker motion profile. ByteTrack keeps the ID;
+        # this layer restores only the display motion that previously stayed on
+        # the person instead of visibly trailing behind them.
         self.smoother = PresentationSmoother(
-            hold_ms=700,
-            memory_ms=6000,
-            prediction_ms=200,
-            velocity_damping=0.96,
-            max_prediction_shift_boxes=0.35,
-            max_prediction_size_ratio=0.08,
-            snap_distance_boxes=0.55,
+            hold_ms=850,
+            memory_ms=2800,
+            prediction_ms=340,
+            velocity_damping=0.95,
+            max_prediction_shift_boxes=0.55,
+            max_prediction_size_ratio=0.06,
+            adaptive_error_low=0.08,
+            adaptive_error_high=0.25,
+            center_response_slow=0.42,
+            center_response_fast=0.84,
+            size_response=0.30,
+            snap_distance_boxes=0.62,
             reversal_damping=0.15,
-            measurement_response=0.96,
-            velocity_response=0.65,
-            size_response=0.70,
+            low_conf=0.08,
+            strong_conf=0.34,
         )
         self.max_width = max(1, int(max_width))
         self.max_height = max(1, int(max_height))
@@ -83,7 +87,7 @@ class MmapFramePublisher(LatestJpegPublisher):
                 "version": self._version,
                 "publisher_mode": "event-driven-mmap-latest-only",
                 "transport": "mmap-bgr-double-buffer-sigbus-safe",
-                "overlay": "bytetrack-id-responsive-presentation",
+                "overlay": "bytetrack-id-old-adaptive-presentation",
                 "mmap_path": str(self.writer.path),
                 "event_wakeups": self.event_wakeups,
                 "coalesced_frames": self.coalesced_frames,
@@ -269,7 +273,7 @@ class MmapFramePublisher(LatestJpegPublisher):
                     print(
                         f"[MMAP] {self.camera_id} first frame "
                         f"{image.shape[1]}x{image.shape[0]} bytes={int(packet['payload_bytes'])} "
-                        "overlay=bytetrack-responsive",
+                        "overlay=bytetrack-old-adaptive",
                         flush=True,
                     )
         finally:
