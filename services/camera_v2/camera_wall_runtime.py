@@ -1,20 +1,6 @@
 from __future__ import annotations
 
-"""Minimal process-isolated controller for the production 2x3 camera wall.
-
-This module deliberately imports no legacy Sentinel presentation classes. The
-child process owns GStreamer/DeepStream and binds one display sink to the XID
-supplied by the Qt host. On the deployment GTX 1050 Ti it constructs the dedicated
-no-NvDCF Pascal runtime.
-
-Display policy is deterministic:
-1. Start with NVIDIA nveglglessink.
-2. Re-use the same stable Qt XID and never rebind an unchanged handle.
-3. If the runtime proves that buffers reach EGL but rendered remains zero, release
-   that complete GStreamer runtime and restart once with the X11 system-memory
-   fallback. This covers hybrid Intel/NVIDIA X11 desktops without penalizing the
-   normal GPU-native path.
-"""
+"""Process-isolated controller for the production 2x3 camera wall."""
 
 import gc
 import multiprocessing as mp
@@ -27,6 +13,8 @@ GRID_COLUMNS = 2
 GRID_ROWS = 3
 WALL_WIDTH = 1600
 WALL_HEIGHT = 1350
+FOCUS_WIDTH = 1920
+FOCUS_HEIGHT = 1080
 
 
 @dataclass(frozen=True)
@@ -52,10 +40,15 @@ def _put_latest(q, state: str, detail: object = "") -> None:
         pass
 
 
-def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> tuple[int, bool]:
-    """Run one complete display backend and release it before returning."""
-
+def _run_backend(
+    window_id: int,
+    command_q,
+    status_q,
+    display_backend: str,
+    initial_focus: int = -1,
+) -> tuple[int, bool, int]:
     runtime = None
+    current_focus = int(initial_focus)
     try:
         xid = int(window_id)
         if xid <= 0:
@@ -81,6 +74,32 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
                 f"production wall requires {CAMERA_COUNT} cameras, found {len(runtime.cameras)}"
             )
 
+        def set_focus(source_id: int) -> None:
+            nonlocal current_focus
+            sid = int(source_id)
+            if not 0 <= sid < CAMERA_COUNT:
+                sid = -1
+            current_focus = sid
+            if runtime.tiler.find_property("show-source") is None:
+                return
+            if sid >= 0:
+                runtime.tiler.set_property("rows", 1)
+                runtime.tiler.set_property("columns", 1)
+                runtime.tiler_rows = 1
+                runtime.tiler_columns = 1
+                runtime.tiler.set_property("show-source", sid)
+                runtime.set_wall_output_geometry(FOCUS_WIDTH, FOCUS_HEIGHT)
+                print(f"CAMERA_FOCUS source={sid} mode=fullscreen", flush=True)
+            else:
+                runtime.tiler.set_property("rows", GRID_ROWS)
+                runtime.tiler.set_property("columns", GRID_COLUMNS)
+                runtime.tiler_rows = GRID_ROWS
+                runtime.tiler_columns = GRID_COLUMNS
+                runtime.tiler.set_property("show-source", -1)
+                runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)
+                print("CAMERA_FOCUS source=-1 mode=grid", flush=True)
+            _put_latest(status_q, "FOCUS", {"source": sid})
+
         runtime.tiler_rows = GRID_ROWS
         runtime.tiler_columns = GRID_COLUMNS
         runtime.tiler.set_property("rows", GRID_ROWS)
@@ -90,6 +109,8 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
         runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)
         if runtime.sink.find_property("force-aspect-ratio") is not None:
             runtime.sink.set_property("force-aspect-ratio", True)
+        if current_focus >= 0:
+            set_focus(current_focus)
 
         current_xid = xid
         bound_xid = 0
@@ -102,7 +123,6 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
             current_xid = target
             if target == bound_xid:
                 return False
-
             GstVideo.VideoOverlay.set_window_handle(overlay, target)
             try:
                 GstVideo.VideoOverlay.handle_events(overlay, False)
@@ -115,8 +135,6 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
             )
             return True
 
-        # Give the sink its target before PLAYING. The sync handler repeats this
-        # only if the actual sink asks through prepare-window-handle.
         bind_overlay(runtime.sink, current_xid)
 
         def on_sync_message(_bus, message, _data=None):
@@ -136,10 +154,7 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
                 )
                 return Gst.BusSyncReply.DROP
             except Exception as exc:
-                print(
-                    f"CAMERA_VIDEO_BIND_ERROR {type(exc).__name__}: {exc}",
-                    flush=True,
-                )
+                print(f"CAMERA_VIDEO_BIND_ERROR {type(exc).__name__}: {exc}", flush=True)
                 _put_latest(status_q, "ERROR", "Camera display bind failed")
                 return Gst.BusSyncReply.PASS
 
@@ -150,11 +165,7 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
                 try:
                     _old, new, _pending = message.parse_state_changed()
                     if new == Gst.State.PLAYING:
-                        _put_latest(
-                            status_q,
-                            "LIVE",
-                            {"backend": display_backend},
-                        )
+                        _put_latest(status_q, "LIVE", {"backend": display_backend})
                 except Exception:
                     pass
             elif message.type == Gst.MessageType.ERROR:
@@ -162,8 +173,8 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
                     err, _debug = message.parse_error()
                     source = message.src.get_name() if message.src else "unknown"
                     print(
-                        f"CAMERA_PIPELINE_ERROR source={source} "
-                        f"backend={display_backend} message={err.message}",
+                        f"CAMERA_PIPELINE_ERROR source={source} backend={display_backend} "
+                        f"message={err.message}",
                         flush=True,
                     )
                     _put_latest(
@@ -178,6 +189,7 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
 
         def poll_commands() -> bool:
             latest_bind = None
+            latest_focus = None
             stop_requested = False
             while True:
                 try:
@@ -191,6 +203,11 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
                         latest_bind = int(value)
                     except Exception:
                         pass
+                elif command == "focus":
+                    try:
+                        latest_focus = int(value)
+                    except Exception:
+                        pass
 
             if latest_bind is not None and latest_bind > 0:
                 if bind_overlay(runtime.sink, latest_bind):
@@ -199,25 +216,19 @@ def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> t
                         "VIDEO_BOUND",
                         {"backend": display_backend, "xid": latest_bind},
                     )
-
+            if latest_focus is not None:
+                set_focus(latest_focus)
             if stop_requested:
                 runtime.stop()
                 return False
             return True
 
         runtime.GLib.timeout_add(50, poll_commands)
-        _put_latest(
-            status_q,
-            "STARTING",
-            {"backend": display_backend},
-        )
+        _put_latest(status_q, "STARTING", {"backend": display_backend})
         rc = runtime.run()
         failover = bool(getattr(runtime, "display_failover_requested", False))
-        return int(rc), failover
+        return int(rc), failover, current_focus
     finally:
-        # CameraDetectionV2.run() already tears down its detector child and the
-        # base run() puts the pipeline in NULL. Repeat defensively for exceptions,
-        # then drop the runtime before another backend is constructed.
         if runtime is not None:
             try:
                 runtime.stop()
@@ -235,27 +246,20 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
     try:
         requested = os.environ.get("CAMERA_V2_DISPLAY_BACKEND", "egl").strip().lower()
         backend = requested if requested in {"egl", "x11"} else "egl"
+        focus = -1
 
-        rc, failover = _run_backend(window_id, command_q, status_q, backend)
-
+        rc, failover, focus = _run_backend(
+            window_id, command_q, status_q, backend, focus
+        )
         if backend == "egl" and failover:
-            print(
-                "CAMERA_DISPLAY_FAILOVER action=restart backend=x11",
-                flush=True,
+            print("CAMERA_DISPLAY_FAILOVER action=restart backend=x11", flush=True)
+            _put_latest(status_q, "DISPLAY_FAILOVER", {"from": "egl", "to": "x11"})
+            rc, _, focus = _run_backend(
+                window_id, command_q, status_q, "x11", focus
             )
-            _put_latest(
-                status_q,
-                "DISPLAY_FAILOVER",
-                {"from": "egl", "to": "x11"},
-            )
-            rc, _ = _run_backend(window_id, command_q, status_q, "x11")
             backend = "x11"
 
-        _put_latest(
-            status_q,
-            "STOPPED",
-            {"backend": backend, "rc": rc},
-        )
+        _put_latest(status_q, "STOPPED", {"backend": backend, "rc": rc})
     except BaseException as exc:
         print(f"CAMERA_RUNTIME_ERROR {type(exc).__name__}: {exc}", flush=True)
         _put_latest(status_q, "ERROR", f"{type(exc).__name__}: {exc}")
@@ -264,11 +268,12 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
 class CameraWallController:
     def __init__(self) -> None:
         self.ctx = mp.get_context("spawn")
-        self.command_q = self.ctx.Queue(maxsize=8)
+        self.command_q = self.ctx.Queue(maxsize=12)
         self.status_q = self.ctx.Queue(maxsize=32)
         self.process = None
         self.last_status = CameraWallStatus("STOPPED")
         self._last_requested_xid = 0
+        self._focus_source = -1
 
     def start_or_bind(self, window_id: int) -> None:
         xid = int(window_id)
@@ -294,6 +299,17 @@ class CameraWallController:
         )
         self.process.start()
         self.last_status = CameraWallStatus("STARTING")
+
+    def focus(self, source_id: int) -> None:
+        sid = int(source_id)
+        sid = sid if 0 <= sid < CAMERA_COUNT else -1
+        self._focus_source = sid
+        if self.process is None or not self.process.is_alive():
+            return
+        try:
+            self.command_q.put_nowait(("focus", sid))
+        except queue.Full:
+            pass
 
     def poll(self):
         latest = None
