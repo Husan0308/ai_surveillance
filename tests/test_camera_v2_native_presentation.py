@@ -54,14 +54,18 @@ def test_camera_click_fullscreens_and_escape_restores_grid() -> None:
     assert "self.surface.escapeRequested.connect(self.exit_fullscreen)" in app
 
 
-def test_pascal_runtime_source_path_is_not_split_before_mux() -> None:
+def test_pascal_runtime_uses_non_retaining_analysis_tiler() -> None:
     runtime = source("services/camera_v2/pascal_safe_pipeline.py")
     assert "SecureCameraWallV2._add_camera(self, index, camera)" in runtime
-    assert "def _install_postmux_inference(self)" in runtime
-    assert "pascal_postmux_tee" in runtime
-    assert "nvstreamdemux" in runtime
-    assert "CAMERA_DETECT_PATH mode=postmux-demux" in runtime
+    assert "def _install_analysis_inference(self)" in runtime
+    assert "pascal_mux_tee" in runtime
+    assert "pascal_analysis_tiler" in runtime
+    assert "def _analysis_gate_probe" in runtime
+    assert "CAMERA_DETECT_PATH mode=analysis-tiler" in runtime
     assert "source_path=direct-to-nvstreammux" in runtime
+    assert "demux=disabled" in runtime
+    assert "mux_batch_retention=bounded" in runtime
+    assert "nvstreamdemux" not in runtime
 
 
 def test_pascal_runtime_has_no_nvdcf_hot_path() -> None:
@@ -84,6 +88,7 @@ def test_pascal_runtime_tracks_every_display_stage() -> None:
         "safe_mux_batches",
         "safe_wall_frames",
         "safe_sink_buffers",
+        "analysis_frames",
         "source_frames=",
         "CAMERA_STARTUP_STALL",
         "rendered=",
