@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -26,6 +27,13 @@ def main() -> int:
     threshold = float(cfg.get("threshold", -1))
     if not 0.01 <= threshold <= 0.60:
         fail(f"unreasonable person threshold {threshold}")
+
+    roi_cfg = dict(cfg.get("roi_second_pass") or {})
+    if not bool(roi_cfg.get("enabled", False)):
+        fail("core-v1 ROI recovery policy is disabled")
+    roi_cameras = dict(roi_cfg.get("cameras") or {})
+    if not {"CAM-05", "CAM-06"}.issubset(roi_cameras):
+        fail("expected proven CAM-05/CAM-06 ROI recovery configuration")
 
     try:
         import torch
@@ -74,32 +82,64 @@ def main() -> int:
         fail(f"native metadata bridge failed: {type(exc).__name__}: {exc}")
 
     try:
-        from services.ml_service.vision_v3.stable_boxes import StableFullBodyManager
-        box_cfg = dict(cfg.get("box") or {})
-        manager = StableFullBodyManager(1280, 720, box_cfg)
-        raw = (500.0, 120.0, 620.0, 610.0)
-        manager.update("CAM-TEST", 1.0, [(raw, 0.90)])
-        rows = manager.render("CAM-TEST", 1.0)
-        if len(rows) != 1:
-            fail("stable Kalman display test produced no strong box")
-        x1, y1, x2, y2, _ = rows[0]
-        if not (x1 < raw[0] and y1 < raw[1] and x2 > raw[2] and y2 > raw[3]):
-            fail("stable display envelope did not cover raw head/feet/sides")
+        from services.ml_service.vision_v3.core_v1_visual_adapter import CoreV1VisualAdapter
+        from services.ml_service.vision_v3.rfdetr_worker_v2 import _dedupe, _filter_hard_masks, rfdetr_worker_v2  # noqa: F401
 
-        weak = StableFullBodyManager(1280, 720, box_cfg)
-        weak.update("CAM-TEST", 1.0, [((100.0, 100.0, 150.0, 200.0), 0.08)])
-        if weak.render("CAM-TEST", 1.0):
-            fail("one weak RF-DETR observation incorrectly created a visible track")
+        box_cfg = dict(cfg.get("box") or {})
+        manager = CoreV1VisualAdapter(1280, 720, box_cfg)
+        raw1 = (500.0, 120.0, 620.0, 610.0)
+        raw2 = (504.0, 122.0, 624.0, 612.0)
+        t0 = time.monotonic()
+        manager.update("CAM-TEST", t0, [(raw1, 0.90)])
+        if manager.render("CAM-TEST", t0):
+            fail("first observation bypassed Core-v1 temporal birth confirmation")
+        manager.update("CAM-TEST", t0 + 0.10, [(raw2, 0.90)])
+        rows = manager.render("CAM-TEST", t0 + 0.10)
+        if len(rows) != 1:
+            fail("ported Core-v1 adaptive Kalman/Byte tracker produced no confirmed box")
+        x1, y1, x2, y2, _ = rows[0]
+        if not (x1 < raw2[0] and y1 < raw2[1] and x2 > raw2[2] and y2 > raw2[3]):
+            fail("display-only full-body guard did not cover raw head/feet/sides")
+
+        weak = CoreV1VisualAdapter(1280, 720, box_cfg)
+        weak.update("CAM-TEST", t0, [((100.0, 100.0, 150.0, 200.0), 0.08)])
+        if weak.render("CAM-TEST", t0):
+            fail("one weak RF-DETR observation incorrectly created a visible person")
+
+        fused = _dedupe(
+            [
+                (100.0, 100.0, 200.0, 400.0, 0.90),
+                (104.0, 105.0, 198.0, 395.0, 0.70),
+                (350.0, 100.0, 450.0, 400.0, 0.80),
+            ],
+            iou_threshold=float(cfg.get("duplicate_iou", 0.58)),
+            containment_threshold=float(cfg.get("fusion_containment", 0.84)),
+            center_threshold=float(cfg.get("fusion_center_distance", 0.40)),
+        )
+        if len(fused) != 2:
+            fail(f"full/ROI confidence-first fusion regression: expected 2 boxes, got {len(fused)}")
+
+        hard_cfg = dict(cfg.get("hard_exclusion") or {})
+        masked, rejected = _filter_hard_masks(
+            "CAM-06",
+            [(420.0, 10.0, 500.0, 120.0, 0.80)],
+            768,
+            432,
+            hard_cfg,
+        )
+        if hard_cfg.get("cameras") and rejected != 1:
+            fail("CAM-06 hard exclusion policy regression")
     except SystemExit:
         raise
     except Exception as exc:
-        fail(f"stable box test failed: {type(exc).__name__}: {exc}")
+        fail(f"ported Core-v1 policy test failed: {type(exc).__name__}: {exc}")
 
     version = getattr(rfdetr, "__version__", "unknown")
     print(
         "VISION_V3_RFDETR_PREFLIGHT=PASS "
         f"rfdetr={version} gpu={torch.cuda.get_device_name(0)} threshold={threshold:.2f} "
-        f"micro_batch={int(cfg.get('micro_batch', 1))} stable_kalman=1 bridge={bridge}",
+        f"micro_batch={int(cfg.get('micro_batch', 1))} core_v1_policy=1 "
+        f"adaptive_kalman_byte=1 roi_recovery=1 fusion=1 bridge={bridge}",
         flush=True,
     )
     return 0
