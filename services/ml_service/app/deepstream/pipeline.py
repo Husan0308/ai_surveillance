@@ -7,9 +7,9 @@ from enum import Enum
 
 from services.ml_service.app.camera_worker import CameraWorker
 from services.ml_service.app.config import Settings
-from services.ml_service.app.detector import PersonDetector
 from services.ml_service.app.fallback_jpeg import OnDemandJpegPublisher
 from services.ml_service.app.latest_frame import LatestFrameStore
+from services.ml_service.app.legacy_latest_detector import LegacyLatestPersonDetector
 from services.ml_service.app.mmap_publisher import MmapFramePublisher
 from services.ml_service.app.tracking import PersonTracker
 
@@ -42,14 +42,24 @@ class DeepStreamRuntime:
             camera.camera_id: CameraWorker(camera, settings.deepstream, self.stores[camera.camera_id])
             for camera in settings.cameras
         }
-        self.detector = PersonDetector(settings.detection, self.stores)
+
+        # Restore the old proven detector hot path while retaining the current
+        # three-service architecture and spawned CUDA crash isolation. The old
+        # good branch always consumed the newest unprocessed camera frames as
+        # soon as the previous batch completed instead of imposing a 4 FPS gate.
+        self.detector = LegacyLatestPersonDetector(settings.detection, self.stores)
+
+        # The restored detector is intentionally uncapped/latest-only. Keep a
+        # realistic nominal detector cadence for ByteTrack's time-based buffer;
+        # old hardware runs were around the low double-digit FPS per camera.
+        nominal_detector_fps = max(10.0, float(settings.detection.target_fps_per_camera))
         self.tracker = PersonTracker(
             settings.tracking,
             self.detector.results,
             [camera.camera_id for camera in settings.cameras],
             frame_width=settings.deepstream.display_width,
             frame_height=settings.deepstream.display_height,
-            detector_fps=settings.detection.target_fps_per_camera,
+            detector_fps=nominal_detector_fps,
         )
         overlay_store = self.tracker.results if settings.tracking.enabled else self.detector.results
 
