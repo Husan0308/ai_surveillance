@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -84,27 +85,61 @@ def main() -> int:
     try:
         from services.ml_service.vision_v3.core_v1_visual_adapter import CoreV1VisualAdapter
         from services.ml_service.vision_v3.rfdetr_worker_v2 import _dedupe, _filter_hard_masks, rfdetr_worker_v2  # noqa: F401
+        from services.ml_service.vision_v3.sparse_visual_tracker import SparseCadenceVisualTracker
+        from services.ml_service.vision_v3.visual_tracker import VisualBox
 
         box_cfg = dict(cfg.get("box") or {})
         manager = CoreV1VisualAdapter(1280, 720, box_cfg)
-        raw1 = (500.0, 120.0, 620.0, 610.0)
-        raw2 = (504.0, 122.0, 624.0, 612.0)
+        raw = (500.0, 120.0, 620.0, 610.0)
         t0 = time.monotonic()
-        manager.update("CAM-TEST", t0, [(raw1, 0.90)])
-        if manager.render("CAM-TEST", t0):
-            fail("first observation bypassed Core-v1 temporal birth confirmation")
-        manager.update("CAM-TEST", t0 + 0.10, [(raw2, 0.90)])
-        rows = manager.render("CAM-TEST", t0 + 0.10)
+
+        # A genuinely strong RF-DETR observation must be visible immediately.
+        manager.update("CAM-TEST", t0, [(raw, 0.90)])
+        rows = manager.render("CAM-TEST", t0)
         if len(rows) != 1:
-            fail("ported Core-v1 adaptive Kalman/Byte tracker produced no confirmed box")
+            fail("strong RF-DETR observation did not create an immediate visible track")
         x1, y1, x2, y2, _ = rows[0]
-        if not (x1 < raw2[0] and y1 < raw2[1] and x2 > raw2[2] and y2 > raw2[3]):
+        if not (x1 < raw[0] and y1 < raw[1] and x2 > raw[2] and y2 > raw[3]):
             fail("display-only full-body guard did not cover raw head/feet/sides")
 
+        # RF-DETR revisits a given camera only every ~1.5-2.0 seconds here. Verify
+        # a borderline birth candidate survives that real cadence instead of the
+        # old hard-coded 1.25 s YOLO window expiring it before hit #2.
+        tracker = SparseCadenceVisualTracker(
+            birth_candidate_ttl_ms=int(box_cfg.get("birth_candidate_ttl_ms", 5000)),
+            hold_ms=int(box_cfg.get("hold_ms", 2400)),
+            memory_ms=int(box_cfg.get("memory_ms", 6000)),
+            prediction_ms=int(box_cfg.get("prediction_ms", 1100)),
+            byte_high_conf=float(box_cfg.get("byte_high_conf", 0.08)),
+            byte_low_conf=float(box_cfg.get("byte_low_conf", 0.06)),
+            low_conf_confirm=float(box_cfg.get("low_conf_confirm", 0.06)),
+            start_conf=float(box_cfg.get("start_conf", 0.18)),
+            new_track_min_conf=float(box_cfg.get("new_track_min_conf", 0.08)),
+            strong_confirm_hits=int(box_cfg.get("strong_confirm_hits", 1)),
+            weak_confirm_hits=int(box_cfg.get("weak_confirm_hits", 2)),
+            low_match_max_age_ms=int(box_cfg.get("low_match_max_age_ms", 2200)),
+        )
+        first = SimpleNamespace(
+            frame_id=1,
+            frame_captured_monotonic=t0,
+            boxes=(VisualBox(100.0, 100.0, 180.0, 360.0, 0.12),),
+        )
+        second = SimpleNamespace(
+            frame_id=2,
+            frame_captured_monotonic=t0 + 1.80,
+            boxes=(VisualBox(104.0, 102.0, 184.0, 362.0, 0.12),),
+        )
+        tracker.update(first, now=t0, source_width=1280, source_height=720)
+        if tracker.visible(now=t0, target_time=t0):
+            fail("borderline RF-DETR birth became visible before temporal confirmation")
+        tracker.update(second, now=t0 + 1.80, source_width=1280, source_height=720)
+        if len(tracker.visible(now=t0 + 1.80, target_time=t0 + 1.80)) != 1:
+            fail("sparse-cadence RF-DETR birth candidate expired before second hit")
+
         weak = CoreV1VisualAdapter(1280, 720, box_cfg)
-        weak.update("CAM-TEST", t0, [((100.0, 100.0, 150.0, 200.0), 0.08)])
+        weak.update("CAM-TEST", t0, [((100.0, 100.0, 150.0, 200.0), 0.07)])
         if weak.render("CAM-TEST", t0):
-            fail("one weak RF-DETR observation incorrectly created a visible person")
+            fail("one continuation-only RF-DETR observation incorrectly created a visible person")
 
         fused = _dedupe(
             [
@@ -120,7 +155,7 @@ def main() -> int:
             fail(f"full/ROI confidence-first fusion regression: expected 2 boxes, got {len(fused)}")
 
         hard_cfg = dict(cfg.get("hard_exclusion") or {})
-        masked, rejected = _filter_hard_masks(
+        _masked, rejected = _filter_hard_masks(
             "CAM-06",
             [(420.0, 10.0, 500.0, 120.0, 0.80)],
             768,
@@ -139,7 +174,7 @@ def main() -> int:
         "VISION_V3_RFDETR_PREFLIGHT=PASS "
         f"rfdetr={version} gpu={torch.cuda.get_device_name(0)} threshold={threshold:.2f} "
         f"micro_batch={int(cfg.get('micro_batch', 1))} core_v1_policy=1 "
-        f"adaptive_kalman_byte=1 roi_recovery=1 fusion=1 bridge={bridge}",
+        f"adaptive_kalman_byte=1 sparse_birth=1 roi_recovery=1 fusion=1 bridge={bridge}",
         flush=True,
     )
     return 0
