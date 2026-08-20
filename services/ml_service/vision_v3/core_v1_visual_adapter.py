@@ -1,150 +1,293 @@
 from __future__ import annotations
 
-import time
-from types import SimpleNamespace
+"""Exact presentation behavior from the previously working RF-DETR-S branch.
 
-from .sparse_visual_tracker import SparseCadenceVisualTracker
-from .visual_tracker import VisualBox
+The failed Vision V3 experiment mixed a very low detector threshold with a new
+Byte/Kalman birth policy.  The known-good ``agent/rfdetr-s-core-final`` runtime
+used a much simpler bounded motion smoother.  This adapter reproduces that logic
+while keeping the Vision V3 ``update/render`` contract.
+"""
+
+import math
+import threading
+from dataclasses import dataclass
+
+
+def _xyxy_to_state(box) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = [float(v) for v in box]
+    return (
+        (x1 + x2) * 0.5,
+        (y1 + y2) * 0.5,
+        max(2.0, x2 - x1),
+        max(2.0, y2 - y1),
+    )
+
+
+def _state_to_xyxy(cx: float, cy: float, w: float, h: float):
+    return (cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5)
+
+
+def _iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    x1, y1 = max(ax1, bx1), max(ay1, by1)
+    x2, y2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    if inter <= 0.0:
+        return 0.0
+    aa = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    bb = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = aa + bb - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+@dataclass
+class _MotionTrack:
+    track_id: int
+    cx: float
+    cy: float
+    w: float
+    h: float
+    vx: float
+    vy: float
+    vw: float
+    vh: float
+    last_det_t: float
+    confidence: float
 
 
 class CoreV1VisualAdapter:
-    """Adapter around the proven Core-v1 adaptive Kalman/Byte visual tracker.
-
-    RF-DETR detections stay raw.  The adapter only owns presentation continuity:
-    low-score continuation, temporal birth confirmation, duplicate suppression,
-    capture-time motion compensation and bounded prediction to the current wall
-    frame.  A final display-only guard keeps visible head/feet/hands inside the
-    rectangle without contaminating future NvDCF/geometry measurements.
-    """
+    """Known-good Camera V2 SmoothBoxManager behind the V3 adapter API."""
 
     def __init__(self, width: int, height: int, cfg: dict) -> None:
         self.width = float(width)
         self.height = float(height)
         self.cfg = dict(cfg or {})
-        self.trackers: dict[str, SparseCadenceVisualTracker] = {}
-        self.frame_ids: dict[str, int] = {}
+        self.lock = threading.RLock()
+        self.tracks: dict[str, dict[int, _MotionTrack]] = {}
+        self.next_id = 1
 
-    def _tracker(self, camera_id: str) -> SparseCadenceVisualTracker:
-        tracker = self.trackers.get(camera_id)
-        if tracker is not None:
-            return tracker
+        self.side_margin = float(self.cfg.get("side_margin", 0.08))
+        self.top_margin = float(self.cfg.get("top_margin", 0.04))
+        self.bottom_margin = float(self.cfg.get("bottom_margin", 0.10))
+        self.max_age = float(self.cfg.get("max_age_sec", 1.80))
+        self.max_predict = float(self.cfg.get("max_predict_sec", 0.75))
 
-        cfg = self.cfg
-        fragment_cameras = {str(v) for v in cfg.get("fragment_duplicate_cameras", [])}
-        camera_start = dict(cfg.get("camera_start_conf") or {})
-        camera_low = dict(cfg.get("camera_low_conf_confirm") or {})
-        camera_birth_zones = dict(cfg.get("camera_new_track_zones") or {})
-        camera_exclusion = dict(cfg.get("camera_exclusion_zones") or {})
-
-        tracker = SparseCadenceVisualTracker(
-            birth_candidate_ttl_ms=int(cfg.get("birth_candidate_ttl_ms", 5000)),
-            hold_ms=int(cfg.get("hold_ms", 2200)),
-            memory_ms=int(cfg.get("memory_ms", 5000)),
-            prediction_ms=int(cfg.get("prediction_ms", 1000)),
-            match_iou=float(cfg.get("match_iou", 0.12)),
-            reacquire_distance=float(cfg.get("reacquire_distance", 1.05)),
-            duplicate_iou=float(cfg.get("duplicate_iou", 0.68)),
-            duplicate_containment=float(cfg.get("duplicate_containment", 0.90)),
-            duplicate_center_distance=float(cfg.get("duplicate_center_distance", 0.20)),
-            fragment_duplicate=camera_id in fragment_cameras,
-            fragment_horizontal_overlap=float(cfg.get("fragment_horizontal_overlap", 0.78)),
-            fragment_x_center=float(cfg.get("fragment_x_center", 0.18)),
-            fragment_max_area_ratio=float(cfg.get("fragment_max_area_ratio", 0.55)),
-            fragment_min_vertical_overlap=float(cfg.get("fragment_min_vertical_overlap", 0.20)),
-            fragment_max_vertical_gap=float(cfg.get("fragment_max_vertical_gap", 0.06)),
-            low_conf_confirm=float(camera_low.get(camera_id, cfg.get("low_conf_confirm", 0.06))),
-            start_conf=float(camera_start.get(camera_id, cfg.get("start_conf", 0.18))),
-            new_track_min_conf=float(cfg.get("new_track_min_conf", 0.08)),
-            strong_confirm_hits=int(cfg.get("strong_confirm_hits", 1)),
-            weak_confirm_hits=int(cfg.get("weak_confirm_hits", 2)),
-            byte_high_conf=float(cfg.get("byte_high_conf", 0.08)),
-            byte_low_conf=float(cfg.get("byte_low_conf", 0.06)),
-            byte_second_match_iou=float(cfg.get("byte_second_match_iou", 0.04)),
-            byte_match_center=float(cfg.get("byte_match_center", 0.70)),
-            byte_second_match_center=float(cfg.get("byte_second_match_center", 0.50)),
-            low_match_max_age_ms=int(cfg.get("low_match_max_age_ms", 2200)),
-            process_noise=float(cfg.get("process_noise", 0.85)),
-            measurement_noise=float(cfg.get("measurement_noise", 0.90)),
-            velocity_damping=float(cfg.get("velocity_damping", 0.96)),
-            size_velocity_damping=float(cfg.get("size_velocity_damping", 0.60)),
-            max_prediction_shift_boxes=float(cfg.get("max_prediction_shift_boxes", 0.70)),
-            max_prediction_size_ratio=float(cfg.get("max_prediction_size_ratio", 0.10)),
-            adaptive_error_low=float(cfg.get("adaptive_error_low", 0.08)),
-            adaptive_error_high=float(cfg.get("adaptive_error_high", 0.25)),
-            center_response_slow=float(cfg.get("center_response_slow", 0.42)),
-            center_response_fast=float(cfg.get("center_response_fast", 0.88)),
-            size_response=float(cfg.get("size_response", 0.30)),
-            snap_distance_boxes=float(cfg.get("snap_distance_boxes", 0.65)),
-            reversal_damping=float(cfg.get("reversal_damping", 0.15)),
-            new_track_zones=camera_birth_zones.get(camera_id, []),
-            exclusion_zones=camera_exclusion.get(camera_id, []),
-            exclusion_max_box_height=float(cfg.get("exclusion_max_box_height", 0.30)),
-            exclusion_overlap_threshold=float(cfg.get("exclusion_overlap_threshold", 0.15)),
+        self.association_score_min = float(
+            self.cfg.get("association_score_min", 0.12)
         )
-        self.trackers[camera_id] = tracker
-        return tracker
+        self.velocity_keep = float(self.cfg.get("velocity_keep", 0.55))
+        self.velocity_measure = float(self.cfg.get("velocity_measure", 0.45))
+        self.size_velocity_keep = float(
+            self.cfg.get("size_velocity_keep", 0.70)
+        )
+        self.size_velocity_measure = float(
+            self.cfg.get("size_velocity_measure", 0.30)
+        )
+        self.position_alpha = float(self.cfg.get("position_alpha", 0.82))
+        self.grow_width_alpha = float(self.cfg.get("grow_width_alpha", 0.75))
+        self.shrink_width_alpha = float(
+            self.cfg.get("shrink_width_alpha", 0.28)
+        )
+        self.grow_height_alpha = float(self.cfg.get("grow_height_alpha", 0.78))
+        self.shrink_height_alpha = float(
+            self.cfg.get("shrink_height_alpha", 0.25)
+        )
+        self.prediction_damping = float(
+            self.cfg.get("prediction_damping", 0.75)
+        )
+        self.prediction_size_gain = float(
+            self.cfg.get("prediction_size_gain", 0.35)
+        )
 
-    @staticmethod
-    def _as_visual_boxes(detections):
-        boxes = []
-        for box, confidence in detections:
-            x1, y1, x2, y2 = [float(v) for v in box]
-            confidence = float(confidence)
-            if x2 <= x1 or y2 <= y1 or confidence <= 0.0:
-                continue
-            boxes.append(VisualBox(x1, y1, x2, y2, confidence))
-        return boxes
+        self._updates = 0
+        self._births = 0
+        self._matches = 0
+        self._pruned = 0
+
+    def _guard_box(self, box):
+        x1, y1, x2, y2 = [float(v) for v in box]
+        w = max(2.0, x2 - x1)
+        h = max(2.0, y2 - y1)
+        x1 -= w * self.side_margin
+        x2 += w * self.side_margin
+        y1 -= h * self.top_margin
+        y2 += h * self.bottom_margin
+        return (
+            max(0.0, x1),
+            max(0.0, y1),
+            min(self.width - 1.0, x2),
+            min(self.height - 1.0, y2),
+        )
+
+    def _predict(self, track: _MotionTrack, when: float):
+        dt = min(self.max_predict, max(0.0, float(when) - track.last_det_t))
+        damping = 1.0 / (1.0 + self.prediction_damping * dt)
+        cx = track.cx + track.vx * dt * damping
+        cy = track.cy + track.vy * dt * damping
+        w = max(8.0, track.w + track.vw * dt * self.prediction_size_gain)
+        h = max(16.0, track.h + track.vh * dt * self.prediction_size_gain)
+        x1, y1, x2, y2 = _state_to_xyxy(cx, cy, w, h)
+
+        shift_x = 0.0
+        shift_y = 0.0
+        if x1 < 0.0:
+            shift_x = -x1
+        elif x2 > self.width - 1.0:
+            shift_x = (self.width - 1.0) - x2
+        if y1 < 0.0:
+            shift_y = -y1
+        elif y2 > self.height - 1.0:
+            shift_y = (self.height - 1.0) - y2
+        return (x1 + shift_x, y1 + shift_y, x2 + shift_x, y2 + shift_y)
 
     def update(self, camera_id: str, captured_t: float, detections) -> None:
-        frame_id = self.frame_ids.get(camera_id, 0) + 1
-        self.frame_ids[camera_id] = frame_id
-        result = SimpleNamespace(
-            frame_id=frame_id,
-            frame_captured_monotonic=float(captured_t),
-            boxes=tuple(self._as_visual_boxes(detections)),
-        )
-        self._tracker(camera_id).update(
-            result,
-            now=time.monotonic(),
-            source_width=self.width,
-            source_height=self.height,
-        )
+        guarded = []
+        for box, confidence in detections:
+            try:
+                confidence = float(confidence)
+                guarded_box = self._guard_box(box)
+            except Exception:
+                continue
+            if confidence <= 0.0:
+                continue
+            guarded.append((guarded_box, confidence))
 
-    def _guard(self, box: VisualBox):
-        x1, y1, x2, y2 = box.x1, box.y1, box.x2, box.y2
-        width = max(2.0, x2 - x1)
-        height = max(2.0, y2 - y1)
-        aspect = height / max(1.0, width)
+        with self.lock:
+            self._updates += 1
+            current = self.tracks.setdefault(camera_id, {})
+            track_ids = list(current)
+            candidates = []
 
-        side = float(self.cfg.get("display_side_margin", 0.08))
-        top = float(self.cfg.get("display_top_margin", 0.07))
-        bottom = float(self.cfg.get("display_bottom_margin", 0.10))
-        if aspect < float(self.cfg.get("sitting_aspect_threshold", 1.55)):
-            side += float(self.cfg.get("sitting_extra_side", 0.04))
-            bottom += float(self.cfg.get("sitting_extra_bottom", 0.04))
+            for track_id in track_ids:
+                track = current[track_id]
+                predicted = self._predict(track, captured_t)
+                pcx, pcy, pw, ph = _xyxy_to_state(predicted)
+                for detection_index, (box, _confidence) in enumerate(guarded):
+                    dcx, dcy, _dw, _dh = _xyxy_to_state(box)
+                    distance = math.hypot(dcx - pcx, dcy - pcy) / max(
+                        30.0, math.hypot(pw, ph)
+                    )
+                    score = _iou(predicted, box) * 0.75 + max(
+                        0.0, 1.0 - distance
+                    ) * 0.25
+                    if score >= self.association_score_min:
+                        candidates.append((score, track_id, detection_index))
 
-        pad_side = max(5.0, width * side)
-        pad_top = max(5.0, height * top)
-        pad_bottom = max(7.0, height * bottom)
-        return (
-            max(0.0, x1 - pad_side),
-            max(0.0, y1 - pad_top),
-            min(self.width - 1.0, x2 + pad_side),
-            min(self.height - 1.0, y2 + pad_bottom),
-            float(box.confidence),
-        )
+            candidates.sort(reverse=True)
+            used_tracks: set[int] = set()
+            used_detections: set[int] = set()
+            matches = []
+            for _score, track_id, detection_index in candidates:
+                if track_id in used_tracks or detection_index in used_detections:
+                    continue
+                used_tracks.add(track_id)
+                used_detections.add(detection_index)
+                matches.append((track_id, detection_index))
+
+            for track_id, detection_index in matches:
+                self._matches += 1
+                track = current[track_id]
+                box, confidence = guarded[detection_index]
+                mcx, mcy, mw, mh = _xyxy_to_state(box)
+                dt = max(0.05, float(captured_t) - track.last_det_t)
+                predicted_box = self._predict(track, captured_t)
+                pcx, pcy, pw, ph = _xyxy_to_state(predicted_box)
+
+                measured_vx = (mcx - track.cx) / dt
+                measured_vy = (mcy - track.cy) / dt
+                max_vx = self.width * 0.90
+                max_vy = self.height * 0.90
+                measured_vx = max(-max_vx, min(max_vx, measured_vx))
+                measured_vy = max(-max_vy, min(max_vy, measured_vy))
+
+                track.vx = (
+                    track.vx * self.velocity_keep
+                    + measured_vx * self.velocity_measure
+                )
+                track.vy = (
+                    track.vy * self.velocity_keep
+                    + measured_vy * self.velocity_measure
+                )
+                track.vw = (
+                    track.vw * self.size_velocity_keep
+                    + ((mw - track.w) / dt) * self.size_velocity_measure
+                )
+                track.vh = (
+                    track.vh * self.size_velocity_keep
+                    + ((mh - track.h) / dt) * self.size_velocity_measure
+                )
+
+                width_alpha = (
+                    self.grow_width_alpha if mw >= pw else self.shrink_width_alpha
+                )
+                height_alpha = (
+                    self.grow_height_alpha if mh >= ph else self.shrink_height_alpha
+                )
+                track.cx = pcx + (mcx - pcx) * self.position_alpha
+                track.cy = pcy + (mcy - pcy) * self.position_alpha
+                track.w = pw + (mw - pw) * width_alpha
+                track.h = ph + (mh - ph) * height_alpha
+                track.last_det_t = float(captured_t)
+                track.confidence = confidence
+
+            for detection_index, (box, confidence) in enumerate(guarded):
+                if detection_index in used_detections:
+                    continue
+                cx, cy, w, h = _xyxy_to_state(box)
+                track_id = self.next_id
+                self.next_id += 1
+                current[track_id] = _MotionTrack(
+                    track_id,
+                    cx,
+                    cy,
+                    w,
+                    h,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    float(captured_t),
+                    confidence,
+                )
+                self._births += 1
+
+            stale = [
+                track_id
+                for track_id, track in current.items()
+                if float(captured_t) - track.last_det_t > self.max_age
+            ]
+            for track_id in stale:
+                current.pop(track_id, None)
+                self._pruned += 1
 
     def render(self, camera_id: str, now: float):
-        tracker = self.trackers.get(camera_id)
-        if tracker is None:
-            return []
-        boxes = tracker.visible(now=float(now), target_time=float(now))
-        return [self._guard(box) for box in boxes]
+        with self.lock:
+            current = self.tracks.get(camera_id, {})
+            rows = []
+            stale = []
+            for track_id, track in current.items():
+                age = float(now) - track.last_det_t
+                if age > self.max_age:
+                    stale.append(track_id)
+                    continue
+                x1, y1, x2, y2 = self._predict(track, now)
+                if x2 > x1 and y2 > y1:
+                    rows.append((x1, y1, x2, y2, track.confidence))
+            for track_id in stale:
+                current.pop(track_id, None)
+                self._pruned += 1
+            return rows
 
     def metrics(self, camera_id: str):
-        tracker = self.trackers.get(camera_id)
-        return tracker.metrics() if tracker is not None else {
-            "algorithm": "adaptive-kalman-byte-visual-v2-sparse",
-            "active_tracks": 0,
-            "birth_candidate_ttl_ms": float(self.cfg.get("birth_candidate_ttl_ms", 5000)),
-        }
+        with self.lock:
+            return {
+                "algorithm": "proven-camera-v2-motion-smoother",
+                "active_tracks": len(self.tracks.get(camera_id, {})),
+                "updates": self._updates,
+                "births": self._births,
+                "matches": self._matches,
+                "pruned": self._pruned,
+                "max_age_ms": self.max_age * 1000.0,
+                "max_predict_ms": self.max_predict * 1000.0,
+            }
