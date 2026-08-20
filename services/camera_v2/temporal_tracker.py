@@ -2,13 +2,13 @@ from __future__ import annotations
 
 """Low-cost temporal person tracking for the Pascal RF-DETR path.
 
-RF-DETR is intentionally sparse on the GTX 1050 Ti.  This module keeps a stable
+RF-DETR is intentionally sparse on the GTX 1050 Ti. This module keeps a stable
 per-camera person state between detector corrections without retaining any
-GStreamer/NVMM buffers.  The state is centered on a persistent body anchor and
+GStreamer/NVMM buffers. The state is centered on a persistent body anchor and
 uses bounded constant-velocity prediction, posture-tolerant association and
 asymmetric box-size smoothing.
 
-This is deliberately not a long-term identity/ReID tracker.  It only owns the
+This is deliberately not a long-term identity/ReID tracker. It only owns the
 short temporal continuity needed for a box to stay attached to the same person
 between RF-DETR observations.
 """
@@ -85,7 +85,11 @@ class AnchoredPersonTracker:
       update(camera_id, captured_time, detections)
       render(camera_id, now) -> [(x1, y1, x2, y2, confidence), ...]
 
-    `anchors()` is exposed for the next optical-flow/center-dot stage.
+    A new candidate is probationary. It is never rendered until a second
+    spatially-consistent RF-DETR observation confirms it, except for an explicitly
+    high-confidence observation above ``CAMERA_V2_TRACK_INSTANT_CONF``. This
+    mirrors the useful probation behavior from the earlier stable tracker and
+    prevents one-frame furniture/monitor false positives becoming long ghosts.
     """
 
     def __init__(self, width: int, height: int) -> None:
@@ -99,20 +103,33 @@ class AnchoredPersonTracker:
         self.top_margin = float(os.environ.get("CAMERA_V2_BOX_TOP_MARGIN", "0.04"))
         self.bottom_margin = float(os.environ.get("CAMERA_V2_BOX_BOTTOM_MARGIN", "0.10"))
 
-        # Detector corrections are sparse on Pascal. Confirmed boxes are held
-        # longer than the expected per-camera detector interval, but motion is
-        # only extrapolated for a bounded period and then frozen to avoid ghosts
-        # running ahead of the person.
-        self.max_age = float(os.environ.get("CAMERA_V2_TRACK_HOLD_SEC", "3.20"))
-        self.tentative_age = float(os.environ.get("CAMERA_V2_TRACK_TENTATIVE_SEC", "1.10"))
-        self.predict_horizon = float(os.environ.get("CAMERA_V2_TRACK_PREDICT_SEC", "0.70"))
-        self.velocity_drag = float(os.environ.get("CAMERA_V2_TRACK_VELOCITY_DRAG", "1.35"))
-
-        self.instant_confirm_conf = float(
-            os.environ.get("CAMERA_V2_TRACK_INSTANT_CONF", "0.48")
+        # Keep invisible probation candidates long enough to see the next sparse
+        # detector observation. Confirmed display state is intentionally much
+        # shorter than the previous 4.8 s flow experiment so a rejected/lost
+        # person cannot leave a long green ghost in the room.
+        self.max_age = float(os.environ.get("CAMERA_V2_TRACK_HOLD_SEC", "2.80"))
+        self.tentative_age = float(
+            os.environ.get("CAMERA_V2_TRACK_TENTATIVE_SEC", "2.60")
         )
-        self.confirm_hits = max(2, int(os.environ.get("CAMERA_V2_TRACK_CONFIRM_HITS", "2")))
-        self.match_floor = float(os.environ.get("CAMERA_V2_TRACK_MATCH_FLOOR", "0.16"))
+        self.predict_horizon = float(
+            os.environ.get("CAMERA_V2_TRACK_PREDICT_SEC", "0.70")
+        )
+        self.velocity_drag = float(
+            os.environ.get("CAMERA_V2_TRACK_VELOCITY_DRAG", "1.35")
+        )
+
+        # The old value 0.48 allowed a single plausible-looking false positive to
+        # become a rendered track immediately. Default to strict birth probation;
+        # only exceptionally strong RF-DETR evidence may skip the second hit.
+        self.instant_confirm_conf = float(
+            os.environ.get("CAMERA_V2_TRACK_INSTANT_CONF", "0.85")
+        )
+        self.confirm_hits = max(
+            2, int(os.environ.get("CAMERA_V2_TRACK_CONFIRM_HITS", "2"))
+        )
+        self.match_floor = float(
+            os.environ.get("CAMERA_V2_TRACK_MATCH_FLOOR", "0.16")
+        )
 
     def _guard_box(self, box):
         x1, y1, x2, y2 = [float(v) for v in box]
@@ -187,7 +204,7 @@ class AnchoredPersonTracker:
         size_sim = _size_similarity(pw, ph, dw, dh)
 
         # Wide gate: low IoU is allowed if the body/foot anchors still agree.
-        # This is what keeps the same track through sitting, bending and partial
+        # This keeps the same track through sitting, bending and partial
         # chair/desk occlusion.
         if overlap < 0.01 and center_dist > 1.55 and bottom_dist > 1.25:
             return None
@@ -203,7 +220,9 @@ class AnchoredPersonTracker:
             + size_sim * 0.08
         )
 
-    def _correct_track(self, track: AnchorTrack, box, conf: float, captured_t: float) -> None:
+    def _correct_track(
+        self, track: AnchorTrack, box, conf: float, captured_t: float
+    ) -> None:
         mcx, mcy, mw, mh = _xyxy_to_state(box)
         pcx, pcy, pw, ph = self._predict_state(track, captured_t)
         dt = max(0.08, captured_t - track.last_det_t)
@@ -237,9 +256,8 @@ class AnchoredPersonTracker:
             track.vx *= 0.72
             track.vy *= 0.72
 
-        # High position gain minimizes visible detector latency. Prediction
-        # supplies smooth intermediate motion; detector measurements remain the
-        # truth and pull the anchor back immediately when prediction is wrong.
+        # Prediction supplies smooth intermediate motion; detector measurements
+        # remain truth and pull the anchor back when prediction is wrong.
         pos_gain = 0.80 if conf >= 0.35 else 0.72
         track.cx = pcx + residual_x * pos_gain
         track.cy = pcy + residual_y * pos_gain
@@ -300,9 +318,9 @@ class AnchoredPersonTracker:
                 if tid not in used_tracks:
                     track.misses += 1
 
-            # Create an anchor for unmatched detections. Low-confidence tracks
-            # are tentative until seen again, while a strong RF-DETR observation
-            # can become visible immediately.
+            # Unmatched detections enter probation. They are retained internally
+            # long enough for the next sparse detector result, but are invisible
+            # until confirmed by another spatially-consistent observation.
             for di, (box, conf) in enumerate(guarded):
                 if di in used_dets:
                     continue
@@ -333,7 +351,9 @@ class AnchoredPersonTracker:
             for tid in stale:
                 current.pop(tid, None)
 
-    def render(self, cid: str, now: float) -> list[tuple[float, float, float, float, float]]:
+    def render(
+        self, cid: str, now: float
+    ) -> list[tuple[float, float, float, float, float]]:
         with self.lock:
             current = self.tracks.get(cid, {})
             rows: list[tuple[float, float, float, float, float]] = []
@@ -345,10 +365,10 @@ class AnchoredPersonTracker:
                     stale.append(tid)
                     continue
 
-                # Tentative weak boxes are not allowed to become long-lived
-                # false positives. Strong first observations are shown at once;
-                # weaker observations become visible after temporal confirmation.
-                if not track.confirmed and track.confidence < 0.30:
+                # Probation candidates are NEVER shown. This is the critical
+                # difference from the previous implementation, which displayed a
+                # single >=0.30/0.48 false positive and then flow kept it alive.
+                if not track.confirmed:
                     continue
 
                 x1, y1, x2, y2 = self._predict_box(track, now)
@@ -356,7 +376,9 @@ class AnchoredPersonTracker:
                     continue
 
                 decay_age = max(0.0, age - 0.65)
-                shown_conf = max(0.05, track.confidence * math.exp(-0.10 * decay_age))
+                shown_conf = max(
+                    0.05, track.confidence * math.exp(-0.10 * decay_age)
+                )
                 rows.append((x1, y1, x2, y2, shown_conf))
 
             for tid in stale:
@@ -364,14 +386,14 @@ class AnchoredPersonTracker:
             return rows
 
     def anchors(self, cid: str, now: float):
-        """Return persistent center anchors for the optical-flow/OSD-dot stage."""
+        """Return confirmed persistent center anchors for flow/OSD-dot stages."""
         with self.lock:
             current = self.tracks.get(cid, {})
             output = []
             for tid, track in current.items():
                 age = max(0.0, float(now) - track.last_det_t)
                 limit = self.max_age if track.confirmed else self.tentative_age
-                if age > limit:
+                if age > limit or not track.confirmed:
                     continue
                 cx, cy, _w, _h = self._predict_state(track, now)
                 output.append(
@@ -380,7 +402,7 @@ class AnchoredPersonTracker:
                         "cx": _clamp(cx, 0.0, self.width - 1.0),
                         "cy": _clamp(cy, 0.0, self.height - 1.0),
                         "age": age,
-                        "confirmed": bool(track.confirmed),
+                        "confirmed": True,
                         "confidence": float(track.confidence),
                     }
                 )
