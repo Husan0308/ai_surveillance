@@ -4,16 +4,19 @@ import os
 
 # Keep the mux at the known 4MP main-stream geometry. DeepStream recommends
 # matching streammux to the input resolution to avoid an unnecessary scale before
-# tracker/tiler. The detector and NvDCF keep their own lightweight resolutions.
+# tracker/tiler. RF-DETR-S and NvDCF keep their own lightweight resolutions.
 _CANONICAL_RUNTIME = {
     "CAMERA_V2_FRAME_WIDTH": "2560",
     "CAMERA_V2_FRAME_HEIGHT": "1440",
     "CAMERA_V2_DETECT_WIDTH": "736",
     "CAMERA_V2_DETECT_HEIGHT": "416",
-    "CAMERA_V2_DETECT_CONF": "0.05",
+    "CAMERA_V2_DETECT_CONF": "0.18",
     "CAMERA_V2_DETECT_IOU": "0.65",
     "CAMERA_V2_MAX_DET": "40",
-    "CAMERA_V2_MICRO_BATCH": "2",
+    # GTX 1050 Ti has 4 GB VRAM. Start RF-DETR-S at batch 1; NvDCF carries
+    # continuity between detector observations. Hardware smoke may later prove
+    # that micro-batch 2 is safe, but production must not depend on that.
+    "CAMERA_V2_MICRO_BATCH": "1",
     "CAMERA_V2_TRACKER_WIDTH": "512",
     "CAMERA_V2_TRACKER_HEIGHT": "288",
 }
@@ -28,16 +31,23 @@ if _stale_runtime_values:
     print(
         "CAMERA_RUNTIME_PROFILE stale_env_overridden="
         + ",".join(_stale_runtime_values)
-        + " canonical=mux:2560x1440,detector:736x416,tracker:512x288",
+        + " canonical=mux:2560x1440,detector:RF-DETR-S@736x416,tracker:512x288",
         flush=True,
     )
+
+# The active core uses RF-DETR-S as the mandatory sparse person detector. Install
+# the spawn-safe worker before importing CameraPersonTrackingFinal, which imports
+# the detector module and captures its worker function for process creation.
+from .rfdetr_backend import install as _install_rfdetr_backend
+
+_install_rfdetr_backend()
 
 from .heatmap_filter import NativeHeatmapFilter
 from .person_tracking_final import CameraPersonTrackingFinal
 
 
 class CameraPersonTrackingHeatmap(CameraPersonTrackingFinal):
-    """Camera-local tracking with lightweight floor-contact heatmap."""
+    """Camera-local RF-DETR-S + NvDCF tracking with floor-contact heatmap."""
 
     def __init__(self) -> None:
         self.heatmap_enabled = os.environ.get("CAMERA_V2_HEATMAP", "1").strip().lower() not in {
