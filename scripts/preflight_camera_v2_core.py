@@ -39,9 +39,9 @@ def main() -> int:
         raise RuntimeError(
             f"monitoring wall must be 1600x1350 (800x450/tile), got {WALL_WIDTH}x{WALL_HEIGHT}"
         )
-    if (INFER_WIDTH, INFER_HEIGHT) != (736, 416):
+    if (INFER_WIDTH, INFER_HEIGHT) != (672, 384):
         raise RuntimeError(
-            f"detector geometry must be 736x416, got {INFER_WIDTH}x{INFER_HEIGHT}"
+            f"RF-DETR-S detector geometry must be 672x384, got {INFER_WIDTH}x{INFER_HEIGHT}"
         )
     if (tracker_width, tracker_height) != (512, 288):
         raise RuntimeError(
@@ -63,16 +63,38 @@ def main() -> int:
         if required not in tracker_source:
             raise RuntimeError(f"fresh detector path guard missing: {required}")
 
+    # The display smoother is intentionally active again. It may only rewrite
+    # rect_params of REAL current-frame NvDCF objects; it must never manufacture
+    # metadata, IDs or a separate temporal tracker.
     native_bridge_source = (ROOT / "services/camera_v2/native_bridge.py").read_text(
         encoding="utf-8"
     )
-    for forbidden in ("SMOOTHER_SOURCE", "camera_v2_smooth_display_boxes"):
-        if forbidden in native_bridge_source:
-            raise RuntimeError(f"legacy display smoother is still active: {forbidden}")
+    for required in ("SMOOTHER_SOURCE", "camera_v2_smooth_display_boxes"):
+        if required not in native_bridge_source:
+            raise RuntimeError(f"display smoother wiring missing: {required}")
 
-    # nvtracker is the last geometry-writing component before nvmultistreamtiler.
-    # DeepStream therefore already places the current tracker box in rect_params.
-    # The label layer is allowed to style borders/text only, never rewrite bbox.
+    smoother_source = (ROOT / "services/camera_v2/native_display_smoother.c").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        "Display-only smoother for REAL current-frame NvDCF objects",
+        "It never creates metadata",
+        "obj->rect_params.left = left",
+        "obj->rect_params.top = top",
+        "obj->rect_params.width = right - left",
+        "obj->rect_params.height = bottom - top",
+    ):
+        if required not in smoother_source:
+            raise RuntimeError(f"display-only smoother contract missing: {required}")
+    for forbidden in (
+        "nvds_acquire_obj_meta_from_pool",
+        "nvds_add_obj_meta_to_frame",
+    ):
+        if forbidden in smoother_source:
+            raise RuntimeError(f"display smoother must not create object metadata: {forbidden}")
+
+    # nvtracker is the last truth-geometry component before the display-only
+    # smoother and nvmultistreamtiler. The label layer styles borders/text only.
     label_source = (ROOT / "services/camera_v2/native_label_style.c").read_text(
         encoding="utf-8"
     )
@@ -121,8 +143,9 @@ def main() -> int:
         f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=PASS "
         f"mux={mux_width}x{mux_height} grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // 2}x{WALL_HEIGHT // 3} focus=1920x1080 "
-        f"detector={INFER_WIDTH}x{INFER_HEIGHT} tracker={tracker_width}x{tracker_height} "
-        "stride_safe=PASS bbox=tracker-rect-params scaling=lanczos custom_bbox_hold=OFF"
+        f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT} "
+        f"tracker={tracker_width}x{tracker_height} "
+        "stride_safe=PASS bbox=nvdcf-truth+display-only-smoother scaling=lanczos"
     )
     print("CAMERA_PREFLIGHT=PASS")
     return 0
