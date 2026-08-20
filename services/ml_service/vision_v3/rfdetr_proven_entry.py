@@ -87,6 +87,13 @@ runtime.SixCameraRFDETR._on_infer_sample = _on_infer_sample_stride_safe
 
 
 def main() -> int:
+    print(
+        "V3_RFDETR_PROFILE source=agent/rfdetr-s-core-final "
+        "model=RF-DETR-S shape=672x384 threshold=0.18 micro_batch=1 "
+        "semantic_person=class_name-first smoother=legacy-motion "
+        "roi=0 hard_masks=0 max_result_age=220ms",
+        flush=True,
+    )
     return runtime.main()
 
 
