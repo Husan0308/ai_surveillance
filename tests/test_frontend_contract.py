@@ -74,21 +74,18 @@ def test_mmap_wall_repaints_only_new_frames_and_keeps_mjpeg_fallback() -> None:
     assert "frame_refresh_interval_ms" in operator
 
 
-def test_focused_camera_gets_hq_scaling_without_six_feed_copy_load() -> None:
+def test_visible_camera_wall_restores_old_clear_scaling_and_focus_pause() -> None:
     wall = source("services/frontend/app/camera_wall.py")
     mmap_reader = source("services/frontend/app/mmap_frame_reader.py")
 
-    # Restore the old acd673ba policy: normal six-camera wall uses the cheap
-    # painter path; only the single focused tile enables HQ scaling.
-    assert "self._smooth_scaling = False" in wall
-    assert "set_smooth_scaling(bool(focused))" in wall
+    # Old simple-clear-detection wall used HQ scaling for all visible feeds.
+    assert "self._smooth_scaling = True" in wall
+    assert "self.mmap_canvas.set_smooth_scaling(bool(active))" in wall
     assert "QPainter.RenderHint.SmoothPixmapTransform" in wall
-    assert "Qt.TransformationMode.FastTransformation" in wall
-    assert "set_presentation_mode" in wall
-    assert "_apply_presentation_policy" in wall
+    assert "Qt.TransformationMode.SmoothTransformation" in wall
 
-    # Hidden tiles stop converting every mmap packet into a QImage while one
-    # camera is focused, then immediately jump to the newest sequence on resume.
+    # Hidden tiles still stop converting every mmap packet while one camera is
+    # focused, then immediately jump to the newest sequence on resume.
     assert "def set_active" in mmap_reader
     assert "if not self._active.is_set()" in mmap_reader
     assert "self.mmap_reader.set_active(bool(active))" in wall
