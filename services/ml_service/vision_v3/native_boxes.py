@@ -40,7 +40,7 @@ def ensure_bridge() -> Path:
             text=True,
         ).strip()
     )
-    cmd = [
+    common = [
         gcc,
         "-shared",
         "-fPIC",
@@ -53,13 +53,19 @@ def ensure_bridge() -> Path:
         f"-L{ds / 'lib'}",
         f"-Wl,-rpath,{ds / 'lib'}",
         *flags,
-        "-lnvds_meta",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0 or not LIB_PATH.exists():
-        detail = (result.stderr or result.stdout or "unknown compiler error").strip()
-        raise RuntimeError("Vision V3 metadata bridge compile failed: " + detail)
-    return LIB_PATH
+    attempts = (
+        ["-lnvds_meta", "-lnvdsgst_meta"],
+        ["-lnvds_meta"],
+        ["-lnvdsgst_meta", "-lnvds_meta"],
+    )
+    errors: list[str] = []
+    for libs in attempts:
+        result = subprocess.run([*common, *libs], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and LIB_PATH.exists():
+            return LIB_PATH
+        errors.append((result.stderr or result.stdout or "unknown compiler error").strip())
+    raise RuntimeError("Vision V3 metadata bridge compile failed: " + " | ".join(errors[-2:]))
 
 
 class NativeBoxBridge:
