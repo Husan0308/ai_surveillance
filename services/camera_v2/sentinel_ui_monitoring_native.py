@@ -389,6 +389,6 @@ class MonitoringPage(QWidget):
             pass
         self.controller.stop()
         try:
-            self.video_window.close()
+            self.surface.video_window.close()
         except Exception:
             pass
