@@ -32,6 +32,13 @@ def main() -> int:
     if os.environ.get("CAMERA_V2_PASCAL_SAFE", "0") != "1":
         raise RuntimeError("production launcher must set CAMERA_V2_PASCAL_SAFE=1")
 
+    transport = os.environ.get("CAMERA_V2_RTSP_TRANSPORT", "").strip().lower()
+    latency = int(os.environ.get("CAMERA_V2_RTSP_LATENCY_MS", "0"))
+    if transport != "tcp":
+        raise RuntimeError(f"production RTSP transport must be tcp, got {transport!r}")
+    if latency < 200:
+        raise RuntimeError(f"production RTSP latency must be >=200ms, got {latency}ms")
+
     mux_width = int(os.environ.get("CAMERA_V2_FRAME_WIDTH", "0"))
     mux_height = int(os.environ.get("CAMERA_V2_FRAME_HEIGHT", "0"))
     if (mux_width, mux_height) != (2560, 1440):
@@ -82,6 +89,17 @@ def main() -> int:
         if forbidden in runtime_source:
             raise RuntimeError(f"Pascal-safe runtime leaked tracker dependency: {forbidden}")
 
+    secure_source = (ROOT / "services/camera_v2/secure.py").read_text(encoding="utf-8")
+    for required in (
+        'CAMERA_V2_RTSP_TRANSPORT',
+        'self._set_if(source, "select-rtp-protocol", 4 if transport == "tcp" else 0)',
+        'self._set_if(element, "protocols", 4)',
+        "def _source_pad_added",
+        "caps.is_any()",
+    ):
+        if required not in secure_source:
+            raise RuntimeError(f"RTSP ingest guard missing: {required}")
+
     sample_source = inspect.getsource(CameraPascalSafeRuntime._on_infer_sample)
     for required in ("mapped_size", "row_stride", "tight_stride", "CAMERA_INFER_LAYOUT"):
         if required not in sample_source:
@@ -113,10 +131,11 @@ def main() -> int:
 
     print(
         f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=OFF "
-        f"mux={mux_width}x{mux_height} grid={WALL_WIDTH}x{WALL_HEIGHT} "
+        f"rtsp={transport} latency={latency}ms mux={mux_width}x{mux_height} "
+        f"grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
         f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
-        "detector_path=postmux-demux source_ingest=isolated "
+        "detector_path=postmux-demux source_ingest=isolated dynamic_pad=late-caps-safe "
         "tracker=motion-predictor nvtracker=disabled stride_safe=PASS "
         "stage_counters=source+mux+wall+sink scaling=lanczos"
     )
