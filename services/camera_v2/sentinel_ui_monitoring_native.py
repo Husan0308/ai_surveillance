@@ -79,7 +79,7 @@ class NativeVideoHost(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self.video_window.show()
+        # createWindowContainer owns the embedded QWindow's visibility/parenting.
         QTimer.singleShot(180, self._publish_xid)
         QTimer.singleShot(700, self._publish_xid)
 
