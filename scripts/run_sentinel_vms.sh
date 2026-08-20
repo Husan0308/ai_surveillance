@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 HEAD_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
-echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.20-r18-rtsp-tcp"
+echo "SENTINEL_BUILD branch=${BRANCH} head=${HEAD_SHA} expected_ui=2026.08.20-r19-analysis-tiler"
 
 if [[ -n "${DISPLAY:-}" && -z "${QT_QPA_PLATFORM:-}" ]]; then
   export QT_QPA_PLATFORM=xcb
@@ -15,10 +15,9 @@ echo "SENTINEL_DISPLAY session=${XDG_SESSION_TYPE:-unknown} qt_platform=${QT_QPA
 INHERITED_DETECT="${CAMERA_V2_DETECT_WIDTH:-unset}x${CAMERA_V2_DETECT_HEIGHT:-unset}"
 INHERITED_MUX="${CAMERA_V2_FRAME_WIDTH:-unset}x${CAMERA_V2_FRAME_HEIGHT:-unset}"
 
-# The target NVR previously negotiated UDP and failed inside udpsrc with
-# not-negotiated (-4). Production is deterministic RTSP/RTP-over-TCP. 250 ms is
-# still low latency for an office wall while giving the camera/NVR enough jitter
-# budget to avoid the 100 ms edge seen in earlier runs.
+# Keep RTSP deterministic on the target NVR. The r18 hardware log proved TCP
+# negotiation itself succeeds; later rtspsrc errors were downstream backpressure
+# propagated upstream, not a transport failure.
 export CAMERA_V2_RTSP_TRANSPORT=tcp
 export CAMERA_V2_RTSP_LATENCY_MS=250
 
@@ -35,9 +34,9 @@ export CAMERA_V2_DETECT_GPU_DUTY=0.24
 export CAMERA_V2_DETECT_GPU_DUTY_MIN=0.12
 export CAMERA_V2_DETECT_GPU_DUTY_MAX=0.30
 
-# GTX 1050 Ti production path: source ingest goes directly into nvstreammux.
-# RF-DETR branches only after mux through nvstreamdemux, so detector load cannot
-# block any RTSP source from reaching the visible camera wall.
+# GTX 1050 Ti production path. Camera ingest remains direct-to-mux. RF-DETR uses
+# a gated secondary analysis tiler; nvstreamdemux is deliberately absent because
+# its zero-copy children retained mux batches and exhausted the 8-buffer pool.
 export CAMERA_V2_PASCAL_SAFE=1
 export CAMERA_V2_HEATMAP=0
 
@@ -52,7 +51,7 @@ export CAMERA_V2_BOX_BOTTOM_MARGIN=0.10
 export CAMERA_V2_BOX_MAX_AGE=1.6
 export CAMERA_V2_BOX_MAX_PREDICT=0.55
 
-echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=RF-DETR-S@672x384 threshold=0.18 batch=1 scheduler=adaptive-duty:12-30% detector_path=postmux-demux tracker=motion-predictor nvtracker=disabled display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
+echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=RF-DETR-S@672x384 threshold=0.18 batch=1 scheduler=adaptive-duty:12-30% detector_path=analysis-tiler demux=disabled tracker=motion-predictor nvtracker=disabled display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
 
 python scripts/preflight_rfdetr_core.py
 python scripts/preflight_pascal_safe.py
