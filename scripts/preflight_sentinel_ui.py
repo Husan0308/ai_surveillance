@@ -19,7 +19,7 @@ from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_R
 from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
-EXPECTED_BUILD = "2026.08.20-r14-monitoring-host"
+EXPECTED_BUILD = "2026.08.20-r15-monitoring-recovery"
 
 
 def _fail(message: str) -> None:
@@ -95,6 +95,9 @@ def main_preflight() -> int:
             "self.video_window = QWindow()",
             "QWidget.createWindowContainer(self.video_window, self)",
             "self.video_window.winId()",
+            "self.video_window.installEventFilter(self)",
+            "def publish_current_xid(self, *, force: bool = False)",
+            "self.surface.publish_current_xid(force=True)",
             "class MonitoringPage(QWidget)",
             "self.surface = NativeVideoHost(self.wall_card)",
             "self.surface.nativeReady.connect(self._start_or_bind)",
@@ -127,7 +130,7 @@ def main_preflight() -> int:
         shell,
         (
             "from .sentinel_ui_monitoring_native import MonitoringPage",
-            "BUILD_TAG = \"2026.08.20-r14-monitoring-host\"",
+            "BUILD_TAG = \"2026.08.20-r15-monitoring-recovery\"",
             "self.monitoring_host = QWidget(self.content)",
             "self.monitoring_page = MonitoringPage()",
             "monitoring_layout.addWidget(self.monitoring_page, 1)",
@@ -166,6 +169,7 @@ def main_preflight() -> int:
             'runtime.tiler.set_property("columns", GRID_COLUMNS)',
             "runtime.set_wall_output_geometry(WALL_WIDTH, WALL_HEIGHT)",
             "GstVideo.VideoOverlay.set_window_handle",
+            "GstVideo.VideoOverlay.expose",
             "live_source_counts",
             "room_people[room_key] = max",
             "total = sum(room_people.values())",

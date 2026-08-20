@@ -11,6 +11,8 @@ Fullscreen only changes the Qt shell/layout; it never mutates the tiler while th
 pipeline is PLAYING.
 """
 
+import time
+
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QWindow
 from PySide6.QtWidgets import (
@@ -49,17 +51,25 @@ class NativeVideoHost(QWidget):
         self.container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.container.setMinimumSize(640, 540)
         self.container.setStyleSheet("background:#020507;border:0;")
+        self.video_window.installEventFilter(self)
+        self.container.installEventFilter(self)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.container, 1)
 
-    def _publish_xid(self) -> None:
-        if not self.isVisible():
+    def publish_current_xid(self, *, force: bool = False) -> None:
+        """Publish the current embedded X11 handle.
+
+        ``createWindowContainer`` may recreate its platform child while the Qt
+        widget object survives. A forced publish is also needed after a camera
+        process exits: the replacement process must receive the same still-valid
+        XID instead of waiting forever for a different one.
+        """
+        if not self.isVisible() or not self.container.isVisible():
             return
         try:
-            self.video_window.create()
             xid = int(self.video_window.winId())
         except Exception as exc:
             print(
@@ -67,7 +77,7 @@ class NativeVideoHost(QWidget):
                 flush=True,
             )
             return
-        if xid <= 0 or xid == self._last_emitted_xid:
+        if xid <= 0 or (not force and xid == self._last_emitted_xid):
             return
         self._last_emitted_xid = xid
         print(
@@ -77,17 +87,38 @@ class NativeVideoHost(QWidget):
         )
         self.nativeReady.emit(xid)
 
+    # Compatibility for the existing preflight and older callers.
+    def _publish_xid(self) -> None:
+        self.publish_current_xid()
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
         # createWindowContainer owns the embedded QWindow's visibility/parenting.
-        QTimer.singleShot(180, self._publish_xid)
-        QTimer.singleShot(700, self._publish_xid)
+        QTimer.singleShot(180, self.publish_current_xid)
+        QTimer.singleShot(700, self.publish_current_xid)
 
     def event(self, event) -> bool:
         result = super().event(event)
         if event.type() in (QEvent.Type.Show, QEvent.Type.ParentChange):
-            QTimer.singleShot(120, self._publish_xid)
+            QTimer.singleShot(120, self.publish_current_xid)
         return result
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        # QWindow platform surfaces can be destroyed/recreated without replacing
+        # the Python object. Re-publish after Qt finishes the native transition so
+        # GstVideoOverlay never remains attached to a stale XID.
+        if watched in (self.video_window, self.container) and event.type() in (
+            QEvent.Type.Show,
+            QEvent.Type.ParentChange,
+            QEvent.Type.WinIdChange,
+            QEvent.Type.PlatformSurface,
+        ):
+            # Show/parent transitions may require a repaint even if X11 reused the
+            # same numeric handle, so deliberately rebind that handle.
+            QTimer.singleShot(
+                0, lambda: self.publish_current_xid(force=True)
+            )
+        return super().eventFilter(watched, event)
 
 
 class CameraStatusRow(QFrame):
@@ -144,7 +175,10 @@ class MonitoringPage(QWidget):
         self.camera_configs = list(load_settings().cameras)
         self.controller = ProPipelineController()
         self._last_bound_xid = 0
+        self._last_bind_at = 0.0
         self._fullscreen_active = False
+        self._restart_not_before = 0.0
+        self._restart_delay = 0.5
 
         root = QHBoxLayout(self)
         root.setContentsMargins(12, 10, 12, 12)
@@ -290,19 +324,41 @@ class MonitoringPage(QWidget):
             self.controller.stop()
             process = None
             self._last_bound_xid = 0
+            self._last_bind_at = 0.0
 
-        if process is not None and process.is_alive() and xid == self._last_bound_xid:
+        now = time.monotonic()
+        if (
+            process is not None
+            and process.is_alive()
+            and xid == self._last_bound_xid
+            and now - self._last_bind_at < 0.15
+        ):
             return
 
         action = "start" if process is None else "rebind"
         print(f"SENTINEL_UI_BIND action={action} xid={xid}", flush=True)
         self.controller.start_or_bind(xid)
         self._last_bound_xid = xid
+        self._last_bind_at = now
 
     def _ensure_started(self) -> None:
-        if self.controller.process is not None:
+        process = self.controller.process
+        if process is not None and process.is_alive():
             return
-        self.surface._publish_xid()
+
+        now = time.monotonic()
+        if now < self._restart_not_before:
+            return
+
+        if process is not None:
+            # Reap/reset the failed child and its queues before a clean restart.
+            self.controller.stop()
+            self._last_bound_xid = 0
+            self._last_bind_at = 0.0
+
+        self._restart_not_before = now + self._restart_delay
+        self._restart_delay = min(15.0, self._restart_delay * 2.0)
+        self.surface.publish_current_xid(force=True)
 
     def timerEvent(self, event) -> None:
         if event.timerId() != self.poll_timer:
@@ -310,6 +366,7 @@ class MonitoringPage(QWidget):
             return
 
         self._ensure_started()
+        self.surface.publish_current_xid()
         status, metrics = self.controller.poll()
         state = str(getattr(status, "state", "STARTING") or "STARTING").upper()
 
@@ -338,6 +395,7 @@ class MonitoringPage(QWidget):
         self.unknown_value.setText(str(unknown))
 
         if online_count > 0:
+            self._restart_delay = 0.5
             self.pipeline_state.setText(
                 "LIVE" if online_count == configured else f"LIVE {online_count}/{configured}"
             )

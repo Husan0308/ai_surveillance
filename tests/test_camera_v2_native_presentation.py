@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -5,6 +6,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def called_attributes(text: str) -> set[str]:
+    tree = ast.parse(text)
+    return {
+        str(node.func.attr)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
 
 
 def test_native_wall_keeps_one_k_tile_and_1080p_source_canvas() -> None:
@@ -35,7 +45,7 @@ def test_native_video_uses_one_persistent_child_surface() -> None:
     assert "ExactCameraTile" not in app
     assert "WA_PaintOnScreen" not in app
     assert "def paintEngine" not in app
-    assert "showFullScreen()" not in app
+    assert "showFullScreen" not in called_attributes(app)
     assert "window.showMaximized()" in app
 
     # A continuously PLAYING EGL sink owns redraw. Do not force expose/rebind on

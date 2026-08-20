@@ -24,7 +24,7 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.20-r14-monitoring-host"
+BUILD_TAG = "2026.08.20-r15-monitoring-recovery"
 
 
 class MainWindow(QMainWindow):

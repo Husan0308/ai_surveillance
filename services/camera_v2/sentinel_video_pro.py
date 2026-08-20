@@ -80,6 +80,14 @@ def _pipeline_process_pro(window_id: int, command_q, status_q) -> None:
                 GstVideo.VideoOverlay.handle_events(overlay, False)
             except Exception:
                 pass
+            try:
+                # A rebind can happen after Qt recreates/reparents the embedded
+                # QWindow. Ask the sink to repaint its last completed frame now;
+                # otherwise a valid live pipeline can remain visually black until
+                # a later expose event that may never reach the child process.
+                GstVideo.VideoOverlay.expose(overlay)
+            except Exception:
+                pass
 
         def set_focus(source_id: int | None) -> None:
             nonlocal current_focus

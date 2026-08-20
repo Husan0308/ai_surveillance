@@ -55,6 +55,9 @@ def test_monitoring_uses_one_embedded_qwindow_video_target() -> None:
     assert "self.video_window = QWindow()" in native
     assert "QWidget.createWindowContainer(self.video_window, self)" in native
     assert "self.video_window.winId()" in native
+    assert "self.video_window.installEventFilter(self)" in native
+    assert "def publish_current_xid(self, *, force: bool = False)" in native
+    assert "self.surface.publish_current_xid(force=True)" in native
     assert "self.surface = NativeVideoHost(self.wall_card)" in native
     assert "self.surface.nativeReady.connect(self._start_or_bind)" in native
     assert "class CameraStatusRow(QFrame)" in native
@@ -70,3 +73,7 @@ def test_monitoring_uses_one_embedded_qwindow_video_target() -> None:
     assert "showFullScreen" not in shell_calls
     assert "showNormal" not in shell_calls
     assert "showMaximized" in shell_calls
+
+    video = source("services/camera_v2/sentinel_video_pro.py")
+    assert "GstVideo.VideoOverlay.set_window_handle" in video
+    assert "GstVideo.VideoOverlay.expose" in video

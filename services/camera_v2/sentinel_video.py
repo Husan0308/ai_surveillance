@@ -78,6 +78,10 @@ def _pipeline_process(window_id: int, command_q, status_q) -> None:
                 GstVideo.VideoOverlay.handle_events(overlay, False)
             except Exception:
                 pass
+            try:
+                GstVideo.VideoOverlay.expose(overlay)
+            except Exception:
+                pass
 
         bind_overlay(runtime.sink, current_xid)
 
@@ -300,6 +304,9 @@ class PipelineController:
             except Exception:
                 pass
             process.join(timeout=7.0)
+        else:
+            # Reap a child that failed during startup before replacing its queues.
+            process.join(timeout=0.2)
         if process.is_alive():
             process.terminate()
             process.join(timeout=2.0)
