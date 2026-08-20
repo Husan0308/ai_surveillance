@@ -200,7 +200,7 @@ def rfdetr_worker_v2(job_q, result_q, cfg: dict) -> None:
             raise RuntimeError("PyTorch CUDA is unavailable")
         device = str(cfg.get("device", "cuda:0"))
         if device.startswith("cuda:"):
-            torch.cuda.set_device(int(device.split(": 1)[1]))
+            torch.cuda.set_device(int(device.split(":", 1)[1]))
         try:
             torch.set_num_threads(1)
             torch.set_num_interop_threads(1)
