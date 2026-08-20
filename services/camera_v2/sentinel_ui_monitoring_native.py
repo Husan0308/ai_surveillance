@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Production Monitoring page with one stable native video target.
+"""Production Monitoring page with one stable native X11 video target.
 
-The camera pixels are rendered by GstVideoOverlay into a dedicated QWindow that
-Qt embeds with QWidget.createWindowContainer(). All Qt controls live outside that
-native child, so normal UI repaints cannot cover or invalidate the EGL surface.
+The camera pixels are rendered by GstVideoOverlay directly into one native
+QWidget. The widget bypasses Qt's backing store so a previously visible page can
+never remain painted over the live EGL surface under X11/AnyDesk.
 
 The DeepStream wall remains a fixed 2x3 grid for the lifetime of the pipeline.
 Fullscreen only changes the Qt shell/layout; it never mutates the tiler while the
@@ -14,7 +14,6 @@ pipeline is PLAYING.
 import time
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
-from PySide6.QtGui import QWindow
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -30,47 +29,49 @@ from .sentinel_ui_base import C
 from .sentinel_video_wall_ui import ProPipelineController
 
 
-class NativeVideoHost(QWidget):
-    """Own exactly one embedded QWindow and publish its platform window id."""
+class NativeVideoSurface(QWidget):
+    """One X11 child surface owned exclusively by GstVideoOverlay."""
 
     nativeReady = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("nativeVideoHost")
+        self.setObjectName("nativeVideoSurface")
         self.setMinimumSize(720, 608)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._last_emitted_xid = 0
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet("")
+        self.setAutoFillBackground(False)
 
-        self.video_window = QWindow()
-        self.video_window.setObjectName("sentinelVideoWindow")
+        # Qt must not preserve or repaint backing-store pixels over this child.
+        # nveglglessink is the only painter and receives this widget's stable XID.
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
 
-        self.container = QWidget.createWindowContainer(self.video_window, self)
-        self.container.setObjectName("nativeVideoContainer")
-        self.container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.container.setMinimumSize(640, 540)
-        self.container.setStyleSheet("background:#020507;border:0;")
-        self.video_window.installEventFilter(self)
-        self.container.installEventFilter(self)
+        self._rebind_timer = QTimer(self)
+        self._rebind_timer.setSingleShot(True)
+        self._rebind_timer.timeout.connect(
+            lambda: self.publish_current_xid(force=True)
+        )
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.container, 1)
+    def _schedule_rebind(self, delay_ms: int = 0) -> None:
+        self._rebind_timer.start(max(0, int(delay_ms)))
 
     def publish_current_xid(self, *, force: bool = False) -> None:
         """Publish the current embedded X11 handle.
 
-        ``createWindowContainer`` may recreate its platform child while the Qt
-        widget object survives. A forced publish is also needed after a camera
-        process exits: the replacement process must receive the same still-valid
-        XID instead of waiting forever for a different one.
+        X11 may recreate the widget's platform child while the Python object
+        survives. A forced publish is also needed after a camera process exits or
+        after Monitoring is shown again with the same numeric XID.
         """
-        if not self.isVisible() or not self.container.isVisible():
+        if not self.isVisible():
             return
         try:
-            xid = int(self.video_window.winId())
+            xid = int(self.winId())
         except Exception as exc:
             print(
                 f"SENTINEL_VIDEO_SURFACE xid_error={type(exc).__name__}:{exc}",
@@ -81,7 +82,7 @@ class NativeVideoHost(QWidget):
             return
         self._last_emitted_xid = xid
         print(
-            f"SENTINEL_VIDEO_SURFACE mode=qwindow-container xid={xid} "
+            f"SENTINEL_VIDEO_SURFACE mode=native-qwidget xid={xid} "
             f"size={self.width()}x{self.height()}",
             flush=True,
         )
@@ -93,32 +94,28 @@ class NativeVideoHost(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        # createWindowContainer owns the embedded QWindow's visibility/parenting.
-        QTimer.singleShot(180, self.publish_current_xid)
-        QTimer.singleShot(700, self.publish_current_xid)
+        self.raise_()
+        self._schedule_rebind(0)
+        QTimer.singleShot(180, lambda: self.publish_current_xid(force=True))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.isVisible():
+            self._schedule_rebind(60)
 
     def event(self, event) -> bool:
         result = super().event(event)
-        if event.type() in (QEvent.Type.Show, QEvent.Type.ParentChange):
-            QTimer.singleShot(120, self.publish_current_xid)
+        if event.type() in (QEvent.Type.WinIdChange, QEvent.Type.ParentChange):
+            if self.isVisible():
+                self._schedule_rebind(0)
         return result
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        # QWindow platform surfaces can be destroyed/recreated without replacing
-        # the Python object. Re-publish after Qt finishes the native transition so
-        # GstVideoOverlay never remains attached to a stale XID.
-        if watched in (self.video_window, self.container) and event.type() in (
-            QEvent.Type.Show,
-            QEvent.Type.ParentChange,
-            QEvent.Type.WinIdChange,
-            QEvent.Type.PlatformSurface,
-        ):
-            # Show/parent transitions may require a repaint even if X11 reused the
-            # same numeric handle, so deliberately rebind that handle.
-            QTimer.singleShot(
-                0, lambda: self.publish_current_xid(force=True)
-            )
-        return super().eventFilter(watched, event)
+    def paintEngine(self):  # noqa: N802
+        return None
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        # GstVideoOverlay owns every pixel of this native drawable.
+        event.accept()
 
 
 class CameraStatusRow(QFrame):
@@ -195,7 +192,7 @@ class MonitoringPage(QWidget):
         wall_layout.setContentsMargins(6, 6, 6, 6)
         wall_layout.setSpacing(0)
 
-        self.surface = NativeVideoHost(self.wall_card)
+        self.surface = NativeVideoSurface(self.wall_card)
         self.surface.nativeReady.connect(self._start_or_bind)
         wall_layout.addWidget(self.surface, 1)
         root.addWidget(self.wall_card, 1)
@@ -413,6 +410,19 @@ class MonitoringPage(QWidget):
         if callable(setter):
             setter(bool(enabled))
 
+    def resume_video(self) -> None:
+        """Raise and rebind the native wall after returning from another page."""
+        self.show()
+        self.raise_()
+        self.wall_card.raise_()
+        self.surface.show()
+        self.surface.raise_()
+        self.surface.publish_current_xid(force=True)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self.resume_video)
+
     def open_fullscreen_grid(self) -> None:
         if self._fullscreen_active:
             return
@@ -446,7 +456,3 @@ class MonitoringPage(QWidget):
         except Exception:
             pass
         self.controller.stop()
-        try:
-            self.surface.video_window.close()
-        except Exception:
-            pass

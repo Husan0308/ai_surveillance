@@ -54,7 +54,7 @@ class FakeController:
 
 
 def test_native_host_can_republish_the_same_xid(qt_app) -> None:
-    host = monitoring.NativeVideoHost()
+    host = monitoring.NativeVideoSurface()
     emitted: list[int] = []
     host.nativeReady.connect(emitted.append)
     host.resize(900, 700)

@@ -24,7 +24,7 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.20-r15-monitoring-recovery"
+BUILD_TAG = "2026.08.20-r16-native-x11"
 
 
 class MainWindow(QMainWindow):
@@ -128,7 +128,7 @@ class MainWindow(QMainWindow):
         hl.addWidget(self.camera_fullscreen)
         content_l.addWidget(self.header)
 
-        # Native QWindow content must not live inside QStackedWidget. Native child
+        # Native X11 video content must not live inside QStackedWidget. Native child
         # stacking is platform-level and can punch through sibling stack pages on
         # X11. Monitoring therefore owns a dedicated sibling host; only ordinary
         # Qt pages are kept in the stack below.
@@ -168,7 +168,7 @@ class MainWindow(QMainWindow):
         if index == 0:
             self.stack.hide()
             self.monitoring_host.show()
-            self.monitoring_page.show()
+            self.monitoring_page.resume_video()
         else:
             self.monitoring_host.hide()
             self.stack.setCurrentIndex(index - 1)
@@ -214,7 +214,7 @@ class MainWindow(QMainWindow):
         if self._current_page_index == 0:
             self.stack.hide()
             self.monitoring_host.show()
-            new_monitoring.show()
+            new_monitoring.resume_video()
         else:
             self.monitoring_host.hide()
 

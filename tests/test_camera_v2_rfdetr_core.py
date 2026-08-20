@@ -47,19 +47,20 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert "RFDETR_PREFLIGHT=PASS" in preflight
 
 
-def test_monitoring_uses_one_embedded_qwindow_video_target() -> None:
+def test_monitoring_uses_one_native_x11_video_target() -> None:
     native = source("services/camera_v2/sentinel_ui_monitoring_native.py")
     shell = source("services/camera_v2/sentinel_ui.py")
 
-    assert "class NativeVideoHost(QWidget)" in native
-    assert "self.video_window = QWindow()" in native
-    assert "QWidget.createWindowContainer(self.video_window, self)" in native
-    assert "self.video_window.winId()" in native
-    assert "self.video_window.installEventFilter(self)" in native
+    assert "class NativeVideoSurface(QWidget)" in native
+    assert "WA_NativeWindow, True" in native
+    assert "WA_DontCreateNativeAncestors, True" in native
+    assert "WA_PaintOnScreen, True" in native
+    assert "def paintEngine(self)" in native
     assert "def publish_current_xid(self, *, force: bool = False)" in native
     assert "self.surface.publish_current_xid(force=True)" in native
-    assert "self.surface = NativeVideoHost(self.wall_card)" in native
+    assert "self.surface = NativeVideoSurface(self.wall_card)" in native
     assert "self.surface.nativeReady.connect(self._start_or_bind)" in native
+    assert "def resume_video(self)" in native
     assert "class CameraStatusRow(QFrame)" in native
     assert "ProPipelineController()" in native
 
@@ -73,6 +74,7 @@ def test_monitoring_uses_one_embedded_qwindow_video_target() -> None:
     assert "showFullScreen" not in shell_calls
     assert "showNormal" not in shell_calls
     assert "showMaximized" in shell_calls
+    assert "self.monitoring_page.resume_video()" in shell
 
     video = source("services/camera_v2/sentinel_video_pro.py")
     assert "GstVideo.VideoOverlay.set_window_handle" in video

@@ -19,7 +19,7 @@ from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_R
 from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
-EXPECTED_BUILD = "2026.08.20-r15-monitoring-recovery"
+EXPECTED_BUILD = "2026.08.20-r16-native-x11"
 
 
 def _fail(message: str) -> None:
@@ -91,16 +91,17 @@ def main_preflight() -> int:
     _require_all(
         monitoring,
         (
-            "class NativeVideoHost(QWidget)",
-            "self.video_window = QWindow()",
-            "QWidget.createWindowContainer(self.video_window, self)",
-            "self.video_window.winId()",
-            "self.video_window.installEventFilter(self)",
+            "class NativeVideoSurface(QWidget)",
+            "WA_NativeWindow, True",
+            "WA_DontCreateNativeAncestors, True",
+            "WA_PaintOnScreen, True",
+            "def paintEngine(self)",
             "def publish_current_xid(self, *, force: bool = False)",
             "self.surface.publish_current_xid(force=True)",
             "class MonitoringPage(QWidget)",
-            "self.surface = NativeVideoHost(self.wall_card)",
+            "self.surface = NativeVideoSurface(self.wall_card)",
             "self.surface.nativeReady.connect(self._start_or_bind)",
+            "def resume_video(self)",
             "ProPipelineController()",
             'QLabel("People in Building")',
             "class CameraStatusRow(QFrame)",
@@ -110,7 +111,7 @@ def main_preflight() -> int:
             "def exit_fullscreen",
             "def shutdown",
         ),
-        "QWindow Monitoring",
+        "native QWidget Monitoring",
     )
 
     monitoring_calls = _called_attribute_names(monitoring)
@@ -130,7 +131,7 @@ def main_preflight() -> int:
         shell,
         (
             "from .sentinel_ui_monitoring_native import MonitoringPage",
-            "BUILD_TAG = \"2026.08.20-r15-monitoring-recovery\"",
+            "BUILD_TAG = \"2026.08.20-r16-native-x11\"",
             "self.monitoring_host = QWidget(self.content)",
             "self.monitoring_page = MonitoringPage()",
             "monitoring_layout.addWidget(self.monitoring_page, 1)",
@@ -140,16 +141,17 @@ def main_preflight() -> int:
             "self.monitoring_host.hide()",
             "self.stack.setCurrentIndex(index - 1)",
             "self.monitoring_host.show()",
+            "self.monitoring_page.resume_video()",
             "window.showMaximized()",
             "def set_monitoring_fullscreen",
         ),
         "native-safe shell",
     )
 
-    # The native QWindow must never be inserted into QStackedWidget. Only the
+    # The native video surface must never be inserted into QStackedWidget. Only the
     # ordinary Qt pages from NAV[1:] may be added to the stack.
     if "self.stack.addWidget(self.monitoring_page)" in shell:
-        _fail("Monitoring QWindow was reinserted into QStackedWidget")
+        _fail("Monitoring native surface was reinserted into QStackedWidget")
     if "for _, _, _, klass in self.NAV:" in shell:
         _fail("shell again stacks Monitoring with ordinary pages")
 
@@ -192,8 +194,8 @@ def main_preflight() -> int:
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT shell=Monitoring-outside-QStackedWidget PASS")
-    print("SENTINEL_PREFLIGHT monitoring=fixed-2x3 qwindow-container right-rail=270px")
-    print("SENTINEL_PREFLIGHT native_video=QWindow+createWindowContainer one-xid PASS")
+    print("SENTINEL_PREFLIGHT monitoring=fixed-2x3 native-qwidget right-rail=270px")
+    print("SENTINEL_PREFLIGHT native_video=one-X11-XID paint-on-screen PASS")
     print("SENTINEL_PREFLIGHT overlays=outside-native-video PASS")
     print("SENTINEL_PREFLIGHT tiler=runtime-fixed no-focus-mutation PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
