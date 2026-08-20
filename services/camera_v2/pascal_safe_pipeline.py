@@ -10,8 +10,8 @@ only the stages that are proven healthy on that machine:
 RTSP -> NVDEC -> nvstreammux -> RF-DETR side capture -> motion predictor
      -> nvmultistreamtiler -> NVMM RGBA -> nvdsosd -> nveglglessink
 
-It intentionally does not import person_tracking.py and never resolves or loads
-libnvds_nvmultiobjecttracker.so / NvDCF configuration files.
+It intentionally does not import the tracker classes and never resolves or loads
+DeepStream's low-level tracker library or NvDCF configuration files.
 """
 
 import os
@@ -40,10 +40,6 @@ def install_pascal_safe_pipeline() -> bool:
     return _enabled()
 
 
-# Install RF-DETR before CameraDetectionV2 starts its worker process. During this
-# import rfdetr_backend calls install_pascal_safe_pipeline(); the compatibility
-# hook above is already defined, so the circular import is harmless and no
-# tracker module is imported.
 from .rfdetr_backend import install as _install_rfdetr_backend
 
 _install_rfdetr_backend()
