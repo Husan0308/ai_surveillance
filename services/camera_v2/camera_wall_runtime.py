@@ -10,11 +10,13 @@ no-NvDCF Pascal runtime.
 Display policy is deterministic:
 1. Start with NVIDIA nveglglessink.
 2. Re-use the same stable Qt XID and never rebind an unchanged handle.
-3. If the runtime proves that buffers reach EGL but rendered remains zero, restart
-   once with the X11 system-memory fallback. This covers hybrid Intel/NVIDIA X11
-   desktops without penalizing the normal GPU-native path.
+3. If the runtime proves that buffers reach EGL but rendered remains zero, release
+   that complete GStreamer runtime and restart once with the X11 system-memory
+   fallback. This covers hybrid Intel/NVIDIA X11 desktops without penalizing the
+   normal GPU-native path.
 """
 
+import gc
 import multiprocessing as mp
 import os
 import queue
@@ -50,7 +52,9 @@ def _put_latest(q, state: str, detail: object = "") -> None:
         pass
 
 
-def _camera_wall_process(window_id: int, command_q, status_q) -> None:
+def _run_backend(window_id: int, command_q, status_q, display_backend: str) -> tuple[int, bool]:
+    """Run one complete display backend and release it before returning."""
+
     runtime = None
     try:
         xid = int(window_id)
@@ -61,10 +65,6 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
         os.environ["CAMERA_V2_HEATMAP"] = "0"
         os.environ["CAMERA_V2_WALL_WIDTH"] = str(WALL_WIDTH)
         os.environ["CAMERA_V2_WALL_HEIGHT"] = str(WALL_HEIGHT)
-
-        display_backend = os.environ.get("CAMERA_V2_DISPLAY_BACKEND", "egl").strip().lower()
-        if display_backend not in {"egl", "x11"}:
-            display_backend = "egl"
         os.environ["CAMERA_V2_DISPLAY_BACKEND"] = display_backend
 
         import gi
@@ -212,14 +212,33 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
             {"backend": display_backend},
         )
         rc = runtime.run()
+        failover = bool(getattr(runtime, "display_failover_requested", False))
+        return int(rc), failover
+    finally:
+        # CameraDetectionV2.run() already tears down its detector child and the
+        # base run() puts the pipeline in NULL. Repeat defensively for exceptions,
+        # then drop the runtime before another backend is constructed.
+        if runtime is not None:
+            try:
+                runtime.stop()
+            except Exception:
+                pass
+            try:
+                runtime.pipeline.set_state(runtime.Gst.State.NULL)
+            except Exception:
+                pass
+        runtime = None
+        gc.collect()
 
-        if (
-            display_backend == "egl"
-            and bool(getattr(runtime, "display_failover_requested", False))
-        ):
-            # Camera/mux/OSD/sink-pad flow was proven, but EGL rendered zero.
-            # Restart once in the same child process using the same Qt XID and
-            # the fallback that downloads only the final tiled wall.
+
+def _camera_wall_process(window_id: int, command_q, status_q) -> None:
+    try:
+        requested = os.environ.get("CAMERA_V2_DISPLAY_BACKEND", "egl").strip().lower()
+        backend = requested if requested in {"egl", "x11"} else "egl"
+
+        rc, failover = _run_backend(window_id, command_q, status_q, backend)
+
+        if backend == "egl" and failover:
             print(
                 "CAMERA_DISPLAY_FAILOVER action=restart backend=x11",
                 flush=True,
@@ -229,24 +248,17 @@ def _camera_wall_process(window_id: int, command_q, status_q) -> None:
                 "DISPLAY_FAILOVER",
                 {"from": "egl", "to": "x11"},
             )
-            os.environ["CAMERA_V2_DISPLAY_BACKEND"] = "x11"
-            runtime = None
-            return _camera_wall_process(window_id, command_q, status_q)
+            rc, _ = _run_backend(window_id, command_q, status_q, "x11")
+            backend = "x11"
 
         _put_latest(
             status_q,
             "STOPPED",
-            {"backend": display_backend, "rc": rc},
+            {"backend": backend, "rc": rc},
         )
     except BaseException as exc:
         print(f"CAMERA_RUNTIME_ERROR {type(exc).__name__}: {exc}", flush=True)
         _put_latest(status_q, "ERROR", f"{type(exc).__name__}: {exc}")
-        try:
-            if runtime is not None:
-                runtime.stop()
-                runtime.pipeline.set_state(runtime.Gst.State.NULL)
-        except Exception:
-            pass
 
 
 class CameraWallController:
