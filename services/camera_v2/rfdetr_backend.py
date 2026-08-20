@@ -14,52 +14,11 @@ import time
 
 import numpy as np
 
-
-def _person_mask(detections, class_id: np.ndarray) -> np.ndarray:
-    """Resolve the person class across RF-DETR checkpoint label layouts."""
-
-    data = getattr(detections, "data", None)
-    if isinstance(data, dict):
-        names = data.get("class_name")
-        if names is not None:
-            names = np.asarray(names).astype(str)
-            if len(names) == len(class_id):
-                normalized = np.char.lower(np.char.strip(names))
-                return normalized == "person"
-
-    # Pretrained COCO checkpoints may expose sparse category id 1 for person;
-    # older/remapped or one-class checkpoints may expose zero-based id 0.
-    return np.isin(class_id, (0, 1))
-
-
-def _person_rows(detections, max_det: int) -> list[tuple[list[float], float]]:
-    """Return person detections only, highest-confidence first."""
-
-    xyxy = np.asarray(getattr(detections, "xyxy", []), dtype=np.float32)
-    confidence = np.asarray(getattr(detections, "confidence", []), dtype=np.float32)
-    class_id = np.asarray(getattr(detections, "class_id", []), dtype=np.int64)
-
-    if xyxy.ndim != 2 or xyxy.shape[-1:] != (4,):
-        return []
-    if len(xyxy) != len(confidence) or len(xyxy) != len(class_id):
-        return []
-
-    indices = np.flatnonzero(_person_mask(detections, class_id))
-    if not len(indices):
-        return []
-    indices = indices[np.argsort(confidence[indices])[::-1]]
-    indices = indices[: max(1, int(max_det))]
-
-    rows: list[tuple[list[float], float]] = []
-    for idx in indices:
-        box = xyxy[int(idx)]
-        score = float(confidence[int(idx)])
-        rows.append(([float(v) for v in box], score))
-    return rows
+from .person_candidate_filter import PersonCandidateFilter
 
 
 def rfdetr_worker(job_q, result_q) -> None:
-    """Spawn-safe CUDA RF-DETR-S worker."""
+    """Spawn-safe CUDA RF-DETR-S worker with strict person-only filtering."""
 
     try:
         try:
@@ -95,6 +54,10 @@ def rfdetr_worker(job_q, result_q) -> None:
         infer_shape = (int(det.INFER_HEIGHT), int(det.INFER_WIDTH))
         threshold = float(det.CONF)
         max_det = int(det.MAX_DET)
+        person_filter = PersonCandidateFilter()
+        telemetry_budget = max(
+            0, int(os.environ.get("CAMERA_V2_RFDETR_FILTER_LOG_BUDGET", "18"))
+        )
 
         model = RFDETRSmall(device="cuda:0")
 
@@ -123,6 +86,7 @@ def rfdetr_worker(job_q, result_q) -> None:
                 "version": version,
                 "shape": infer_shape,
                 "threshold": threshold,
+                "person_class_ids": person_filter.person_ids,
             }
         )
 
@@ -154,10 +118,36 @@ def rfdetr_worker(job_q, result_q) -> None:
                         f"cameras={len(job['cameras'])}"
                     )
 
-                output = {
-                    cid: _person_rows(prediction, max_det)
-                    for cid, prediction in zip(job["cameras"], predictions)
-                }
+                output = {}
+                filter_stats = {}
+                for cid, prediction in zip(job["cameras"], predictions):
+                    rows, stats = person_filter.filter(prediction, max_det)
+                    output[cid] = rows
+                    filter_stats[cid] = {
+                        "raw": stats.raw,
+                        "class_rejected": stats.class_rejected,
+                        "geometry_rejected": stats.geometry_rejected,
+                        "duplicate_rejected": stats.duplicate_rejected,
+                        "kept": stats.kept,
+                        "class_mode": stats.class_mode,
+                        "raw_ids": stats.raw_ids,
+                        "raw_names": stats.raw_names,
+                    }
+                    if telemetry_budget > 0:
+                        telemetry_budget -= 1
+                        names = ",".join(stats.raw_names) if stats.raw_names else "-"
+                        ids = ",".join(str(v) for v in stats.raw_ids) if stats.raw_ids else "-"
+                        print(
+                            "CAMERA_RFDETR_FILTER "
+                            f"camera={cid} class_mode={stats.class_mode} "
+                            f"raw={stats.raw} class_reject={stats.class_rejected} "
+                            f"geom_reject={stats.geometry_rejected} "
+                            f"dedup_reject={stats.duplicate_rejected} kept={stats.kept} "
+                            f"raw_ids=[{ids}] raw_names=[{names}] "
+                            f"fallback_person_ids={person_filter.person_ids}",
+                            flush=True,
+                        )
+
                 result_q.put(
                     {
                         "type": "result",
@@ -165,6 +155,7 @@ def rfdetr_worker(job_q, result_q) -> None:
                         "cameras": job["cameras"],
                         "captured": job["captured"],
                         "boxes": output,
+                        "filter_stats": filter_stats,
                         "batch_ms": (ended - started) * 1000.0,
                     }
                 )
@@ -215,7 +206,7 @@ def install() -> None:
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
 
     # CameraDetectionV2 resolves SmoothBoxManager from its module globals at
-    # runtime.  RF-DETR owns detector corrections; the replacement tracker adds
+    # runtime. RF-DETR owns detector corrections; the replacement tracker adds
     # a persistent center anchor and accepts measured 20-FPS optical flow between
     # sparse detector calls.
     detection.SmoothBoxManager = FlowAssistedPersonTracker
@@ -228,7 +219,7 @@ def install() -> None:
     }
 
     if pascal_safe:
-        # CameraPascalSafeRuntime is defined after this installer runs.  Wrapping
+        # CameraPascalSafeRuntime is defined after this installer runs. Wrapping
         # its CameraDetectionV2 base initializer lets the normal Pascal virtual
         # _install_osd_and_meta() build the proven display/analysis tee first;
         # only then do we attach a third leaky continuous motion branch.
@@ -245,7 +236,7 @@ def install() -> None:
             detection.CameraDetectionV2._camera_v2_flow_init_wrapped = True
     else:
         # Supported/non-Pascal runtimes may still use the existing sparse external
-        # detector contract with NvDCF.  The GTX 1050 Ti production controller
+        # detector contract with NvDCF. The GTX 1050 Ti production controller
         # never imports that tracker path.
         from .sparse_tracker_contract import install_sparse_tracker_contract
 
