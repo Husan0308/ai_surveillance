@@ -1,3 +1,6 @@
 # Camera V2 person detector. Keep the existing project PyTorch/CUDA install;
 # install this file into that same environment rather than replacing torch.
+# supervision/OpenCV in this deployment is still built against the NumPy 1.x ABI.
+numpy>=1.26,<2
+opencv-python-headless>=4.10,<5
 rfdetr>=1.9.3,<2
