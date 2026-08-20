@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """RF-DETR-S detector backend for the Camera V2 core.
 
-The rest of the live pipeline keeps its existing latest-only DeepStream capture,
-NvDCF tracker and OSD contract. This module replaces the sparse detector worker
-while preserving the result schema expected by the tracker scheduler, and installs
-the external-detector frame contract required by NvDCF between sparse detections.
+The detector worker is process-isolated and keeps the existing result schema. On
+supported DeepStream GPUs it also installs the sparse external-detector contract
+for NvDCF. On the deployment Pascal GPU, where DeepStream 7.1 NvDCF stalls, the
+launcher enables the Pascal-safe motion-predictor presentation path instead.
 """
 
 import importlib.metadata
@@ -226,10 +226,23 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
 
 
 def install() -> None:
-    """Make RF-DETR-S + the sparse NvDCF contract active for Camera V2."""
+    """Make RF-DETR-S and the hardware-appropriate tracking path active."""
     from . import detection
-    from .sparse_tracker_contract import install_sparse_tracker_contract
 
     detection._yolo_worker = rfdetr_worker
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
-    install_sparse_tracker_contract()
+
+    pascal_safe = os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if pascal_safe:
+        from .pascal_safe_pipeline import install_pascal_safe_pipeline
+
+        install_pascal_safe_pipeline()
+    else:
+        from .sparse_tracker_contract import install_sparse_tracker_contract
+
+        install_sparse_tracker_contract()
