@@ -21,9 +21,9 @@ export CAMERA_V2_RTSP_LATENCY_MS=250
 export CAMERA_V2_FRAME_WIDTH=2560
 export CAMERA_V2_FRAME_HEIGHT=1440
 
-# RF-DETR-S ONLY.  Keep the capture tile 16:9 so CCTV geometry is preserved,
+# RF-DETR-S ONLY. Keep the capture tile 16:9 so CCTV geometry is preserved,
 # then let RF-DETR resize internally to the published Small 512x512 operating
-# point.  Returned boxes are in the original 672x384 capture coordinates and
+# point. Returned boxes are in the original 672x384 capture coordinates and
 # CameraDetectionV2 scales those to the 2560x1440 mux frame before metadata.
 export CAMERA_V2_DETECT_BACKEND=rfdetr-s
 export CAMERA_V2_DETECT_WIDTH=672
@@ -40,7 +40,7 @@ export CAMERA_V2_DETECT_GPU_DUTY=0.28
 export CAMERA_V2_DETECT_GPU_DUTY_MIN=0.20
 export CAMERA_V2_DETECT_GPU_DUTY_MAX=0.34
 
-# No tracker, no prediction and no optical flow.  Repeating the latest real
+# No tracker, no prediction and no optical flow. Repeating the latest real
 # RF-DETR result for a short bounded interval only prevents the box blinking
 # between sparse round-robin detector calls.
 export CAMERA_V2_RFDETR_RAW_HOLD_SEC=2.80
@@ -54,7 +54,7 @@ export CAMERA_V2_HEATMAP=0
 export CAMERA_V2_DISPLAY_BACKEND=egl
 export CAMERA_V2_EGL_FAILOVER_SEC=8.0
 
-echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=RF-DETR-S capture=672x384 model=512x512 threshold=0.18 batch=1 scheduler=adaptive-duty:20-34% detector_path=analysis-tiler raw_truth=1 tracker=OFF flow=OFF reid=OFF display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
+echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=RF-DETR-S capture=672x384 model=512x512 threshold=0.18 batch=1 scheduler=adaptive-duty:20-34% detector_path=analysis-tiler demux=disabled mux_batch_retention=bounded raw_truth=1 tracker=OFF flow=OFF reid=OFF display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
 
 python scripts/preflight_rfdetr_core.py
 python scripts/preflight_pascal_safe.py
