@@ -85,5 +85,6 @@ def test_nvdcf_continuity_does_not_hide_short_pose_misses() -> None:
     assert "self.latency_compensator.projection_gain = 0.62" in tracking
     assert '"maxShadowTrackingAge": "40"' in profile
     assert '"minTrackingConfidenceDuringInactive": "0.12"' in profile
-    assert '"outputShadowTracks", "0"' in profile
+    assert '_set_section_key(output, "TargetManagement", "outputShadowTracks", "1")' in profile
+    assert "outputShadowTracks=1" in profile
     assert "UI_TRACK_HOLD_SEC = 2.0" in live
