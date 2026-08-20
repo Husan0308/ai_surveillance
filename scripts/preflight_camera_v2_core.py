@@ -63,16 +63,20 @@ def main() -> int:
     for required in (
         "class CameraPascalSafeRuntime(CameraDetectionV2)",
         "SecureCameraWallV2._add_camera(self, index, camera)",
-        "def _install_postmux_inference(self)",
-        "pascal_postmux_tee",
-        "nvstreamdemux",
-        'self._request_src_pad(demux, f"src_{index}")',
-        "CAMERA_DETECT_PATH mode=postmux-demux",
+        "def _install_analysis_inference(self)",
+        "pascal_mux_tee",
+        "pascal_analysis_tiler",
+        "def _analysis_gate_probe",
+        "def _on_analysis_sample",
+        "CAMERA_DETECT_PATH mode=analysis-tiler",
         "source_path=direct-to-nvstreammux",
+        "demux=disabled",
+        "mux_batch_retention=bounded",
         "self.wall_queue.unlink(self.sink)",
         "safe_mux_batches",
         "safe_wall_frames",
         "safe_sink_buffers",
+        "analysis_frames",
         "CAMERA_STARTUP_STALL",
         "tracker=motion-predictor",
         "nvtracker=disabled",
@@ -81,13 +85,15 @@ def main() -> int:
             raise RuntimeError(f"Pascal-safe runtime guard missing: {required}")
 
     for forbidden in (
+        "nvstreamdemux",
+        "pascal_infer_demux",
         "CameraPersonTrackingV2",
         "CameraPersonTrackingFinal",
         "libnvds_nvmultiobjecttracker",
         "config_tracker_NvDCF",
     ):
         if forbidden in runtime_source:
-            raise RuntimeError(f"Pascal-safe runtime leaked tracker dependency: {forbidden}")
+            raise RuntimeError(f"Pascal-safe runtime leaked forbidden dependency: {forbidden}")
 
     secure_source = (ROOT / "services/camera_v2/secure.py").read_text(encoding="utf-8")
     for required in (
@@ -100,10 +106,16 @@ def main() -> int:
         if required not in secure_source:
             raise RuntimeError(f"RTSP ingest guard missing: {required}")
 
-    sample_source = inspect.getsource(CameraPascalSafeRuntime._on_infer_sample)
-    for required in ("mapped_size", "row_stride", "tight_stride", "CAMERA_INFER_LAYOUT"):
+    sample_source = inspect.getsource(CameraPascalSafeRuntime._on_analysis_sample)
+    for required in (
+        "mapped_size",
+        "row_stride",
+        "INFER_WIDTH",
+        "INFER_HEIGHT",
+        "CAMERA_INFER_LAYOUT",
+    ):
         if required not in sample_source:
-            raise RuntimeError(f"stride-safe RF-DETR capture is missing: {required}")
+            raise RuntimeError(f"analysis-wall RF-DETR capture is missing: {required}")
 
     display_source = (ROOT / "services/camera_v2/dynamic_wall.py").read_text(
         encoding="utf-8"
@@ -135,9 +147,10 @@ def main() -> int:
         f"grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
         f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
-        "detector_path=postmux-demux source_ingest=isolated dynamic_pad=late-caps-safe "
-        "tracker=motion-predictor nvtracker=disabled stride_safe=PASS "
-        "stage_counters=source+mux+wall+sink scaling=lanczos"
+        "detector_path=analysis-tiler demux=disabled mux_retention=bounded "
+        "source_ingest=isolated dynamic_pad=late-caps-safe "
+        "tracker=motion-predictor nvtracker=disabled capture=analysis-grid "
+        "stage_counters=source+mux+wall+sink+analysis scaling=lanczos"
     )
     print("CAMERA_PREFLIGHT=PASS")
     return 0
