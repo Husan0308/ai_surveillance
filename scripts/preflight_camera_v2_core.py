@@ -25,8 +25,6 @@ from services.ml_service.app.config import load_settings  # noqa: E402
 def _detector_contract() -> tuple[str, tuple[int, int, int], tuple[int, int] | None]:
     backend = os.environ.get("CAMERA_V2_DETECT_BACKEND", "rfdetr-s").strip().lower()
     if backend in {"stable-yolo26m", "yolo26m", "yolo", "stable-yolo"}:
-        # Capture is kept ~16:9; Ultralytics performs the final old-stable
-        # aspect-preserving letterbox to model imgsz 448x704.
         return "YOLO26m-person-only", (704, 400, 2), (704, 448)
     if backend in {"rfdetr-s", "rfdetr", "rf-detr-s", ""}:
         return "RF-DETR-S", (672, 384, 1), None
@@ -105,7 +103,6 @@ def main() -> int:
         "safe_sink_buffers",
         "analysis_frames",
         "CAMERA_STARTUP_STALL",
-        "tracker=motion-predictor",
         "nvtracker=disabled",
     ):
         if required not in runtime_source:
@@ -121,6 +118,17 @@ def main() -> int:
     ):
         if forbidden in runtime_source:
             raise RuntimeError(f"Pascal-safe runtime leaked forbidden dependency: {forbidden}")
+
+    backend_source = (ROOT / "services/camera_v2/rfdetr_backend.py").read_text(encoding="utf-8")
+    if detector_label == "RF-DETR-S":
+        for required in (
+            "class RFDETRRawBoxManager",
+            "detection.SmoothBoxManager = RFDETRRawBoxManager",
+            "detection.CameraDetectionV2._inject_boxes_probe = _inject_rfdetr_truth_probe",
+            "tracker=OFF flow=OFF reid=OFF",
+        ):
+            if required not in backend_source:
+                raise RuntimeError(f"RF-DETR detector-only guard missing: {required}")
 
     secure_source = (ROOT / "services/camera_v2/secure.py").read_text(encoding="utf-8")
     for required in (
@@ -171,7 +179,7 @@ def main() -> int:
     tracker_label = (
         "old-stable-adaptive-kalman-byte+lk"
         if detector_label.startswith("YOLO26m")
-        else "motion-predictor"
+        else "OFF"
     )
     print(
         f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=OFF "
