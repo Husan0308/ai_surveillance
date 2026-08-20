@@ -24,7 +24,7 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.20-r13-rfdetr"
+BUILD_TAG = "2026.08.20-r14-monitoring-host"
 
 
 class MainWindow(QMainWindow):
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self.resize(1500, 920)
         self.setMinimumSize(1180, 720)
         self._monitoring_fullscreen = False
+        self._current_page_index = 0
 
         root = QWidget()
         root.setObjectName("root")
@@ -127,14 +128,30 @@ class MainWindow(QMainWindow):
         hl.addWidget(self.camera_fullscreen)
         content_l.addWidget(self.header)
 
-        self.stack = QStackedWidget()
-        self.pages = []
-        for _, _, _, klass in self.NAV:
+        # Native QWindow content must not live inside QStackedWidget. Native child
+        # stacking is platform-level and can punch through sibling stack pages on
+        # X11. Monitoring therefore owns a dedicated sibling host; only ordinary
+        # Qt pages are kept in the stack below.
+        self.monitoring_host = QWidget(self.content)
+        self.monitoring_host.setObjectName("monitoringHost")
+        monitoring_layout = QVBoxLayout(self.monitoring_host)
+        monitoring_layout.setContentsMargins(0, 0, 0, 0)
+        monitoring_layout.setSpacing(0)
+        self._monitoring_layout = monitoring_layout
+
+        self.monitoring_page = MonitoringPage()
+        monitoring_layout.addWidget(self.monitoring_page, 1)
+        content_l.addWidget(self.monitoring_host, 1)
+
+        self.stack = QStackedWidget(self.content)
+        self.pages = [self.monitoring_page]
+        for _, _, _, klass in self.NAV[1:]:
             page = klass()
             self.pages.append(page)
             self.stack.addWidget(page)
             if isinstance(page, SettingsPage):
                 page.applyRequested.connect(self.apply_camera_settings)
+        self.stack.hide()
         content_l.addWidget(self.stack, 1)
         main.addWidget(self.content, 1)
 
@@ -143,9 +160,20 @@ class MainWindow(QMainWindow):
     def switch_page(self, index: int) -> None:
         if not (0 <= index < len(self.NAV)):
             return
+
         if self._monitoring_fullscreen:
-            self.pages[0].exit_fullscreen()
-        self.stack.setCurrentIndex(index)
+            self.monitoring_page.exit_fullscreen()
+
+        self._current_page_index = int(index)
+        if index == 0:
+            self.stack.hide()
+            self.monitoring_host.show()
+            self.monitoring_page.show()
+        else:
+            self.monitoring_host.hide()
+            self.stack.setCurrentIndex(index - 1)
+            self.stack.show()
+
         _, title, subtitle, _ = self.NAV[index]
         self.title.setText(title)
         self.subtitle.setText(subtitle)
@@ -158,49 +186,51 @@ class MainWindow(QMainWindow):
         self._monitoring_fullscreen = enabled
 
         # Keep one top-level X11 window state for the lifetime of the EGL child.
-        # Toggling showFullScreen()/showNormal() can recreate/reparent native child
-        # windows under X11/XWayland and makes GstVideoOverlay paint outside the
-        # camera panel. The app is maximized from startup; fullscreen monitoring is
-        # therefore just a shell/layout change, not a window-manager mode change.
+        # Fullscreen here is shell-only: no window-manager mode change and no
+        # DeepStream tiler mutation.
         self.sidebar.setVisible(not enabled)
         self.header.setVisible(not enabled)
 
     def open_camera_fullscreen(self) -> None:
-        self.pages[0].open_fullscreen_grid()
+        self.monitoring_page.open_fullscreen_grid()
 
     def apply_camera_settings(self) -> None:
         settings_page = next(
             (page for page in self.pages if isinstance(page, SettingsPage)),
             None,
         )
-        current = self.stack.currentWidget()
-        old_monitoring = self.pages[0]
+
+        old_monitoring = self.monitoring_page
         old_monitoring.shutdown()
-        self.stack.removeWidget(old_monitoring)
+        self._monitoring_layout.removeWidget(old_monitoring)
+        old_monitoring.hide()
         old_monitoring.deleteLater()
 
         new_monitoring = MonitoringPage()
-        self.stack.insertWidget(0, new_monitoring)
+        self._monitoring_layout.addWidget(new_monitoring, 1)
+        self.monitoring_page = new_monitoring
         self.pages[0] = new_monitoring
-        if current is old_monitoring:
-            self.stack.setCurrentWidget(new_monitoring)
+
+        if self._current_page_index == 0:
+            self.stack.hide()
+            self.monitoring_host.show()
+            new_monitoring.show()
         else:
-            self.stack.setCurrentWidget(current)
+            self.monitoring_host.hide()
 
         if settings_page is not None:
             settings_page.mark_applied()
 
     def keyPressEvent(self, event) -> None:
         if self._monitoring_fullscreen and event.key() in (Qt.Key_Escape, Qt.Key_F11):
-            self.pages[0].exit_fullscreen()
+            self.monitoring_page.exit_fullscreen()
             event.accept()
             return
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        monitoring = self.pages[0] if self.pages else None
-        if monitoring is not None and hasattr(monitoring, "shutdown"):
-            monitoring.shutdown()
+        if self.monitoring_page is not None and hasattr(self.monitoring_page, "shutdown"):
+            self.monitoring_page.shutdown()
         super().closeEvent(event)
 
 
@@ -218,7 +248,6 @@ def run():
         flush=True,
     )
     window = MainWindow()
-    # Settle the top-level X11 geometry before the MonitoringPage binds EGL.
     window.showMaximized()
     return app.exec()
 
