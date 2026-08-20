@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -5,6 +6,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def called_attributes(text: str) -> set[str]:
+    tree = ast.parse(text)
+    return {
+        str(node.func.attr)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
 
 
 def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
@@ -50,11 +60,13 @@ def test_monitoring_uses_one_embedded_qwindow_video_target() -> None:
     assert "class CameraStatusRow(QFrame)" in native
     assert "ProPipelineController()" in native
 
-    assert "controller.focus(" not in native
-    assert "set_fullscreen_mode(" not in native
+    native_calls = called_attributes(native)
+    assert "focus" not in native_calls
+    assert "set_fullscreen_mode" not in native_calls
     assert "ProLiveVideoWall(" not in native
 
     assert "from .sentinel_ui_monitoring_native import MonitoringPage" in shell
-    assert "showFullScreen()" not in shell
-    assert "showNormal()" not in shell
-    assert "window.showMaximized()" in shell
+    shell_calls = called_attributes(shell)
+    assert "showFullScreen" not in shell_calls
+    assert "showNormal" not in shell_calls
+    assert "showMaximized" in shell_calls
