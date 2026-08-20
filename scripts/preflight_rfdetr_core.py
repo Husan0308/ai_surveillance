@@ -32,10 +32,15 @@ except Exception as exc:
 if not torch.cuda.is_available():
     fail("PyTorch CUDA unavailable")
 
-width = int(os.environ.get("CAMERA_V2_DETECT_WIDTH", "736"))
-height = int(os.environ.get("CAMERA_V2_DETECT_HEIGHT", "416"))
-if width <= 0 or height <= 0:
-    fail(f"invalid detector shape {width}x{height}")
+capture_width = int(os.environ.get("CAMERA_V2_DETECT_WIDTH", "672"))
+capture_height = int(os.environ.get("CAMERA_V2_DETECT_HEIGHT", "384"))
+if capture_width <= 0 or capture_height <= 0:
+    fail(f"invalid detector capture shape {capture_width}x{capture_height}")
+
+model_width = int(os.environ.get("CAMERA_V2_RFDETR_MODEL_WIDTH", "512"))
+model_height = int(os.environ.get("CAMERA_V2_RFDETR_MODEL_HEIGHT", "512"))
+if model_width <= 0 or model_height <= 0:
+    fail(f"invalid RF-DETR model shape {model_width}x{model_height}")
 
 try:
     config = RFDETRSmallConfig()
@@ -45,10 +50,18 @@ try:
 except Exception as exc:
     fail(f"cannot resolve RF-DETR-S shape contract: {type(exc).__name__}: {exc}")
 
-if block_size <= 0 or width % block_size or height % block_size:
+if block_size <= 0 or model_width % block_size or model_height % block_size:
     fail(
-        f"RF-DETR-S detector shape must be divisible by {block_size} "
-        f"(patch={patch_size} windows={num_windows}), got {width}x{height}"
+        f"RF-DETR-S model shape must be divisible by {block_size} "
+        f"(patch={patch_size} windows={num_windows}), got {model_width}x{model_height}"
+    )
+
+# RF-DETR-S is published/evaluated at 512x512.  Keep the live CCTV capture 16:9
+# and let RF-DETR own the final resize to its native model operating point.
+if (model_width, model_height) != (512, 512):
+    fail(
+        "production RF-DETR-S truth mode requires native model shape 512x512, "
+        f"got {model_width}x{model_height}"
     )
 
 micro_batch = int(os.environ.get("CAMERA_V2_MICRO_BATCH", "1"))
@@ -59,10 +72,15 @@ threshold = float(os.environ.get("CAMERA_V2_DETECT_CONF", "0.18"))
 if not 0.05 <= threshold <= 0.60:
     fail(f"unexpected RF-DETR threshold {threshold}")
 
+backend = os.environ.get("CAMERA_V2_DETECT_BACKEND", "rfdetr-s").strip().lower()
+if backend not in {"rfdetr-s", "rfdetr", "rf-detr-s", ""}:
+    fail(f"production launcher must select RF-DETR-S, got backend={backend!r}")
+
 print(
     "RFDETR_PREFLIGHT=PASS "
     f"version={version} model=RF-DETR-S device={torch.cuda.get_device_name(0)} "
-    f"cuda={torch.version.cuda} shape={width}x{height} block={block_size} "
-    f"batch={micro_batch} threshold={threshold:.2f}",
+    f"cuda={torch.version.cuda} capture={capture_width}x{capture_height} "
+    f"model_shape={model_width}x{model_height} block={block_size} "
+    f"batch={micro_batch} threshold={threshold:.2f} tracker=OFF flow=OFF",
     flush=True,
 )
