@@ -3,21 +3,18 @@ from __future__ import annotations
 import sys
 
 from . import rfdetr_detection as runtime
-from .stable_boxes import StableFullBodyManager
+from .core_v1_visual_adapter import CoreV1VisualAdapter
+from .rfdetr_worker_v2 import rfdetr_worker_v2
 
-# Keep the runtime module focused on detector logic while this entrypoint owns
-# process-level stderr/exit handling.
+# Keep the legacy RF-DETR camera/display shell small.  Vision V3 reuses the
+# mature Core-v1 detector policy and visual tracker through explicit adapters:
+# RF-DETR-S supplies raw person observations; old proven policy owns fusion,
+# temporal confirmation and presentation continuity.
 runtime.sys = sys
 
 
 def _install_osd_pygi(self) -> None:
-    """Insert nvdsosd into the already-built camera display chain.
-
-    Gst.Element.unlink() maps the C API gst_element_unlink(), whose return type is
-    void. PyGObject therefore returns None even when the unlink succeeds. The old
-    `if not element.unlink(...)` check treated every successful unlink as failure
-    and aborted before the pipeline could start.
-    """
+    """Insert nvdsosd into the already-built camera display chain safely."""
     wall_src = self.wall_queue.get_static_pad("src")
     sink_pad = self.sink.get_static_pad("sink")
     if wall_src is None or sink_pad is None:
@@ -65,11 +62,11 @@ def _install_osd_pygi(self) -> None:
     self.osd = osd
 
 
-# Apply compatibility + the proven core-v1 visual-continuity design before
-# SixCameraRFDETR is constructed. Raw RF-DETR boxes are still untouched; only
-# the display manager is replaced.
+# Patch the shell BEFORE SixCameraRFDETR is constructed.  The spawned worker is
+# a module-level function, so multiprocessing can import it normally under spawn.
 runtime.SixCameraRFDETR._install_osd = _install_osd_pygi
-runtime.ProtectiveBoxManager = StableFullBodyManager
+runtime.ProtectiveBoxManager = CoreV1VisualAdapter
+runtime._rfdetr_worker = rfdetr_worker_v2
 
 
 def main() -> int:
