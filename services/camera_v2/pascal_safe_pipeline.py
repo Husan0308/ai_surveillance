@@ -1,21 +1,24 @@
 from __future__ import annotations
 
-"""Pascal-safe RF-DETR camera runtime with display-first source isolation.
+"""Pascal-safe RF-DETR camera runtime with a display-first graph.
 
-The deployment GPU is a GTX 1050 Ti (Pascal). The production graph therefore
-keeps gst-nvtracker/NvDCF out of the hot path. More importantly, camera ingest is
-never split before nvstreammux: the six RTSP/NVDEC sources use the same direct
-source -> queue -> nvstreammux path that already proved stable on the target.
+The production display path is intentionally simple and never waits on the
+external detector:
 
-RF-DETR receives per-camera frames only after muxing:
+    RTSP/NVDEC -> nvstreammux -> tee -> display queue -> display tiler -> OSD -> sink
+                                \\-> analysis queue -> analysis tiler -> appsink
 
-RTSP/NVDEC -> nvstreammux -> tee -> display branch -> tiler -> OSD -> sink
-                              \\-> nvstreamdemux -> per-camera RF-DETR capture
+The old detector branch used nvstreamdemux. That plugin is zero-copy and keeps
+the original nvstreammux batch alive until every demuxed child buffer is returned.
+With sparse gated per-camera queues this could retain several different parent
+batches at once and exhaust the mux buffer pool. The hardware log stopped at
+seven mux batches with an eight-buffer mux pool, exactly matching that failure
+mode. The analysis branch below therefore never uses nvstreamdemux.
 
-This makes detector startup/backpressure incapable of preventing a camera from
-reaching nvstreammux. The primary display is nveglglessink; when upstream flow is
-proven but EGL renders zero frames, the controller may restart once with the
-bounded X11 system-memory fallback.
+It produces one temporary 2x3 analysis wall only when the detector scheduler has
+armed a capture request. Each tile is exactly RF-DETR's input size, so Python only
+copies the requested tile; it does not resize six camera frames or retain DeepStream
+batch buffers.
 """
 
 import os
@@ -32,7 +35,10 @@ from .secure import SecureCameraWallV2
 
 
 class CameraPascalSafeRuntime(CameraDetectionV2):
-    """RF-DETR + motion prediction without any DeepStream tracker dependency."""
+    """RF-DETR + bounded motion prediction, with no DeepStream tracker."""
+
+    ANALYSIS_COLUMNS = 2
+    ANALYSIS_ROWS = 3
 
     def __init__(self) -> None:
         backend = os.environ.get("CAMERA_V2_DISPLAY_BACKEND", "egl").strip().lower()
@@ -42,9 +48,10 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
         self.safe_wall_frames = 0
         self.safe_mux_batches = 0
         self.safe_sink_buffers = 0
+        self.analysis_frames = 0
         self.source_track_counts: dict[int, int] = {}
         self.tracked_now = 0
-        self._safe_stride_logged: set[str] = set()
+        self._analysis_layout_logged = False
         self._startup_stall_reported = False
         super().__init__()
         self.source_track_counts = {
@@ -55,7 +62,7 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
 
     def _preflight(self) -> None:
         super()._preflight()
-        for plugin in ("tee", "nvstreamdemux", "nvvideoconvert", "appsink"):
+        for plugin in ("tee", "nvmultistreamtiler", "nvvideoconvert", "appsink"):
             if self.Gst.ElementFactory.find(plugin) is None:
                 raise RuntimeError(f"required Pascal-safe plugin is unavailable: {plugin}")
         if self.display_backend == "x11" and self.Gst.ElementFactory.find("ximagesink") is None:
@@ -67,12 +74,7 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
         return super()._make(factory, name)
 
     def _add_camera(self, index, camera) -> None:
-        """Keep the proven direct source -> queue -> mux path.
-
-        CameraDetectionV2 normally inserts a tee before nvstreammux. On this
-        deployment that branch is deliberately removed; inference is attached
-        after the mux in _install_postmux_inference().
-        """
+        """Preserve the proven source -> queue -> nvstreammux ingest path."""
 
         cid = camera.camera_id
         self.camera_index[cid] = int(index)
@@ -97,123 +99,161 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
         self.tee_request_pads.append((element, pad))
         return pad
 
-    def _install_postmux_inference(self) -> None:
-        """Split the batched mux output, never individual source inputs."""
+    def _analysis_gate_probe(self, _pad, _info):
+        """Drop analysis batches immediately unless RF-DETR requested a sample."""
+
+        with self.capture_lock:
+            requested = any(bool(v) for v in self.capture_requested.values())
+        return self.Gst.PadProbeReturn.OK if requested else self.Gst.PadProbeReturn.DROP
+
+    def _install_analysis_inference(self) -> None:
+        """Attach a non-retaining detector branch after nvstreammux.
+
+        Both branches consume the same batched mux buffer, but the detector branch
+        immediately drops unrequested batches. Requested batches are fully consumed
+        by a second tiler, which creates its own 2x3 output surface. No zero-copy
+        demux child buffers exist, so the mux buffer can always return to its pool.
+        """
 
         mux_src = self.mux.get_static_pad("src")
-        tiler_sink = self.tiler.get_static_pad("sink")
-        if mux_src is None or tiler_sink is None:
-            raise RuntimeError("could not inspect nvstreammux -> tiler link")
+        display_tiler_sink = self.tiler.get_static_pad("sink")
+        if mux_src is None or display_tiler_sink is None:
+            raise RuntimeError("could not inspect nvstreammux -> display tiler link")
         if mux_src.is_linked():
             self.mux.unlink(self.tiler)
-        if mux_src.is_linked() or tiler_sink.is_linked():
-            raise RuntimeError("could not detach nvstreammux -> tiler")
+        if mux_src.is_linked() or display_tiler_sink.is_linked():
+            raise RuntimeError("could not detach nvstreammux -> display tiler")
 
-        tee = self._make("tee", "pascal_postmux_tee")
+        tee = self._make("tee", "pascal_mux_tee")
         display_q = self._make("queue", "pascal_display_branch")
-        infer_q = self._make("queue", "pascal_infer_batch_branch")
-        demux = self._make("nvstreamdemux", "pascal_infer_demux")
-        self._queue_latest(self, display_q, 2)
-        self._queue_latest(self, infer_q, 1)
+        analysis_q = self._make("queue", "pascal_analysis_branch")
+        analysis_tiler = self._make("nvmultistreamtiler", "pascal_analysis_tiler")
+        analysis_convert = self._make("nvvideoconvert", "pascal_analysis_convert")
+        analysis_caps = self._make("capsfilter", "pascal_analysis_caps")
+        analysis_sink = self._make("appsink", "pascal_analysis_sink")
 
-        for element in (tee, display_q, infer_q, demux):
+        self._queue_latest(self, display_q, 2)
+        self._queue_latest(self, analysis_q, 1)
+
+        analysis_width = INFER_WIDTH * self.ANALYSIS_COLUMNS
+        analysis_height = INFER_HEIGHT * self.ANALYSIS_ROWS
+        self._set_if(analysis_tiler, "rows", self.ANALYSIS_ROWS)
+        self._set_if(analysis_tiler, "columns", self.ANALYSIS_COLUMNS)
+        self._set_if(analysis_tiler, "width", analysis_width)
+        self._set_if(analysis_tiler, "height", analysis_height)
+        self._set_if(analysis_tiler, "gpu-id", self.gpu_id)
+        self._set_if(analysis_tiler, "nvbuf-memory-type", 2)
+        self._set_if(analysis_tiler, "compute-hw", 1)
+        self._set_if(analysis_tiler, "interpolation-method", 2)
+        if analysis_tiler.find_property("show-source") is not None:
+            analysis_tiler.set_property("show-source", -1)
+
+        self._set_if(analysis_convert, "gpu-id", self.gpu_id)
+        self._set_if(analysis_convert, "compute-hw", 1)
+        analysis_caps.set_property(
+            "caps",
+            self.Gst.Caps.from_string(
+                "video/x-raw,format=BGRx,"
+                f"width={analysis_width},height={analysis_height},pixel-aspect-ratio=1/1"
+            ),
+        )
+        analysis_sink.set_property("emit-signals", True)
+        analysis_sink.set_property("sync", False)
+        analysis_sink.set_property("drop", True)
+        analysis_sink.set_property("max-buffers", 1)
+        self._set_if(analysis_sink, "enable-last-sample", False)
+        self._set_if(analysis_sink, "wait-on-eos", False)
+
+        for element in (
+            tee,
+            display_q,
+            analysis_q,
+            analysis_tiler,
+            analysis_convert,
+            analysis_caps,
+            analysis_sink,
+        ):
             self.pipeline.add(element)
 
         if not self.mux.link(tee):
-            raise RuntimeError("failed nvstreammux -> postmux tee")
+            raise RuntimeError("failed nvstreammux -> detector/display tee")
 
         tee_display = self._request_src_pad(tee, "src_%u")
-        tee_infer = self._request_src_pad(tee, "src_%u")
+        tee_analysis = self._request_src_pad(tee, "src_%u")
         if tee_display.link(display_q.get_static_pad("sink")) != self.Gst.PadLinkReturn.OK:
-            raise RuntimeError("failed postmux tee -> display queue")
-        if tee_infer.link(infer_q.get_static_pad("sink")) != self.Gst.PadLinkReturn.OK:
-            raise RuntimeError("failed postmux tee -> inference queue")
+            raise RuntimeError("failed mux tee -> display queue")
+        if tee_analysis.link(analysis_q.get_static_pad("sink")) != self.Gst.PadLinkReturn.OK:
+            raise RuntimeError("failed mux tee -> analysis queue")
         if not display_q.link(self.tiler):
-            raise RuntimeError("failed display queue -> nvmultistreamtiler")
-        if not infer_q.link(demux):
-            raise RuntimeError("failed inference queue -> nvstreamdemux")
+            raise RuntimeError("failed display queue -> display tiler")
+        if not analysis_q.link(analysis_tiler):
+            raise RuntimeError("failed analysis queue -> analysis tiler")
+        if not analysis_tiler.link(analysis_convert):
+            raise RuntimeError("failed analysis tiler -> analysis convert")
+        if not analysis_convert.link(analysis_caps):
+            raise RuntimeError("failed analysis convert -> BGRx caps")
+        if not analysis_caps.link(analysis_sink):
+            raise RuntimeError("failed analysis caps -> appsink")
+
+        # BUFFER-only gate: CAPS/SEGMENT events still pass, so negotiation is
+        # complete before the first detector sample is requested.
+        analysis_q.get_static_pad("src").add_probe(
+            self.Gst.PadProbeType.BUFFER,
+            self._analysis_gate_probe,
+        )
+        analysis_sink.connect("new-sample", self._on_analysis_sample)
 
         self.postmux_tee = tee
         self.postmux_display_queue = display_q
-        self.postmux_infer_queue = infer_q
-        self.infer_demux = demux
-
-        for index, camera in enumerate(self.cameras):
-            cid = camera.camera_id
-            queue = self._make("queue", f"detect_queue_{index}")
-            converter = self._make("nvvideoconvert", f"detect_convert_{index}")
-            capsfilter = self._make("capsfilter", f"detect_caps_{index}")
-            appsink = self._make("appsink", f"detect_sink_{index}")
-
-            self._queue_latest(self, queue, 1)
-            self._set_if(converter, "gpu-id", self.gpu_id)
-            self._set_if(converter, "compute-hw", 1)
-            self._set_if(converter, "interpolation-method", 2)
-            capsfilter.set_property(
-                "caps",
-                self.Gst.Caps.from_string(
-                    "video/x-raw,format=BGRx,"
-                    f"width={INFER_WIDTH},height={INFER_HEIGHT},pixel-aspect-ratio=1/1"
-                ),
-            )
-            appsink.set_property("emit-signals", True)
-            appsink.set_property("sync", False)
-            appsink.set_property("drop", True)
-            appsink.set_property("max-buffers", 1)
-            self._set_if(appsink, "enable-last-sample", False)
-            self._set_if(appsink, "wait-on-eos", False)
-
-            for element in (queue, converter, capsfilter, appsink):
-                self.pipeline.add(element)
-
-            demux_pad = self._request_src_pad(demux, f"src_{index}")
-            if demux_pad.link(queue.get_static_pad("sink")) != self.Gst.PadLinkReturn.OK:
-                raise RuntimeError(f"{cid}: nvstreamdemux -> inference queue failed")
-            if not queue.link(converter):
-                raise RuntimeError(f"{cid}: inference queue -> convert failed")
-            if not converter.link(capsfilter):
-                raise RuntimeError(f"{cid}: inference convert -> caps failed")
-            if not capsfilter.link(appsink):
-                raise RuntimeError(f"{cid}: inference caps -> appsink failed")
-
-            queue.get_static_pad("src").add_probe(
-                self.Gst.PadProbeType.BUFFER,
-                self._infer_gate_probe,
-                cid,
-            )
-            appsink.connect("new-sample", self._on_infer_sample, cid)
+        self.analysis_queue = analysis_q
+        self.analysis_tiler = analysis_tiler
+        self.analysis_convert = analysis_convert
+        self.analysis_caps = analysis_caps
+        self.analysis_sink = analysis_sink
 
         print(
-            "CAMERA_DETECT_PATH mode=postmux-demux "
-            "source_path=direct-to-nvstreammux detector_cannot-block-ingest=1",
+            "CAMERA_DETECT_PATH mode=analysis-tiler "
+            "source_path=direct-to-nvstreammux demux=disabled "
+            "mux_batch_retention=bounded",
             flush=True,
         )
 
-    def _on_infer_sample(self, sink, cid: str):
-        """Copy BGRx using the actual mapped row stride, not width*4."""
-
+    def _on_analysis_sample(self, sink):
         sample = sink.emit("pull-sample")
         if sample is None:
-            with self.capture_lock:
-                self.capture_requested[cid] = True
+            return self.Gst.FlowReturn.OK
+
+        with self.capture_lock:
+            requested = [cid for cid, armed in self.capture_requested.items() if armed]
+        if not requested:
             return self.Gst.FlowReturn.OK
 
         structure = sample.get_caps().get_structure(0)
         width = int(structure.get_value("width"))
         height = int(structure.get_value("height"))
+        expected_width = INFER_WIDTH * self.ANALYSIS_COLUMNS
+        expected_height = INFER_HEIGHT * self.ANALYSIS_ROWS
+        if (width, height) != (expected_width, expected_height):
+            with self.det_lock:
+                self.det_error = (
+                    f"analysis wall geometry {width}x{height} != "
+                    f"{expected_width}x{expected_height}"
+                )
+            return self.Gst.FlowReturn.OK
+
         buffer = sample.get_buffer()
         ok, mapped = buffer.map(self.Gst.MapFlags.READ)
         if not ok:
-            with self.capture_lock:
-                self.capture_requested[cid] = True
             return self.Gst.FlowReturn.OK
 
+        captured = time.monotonic()
+        delivered: list[str] = []
         try:
             tight_stride = width * 4
             mapped_size = int(getattr(mapped, "size", len(mapped.data)))
             if mapped_size < tight_stride * height:
                 raise RuntimeError(
-                    f"{cid}: BGRx buffer too small: {mapped_size} < {tight_stride * height}"
+                    f"analysis BGRx buffer too small: {mapped_size} < {tight_stride * height}"
                 )
             row_stride = (
                 mapped_size // height
@@ -222,30 +262,52 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
             )
             if row_stride < tight_stride:
                 raise RuntimeError(
-                    f"{cid}: invalid BGRx stride={row_stride}, tight={tight_stride}"
+                    f"analysis invalid BGRx stride={row_stride}, tight={tight_stride}"
                 )
 
-            needed = row_stride * height
-            raw = np.frombuffer(mapped.data, dtype=np.uint8, count=needed)
+            raw = np.frombuffer(
+                mapped.data,
+                dtype=np.uint8,
+                count=row_stride * height,
+            )
             rows = raw.reshape((height, row_stride))
             bgrx = rows[:, :tight_stride].reshape((height, width, 4))
-            frame = bgrx[..., :3].copy()
 
-            if cid not in self._safe_stride_logged:
-                self._safe_stride_logged.add(cid)
+            for cid in requested:
+                index = int(self.camera_index[cid])
+                row = index // self.ANALYSIS_COLUMNS
+                column = index % self.ANALYSIS_COLUMNS
+                y1 = row * INFER_HEIGHT
+                y2 = y1 + INFER_HEIGHT
+                x1 = column * INFER_WIDTH
+                x2 = x1 + INFER_WIDTH
+                frame = bgrx[y1:y2, x1:x2, :3].copy()
+                if frame.shape != (INFER_HEIGHT, INFER_WIDTH, 3):
+                    continue
+                self.mailbox.put(cid, captured, frame)
+                delivered.append(cid)
+
+            if not self._analysis_layout_logged:
+                self._analysis_layout_logged = True
                 print(
-                    f"CAMERA_INFER_LAYOUT {cid} size={mapped_size} "
-                    f"frame={width}x{height} stride={row_stride} tight={tight_stride}",
+                    "CAMERA_INFER_LAYOUT "
+                    f"wall={width}x{height} stride={row_stride} "
+                    f"tile={INFER_WIDTH}x{INFER_HEIGHT} grid="
+                    f"{self.ANALYSIS_COLUMNS}x{self.ANALYSIS_ROWS}",
                     flush=True,
                 )
         finally:
             buffer.unmap(mapped)
 
-        self.mailbox.put(cid, time.monotonic(), frame)
+        if delivered:
+            with self.capture_lock:
+                for cid in delivered:
+                    self.capture_requested[cid] = False
+            self.analysis_frames += 1
         return self.Gst.FlowReturn.OK
 
     def _install_osd_and_meta(self) -> None:
-        self._install_postmux_inference()
+        self._install_analysis_inference()
 
         queue_src = self.wall_queue.get_static_pad("src")
         sink_pad = self.sink.get_static_pad("sink")
@@ -381,17 +443,26 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
             return False
         if time.monotonic() - self.display_watch_started < 10.0:
             return True
-        if self.safe_mux_batches > 0:
+
+        source_total = sum(int(stat.frames) for stat in self.stats.values())
+        if source_total == 0:
+            stage = "source-or-auth"
+        elif self.safe_mux_batches == 0:
+            stage = "nvstreammux"
+        elif self.safe_wall_frames == 0:
+            stage = "display-tiler-or-osd"
+        elif self.safe_sink_buffers == 0:
+            stage = "display-sink-link"
+        else:
             return False
-        source_counts = {
-            cid: int(stat.frames) for cid, stat in self.stats.items()
-        }
-        stage = "source-or-auth" if sum(source_counts.values()) == 0 else "nvstreammux"
+
         if not self._startup_stall_reported:
             self._startup_stall_reported = True
             print(
                 "CAMERA_STARTUP_STALL "
-                f"stage={stage} source_frames={source_counts} mux_batches=0",
+                f"stage={stage} source_frames={source_total} "
+                f"mux_batches={self.safe_mux_batches} wall_frames={self.safe_wall_frames} "
+                f"sink_buffers={self.safe_sink_buffers}",
                 flush=True,
             )
         return True
@@ -405,10 +476,11 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
             "CAMERA_PASCAL_SAFE "
             f"display={self.display_backend} source_frames={source_total} "
             f"mux_batches={self.safe_mux_batches} wall_frames={self.safe_wall_frames} "
-            f"sink_buffers={self.safe_sink_buffers} tracked_now={self.tracked_now} "
-            f"source_counts={counts} rendered={rendered if rendered is not None else '?'} "
+            f"sink_buffers={self.safe_sink_buffers} analysis_frames={self.analysis_frames} "
+            f"tracked_now={self.tracked_now} source_counts={counts} "
+            f"rendered={rendered if rendered is not None else '?'} "
             f"dropped={dropped if dropped is not None else '?'} "
-            "nvtracker=0 tracker=motion-predictor detector_path=postmux-demux",
+            "nvtracker=0 tracker=motion-predictor detector_path=analysis-tiler",
             flush=True,
         )
         return keep
@@ -421,7 +493,7 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
         print(
             "CAMERA_PASCAL_SAFE ready backend=RF-DETR-S "
             f"display={self.display_backend} tracker=motion-predictor nvtracker=disabled "
-            "source_path=direct-to-mux detector_path=postmux-demux",
+            "source_path=direct-to-mux detector_path=analysis-tiler demux=disabled",
             flush=True,
         )
         return super().run()
