@@ -19,6 +19,8 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
     dictionaries for the Qt UI. No frame copies, JPEG, appsink or second decoder.
     """
 
+    UI_TRACK_HOLD_SEC = 2.0
+
     def __init__(self) -> None:
         self.ui_lock = threading.RLock()
         self.live_tracks: dict[tuple[int, int], dict] = {}
@@ -41,9 +43,10 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
         self._set_if(self.tiler, "height", self.wall_height)
         if self.tiler.find_property("show-source") is not None:
             self.tiler.set_property("show-source", -1)
-        # The Qt grid owns the final visible geometry. Stretching only happens at
-        # the presentation sink; detector/tracker coordinates remain source-space.
-        self._set_if(self.sink, "force-aspect-ratio", False)
+        # The 2x3 wall is made from 16:9 camera tiles. Preserve that geometry at
+        # the EGL sink instead of horizontally stretching the wall to whatever Qt
+        # rectangle happens to be available; stretching softens small CCTV detail.
+        self._set_if(self.sink, "force-aspect-ratio", True)
 
         now = time.monotonic()
         for camera in self.cameras:
@@ -54,6 +57,25 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
         if 0 <= source_id < len(self.cameras):
             return self.cameras[source_id].camera_id
         return f"CAM-{source_id + 1:02d}"
+
+    def _expire_tracks_locked(self, now: float, epoch: float) -> None:
+        expired = [
+            key for key, item in self.live_tracks.items()
+            if now - float(item.get("last_seen", 0.0)) > self.UI_TRACK_HOLD_SEC
+        ]
+        for key in expired:
+            item = self.live_tracks.pop(key)
+            self.live_events.appendleft({
+                "type": "exit",
+                "time": epoch,
+                "camera_id": item["camera_id"],
+                "source_id": item["source_id"],
+                "room_id": item["room_id"],
+                "object_id": item["object_id"],
+                "person_id": f"{item['source_id']}:{item['object_id']}",
+                "label": item["label"],
+                "message": f"{item['label']} {item['camera_id']} dan chiqdi",
+            })
 
     def _update_ui_tracks(self, rows: list[dict], now: float) -> None:
         epoch = time.time()
@@ -90,25 +112,9 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
                         "message": f"{item['label']} {item['camera_id']} da aniqlandi",
                     })
 
-            # nvstreammux may emit partial live batches; do not turn one missing
-            # source in one batch into a false exit event.
-            expired = [
-                key for key, item in self.live_tracks.items()
-                if now - float(item.get("last_seen", 0.0)) > 1.35
-            ]
-            for key in expired:
-                item = self.live_tracks.pop(key)
-                self.live_events.appendleft({
-                    "type": "exit",
-                    "time": epoch,
-                    "camera_id": item["camera_id"],
-                    "source_id": item["source_id"],
-                    "room_id": item["room_id"],
-                    "object_id": item["object_id"],
-                    "person_id": f"{item['source_id']}:{item['object_id']}",
-                    "label": item["label"],
-                    "message": f"{item['label']} {item['camera_id']} dan chiqdi",
-                })
+            # A partial live mux batch or short inactive NvDCF phase must not make
+            # the right-side UI blink even though the local track still exists.
+            self._expire_tracks_locked(now, epoch)
 
     def _tracker_probe(self, pad, info):
         result = super()._tracker_probe(pad, info)
@@ -132,23 +138,7 @@ class SentinelLiveRuntime(CameraPersonHeatmap):
     def _expire_tracks(self, now: float) -> None:
         epoch = time.time()
         with self.ui_lock:
-            expired = [
-                key for key, item in self.live_tracks.items()
-                if now - float(item.get("last_seen", 0.0)) > 1.35
-            ]
-            for key in expired:
-                item = self.live_tracks.pop(key)
-                self.live_events.appendleft({
-                    "type": "exit",
-                    "time": epoch,
-                    "camera_id": item["camera_id"],
-                    "source_id": item["source_id"],
-                    "room_id": item["room_id"],
-                    "object_id": item["object_id"],
-                    "person_id": f"{item['source_id']}:{item['object_id']}",
-                    "label": item["label"],
-                    "message": f"{item['label']} {item['camera_id']} dan chiqdi",
-                })
+            self._expire_tracks_locked(now, epoch)
 
     def ui_snapshot(self) -> dict:
         now = time.monotonic()
