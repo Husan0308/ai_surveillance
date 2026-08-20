@@ -7,9 +7,9 @@ renders only into that child. There are no Qt labels, frames, hover widgets or
 paintable containers layered on top of the native video drawable.
 
 The DeepStream tiler remains in its startup 2x3 grid for the lifetime of the
-pipeline. Monitoring never changes tiler rows/columns/show-source while PLAYING;
-that avoids the SetSingleSourceMode/not-negotiated failures seen during the older
-focus/fullscreen implementation.
+pipeline. Monitoring never changes the tiler's runtime grid-selection properties
+while PLAYING; that avoids the SetSingleSourceMode/not-negotiated failures seen
+during the older focus/fullscreen implementation.
 """
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
