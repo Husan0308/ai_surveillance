@@ -29,7 +29,6 @@ def main() -> int:
         raise RuntimeError(
             f"production camera wall requires exactly {CAMERA_COUNT} enabled cameras, got {camera_count}"
         )
-
     if os.environ.get("CAMERA_V2_PASCAL_SAFE", "0") != "1":
         raise RuntimeError("production launcher must set CAMERA_V2_PASCAL_SAFE=1")
 
@@ -44,9 +43,7 @@ def main() -> int:
             f"monitoring wall must be 1600x1350, got {WALL_WIDTH}x{WALL_HEIGHT}"
         )
     if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
-        raise RuntimeError(
-            f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}"
-        )
+        raise RuntimeError(f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
     if (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH) != (672, 384, 1):
         raise RuntimeError(
             "RF-DETR-S geometry must be 672x384 micro-batch=1, got "
@@ -58,12 +55,18 @@ def main() -> int:
     )
     for required in (
         "class CameraPascalSafeRuntime(CameraDetectionV2)",
+        "SecureCameraWallV2._add_camera(self, index, camera)",
+        "def _install_postmux_inference(self)",
+        "pascal_postmux_tee",
+        "nvstreamdemux",
+        'self._request_src_pad(demux, f"src_{index}")',
+        "CAMERA_DETECT_PATH mode=postmux-demux",
+        "source_path=direct-to-nvstreammux",
         "self.wall_queue.unlink(self.sink)",
-        "if queue_src.is_linked()",
-        "pascal_wall_convert",
-        "pascal_osd",
         "safe_mux_batches",
         "safe_wall_frames",
+        "safe_sink_buffers",
+        "CAMERA_STARTUP_STALL",
         "tracker=motion-predictor",
         "nvtracker=disabled",
     ):
@@ -80,12 +83,7 @@ def main() -> int:
             raise RuntimeError(f"Pascal-safe runtime leaked tracker dependency: {forbidden}")
 
     sample_source = inspect.getsource(CameraPascalSafeRuntime._on_infer_sample)
-    for required in (
-        "mapped_size",
-        "row_stride",
-        "tight_stride",
-        "CAMERA_INFER_LAYOUT",
-    ):
+    for required in ("mapped_size", "row_stride", "tight_stride", "CAMERA_INFER_LAYOUT"):
         if required not in sample_source:
             raise RuntimeError(f"stride-safe RF-DETR capture is missing: {required}")
 
@@ -109,7 +107,7 @@ def main() -> int:
         'self._set_if(self.sink, "force-aspect-ratio", True)',
     ):
         if required not in main_source:
-            raise RuntimeError(f"live EGL sink guard missing: {required}")
+            raise RuntimeError(f"live display sink guard missing: {required}")
 
     ensure_bridge()
 
@@ -118,8 +116,9 @@ def main() -> int:
         f"mux={mux_width}x{mux_height} grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
         f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
+        "detector_path=postmux-demux source_ingest=isolated "
         "tracker=motion-predictor nvtracker=disabled stride_safe=PASS "
-        "stage_counters=mux+wall+sink scaling=lanczos"
+        "stage_counters=source+mux+wall+sink scaling=lanczos"
     )
     print("CAMERA_PREFLIGHT=PASS")
     return 0
