@@ -34,6 +34,7 @@ def main() -> int:
     ui = source("services/camera_v2/sentinel_ui_monitoring_native.py")
     launcher = source("scripts/run_sentinel_vms.sh")
     secure = source("services/camera_v2/secure.py")
+    detector_backend = source("services/camera_v2/rfdetr_backend.py")
 
     for token in (
         "class CameraPascalSafeRuntime(CameraDetectionV2)",
@@ -53,7 +54,7 @@ def main() -> int:
         "CAMERA_STARTUP_STALL",
         "display_failover_requested = True",
         "CAMERA_DISPLAY_FAILOVER",
-        "tracker=motion-predictor",
+        "self.tracker = None",
         "nvtracker=disabled",
     ):
         if token not in runtime:
@@ -70,6 +71,28 @@ def main() -> int:
     ):
         if forbidden in runtime:
             return fail(f"Pascal runtime leaked forbidden code path: {forbidden}")
+
+    for token in (
+        "class RFDETRRawBoxManager",
+        "detection.SmoothBoxManager = RFDETRRawBoxManager",
+        "detection.CameraDetectionV2._inject_boxes_probe = _inject_rfdetr_truth_probe",
+        "tracker=OFF flow=OFF reid=OFF",
+        "RFDETR_TRUTH_READY",
+        "RFDETR_TRUTH_RESULT",
+        "RFDETR_TRUTH_META",
+    ):
+        if token not in detector_backend:
+            return fail(f"missing RF-DETR truth contract: {token}")
+
+    for forbidden in (
+        "detection.SmoothBoxManager = FlowAssistedPersonTracker",
+        "attach_motion_flow(self)",
+    ):
+        # These may exist in old explicit diagnostics, but must not be part of the
+        # selected/default RF-DETR branch anymore.
+        selected_part = detector_backend.split("def install() -> None:", 1)[-1]
+        if forbidden in selected_part:
+            return fail(f"RF-DETR truth path still installs temporal logic: {forbidden}")
 
     for token in (
         'CAMERA_V2_RTSP_TRANSPORT',
@@ -107,10 +130,13 @@ def main() -> int:
     for token in (
         "export CAMERA_V2_RTSP_TRANSPORT=tcp",
         "export CAMERA_V2_RTSP_LATENCY_MS=250",
+        "export CAMERA_V2_DETECT_BACKEND=rfdetr-s",
+        "export CAMERA_V2_RFDETR_MODEL_WIDTH=512",
+        "export CAMERA_V2_RFDETR_MODEL_HEIGHT=512",
         "detector_path=analysis-tiler",
-        "demux=disabled",
-        "tracker=motion-predictor",
-        "nvtracker=disabled",
+        "tracker=OFF",
+        "flow=OFF",
+        "reid=OFF",
         "export CAMERA_V2_DISPLAY_BACKEND=egl",
         "ui=camera-only-2x3-click-fullscreen",
     ):
@@ -144,8 +170,9 @@ def main() -> int:
         "PASCAL_SAFE_PREFLIGHT=PASS "
         f"gpu={gpu!r} runtime=CameraPascalSafeRuntime rtsp=tcp latency>=200ms "
         "source_path=direct-to-mux detector_path=analysis-tiler demux=disabled "
-        "mux_retention=bounded tracker=motion-predictor nvtracker=disabled "
-        "display=egl-primary+x11-zero-render-fallback fullscreen=click+escape"
+        "mux_retention=bounded detector=RF-DETR-S tracker=OFF flow=OFF reid=OFF "
+        "nvtracker=disabled display=egl-primary+x11-zero-render-fallback "
+        "fullscreen=click+escape"
     )
     return 0
 
