@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-"""RF-DETR-S detector backend for the Camera V2 core.
+"""RF-DETR-S detector backend for Camera V2.
 
-The detector worker is process-isolated and keeps the existing result schema. On
-supported DeepStream GPUs it also installs the sparse external-detector contract
-for NvDCF. On the deployment Pascal GPU, where DeepStream 7.1 NvDCF stalls, the
-launcher enables the Pascal-safe motion-predictor presentation path instead.
+The detector worker is process-isolated and preserves the existing CameraDetectionV2
+job/result schema. Tracker selection is intentionally outside this module: the GTX
+1050 Ti production controller constructs CameraPascalSafeRuntime directly, while
+other runtimes may opt into the sparse NvDCF contract.
 """
 
 import importlib.metadata
@@ -16,13 +16,8 @@ import numpy as np
 
 
 def _person_mask(detections, class_id: np.ndarray) -> np.ndarray:
-    """Resolve the person class across RF-DETR checkpoint label layouts.
+    """Resolve the person class across RF-DETR checkpoint label layouts."""
 
-    Current pretrained COCO checkpoints can expose sparse raw COCO category IDs
-    (where person is category 1), while fine-tuned checkpoints can expose zero-
-    based class IDs. RF-DETR also publishes class_name in Detections.data, so use
-    that semantic label whenever available and only fall back to IDs.
-    """
     data = getattr(detections, "data", None)
     if isinstance(data, dict):
         names = data.get("class_name")
@@ -32,14 +27,14 @@ def _person_mask(detections, class_id: np.ndarray) -> np.ndarray:
                 normalized = np.char.lower(np.char.strip(names))
                 return normalized == "person"
 
-    # Pretrained COCO: raw sparse IDs use 1 for person. Older/remapped or
-    # fine-tuned one-class checkpoints commonly use 0. Accept both only as a
-    # compatibility fallback when semantic class names are unavailable.
+    # Pretrained COCO checkpoints may expose sparse category id 1 for person;
+    # older/remapped or one-class checkpoints may expose zero-based id 0.
     return np.isin(class_id, (0, 1))
 
 
 def _person_rows(detections, max_det: int) -> list[tuple[list[float], float]]:
     """Return person detections only, highest-confidence first."""
+
     xyxy = np.asarray(getattr(detections, "xyxy", []), dtype=np.float32)
     confidence = np.asarray(getattr(detections, "confidence", []), dtype=np.float32)
     class_id = np.asarray(getattr(detections, "class_id", []), dtype=np.int64)
@@ -64,13 +59,7 @@ def _person_rows(detections, max_det: int) -> list[tuple[list[float], float]]:
 
 
 def rfdetr_worker(job_q, result_q) -> None:
-    """Spawn-safe CUDA RF-DETR-S worker.
-
-    Input frames arrive from GStreamer as BGR. RF-DETR's NumPy API expects RGB,
-    so every selected frame is converted before inference. The worker remains
-    process-isolated exactly like the previous detector, keeping CUDA failures out
-    of the Qt/DeepStream parent process.
-    """
+    """Spawn-safe CUDA RF-DETR-S worker."""
 
     try:
         try:
@@ -95,8 +84,8 @@ def rfdetr_worker(job_q, result_q) -> None:
             pass
         torch.backends.cudnn.benchmark = True
 
-        # Import here, after the child owns CUDA, to avoid any detector-side CUDA
-        # context in the parent process.
+        # Import after the child owns CUDA. This keeps the parent Qt/DeepStream
+        # process free of detector-side CUDA model state.
         from . import detection as det
 
         startup_delay = float(os.environ.get("CAMERA_V2_DETECT_STARTUP_DELAY", "3.0"))
@@ -109,8 +98,7 @@ def rfdetr_worker(job_q, result_q) -> None:
 
         model = RFDETRSmall(device="cuda:0")
 
-        # The target GPU is memory constrained. Avoid JIT/deep-copy optimization
-        # during bring-up; eager FP32 is the accuracy-safe baseline on Pascal.
+        # Eager FP32 is the compatibility baseline for the Pascal deployment.
         warm = np.zeros((infer_shape[0], infer_shape[1], 3), dtype=np.uint8)
         with torch.inference_mode():
             model.predict(
@@ -145,8 +133,7 @@ def rfdetr_worker(job_q, result_q) -> None:
 
             started = time.monotonic()
             try:
-                # RF-DETR documents NumPy input as RGB. The inference side branch
-                # delivers BGR from BGRx, so convert without touching display data.
+                # The GStreamer side branch supplies BGR; RF-DETR NumPy input is RGB.
                 rgb_frames = [
                     np.ascontiguousarray(frame[..., ::-1]) for frame in job["frames"]
                 ]
@@ -163,7 +150,8 @@ def rfdetr_worker(job_q, result_q) -> None:
                     predictions = [predictions]
                 if len(predictions) != len(job["cameras"]):
                     raise RuntimeError(
-                        f"RF-DETR batch mismatch: predictions={len(predictions)} cameras={len(job['cameras'])}"
+                        f"RF-DETR batch mismatch: predictions={len(predictions)} "
+                        f"cameras={len(job['cameras'])}"
                     )
 
                 output = {
@@ -208,16 +196,8 @@ def rfdetr_worker(job_q, result_q) -> None:
 
 
 def _capture_gate_until_sample(self, _pad, _info, cid: str):
-    """Pass buffers while a capture request is armed; scheduler clears the gate.
+    """Pass buffers while a capture request is armed; scheduler clears the gate."""
 
-    The old one-shot gate cleared ``capture_requested`` before downstream
-    nvvideoconvert/appsink had actually delivered a sample. During startup caps
-    negotiation that single admitted buffer can be consumed without producing an
-    appsink sample, leaving the scheduler in an endless timeout loop. Keep the
-    request armed until the mailbox receives a sample (or the scheduler times out
-    and clears the request) so downstream has more than one chance to complete the
-    requested capture.
-    """
     with self.capture_lock:
         requested = bool(self.capture_requested.get(cid, False))
     if not requested:
@@ -226,23 +206,23 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
 
 
 def install() -> None:
-    """Make RF-DETR-S and the hardware-appropriate tracking path active."""
+    """Install RF-DETR-S into CameraDetectionV2 without selecting a tracker."""
+
     from . import detection
 
     detection._yolo_worker = rfdetr_worker
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
 
+    # Supported/non-Pascal runtimes may still use the existing sparse external
+    # detector contract with NvDCF. The production GTX 1050 Ti controller never
+    # imports those tracker runtimes, so safe mode has no tracker side effect.
     pascal_safe = os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
-    if pascal_safe:
-        from .pascal_safe_pipeline import install_pascal_safe_pipeline
-
-        install_pascal_safe_pipeline()
-    else:
+    if not pascal_safe:
         from .sparse_tracker_contract import install_sparse_tracker_contract
 
         install_sparse_tracker_contract()
