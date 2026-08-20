@@ -2,146 +2,49 @@ detector:
   model: rfdetr-small
   device: cuda:0
 
-  # Core-v1 rule: detector floor stays low for difficult/occluded people. Weak
-  # observations can continue an existing track, while temporal birth confirmation
-  # prevents persistent low-score noise from becoming a visible person.
-  capture_width: 768
-  capture_height: 432
-  threshold: 0.06
-  person_class_id: 1
-  max_det: 50
-  camera_thresholds: {}
+  # Exact production profile from agent/rfdetr-s-core-final.
+  # Keep the detector conservative: the old working branch used 0.18 and semantic
+  # class-name filtering. The 0.06 experiment created furniture/fragment boxes.
+  capture_width: 672
+  capture_height: 384
+  threshold: 0.18
+  max_det: 40
 
-  # GTX 1050 Ti 4GB safety profile. Camera decode/display never waits for this
-  # worker. The parent scheduler is latest-only and automatically reduces duty if
-  # wall cadence degrades.
+  # GTX 1050 Ti / Pascal-safe profile from the old working runtime.
   micro_batch: 1
-  gpu_duty: 0.30
+  gpu_duty: 0.24
   gpu_duty_min: 0.12
-  gpu_duty_max: 0.45
+  gpu_duty_max: 0.30
   startup_timeout_sec: 90
   result_timeout_sec: 12
-  max_result_age_ms: 900
+  max_result_age_ms: 220
   optimize_for_inference: false
 
-  # Exact Core-v1 full-frame + ROI fusion policy. These guards run on RAW RF-DETR
-  # detections before presentation tracking.
-  duplicate_iou: 0.58
-  fusion_containment: 0.84
-  fusion_center_distance: 0.40
-
-  # Known static false-positive region retained from the proven six-camera setup.
-  # It only rejects small boxes; a large real person crossing the region is kept.
-  hard_exclusion:
-    max_box_height_ratio: 0.30
-    overlap_threshold: 0.15
-    cameras:
-      CAM-06:
-        - [0.50, 0.00, 0.78, 0.22]
-
-  # Selective high-resolution recovery from Core-v1. It is intentionally limited
-  # to the two historically difficult views, so six-camera GPU load stays bounded.
-  # verify: replace full-frame detections inside ROI with the crop result.
-  # augment: keep full-frame detections and add crop-only misses.
-  roi_second_pass:
-    enabled: true
-    every_n: 2
-    trigger_max_full_roi_persons: 1
-    accept_conf: 0.06
-    cameras:
-      CAM-05:
-        mode: verify
-        every_n: 2
-        always_run: false
-        accept_conf: 0.11
-        rotations: [0]
-        trigger_max_full_roi_persons: 1
-        box: [0.27, 0.00, 0.72, 0.54]
-      CAM-06:
-        mode: augment
-        every_n: 2
-        always_run: false
-        accept_conf: 0.075
-        rotations: [0]
-        trigger_max_full_roi_persons: 0
-        box: [0.36, 0.12, 0.74, 0.48]
-
-  # Mature Core-v1 adaptive Kalman + Byte visual policy. RF-DETR-S revisits one
-  # camera far more slowly than the old YOLO worker, so track birth and recovery
-  # windows are explicitly sized for the observed ~1.5-2.0 s/camera cadence.
-  # This state is DISPLAY-ONLY; raw RF-DETR geometry remains authoritative for the
-  # future NvDCF/room-geometry pipeline.
+  # No ROI recovery, hard masks, low-confidence births or fragment suppression in
+  # the baseline. Those were not part of the proven RF-DETR-S camera-only profile.
+  # First reproduce the old correct detector exactly; additions come only after a
+  # real-camera A/B test.
   box:
-    hold_ms: 2400
-    memory_ms: 6000
-    prediction_ms: 1100
-    birth_candidate_ttl_ms: 5000
+    side_margin: 0.08
+    top_margin: 0.04
+    bottom_margin: 0.10
+    max_age_sec: 1.80
+    max_predict_sec: 0.75
 
-    match_iou: 0.12
-    reacquire_distance: 1.05
-    byte_match_center: 0.70
-    byte_second_match_iou: 0.04
-    byte_second_match_center: 0.50
-    low_match_max_age_ms: 2200
+    # Exact old SmoothBoxManager motion/update constants.
+    association_score_min: 0.12
+    velocity_keep: 0.55
+    velocity_measure: 0.45
+    size_velocity_keep: 0.70
+    size_velocity_measure: 0.30
+    position_alpha: 0.82
+    grow_width_alpha: 0.75
+    shrink_width_alpha: 0.28
+    grow_height_alpha: 0.78
+    shrink_height_alpha: 0.25
+    prediction_damping: 0.75
+    prediction_size_gain: 0.35
 
-    # RF-DETR confidence scale is lower than the previous YOLO detector. Keep
-    # 0.06-0.08 observations continuation-only; >=0.08 may create a track.
-    # Clearly strong observations (>=0.18) appear immediately. Borderline births
-    # require a second spatially consistent observation and can survive the full
-    # six-camera round-robin interval.
-    byte_high_conf: 0.08
-    byte_low_conf: 0.06
-    low_conf_confirm: 0.06
-    start_conf: 0.18
-    new_track_min_conf: 0.08
-    strong_confirm_hits: 1
-    weak_confirm_hits: 2
-
-    process_noise: 0.85
-    measurement_noise: 0.90
-    velocity_damping: 0.96
-    size_velocity_damping: 0.60
-    max_prediction_shift_boxes: 0.70
-    max_prediction_size_ratio: 0.10
-
-    adaptive_error_low: 0.08
-    adaptive_error_high: 0.25
-    center_response_slow: 0.42
-    center_response_fast: 0.88
-    size_response: 0.30
-    snap_distance_boxes: 0.65
-    reversal_damping: 0.15
-
-    duplicate_iou: 0.68
-    duplicate_containment: 0.90
-    duplicate_center_distance: 0.20
-    fragment_duplicate_cameras: [CAM-03, CAM-05, CAM-06]
-    fragment_horizontal_overlap: 0.78
-    fragment_x_center: 0.18
-    fragment_max_area_ratio: 0.55
-    fragment_min_vertical_overlap: 0.20
-    fragment_max_vertical_gap: 0.06
-
-    exclusion_max_box_height: 0.30
-    exclusion_overlap_threshold: 0.15
-    camera_exclusion_zones:
-      CAM-06:
-        - [0.50, 0.00, 0.78, 0.22]
-
-    camera_start_conf: {}
-    camera_low_conf_confirm: {}
-    camera_new_track_zones: {}
-
-    # Final OSD-only body envelope. This does not feed back into detection or the
-    # future tracker; it just prevents a tight model box clipping visible head,
-    # hands or shoes.
-    display_side_margin: 0.08
-    display_top_margin: 0.07
-    display_bottom_margin: 0.10
-    sitting_extra_side: 0.04
-    sitting_extra_bottom: 0.04
-    sitting_aspect_threshold: 1.55
-
-  # Display is always higher priority than detector throughput.
+  # Display always wins over detector throughput.
   wall_p95_slow_ms: 72
   wall_p95_fast_ms: 60
