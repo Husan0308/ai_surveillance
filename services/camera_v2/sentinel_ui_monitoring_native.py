@@ -2,20 +2,19 @@ from __future__ import annotations
 
 """Camera-only Qt host for the fixed six-camera DeepStream wall.
 
-The dashboard is intentionally absent. GstVideoOverlay renders directly into one
-native QWidget X11 window. There are no stacked pages and no Qt children painted
-over the video surface. RF-DETR/NvDCF and the DeepStream runtime remain separate
-from this display host.
+One native QWidget is used as the GstVideoOverlay X11 target. The UI owns no
+camera cards, labels, overlays, dashboards or secondary video widgets. The child
+DeepStream process is managed by camera_wall_runtime.CameraWallController.
 """
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
-from .sentinel_video_wall_ui import ProPipelineController
+from .camera_wall_runtime import CameraWallController
 
 
 class NativeVideoHost(QWidget):
-    """One native QWidget used directly as the GstVideoOverlay X11 target."""
+    """Persistent native QWidget used directly as the EGL/X11 render target."""
 
     nativeReady = Signal(int)
 
@@ -26,8 +25,9 @@ class NativeVideoHost(QWidget):
         self.setMinimumSize(640, 480)
         self._last_emitted_xid = 0
 
-        # This widget is the render target. Do not let Qt's backing store paint
-        # over EGL, and do not create another embedded native window layer.
+        # External GstVideoOverlay/EGL owns this native child. On X11,
+        # WA_PaintOnScreen + a null paint engine prevents Qt's backing store from
+        # repainting over the live EGL surface.
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -36,7 +36,6 @@ class NativeVideoHost(QWidget):
         self.setAutoFillBackground(False)
 
     def paintEngine(self):
-        # External GstVideoOverlay/EGL owns all pixels in this widget.
         return None
 
     def _publish_xid(self) -> None:
@@ -62,8 +61,9 @@ class NativeVideoHost(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        QTimer.singleShot(80, self._publish_xid)
-        QTimer.singleShot(300, self._publish_xid)
+        # Let the window manager settle before the first XID is handed to EGL.
+        QTimer.singleShot(120, self._publish_xid)
+        QTimer.singleShot(400, self._publish_xid)
 
     def event(self, event) -> bool:
         result = super().event(event)
@@ -73,12 +73,12 @@ class NativeVideoHost(QWidget):
 
 
 class MonitoringPage(QWidget):
-    """Only the fixed 2x3 live camera wall; no other UI is constructed."""
+    """Only the fixed 2x3 live camera wall; no dashboard is constructed."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("cameraOnlyPage")
-        self.controller = ProPipelineController()
+        self.controller = CameraWallController()
         self._last_bound_xid = 0
 
         layout = QVBoxLayout(self)
@@ -89,9 +89,8 @@ class MonitoringPage(QWidget):
         self.surface.nativeReady.connect(self._start_or_bind)
         layout.addWidget(self.surface, 1)
 
-        # Drain status/metrics IPC but render none of it in this camera-only UI.
         self.poll_timer = self.startTimer(250)
-        QTimer.singleShot(200, self._ensure_started)
+        QTimer.singleShot(250, self._ensure_started)
 
     def _start_or_bind(self, xid: int) -> None:
         xid = int(xid)
