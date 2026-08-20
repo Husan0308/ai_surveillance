@@ -7,17 +7,17 @@ RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
 # Local NvDCF tuning only. ReID/re-association is forcibly disabled below.
-# The detector is sparse, but stale visual tracks must not remain visible over
-# empty floor. Keep a short recovery window and require useful tracker confidence.
+# The detector is sparse, so confirmed local tracks need enough visual recovery
+# time to survive a short bend/turn/occlusion without blinking off the live wall.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "0",
     "maxTargetsPerStream": "24",
     "minIouDiff4NewTarget": "0.72",
-    "minTrackerConfidence": "0.28",
-    "probationAge": "2",
-    "maxShadowTrackingAge": "12",
-    "earlyTerminationAge": "1",
+    "minTrackerConfidence": "0.15",
+    "probationAge": "1",
+    "maxShadowTrackingAge": "40",
+    "earlyTerminationAge": "2",
 }
 
 _OPTIONAL_PATCHES: dict[str, str] = {
@@ -33,7 +33,7 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4Iou": "0.03",
     "minMatchingScore4VisualSimilarity": "0.08",
     "usePrediction4Assoc": "1",
-    "minTrackingConfidenceDuringInactive": "0.40",
+    "minTrackingConfidenceDuringInactive": "0.12",
     "minIou4TargetDuplicate": "0.94",
     "targetDuplicateRunInterval": "5",
 }
@@ -149,7 +149,9 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing)
         )
 
-    # Shadow tracks remain internal; only accepted current NvDCF outputs reach UI.
+    # Shadow state stays inside NvDCF; the normal current-frame tracker output is
+    # allowed to survive at lower confidence instead of being hidden by a second
+    # UI threshold. No ReID or cross-camera memory is enabled here.
     _set_section_key(output, "TargetManagement", "outputShadowTracks", "0")
     _disable_reid(output)
 
@@ -158,7 +160,7 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     header = [
         f"# Auto-generated from {stock.name}.",
         "# Camera V2 local NvDCF profile; cross-camera ReID is intentionally absent.",
-        "# maxShadowTrackingAge=12; outputShadowTracks=0; stale-track UI filtering enabled.",
+        "# maxShadowTrackingAge=40; outputShadowTracks=0; continuity-first local tracking.",
         "# TrajectoryManagement.enableReAssoc=0; ReID.reidType=0; outputReidTensor=0.",
         "# No ReID model, TensorRT engine, gallery, sidecar or room topology is loaded.",
         "# Optional patches applied: "
