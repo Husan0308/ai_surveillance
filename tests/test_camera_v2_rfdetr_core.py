@@ -58,14 +58,18 @@ def test_monitoring_uses_one_native_x11_video_target() -> None:
     assert "def paintEngine(self)" in native
     assert "def publish_current_xid(self, *, force: bool = False)" in native
     assert "self.surface.publish_current_xid(force=True)" in native
-    assert "self.surface = NativeVideoSurface(self.wall_card)" in native
+    assert "self.surface = NativeVideoSurface(" in native
+    assert "camera_count=len(self.camera_configs)" in native
     assert "self.surface.nativeReady.connect(self._start_or_bind)" in native
+    assert "self.surface.cameraActivated.connect(self.toggle_camera_focus)" in native
     assert "def resume_video(self)" in native
+    assert "def toggle_camera_focus(self, source_id: int)" in native
+    assert "self.controller.focus(source_id)" in native
     assert "class CameraStatusRow(QFrame)" in native
     assert "ProPipelineController()" in native
 
     native_calls = called_attributes(native)
-    assert "focus" not in native_calls
+    assert "focus" in native_calls
     assert "set_fullscreen_mode" not in native_calls
     assert "ProLiveVideoWall(" not in native
 
@@ -75,6 +79,7 @@ def test_monitoring_uses_one_native_x11_video_target() -> None:
     assert "showNormal" not in shell_calls
     assert "showMaximized" in shell_calls
     assert "self.monitoring_page.resume_video()" in shell
+    assert "self.monitoring_page.open_fullscreen_grid()" in shell
 
     video = source("services/camera_v2/sentinel_video_pro.py")
     assert "GstVideo.VideoOverlay.set_window_handle" in video

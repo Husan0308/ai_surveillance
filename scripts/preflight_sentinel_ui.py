@@ -19,7 +19,7 @@ from services.camera_v2.sentinel_video import CAMERA_COUNT, GRID_COLUMNS, GRID_R
 from services.ml_service.app.config import CameraConfig, load_settings
 
 EXPECTED_NAV = ["Monitoring", "People", "Events", "Rooms", "Enrollment", "Settings"]
-EXPECTED_BUILD = "2026.08.20-r16-native-x11"
+EXPECTED_BUILD = "2026.08.20-r17-camera-only"
 
 
 def _fail(message: str) -> None:
@@ -99,9 +99,15 @@ def main_preflight() -> int:
             "def publish_current_xid(self, *, force: bool = False)",
             "self.surface.publish_current_xid(force=True)",
             "class MonitoringPage(QWidget)",
-            "self.surface = NativeVideoSurface(self.wall_card)",
+            "self.surface = NativeVideoSurface(",
+            "camera_count=len(self.camera_configs)",
             "self.surface.nativeReady.connect(self._start_or_bind)",
+            "self.surface.cameraActivated.connect(self.toggle_camera_focus)",
             "def resume_video(self)",
+            "def toggle_camera_focus(self, source_id: int)",
+            "self.controller.focus(source_id)",
+            "self._camera_only_mode = True",
+            "self.identity_panel.hide()",
             "ProPipelineController()",
             'QLabel("People in Building")',
             "class CameraStatusRow(QFrame)",
@@ -115,7 +121,7 @@ def main_preflight() -> int:
     )
 
     monitoring_calls = _called_attribute_names(monitoring)
-    forbidden_monitoring_calls = {"focus", "set_fullscreen_mode"}.intersection(
+    forbidden_monitoring_calls = {"set_fullscreen_mode"}.intersection(
         monitoring_calls
     )
     if forbidden_monitoring_calls:
@@ -131,7 +137,7 @@ def main_preflight() -> int:
         shell,
         (
             "from .sentinel_ui_monitoring_native import MonitoringPage",
-            "BUILD_TAG = \"2026.08.20-r16-native-x11\"",
+            "BUILD_TAG = \"2026.08.20-r17-camera-only\"",
             "self.monitoring_host = QWidget(self.content)",
             "self.monitoring_page = MonitoringPage()",
             "monitoring_layout.addWidget(self.monitoring_page, 1)",
@@ -142,6 +148,7 @@ def main_preflight() -> int:
             "self.stack.setCurrentIndex(index - 1)",
             "self.monitoring_host.show()",
             "self.monitoring_page.resume_video()",
+            "self.monitoring_page.open_fullscreen_grid()",
             "window.showMaximized()",
             "def set_monitoring_fullscreen",
         ),
@@ -194,10 +201,11 @@ def main_preflight() -> int:
 
     print(f"SENTINEL_PREFLIGHT build={BUILD_TAG} ui=PASS")
     print("SENTINEL_PREFLIGHT shell=Monitoring-outside-QStackedWidget PASS")
-    print("SENTINEL_PREFLIGHT monitoring=fixed-2x3 native-qwidget right-rail=270px")
+    print("SENTINEL_PREFLIGHT monitoring=camera-only 2x3 native-qwidget")
     print("SENTINEL_PREFLIGHT native_video=one-X11-XID paint-on-screen PASS")
+    print("SENTINEL_PREFLIGHT interaction=click-focus click-or-escape-grid PASS")
     print("SENTINEL_PREFLIGHT overlays=outside-native-video PASS")
-    print("SENTINEL_PREFLIGHT tiler=runtime-fixed no-focus-mutation PASS")
+    print("SENTINEL_PREFLIGHT tiler=2x3-grid click-focus command-safe PASS")
     print("SENTINEL_PREFLIGHT people_count=room-fused total+known+unknown wiring=PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0

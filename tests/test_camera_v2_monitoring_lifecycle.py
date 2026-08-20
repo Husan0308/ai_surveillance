@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QPoint, QTimer
 from PySide6.QtWidgets import QApplication
 
 import services.camera_v2.sentinel_ui_monitoring_native as monitoring
@@ -39,6 +39,7 @@ class FakeController:
     def __init__(self) -> None:
         self.process = None
         self.started: list[int] = []
+        self.focused: list[int | None] = []
         self.stop_count = 0
 
     def start_or_bind(self, xid: int) -> None:
@@ -47,6 +48,9 @@ class FakeController:
 
     def poll(self):
         return type("Status", (), {"state": "STARTING"})(), {"cameras": []}
+
+    def focus(self, source_id: int | None) -> None:
+        self.focused.append(source_id)
 
     def stop(self) -> None:
         self.stop_count += 1
@@ -73,6 +77,19 @@ def test_native_host_can_republish_the_same_xid(qt_app) -> None:
     host.close()
 
 
+def test_native_surface_maps_the_aspect_fitted_camera_grid(qt_app) -> None:
+    surface = monitoring.NativeVideoSurface(camera_count=6)
+    surface.resize(1200, 900)
+
+    assert surface.source_at(QPoint(20, 450)) is None
+    assert surface.source_at(QPoint(200, 100)) == 0
+    assert surface.source_at(QPoint(1000, 800)) == 5
+    surface.set_focused_source(5)
+    assert surface.source_at(QPoint(20, 450)) == 5
+
+    surface.close()
+
+
 def test_monitoring_restarts_after_early_pipeline_exit(qt_app, monkeypatch) -> None:
     monkeypatch.setattr(monitoring, "ProPipelineController", FakeController)
     page = monitoring.MonitoringPage()
@@ -92,6 +109,19 @@ def test_monitoring_restarts_after_early_pipeline_exit(qt_app, monkeypatch) -> N
     wait(qt_app, 250)
     assert page.controller.started[-1] == first_xid
     assert len(page.controller.started) > starts_before_show
+
+    page.open_fullscreen_grid()
+    assert page.identity_panel.isHidden()
+    assert page._root_layout.getContentsMargins() == (0, 0, 0, 0)
+
+    page.surface.cameraActivated.emit(4)
+    assert page.controller.focused[-1] == 4
+    assert page._focused_source == 4
+
+    page.exit_fullscreen()
+    assert page.controller.focused[-1] is None
+    assert page._focused_source is None
+    assert page.identity_panel.isHidden()
 
     page.controller.process.alive = False
     page._restart_not_before = 0.0

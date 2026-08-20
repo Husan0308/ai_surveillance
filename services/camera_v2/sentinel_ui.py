@@ -24,7 +24,7 @@ from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.20-r16-native-x11"
+BUILD_TAG = "2026.08.20-r17-camera-only"
 
 
 class MainWindow(QMainWindow):
@@ -156,6 +156,7 @@ class MainWindow(QMainWindow):
         main.addWidget(self.content, 1)
 
         self.nav_buttons[0].setChecked(True)
+        self.monitoring_page.open_fullscreen_grid()
 
     def switch_page(self, index: int) -> None:
         if not (0 <= index < len(self.NAV)):
@@ -214,6 +215,7 @@ class MainWindow(QMainWindow):
         if self._current_page_index == 0:
             self.stack.hide()
             self.monitoring_host.show()
+            new_monitoring.open_fullscreen_grid()
             new_monitoring.resume_video()
         else:
             self.monitoring_host.hide()

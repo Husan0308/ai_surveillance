@@ -6,9 +6,9 @@ The camera pixels are rendered by GstVideoOverlay directly into one native
 QWidget. The widget bypasses Qt's backing store so a previously visible page can
 never remain painted over the live EGL surface under X11/AnyDesk.
 
-The DeepStream wall remains a fixed 2x3 grid for the lifetime of the pipeline.
-Fullscreen only changes the Qt shell/layout; it never mutates the tiler while the
-pipeline is PLAYING.
+The app starts as an edge-to-edge 2x3 camera wall. Clicking a tile temporarily
+focuses that source on the same native surface; clicking again or pressing Escape
+returns to the grid without recreating the window or pipeline.
 """
 
 import time
@@ -26,6 +26,13 @@ from PySide6.QtWidgets import (
 from services.ml_service.app.config import load_settings
 
 from .sentinel_ui_base import C
+from .sentinel_video import (
+    CAMERA_COUNT,
+    GRID_COLUMNS,
+    GRID_ROWS,
+    WALL_HEIGHT,
+    WALL_WIDTH,
+)
 from .sentinel_video_wall_ui import ProPipelineController
 
 
@@ -33,14 +40,23 @@ class NativeVideoSurface(QWidget):
     """One X11 child surface owned exclusively by GstVideoOverlay."""
 
     nativeReady = Signal(int)
+    cameraActivated = Signal(int)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        camera_count: int = CAMERA_COUNT,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("nativeVideoSurface")
         self.setMinimumSize(720, 608)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._last_emitted_xid = 0
+        self._camera_count = max(0, min(CAMERA_COUNT, int(camera_count)))
+        self._focused_source: int | None = None
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet("")
         self.setAutoFillBackground(False)
 
@@ -117,6 +133,50 @@ class NativeVideoSurface(QWidget):
         # GstVideoOverlay owns every pixel of this native drawable.
         event.accept()
 
+    def source_at(self, pos) -> int | None:
+        """Map a click inside the aspect-fitted 2x3 wall to a camera source."""
+        width = self.width()
+        height = self.height()
+        if width <= 0 or height <= 0 or self._camera_count <= 0:
+            return None
+
+        if self._focused_source is not None:
+            return self._focused_source
+
+        wall_aspect = WALL_WIDTH / WALL_HEIGHT
+        if width / height > wall_aspect:
+            video_height = float(height)
+            video_width = video_height * wall_aspect
+            left = (width - video_width) / 2.0
+            top = 0.0
+        else:
+            video_width = float(width)
+            video_height = video_width / wall_aspect
+            left = 0.0
+            top = (height - video_height) / 2.0
+
+        x = float(pos.x()) - left
+        y = float(pos.y()) - top
+        if x < 0 or y < 0 or x >= video_width or y >= video_height:
+            return None
+
+        column = min(GRID_COLUMNS - 1, int(x * GRID_COLUMNS / video_width))
+        row = min(GRID_ROWS - 1, int(y * GRID_ROWS / video_height))
+        source_id = row * GRID_COLUMNS + column
+        return source_id if 0 <= source_id < self._camera_count else None
+
+    def set_focused_source(self, source_id: int | None) -> None:
+        self._focused_source = None if source_id is None else int(source_id)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            source_id = self.source_at(event.position().toPoint())
+            if source_id is not None:
+                self.cameraActivated.emit(source_id)
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
 
 class CameraStatusRow(QFrame):
     def __init__(self, camera_id: str, parent: QWidget | None = None) -> None:
@@ -174,6 +234,8 @@ class MonitoringPage(QWidget):
         self._last_bound_xid = 0
         self._last_bind_at = 0.0
         self._fullscreen_active = False
+        self._camera_only_mode = False
+        self._focused_source: int | None = None
         self._restart_not_before = 0.0
         self._restart_delay = 0.5
 
@@ -191,9 +253,14 @@ class MonitoringPage(QWidget):
         wall_layout = QVBoxLayout(self.wall_card)
         wall_layout.setContentsMargins(6, 6, 6, 6)
         wall_layout.setSpacing(0)
+        self._wall_layout = wall_layout
 
-        self.surface = NativeVideoSurface(self.wall_card)
+        self.surface = NativeVideoSurface(
+            self.wall_card,
+            camera_count=len(self.camera_configs),
+        )
         self.surface.nativeReady.connect(self._start_or_bind)
+        self.surface.cameraActivated.connect(self.toggle_camera_focus)
         wall_layout.addWidget(self.surface, 1)
         root.addWidget(self.wall_card, 1)
 
@@ -424,18 +491,46 @@ class MonitoringPage(QWidget):
         QTimer.singleShot(0, self.resume_video)
 
     def open_fullscreen_grid(self) -> None:
-        if self._fullscreen_active:
-            return
+        self._camera_only_mode = True
+        if self._focused_source is not None:
+            self._set_camera_focus(None)
         self._fullscreen_active = True
         self.identity_panel.hide()
         self._root_layout.setContentsMargins(0, 0, 0, 0)
         self._root_layout.setSpacing(0)
+        self._wall_layout.setContentsMargins(0, 0, 0, 0)
         self.wall_card.setStyleSheet(
             "QFrame#monitorWallCard{background:#020507;border:0;border-radius:0;}"
         )
         self._set_app_fullscreen_shell(True)
+        self.surface.publish_current_xid(force=True)
+
+    def _set_camera_focus(self, source_id: int | None) -> None:
+        if source_id is not None:
+            source_id = int(source_id)
+            if not 0 <= source_id < len(self.camera_configs):
+                return
+        self._focused_source = source_id
+        self.surface.set_focused_source(source_id)
+        self.controller.focus(source_id)
+        QTimer.singleShot(
+            80,
+            lambda: self.surface.publish_current_xid(force=True),
+        )
+
+    def toggle_camera_focus(self, source_id: int) -> None:
+        """Click a grid tile to focus it; click the focused view to return."""
+        if self._focused_source is None:
+            self._set_camera_focus(source_id)
+        else:
+            self._set_camera_focus(None)
 
     def exit_fullscreen(self) -> None:
+        if self._focused_source is not None:
+            self._set_camera_focus(None)
+            return
+        if self._camera_only_mode:
+            return
         if not self._fullscreen_active:
             return
         self._fullscreen_active = False
@@ -443,6 +538,7 @@ class MonitoringPage(QWidget):
         self.identity_panel.show()
         self._root_layout.setContentsMargins(12, 10, 12, 12)
         self._root_layout.setSpacing(12)
+        self._wall_layout.setContentsMargins(6, 6, 6, 6)
         self.wall_card.setStyleSheet(
             "QFrame#monitorWallCard{background:#05090d;border:1px solid #1b2a36;"
             "border-radius:8px;}"
