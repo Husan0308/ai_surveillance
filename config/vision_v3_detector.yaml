@@ -2,16 +2,16 @@ detector:
   model: rfdetr-small
   device: cuda:0
 
-  # RF-DETR-S is a 512px-class model. The capture branch preserves the camera's
-  # 16:9 scene and RF-DETR performs its own model preprocessing.
+  # High-recall raw detector gate. This is intentionally low: low-confidence
+  # person observations may recover an existing visual track, while the stable
+  # Byte/Kalman display manager prevents weak one-frame noise from becoming a box.
   capture_width: 768
   capture_height: 432
-  threshold: 0.18
+  threshold: 0.06
   person_class_id: 1
 
-  # GTX 1050 Ti 4GB safety profile. One image per RF-DETR forward pass avoids
-  # OOM spikes while the six NVDEC streams continue independently. Duty is
-  # adaptive: display cadence always has priority over detector throughput.
+  # GTX 1050 Ti 4GB safety profile. One image per forward pass keeps VRAM spikes
+  # bounded while all six NVDEC streams stay independent from detector latency.
   micro_batch: 1
   gpu_duty: 0.30
   gpu_duty_min: 0.12
@@ -20,25 +20,45 @@ detector:
   result_timeout_sec: 12
   optimize_for_inference: false
 
-  # Protective DISPLAY envelope. Raw RF-DETR boxes remain untouched for future
-  # NvDCF/geometry. The visible box is intentionally generous so a tight model
-  # box does not clip head, shoes, hands or a seated/crouched body.
+  # Display-only visual continuity, adapted from the previously stable core-v1
+  # Paddle/Byte-style Kalman tracker. Raw RF-DETR boxes are NOT changed and remain
+  # available for future NvDCF/geometry.
   box:
-    side_margin: 0.12
-    top_margin: 0.10
-    bottom_margin: 0.15
-    sitting_extra_side: 0.06
-    sitting_extra_bottom: 0.05
+    byte_high_conf: 0.22
+    byte_low_conf: 0.06
+    start_conf: 0.30
+    new_track_min_conf: 0.16
+    birth_hits: 2
+
+    match_iou: 0.10
+    second_match_iou: 0.04
+    match_center: 0.75
+    second_match_center: 0.52
+    low_match_max_age_sec: 0.85
+
+    process_noise: 0.85
+    measurement_noise: 0.90
+    velocity_damping: 0.96
+    max_prediction_shift_boxes: 0.55
+    max_prediction_size_ratio: 0.08
+    shrink_measure_alpha: 0.28
+
+    duplicate_iou: 0.68
+    duplicate_containment: 0.90
+    duplicate_center_distance: 0.20
+
+    hold_sec: 1.20
+    memory_sec: 3.0
+    predict_sec: 0.55
+
+    # Full-body display guard. Head and shoes get extra room, but the rectangle is
+    # intentionally tighter than the first RF-DETR prototype.
+    side_margin: 0.08
+    top_margin: 0.07
+    bottom_margin: 0.10
+    sitting_extra_side: 0.04
+    sitting_extra_bottom: 0.04
     sitting_aspect_threshold: 1.55
-    duplicate_iou: 0.80
-    hold_sec: 1.80
-    predict_sec: 0.80
-    expand_alpha: 0.90
-    shrink_alpha: 0.18
-    position_alpha: 0.82
-    velocity_alpha: 0.38
-    min_width: 12
-    min_height: 24
 
   # If display cadence becomes unhealthy, detector work backs off automatically.
   wall_p95_slow_ms: 72
