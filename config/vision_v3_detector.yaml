@@ -1,0 +1,43 @@
+detector:
+  model: rfdetr-small
+  device: cuda:0
+
+  # RF-DETR-S is a 512px-class model. The capture branch preserves the camera's
+  # 16:9 scene and RF-DETR performs its own model preprocessing.
+  capture_width: 768
+  capture_height: 432
+  threshold: 0.18
+  person_class_id: 1
+
+  # GTX 1050 Ti 4GB safety profile. One image per RF-DETR forward pass avoids
+  # OOM spikes while the six NVDEC streams continue independently.
+  micro_batch: 1
+  gpu_duty: 0.22
+  gpu_duty_min: 0.12
+  gpu_duty_max: 0.32
+  startup_timeout_sec: 90
+  result_timeout_sec: 12
+  optimize_for_inference: false
+
+  # Protective display envelope. Raw detector boxes are kept untouched for the
+  # future NvDCF input. Only the visible OSD envelope gets padded/smoothed.
+  box:
+    side_margin: 0.10
+    top_margin: 0.08
+    bottom_margin: 0.12
+    sitting_extra_side: 0.05
+    sitting_extra_bottom: 0.04
+    sitting_aspect_threshold: 1.55
+    duplicate_iou: 0.80
+    hold_sec: 1.10
+    predict_sec: 0.70
+    expand_alpha: 0.88
+    shrink_alpha: 0.20
+    position_alpha: 0.82
+    velocity_alpha: 0.38
+    min_width: 12
+    min_height: 24
+
+  # If display cadence becomes unhealthy, detector work backs off automatically.
+  wall_p95_slow_ms: 72
+  wall_p95_fast_ms: 60
