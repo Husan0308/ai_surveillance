@@ -19,17 +19,17 @@ from PySide6.QtWidgets import (
 from .data import EVENTS, PEOPLE
 from .sentinel_ui_base import APP_QSS, C, label, make_button
 from .sentinel_ui_enrollment import EnrollmentPage
-from .sentinel_ui_monitoring import MonitoringPage
+from .sentinel_ui_monitoring_native import MonitoringPage
 from .sentinel_ui_pages import EventsPage, PeoplePage, RoomsPage
 from .sentinel_ui_settings import SettingsPage
 
 
-BUILD_TAG = "2026.08.19-r11"
+BUILD_TAG = "2026.08.20-r12-rfdetr"
 
 
 class MainWindow(QMainWindow):
     NAV = [
-        ("▣", "Monitoring", "Live cameras · tracking · heatmap", MonitoringPage),
+        ("▣", "Monitoring", "Live cameras · RF-DETR-S · NvDCF", MonitoringPage),
         ("♙", "People", f"{len(PEOPLE)} ta identity", PeoplePage),
         ("⌁", "Events", f"{len(EVENTS)} ta hodisa", EventsPage),
         ("▥", "Rooms", "Xonalar va camera topology", RoomsPage),
@@ -43,7 +43,6 @@ class MainWindow(QMainWindow):
         self.resize(1500, 920)
         self.setMinimumSize(1180, 720)
         self._monitoring_fullscreen = False
-        self._restore_maximized = False
 
         root = QWidget()
         root.setObjectName("root")
@@ -158,18 +157,13 @@ class MainWindow(QMainWindow):
             return
         self._monitoring_fullscreen = enabled
 
-        if enabled:
-            self._restore_maximized = self.isMaximized()
-            self.sidebar.hide()
-            self.header.hide()
-            self.showFullScreen()
-        else:
-            self.sidebar.show()
-            self.header.show()
-            if self._restore_maximized:
-                self.showMaximized()
-            else:
-                self.showNormal()
+        # Keep one top-level X11 window state for the lifetime of the EGL child.
+        # Toggling showFullScreen()/showNormal() can recreate/reparent native child
+        # windows under X11/XWayland and makes GstVideoOverlay paint outside the
+        # camera panel. The app is maximized from startup; fullscreen monitoring is
+        # therefore just a shell/layout change, not a window-manager mode change.
+        self.sidebar.setVisible(not enabled)
+        self.header.setVisible(not enabled)
 
     def open_camera_fullscreen(self) -> None:
         self.pages[0].open_fullscreen_grid()
@@ -224,7 +218,8 @@ def run():
         flush=True,
     )
     window = MainWindow()
-    window.show()
+    # Settle the top-level X11 geometry before the MonitoringPage binds EGL.
+    window.showMaximized()
     return app.exec()
 
 
