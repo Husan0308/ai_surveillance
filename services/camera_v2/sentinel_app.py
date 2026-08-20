@@ -11,8 +11,7 @@ from . import sentinel_exact as ui
 
 
 def _install_reference_contract() -> None:
-    from PySide6.QtCore import QEvent, Qt
-    from PySide6.QtGui import QColor, QPainter, QPen
+    from PySide6.QtCore import QEvent, QTimer, Qt
     from PySide6.QtWidgets import QWidget
 
     # Exact names/capacities from the supplied data.py. Camera V2 has two physical
@@ -45,23 +44,27 @@ def _install_reference_contract() -> None:
     BaseLiveWall = ui.LiveWall
 
     class ExactCameraTile(BaseCameraTile):
-        """Realtime overlay with the supplied CameraView chrome only.
+        """Input-only transparent tile above the native DeepStream wall.
 
-        The temporary realtime fork added Heatmap/Fullscreen hover controls inside
-        every camera. The uploaded reference does not contain them, so keep those
-        children permanently hidden. Double-click fullscreen remains, matching the
-        supplied CameraView.clicked behavior.
+        The previous version painted borders/status/badges on six translucent Qt
+        child widgets while nveglglessink painted the same X11 area underneath.
+        That gives two independent painters ownership of overlapping native pixels
+        and is visible as intermittent background flashing over AnyDesk/X11.
+
+        DeepStream OSD already owns camera/person graphics, so these child widgets
+        now exist only for hit-testing/double-click focus. They never paint.
         """
 
         def __init__(self, source_id: int, parent=None):
             super().__init__(source_id, parent)
             self.controls.hide()
             self.controls.setEnabled(False)
+            self.setAutoFillBackground(False)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
             self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
 
         def enterEvent(self, event):
-            # Deliberately do not reveal the historical hover controls.
             QWidget.enterEvent(self, event)
 
         def leaveEvent(self, event):
@@ -69,24 +72,15 @@ def _install_reference_contract() -> None:
             QWidget.leaveEvent(self, event)
 
         def resizeEvent(self, event):
-            # Do not call BaseCameraTile.resizeEvent(), because that method raises
-            # the removed controls. There is no geometry to maintain for them.
             QWidget.resizeEvent(self, event)
 
         def paintEvent(self, event):
-            super().paintEvent(event)
-            # The supplied Monitoring grid has 10 px gutters between cards. The
-            # native DeepStream wall has no physical gap, so mask only a 5 px edge
-            # on each tile. Total visible camera area stays large while the exact
-            # card separation is restored without copying a video frame into Qt.
-            painter = QPainter(self)
-            painter.setPen(QPen(QColor(ui.C["bg"]), 5))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(self.rect().adjusted(2, 2, -3, -3))
-            painter.end()
+            # Native GstVideoOverlay owns every video pixel. Do not let Qt erase,
+            # border, dim, antialias or otherwise touch the live surface.
+            event.accept()
 
     class ExactLiveWall(BaseLiveWall):
-        """Native X11 surface owned by nveglglessink, not Qt backing-store paint."""
+        """Native X11 surface owned exclusively by nveglglessink."""
 
         def __init__(self, controller, parent=None):
             super().__init__(controller, parent)
@@ -95,6 +89,7 @@ def _install_reference_contract() -> None:
             self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
             self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
             self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
             _ = int(self.winId())
 
         def paintEngine(self):
@@ -104,6 +99,14 @@ def _install_reference_contract() -> None:
         def paintEvent(self, event):
             event.accept()
 
+        def resizeEvent(self, event):
+            # Keep BaseLiveWall's hit-test tile layout, but do not ask Qt to paint
+            # the video. After X11 changes the native drawable size, explicitly
+            # ask GstVideoOverlay to redraw the latest completed frame.
+            BaseLiveWall.resizeEvent(self, event)
+            if getattr(self, "controller", None) is not None:
+                QTimer.singleShot(0, self.controller.expose)
+
         def event(self, event):
             result = super().event(event)
             if event.type() == QEvent.Type.WinIdChange:
@@ -111,12 +114,13 @@ def _install_reference_contract() -> None:
                     xid = int(self.winId())
                     if xid > 0 and getattr(self, "controller", None) is not None:
                         self.controller.bind_window(xid)
+                        QTimer.singleShot(0, self.controller.expose)
                 except Exception:
                     pass
             return result
 
     # MainWindow -> MonitoringPage resolves these names at instantiation time, so
-    # this keeps the historical exact shell intact and swaps only video integration.
+    # this keeps the historical shell intact and swaps only video integration.
     ui.CameraTile = ExactCameraTile
     ui.LiveWall = ExactLiveWall
 
