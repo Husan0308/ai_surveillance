@@ -1,0 +1,1 @@
+RTSP -> nvurisrcbin/NVDEC -> queue(1,leaky) -> nvstreammux(batch=6,sync-inputs=0) -> nvmultistreamtiler -> queue(1,leaky) -> nveglglessink. RF-DETR-S is added only after this core passes soak testing.
