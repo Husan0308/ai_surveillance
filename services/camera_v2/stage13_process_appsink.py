@@ -71,5 +71,10 @@ source = source.replace(
     'f"parent={os.getppid()} child={os.getpid()} appsink=1 pull=0 callback=0 detector=0 tracker=0 gate=0"',
 )
 
-# Execute the transformed diagnostic exactly as a module entry point.
-exec(compile(source, str(source_path), "exec"), {"__name__": "__main__", "__file__": str(source_path)})
+# IMPORTANT: execute inside the real module globals. multiprocessing "spawn"
+# pickles the target by module/name. Executing in a detached dict made
+# _child_main claim __main__ while not actually being an attribute of the real
+# __main__ module, causing PicklingError before GStreamer even started.
+# Using globals() preserves the exact Stage 12 spawn behavior while keeping the
+# Stage 13 graph delta limited to fakesink -> appsink.
+exec(compile(source, str(source_path), "exec"), globals())
