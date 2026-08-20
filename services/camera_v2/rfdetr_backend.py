@@ -206,12 +206,19 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
 
 
 def install() -> None:
-    """Install RF-DETR-S into CameraDetectionV2 without selecting a tracker."""
+    """Install RF-DETR-S and the Pascal-safe anchored temporal tracker."""
 
     from . import detection
+    from .temporal_tracker import AnchoredPersonTracker
 
     detection._yolo_worker = rfdetr_worker
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
+
+    # CameraDetectionV2 resolves SmoothBoxManager from its module globals at
+    # runtime. Replacing that factory preserves the existing detector/metadata
+    # contract while giving the Pascal path a persistent body-center anchor,
+    # posture-tolerant association and bounded latency compensation.
+    detection.SmoothBoxManager = AnchoredPersonTracker
 
     # Supported/non-Pascal runtimes may still use the existing sparse external
     # detector contract with NvDCF. The production GTX 1050 Ti controller never
