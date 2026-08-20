@@ -12,7 +12,10 @@ CAMERA_COUNT = 6
 GRID_COLUMNS = 2
 GRID_ROWS = 3
 WALL_WIDTH = 1600
-WALL_HEIGHT = 1350
+# nvmultistreamtiler/NVMM aligns the requested 1350 surface to 1352 on the
+# target Pascal stack. Keep the production caps geometry aligned with the
+# negotiated surface so downstream caps do not fail with not-negotiated (-4).
+WALL_HEIGHT = 1352
 FOCUS_WIDTH = 1920
 FOCUS_HEIGHT = 1080
 
