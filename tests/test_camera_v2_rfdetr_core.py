@@ -22,13 +22,23 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert "np.isin(class_id, (0, 1))" in backend
     assert 'detection._yolo_worker = rfdetr_worker' in backend
 
+    # The capture gate must remain armed until a real appsink sample reaches the
+    # mailbox. Clearing it inside the pad probe can starve RF-DETR forever during
+    # initial nvvideoconvert/appsink negotiation.
+    assert "def _capture_gate_until_sample" in backend
+    assert "requested = bool(self.capture_requested.get(cid, False))" in backend
+    assert "self.capture_requested[cid] = False" not in backend.split(
+        "def _capture_gate_until_sample", 1
+    )[1].split("def install", 1)[0]
+    assert "CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample" in backend
+
     assert "_install_rfdetr_backend()" in heatmap
-    assert '"CAMERA_V2_DETECT_WIDTH": "736"' in heatmap
-    assert '"CAMERA_V2_DETECT_HEIGHT": "416"' in heatmap
+    assert '"CAMERA_V2_DETECT_WIDTH": "672"' in heatmap
+    assert '"CAMERA_V2_DETECT_HEIGHT": "384"' in heatmap
     assert '"CAMERA_V2_MICRO_BATCH": "1"' in heatmap
     assert '"CAMERA_V2_DETECT_CONF": "0.18"' in heatmap
 
-    assert "detector=RF-DETR-S@736x416" in launcher
+    assert "detector=RF-DETR-S@672x384" in launcher
     assert "python scripts/preflight_rfdetr_core.py" in launcher
     assert "RFDETR_PREFLIGHT=PASS" in preflight
 
