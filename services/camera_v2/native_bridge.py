@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("native_meta_bridge.c")
 LABEL_SOURCE = Path(__file__).with_name("native_label_style.c")
+SMOOTHER_SOURCE = Path(__file__).with_name("native_display_smoother.c")
 HEATMAP_SOURCE = Path(__file__).with_name("native_heatmap.c")
 BUILD_DIR = ROOT / ".runtime" / "camera_v2"
 LIB_PATH = BUILD_DIR / "libcamera_v2_meta.so"
@@ -55,7 +56,7 @@ def _deepstream_root() -> Path:
 
 def ensure_bridge() -> Path:
     """Build active metadata helpers for detector/tracker labels and heatmap."""
-    sources = (SOURCE, LABEL_SOURCE, HEATMAP_SOURCE)
+    sources = (SOURCE, LABEL_SOURCE, SMOOTHER_SOURCE, HEATMAP_SOURCE)
     for src in sources:
         if not src.exists():
             raise RuntimeError(f"metadata bridge source missing: {src}")
@@ -89,6 +90,7 @@ def ensure_bridge() -> Path:
         "-std=c11",
         str(SOURCE),
         str(LABEL_SOURCE),
+        str(SMOOTHER_SOURCE),
         str(HEATMAP_SOURCE),
         "-o",
         str(LIB_PATH),
@@ -136,6 +138,8 @@ class NativeMetaBridge:
 
         self.lib.camera_v2_style_and_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_style_and_count_tracked.restype = ctypes.c_int
+        self.lib.camera_v2_smooth_display_boxes.argtypes = [ctypes.c_uint64]
+        self.lib.camera_v2_smooth_display_boxes.restype = ctypes.c_int
         self.lib.camera_v2_apply_local_track_style.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_apply_local_track_style.restype = ctypes.c_int
         self.lib.camera_v2_copy_tracks.argtypes = [
@@ -229,11 +233,11 @@ class NativeMetaBridge:
         )
 
     def style_and_count_tracked(self, gst_buffer) -> int:
-        return int(
-            self.lib.camera_v2_style_and_count_tracked(
-                ctypes.c_uint64(hash(gst_buffer))
-            )
-        )
+        buffer_ptr = ctypes.c_uint64(hash(gst_buffer))
+        count = int(self.lib.camera_v2_style_and_count_tracked(buffer_ptr))
+        if count >= 0:
+            self.lib.camera_v2_smooth_display_boxes(buffer_ptr)
+        return count
 
     def apply_local_track_style(self, gst_buffer) -> int:
         return int(
