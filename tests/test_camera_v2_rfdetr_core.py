@@ -47,20 +47,27 @@ def test_rfdetr_small_is_the_active_person_detector_contract() -> None:
     assert "RFDETR_PREFLIGHT=PASS" in preflight
 
 
-def test_ui_is_camera_only_and_uses_one_embedded_qwindow_target() -> None:
+def test_ui_is_camera_only_and_uses_one_direct_native_qwidget_target() -> None:
     native = source("services/camera_v2/sentinel_ui_monitoring_native.py")
     shell = source("services/camera_v2/sentinel_ui.py")
 
     assert "class NativeVideoHost(QWidget)" in native
-    assert "self.video_window = QWindow()" in native
-    assert "QWidget.createWindowContainer(self.video_window, self)" in native
-    assert "self.video_window.winId()" in native
+    assert "WA_NativeWindow, True" in native
+    assert "WA_DontCreateNativeAncestors, True" in native
+    assert "WA_NoSystemBackground, True" in native
+    assert "WA_OpaquePaintEvent, True" in native
+    assert "WA_PaintOnScreen, True" in native
+    assert "def paintEngine(self)" in native
+    assert "xid = int(self.winId())" in native
+    assert "mode=direct-native-qwidget" in native
     assert "self.surface = NativeVideoHost(self)" in native
     assert "self.surface.nativeReady.connect(self._start_or_bind)" in native
     assert "ProPipelineController()" in native
     assert "self.controller.poll()" in native
 
     for forbidden in (
+        "QWindow",
+        "createWindowContainer",
         "QFrame",
         "QLabel",
         "CameraStatusRow",
