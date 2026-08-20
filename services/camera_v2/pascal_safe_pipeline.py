@@ -17,6 +17,8 @@ libnvds_nvmultiobjecttracker.so / NvDCF configuration files.
 import os
 import time
 
+import numpy as np
+
 
 def _enabled() -> bool:
     return os.environ.get("CAMERA_V2_PASCAL_SAFE", "0").strip().lower() in {
@@ -57,12 +59,68 @@ class CameraPascalSafeRuntime(CameraDetectionV2):
         self.safe_mux_batches = 0
         self.source_track_counts: dict[int, int] = {}
         self.tracked_now = 0
+        self._safe_stride_logged: set[str] = set()
         super().__init__()
         self.source_track_counts = {
             int(source_id): 0 for source_id in self.camera_index.values()
         }
         self.tracker_backend = "motion-predictor"
         self.tracker = None
+
+    def _on_infer_sample(self, sink, cid: str):
+        """Copy BGRx using the actual mapped row stride, not width*4."""
+
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            with self.capture_lock:
+                self.capture_requested[cid] = True
+            return self.Gst.FlowReturn.OK
+
+        structure = sample.get_caps().get_structure(0)
+        width = int(structure.get_value("width"))
+        height = int(structure.get_value("height"))
+        buffer = sample.get_buffer()
+        ok, mapped = buffer.map(self.Gst.MapFlags.READ)
+        if not ok:
+            with self.capture_lock:
+                self.capture_requested[cid] = True
+            return self.Gst.FlowReturn.OK
+
+        try:
+            tight_stride = width * 4
+            mapped_size = int(getattr(mapped, "size", len(mapped.data)))
+            if mapped_size < tight_stride * height:
+                raise RuntimeError(
+                    f"{cid}: BGRx buffer too small: {mapped_size} < {tight_stride * height}"
+                )
+            row_stride = (
+                mapped_size // height
+                if height > 0 and mapped_size % height == 0
+                else tight_stride
+            )
+            if row_stride < tight_stride:
+                raise RuntimeError(
+                    f"{cid}: invalid BGRx stride={row_stride}, tight={tight_stride}"
+                )
+
+            needed = row_stride * height
+            raw = np.frombuffer(mapped.data, dtype=np.uint8, count=needed)
+            rows = raw.reshape((height, row_stride))
+            bgrx = rows[:, :tight_stride].reshape((height, width, 4))
+            frame = bgrx[..., :3].copy()
+
+            if cid not in self._safe_stride_logged:
+                self._safe_stride_logged.add(cid)
+                print(
+                    f"CAMERA_INFER_LAYOUT {cid} size={mapped_size} "
+                    f"frame={width}x{height} stride={row_stride} tight={tight_stride}",
+                    flush=True,
+                )
+        finally:
+            buffer.unmap(mapped)
+
+        self.mailbox.put(cid, time.monotonic(), frame)
+        return self.Gst.FlowReturn.OK
 
     def _install_osd_and_meta(self) -> None:
         """Insert OSD without relying on gst-nvtracker.
