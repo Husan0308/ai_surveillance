@@ -20,19 +20,21 @@ def main() -> int:
     cid = "CAM-TEST"
     t0 = 100.0
 
-    # Strong first observation: track is immediately confirmed.
+    # A single plausible detection must NOT immediately become a visible person.
     tracker.update(cid, t0, [((900.0, 260.0, 1200.0, 1040.0), 0.82)])
-    anchors0 = tracker.anchors(cid, t0)
-    assert len(anchors0) == 1, anchors0
-    tid = anchors0[0]["track_id"]
-    assert anchors0[0]["confirmed"] is True
+    assert tracker.render(cid, t0) == []
+    assert tracker.anchors(cid, t0) == []
+    internal = tracker.tracks[cid]
+    assert len(internal) == 1, internal
+    tid = next(iter(internal))
+    assert internal[tid].confirmed is False
 
-    # Walking correction. The same anchor must survive and move right.
+    # A second spatially-consistent observation confirms the same candidate.
     tracker.update(cid, t0 + 0.50, [((1010.0, 275.0, 1310.0, 1050.0), 0.73)])
     anchors1 = tracker.anchors(cid, t0 + 0.50)
     assert len(anchors1) == 1, anchors1
     assert anchors1[0]["track_id"] == tid, (tid, anchors1)
-    assert anchors1[0]["cx"] > anchors0[0]["cx"]
+    assert anchors1[0]["confirmed"] is True
 
     rows = tracker.render(cid, t0 + 0.75)
     assert len(rows) == 1, rows
@@ -47,7 +49,7 @@ def main() -> int:
     assert len(anchors2) == 1, anchors2
     assert anchors2[0]["track_id"] == tid, (tid, anchors2)
 
-    # A detector miss must not make the person box disappear immediately.
+    # A detector miss must not make a confirmed person disappear immediately.
     tracker.update(cid, t0 + 1.50, [])
     held = tracker.render(cid, t0 + 2.80)
     assert len(held) == 1, held
@@ -55,14 +57,19 @@ def main() -> int:
     assert len(anchors_held) == 1
     assert anchors_held[0]["track_id"] == tid
 
-    # Once the configured hold window is genuinely exceeded the stale ghost is
-    # removed. Long-term survival will be owned by the optical-flow stage.
-    stale = tracker.render(cid, t0 + 4.30)
+    # Once the bounded display hold is genuinely exceeded, no stale ghost remains.
+    stale = tracker.render(cid, t0 + 4.00)
     assert stale == [], stale
+
+    # A one-off medium-confidence furniture-like candidate never renders.
+    false_cid = "CAM-FALSE"
+    tracker.update(false_cid, t0, [((300.0, 300.0, 520.0, 520.0), 0.67)])
+    assert tracker.render(false_cid, t0 + 0.30) == []
 
     print(
         "TEMPORAL_TRACKER_TEST=PASS "
-        f"track_id={tid} posture_same_id=1 miss_hold=1 bounded_prediction=1"
+        f"track_id={tid} probation=1 posture_same_id=1 miss_hold=1 "
+        "bounded_prediction=1 single_false_hidden=1"
     )
     return 0
 
