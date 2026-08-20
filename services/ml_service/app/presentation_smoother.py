@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import threading
 import time
 
@@ -17,51 +18,61 @@ class PresentedTrack:
 @dataclass(slots=True)
 class _State:
     track_id: int
-    mean: np.ndarray
-    covariance: np.ndarray
+    box: np.ndarray
+    velocity: np.ndarray
     confidence: float
-    state_time: float
     last_observation: float
     last_seen_wall: float
+    last_measurement: np.ndarray
 
 
 class PresentationSmoother:
-    """Timestamp-aware Kalman presentation keyed by canonical ByteTrack T-IDs.
+    """Responsive legacy-style presentation keyed by canonical ByteTrack T-IDs.
 
     ByteTrack remains the only identity/association owner. This class never
-    creates, merges or reassigns IDs; it only projects each already-associated
-    T-ID from the detector timestamp to the current camera-frame timestamp.
+    creates, merges or reassigns IDs. It restores the old proven presentation
+    policy that visibly followed people well: real detector/tracker measurements
+    dominate immediately, measured velocity only bridges the short detector gap,
+    and prediction is hard-capped so a box cannot trail or fly away.
 
-    The implementation is deliberately biased against visible trailing:
-    measurements are trusted strongly, direction reversals damp stale velocity,
-    large innovations snap back to the measured person, and extrapolation is
-    tightly bounded so a box cannot run far ahead of the person.
+    The important design split is:
+      * ByteTrack owns identity.
+      * The newest real measurement owns bbox geometry.
+      * Velocity is presentation-only and short lived.
     """
 
     def __init__(
         self,
         *,
         hold_ms: int = 700,
-        memory_ms: int = 2800,
-        prediction_ms: int = 280,
+        memory_ms: int = 6000,
+        prediction_ms: int = 200,
         process_noise: float = 1.0,
         measurement_noise: float = 0.70,
-        velocity_damping: float = 0.985,
-        max_prediction_shift_boxes: float = 0.48,
+        velocity_damping: float = 0.96,
+        max_prediction_shift_boxes: float = 0.35,
         max_prediction_size_ratio: float = 0.08,
-        snap_distance_boxes: float = 0.42,
-        reversal_damping: float = 0.12,
+        snap_distance_boxes: float = 0.55,
+        reversal_damping: float = 0.15,
+        measurement_response: float = 0.96,
+        velocity_response: float = 0.65,
+        size_response: float = 0.70,
     ) -> None:
         self.hold_sec = max(0.05, float(hold_ms) / 1000.0)
         self.memory_sec = max(self.hold_sec, float(memory_ms) / 1000.0)
         self.prediction_sec = max(0.0, float(prediction_ms) / 1000.0)
-        self.process_noise = max(0.05, float(process_noise))
-        self.measurement_noise = max(0.05, float(measurement_noise))
+        # Kept for backward-compatible constructor calls. The restored responsive
+        # path intentionally does not let a covariance filter overrule geometry.
+        self.process_noise = float(process_noise)
+        self.measurement_noise = float(measurement_noise)
         self.velocity_damping = max(0.80, min(1.0, float(velocity_damping)))
-        self.max_prediction_shift_boxes = max(0.10, float(max_prediction_shift_boxes))
+        self.max_prediction_shift_boxes = max(0.05, float(max_prediction_shift_boxes))
         self.max_prediction_size_ratio = max(0.0, min(0.50, float(max_prediction_size_ratio)))
         self.snap_distance_boxes = max(0.10, float(snap_distance_boxes))
         self.reversal_damping = max(0.0, min(0.80, float(reversal_damping)))
+        self.measurement_response = max(0.50, min(1.0, float(measurement_response)))
+        self.velocity_response = max(0.05, min(1.0, float(velocity_response)))
+        self.size_response = max(0.05, min(1.0, float(size_response)))
         self._states: dict[int, _State] = {}
         self._last_frame_id = -1
         self._lock = threading.RLock()
@@ -77,8 +88,8 @@ class PresentationSmoother:
         )
 
     @staticmethod
-    def _box_from_mean(mean: np.ndarray, confidence: float, track_id: int) -> PresentedTrack:
-        cx, cy, width, height = [float(v) for v in mean[:4]]
+    def _presented(box: np.ndarray, confidence: float, track_id: int) -> PresentedTrack:
+        cx, cy, width, height = [float(v) for v in box]
         width = max(2.0, width)
         height = max(2.0, height)
         return PresentedTrack(
@@ -92,158 +103,112 @@ class PresentationSmoother:
             confidence=float(confidence),
         )
 
-    def _init_state(self, track_id: int, measurement: np.ndarray, observation: float, now: float, confidence: float) -> _State:
-        scale = max(20.0, float(measurement[2]), float(measurement[3]))
-        mean = np.zeros(8, dtype=np.float64)
-        mean[:4] = measurement
-        pos = (0.035 * scale) ** 2
-        size = (0.050 * scale) ** 2
-        velocity = (0.55 * scale) ** 2
-        covariance = np.diag(
-            [pos, pos, size, size, velocity, velocity, velocity, velocity]
-        ).astype(np.float64)
+    @staticmethod
+    def _damped_displacement(damping: float, dt: float) -> tuple[float, float]:
+        """Return displacement multiplier and remaining velocity.
+
+        Damping is defined per 100 ms just like the old responsive visual tracker,
+        so behavior does not depend on an arbitrary render cadence.
+        """
+        dt = max(0.0, float(dt))
+        if dt <= 0.0:
+            return 0.0, 1.0
+        decay = float(damping) ** (dt / 0.1)
+        if damping >= 0.999999:
+            return dt, decay
+        rate = -math.log(float(damping)) / 0.1
+        return (1.0 - decay) / max(rate, 1e-9), decay
+
+    def _init_state(
+        self,
+        track_id: int,
+        measurement: np.ndarray,
+        observation: float,
+        now: float,
+        confidence: float,
+    ) -> _State:
         return _State(
             track_id=int(track_id),
-            mean=mean,
-            covariance=covariance,
+            box=measurement.copy(),
+            velocity=np.zeros(2, dtype=np.float64),
             confidence=float(confidence),
-            state_time=float(observation),
             last_observation=float(observation),
             last_seen_wall=float(now),
+            last_measurement=measurement.copy(),
         )
-
-    def _predict_arrays(
-        self,
-        mean: np.ndarray,
-        covariance: np.ndarray,
-        dt: float,
-        *,
-        cap_horizon: bool,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        dt = max(0.0, float(dt))
-        if cap_horizon:
-            dt = min(dt, self.prediction_sec)
-        if dt <= 0.0:
-            return mean.copy(), covariance.copy()
-
-        decay = self.velocity_damping ** (dt / 0.1)
-        transition = np.eye(8, dtype=np.float64)
-        for position, velocity in ((0, 4), (1, 5), (2, 6), (3, 7)):
-            transition[position, velocity] = dt
-            transition[velocity, velocity] = decay
-
-        predicted = transition @ mean
-        scale = max(20.0, float(predicted[2]), float(predicted[3]))
-        q_pos = (0.010 * scale * self.process_noise * (1.0 + 3.0 * dt)) ** 2
-        q_size = (0.008 * scale * self.process_noise * (1.0 + 2.0 * dt)) ** 2
-        q_vel = (0.14 * scale * self.process_noise * max(0.05, dt)) ** 2
-        process_cov = np.diag(
-            [q_pos, q_pos, q_size, q_size, q_vel, q_vel, q_vel, q_vel]
-        )
-        predicted_cov = transition @ covariance @ transition.T + process_cov
-
-        # Presentation prediction is allowed to bridge the detector cadence, not
-        # to invent large movement. Clamp both center travel and box breathing.
-        if cap_horizon:
-            base_w = max(2.0, float(mean[2]))
-            base_h = max(2.0, float(mean[3]))
-            dx = float(predicted[0] - mean[0])
-            dy = float(predicted[1] - mean[1])
-            max_dx = max(10.0, base_w * self.max_prediction_shift_boxes)
-            max_dy = max(10.0, base_h * self.max_prediction_shift_boxes)
-            normalized = ((dx / max_dx) ** 2 + (dy / max_dy) ** 2) ** 0.5
-            if normalized > 1.0:
-                predicted[0] = mean[0] + dx / normalized
-                predicted[1] = mean[1] + dy / normalized
-
-            max_dw = base_w * self.max_prediction_size_ratio
-            max_dh = base_h * self.max_prediction_size_ratio
-            predicted[2] = mean[2] + np.clip(predicted[2] - mean[2], -max_dw, max_dw)
-            predicted[3] = mean[3] + np.clip(predicted[3] - mean[3], -max_dh, max_dh)
-
-        predicted[2] = max(2.0, float(predicted[2]))
-        predicted[3] = max(2.0, float(predicted[3]))
-        return predicted, predicted_cov
 
     def _correct(self, state: _State, measurement: np.ndarray, observation: float) -> None:
-        dt = max(0.0, float(observation) - state.state_time)
-        predicted, predicted_cov = self._predict_arrays(
-            state.mean, state.covariance, dt, cap_horizon=False
+        dt = max(1e-3, float(observation) - state.last_observation)
+        previous_box = state.box.copy()
+        old_velocity = state.velocity.copy()
+
+        # Project only to the real observation time. The measurement still owns
+        # the final geometry; this prior exists only to estimate whether motion
+        # changed direction and to avoid jitter on tiny detector noise.
+        motion_dt, _decay = self._damped_displacement(
+            self.velocity_damping,
+            min(dt, self.prediction_sec),
+        )
+        prior_center = previous_box[:2] + old_velocity * motion_dt
+
+        measured_velocity = (measurement[:2] - state.last_measurement[:2]) / dt
+        dimensions = np.maximum(20.0, measurement[2:4])
+        velocity_limit = np.asarray(
+            [5.0 * dimensions[0], 5.0 * dimensions[1]], dtype=np.float64
+        )
+        measured_velocity = np.clip(measured_velocity, -velocity_limit, velocity_limit)
+
+        # Direction reversal was the most visible source of boxes being left
+        # behind. Kill stale momentum before mixing the new measured velocity.
+        for axis in (0, 1):
+            displacement = float(measurement[axis] - state.last_measurement[axis])
+            reversal_threshold = 0.03 * float(dimensions[axis])
+            if (
+                old_velocity[axis] * measured_velocity[axis] < 0.0
+                and abs(displacement) >= reversal_threshold
+            ):
+                old_velocity[axis] *= self.reversal_damping
+
+        state.velocity = (
+            (1.0 - self.velocity_response) * old_velocity
+            + self.velocity_response * measured_velocity
+        )
+        state.velocity = np.clip(state.velocity, -velocity_limit, velocity_limit)
+
+        error = measurement[:2] - prior_center
+        normalized_error = math.hypot(
+            float(error[0]) / float(dimensions[0]),
+            float(error[1]) / float(dimensions[1]),
         )
 
-        scale = max(
-            20.0,
-            float(predicted[2]),
-            float(predicted[3]),
-            float(measurement[2]),
-            float(measurement[3]),
-        )
-        innovation = measurement - predicted[:4]
-        center_error_boxes = (
-            float(np.hypot(innovation[0], innovation[1])) / max(scale, 1.0)
-        )
-
-        # A direction reversal is where extrapolated boxes most visibly run in
-        # front of a person. Kill stale velocity before correcting the state.
-        if predicted[4] * innovation[0] < 0.0 and abs(float(innovation[0])) > 0.03 * scale:
-            predicted[4] *= self.reversal_damping
-        if predicted[5] * innovation[1] < 0.0 and abs(float(innovation[1])) > 0.03 * scale:
-            predicted[5] *= self.reversal_damping
-
-        if center_error_boxes >= self.snap_distance_boxes:
-            # The detector has clearly disagreed with the motion estimate. Trust
-            # the observed person now instead of visibly easing toward them.
-            previous_center = state.mean[:2].copy()
-            observed_dt = max(1e-3, float(observation) - state.last_observation)
-            predicted[:4] = measurement
-            measured_velocity = (measurement[:2] - previous_center) / observed_dt
-            predicted[4] = 0.65 * float(measured_velocity[0])
-            predicted[5] = 0.65 * float(measured_velocity[1])
-            predicted[6] *= 0.25
-            predicted[7] *= 0.25
-            reset_pos = (0.035 * scale) ** 2
-            reset_size = (0.050 * scale) ** 2
-            predicted_cov[:4, :4] = np.diag(
-                [reset_pos, reset_pos, reset_size, reset_size]
+        # Old good behavior: the real observation wins. For a clearly displaced
+        # person snap completely; otherwise keep only 4% of the predicted center.
+        if normalized_error >= self.snap_distance_boxes:
+            center = measurement[:2].copy()
+            # A far correction is not evidence for equally huge future momentum.
+            state.velocity *= 0.65
+        else:
+            center = (
+                (1.0 - self.measurement_response) * prior_center
+                + self.measurement_response * measurement[:2]
             )
-            state.mean = predicted
-            state.covariance = predicted_cov
-            state.state_time = float(observation)
-            return
 
-        measurement_matrix = np.zeros((4, 8), dtype=np.float64)
-        measurement_matrix[:4, :4] = np.eye(4, dtype=np.float64)
-        r_pos = (0.022 * scale * self.measurement_noise) ** 2
-        r_size = (0.030 * scale * self.measurement_noise) ** 2
-        measurement_cov = np.diag([r_pos, r_pos, r_size, r_size])
-
-        projected_cov = (
-            measurement_matrix @ predicted_cov @ measurement_matrix.T + measurement_cov
+        # Keep width/height responsive but bounded so partial detections do not
+        # make a person's rectangle breathe violently from one result to the next.
+        old_size = np.maximum(2.0, previous_box[2:4])
+        requested_delta = measurement[2:4] - old_size
+        max_delta = old_size * 0.35
+        bounded_measurement_size = old_size + np.clip(
+            requested_delta, -max_delta, max_delta
         )
-        kalman_gain = (
-            predicted_cov
-            @ measurement_matrix.T
-            @ np.linalg.inv(projected_cov)
+        size = (
+            (1.0 - self.size_response) * old_size
+            + self.size_response * bounded_measurement_size
         )
-        corrected = predicted + kalman_gain @ innovation
-        identity = np.eye(8, dtype=np.float64)
-        corrected_cov = (
-            identity - kalman_gain @ measurement_matrix
-        ) @ predicted_cov
 
-        # Give the current measurement a final small direct vote. This removes
-        # the classic smooth-but-behind visual lag while the Kalman velocity still
-        # supplies between-detector-frame motion.
-        corrected[0] = 0.18 * corrected[0] + 0.82 * measurement[0]
-        corrected[1] = 0.18 * corrected[1] + 0.82 * measurement[1]
-        corrected[2] = 0.35 * corrected[2] + 0.65 * measurement[2]
-        corrected[3] = 0.35 * corrected[3] + 0.65 * measurement[3]
-        corrected[2] = max(2.0, float(corrected[2]))
-        corrected[3] = max(2.0, float(corrected[3]))
-
-        state.mean = corrected
-        state.covariance = corrected_cov
-        state.state_time = float(observation)
+        state.box = np.concatenate((center, np.maximum(2.0, size))).astype(np.float64)
+        state.last_measurement = measurement.copy()
+        state.last_observation = float(observation)
 
     def update(self, snapshot) -> None:
         if snapshot is None:
@@ -256,11 +221,13 @@ class PresentationSmoother:
 
             now = time.monotonic()
             observation = float(getattr(snapshot, "captured_monotonic", now))
+            seen_ids: set[int] = set()
             for row in getattr(snapshot, "detections", ()) or ():
                 track_id = getattr(row, "track_id", None)
                 if track_id is None:
                     continue
                 track_id = int(track_id)
+                seen_ids.add(track_id)
                 measurement = self._measurement(row.xyxy)
                 confidence = float(getattr(row, "confidence", 0.0))
                 state = self._states.get(track_id)
@@ -272,7 +239,6 @@ class PresentationSmoother:
 
                 self._correct(state, measurement, observation)
                 state.confidence = confidence
-                state.last_observation = float(observation)
                 state.last_seen_wall = float(now)
 
             stale = [
@@ -290,11 +256,36 @@ class PresentationSmoother:
             for state in self._states.values():
                 if now - state.last_seen_wall > self.hold_sec:
                     continue
-                dt = max(0.0, float(target_time) - state.state_time)
-                predicted, _ = self._predict_arrays(
-                    state.mean, state.covariance, dt, cap_horizon=True
+
+                elapsed = max(0.0, float(target_time) - state.last_observation)
+                horizon = min(elapsed, self.prediction_sec)
+                motion_dt, _decay = self._damped_displacement(
+                    self.velocity_damping,
+                    horizon,
                 )
+                presented = state.box.copy()
+                shift = state.velocity * motion_dt
+
+                # Prediction only bridges detector cadence. It is never allowed to
+                # drag the rectangle a large fraction of the person size.
+                max_shift = np.asarray(
+                    [
+                        max(8.0, state.box[2] * self.max_prediction_shift_boxes),
+                        max(8.0, state.box[3] * self.max_prediction_shift_boxes),
+                    ],
+                    dtype=np.float64,
+                )
+                normalized = math.hypot(
+                    float(shift[0]) / float(max_shift[0]),
+                    float(shift[1]) / float(max_shift[1]),
+                )
+                if normalized > 1.0:
+                    shift /= normalized
+                presented[:2] += shift
+
+                # Size is deliberately not extrapolated. The latest measured body
+                # envelope is safer than speculative box breathing between frames.
                 output.append(
-                    self._box_from_mean(predicted, state.confidence, state.track_id)
+                    self._presented(presented, state.confidence, state.track_id)
                 )
         return tuple(output)
