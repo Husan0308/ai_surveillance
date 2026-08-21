@@ -1,134 +1,151 @@
 from __future__ import annotations
 
-"""RF-DETR-S detector backend for the Pascal-safe Camera V2 wall.
+"""RF-DETR-S backend using the proven Core-v1 detection policy.
 
-The default production mode is deliberately detector-only until person boxes are
-visually proven on the live wall:
+The detector model remains RF-DETR-S.  Around it we restore the logic from the
+old ``rebuild/core-v1-clean`` period that the live deployment found reliable:
 
-    analysis tile -> RF-DETR-S -> strict person filter -> latest raw bbox
-                  -> NvDsObjectMeta -> nvmultistreamtiler -> nvdsosd
+* aspect-matched full-frame inference;
+* strict person-only output;
+* latest-only/stale-result discipline;
+* cross-pass deduplication;
+* CAM-05 verification ROI;
+* CAM-06 augmentation ROI and static false-positive exclusion;
+* old adaptive Kalman/Byte presentation tracker;
+* no optical flow, ReID or NvDCF in the Pascal path.
 
-No temporal tracker, optical flow, ReID or identity logic is installed by the
-RF-DETR path.  A short raw-result hold only repeats the newest real detector box
-on display frames between sparse round-robin inference calls; it never predicts
-motion or creates a box on its own.
-
-The analysis capture remains 16:9 (normally 672x384).  RF-DETR-S performs its
-own inference resize at its published 512x512 operating point, and RF-DETR's
-postprocessor returns boxes in the original analysis-image pixel coordinates.
+Presentation rectangles are deliberately NOT injected here before the display
+tiler.  ``CameraPascalSafeRuntime`` maps source-space boxes to the final grid or
+fullscreen wall and injects them immediately before nvdsosd.  That mirrors the
+old-good direct-overlay semantics and avoids a second metadata coordinate
+transform when the tiler layout changes.
 """
 
 import importlib.metadata
 import math
 import os
-import threading
 import time
-from dataclasses import dataclass
-from types import SimpleNamespace
 
 import numpy as np
 
+from .old_good_rfdetr_tracker import OldGoodRFDETRBoxManager
 from .person_candidate_filter import PersonCandidateFilter
 
 
-@dataclass(slots=True)
-class _RawState:
-    rows: list[tuple[float, float, float, float, float]]
-    captured: float
-    version: int
+# Core-v1 camera-specific detector policy.  Coordinates are normalized to the
+# analysis/source image before CameraDetectionV2 scales them to mux coordinates.
+_ROI_POLICY = {
+    "CAM-05": {
+        "mode": "verify",
+        "box": (0.27, 0.00, 0.72, 0.54),
+        "every_n": 2,
+        "trigger_max": 1,
+        "accept_conf": 0.11,
+    },
+    "CAM-06": {
+        "mode": "augment",
+        "box": (0.36, 0.12, 0.74, 0.48),
+        "every_n": 2,
+        "trigger_max": 0,
+        "accept_conf": 0.075,
+    },
+}
+
+_CAM06_EXCLUSION = (0.50, 0.00, 0.78, 0.22)
 
 
-class RFDETRRawBoxManager:
-    """Newest real RF-DETR person boxes only; no prediction or association."""
+def _area(box) -> float:
+    return max(0.0, float(box[2]) - float(box[0])) * max(
+        0.0, float(box[3]) - float(box[1])
+    )
 
-    def __init__(self, width: int, height: int) -> None:
-        self.width = float(width)
-        self.height = float(height)
-        self.lock = threading.RLock()
-        self.max_age = float(os.environ.get("CAMERA_V2_RFDETR_RAW_HOLD_SEC", "2.80"))
-        self.side_margin = float(os.environ.get("CAMERA_V2_RFDETR_BOX_SIDE_MARGIN", "0.04"))
-        self.top_margin = float(os.environ.get("CAMERA_V2_RFDETR_BOX_TOP_MARGIN", "0.03"))
-        self.bottom_margin = float(os.environ.get("CAMERA_V2_RFDETR_BOX_BOTTOM_MARGIN", "0.06"))
-        self._states: dict[str, _RawState] = {}
-        self._versions: dict[str, int] = {}
 
-    @property
-    def tracks(self):
-        """Compatibility view for existing Pascal counters; this is not tracking."""
-        now = time.monotonic()
-        output = {}
-        with self.lock:
-            for cid, state in self._states.items():
-                if now - state.captured > self.max_age:
-                    output[cid] = {}
-                    continue
-                output[cid] = {
-                    index + 1: SimpleNamespace(last_det_t=state.captured)
-                    for index in range(len(state.rows))
-                }
-        return output
+def _intersection(a, b) -> float:
+    return max(0.0, min(float(a[2]), float(b[2])) - max(float(a[0]), float(b[0]))) * max(
+        0.0, min(float(a[3]), float(b[3])) - max(float(a[1]), float(b[1]))
+    )
 
-    def _guard_box(self, box):
-        x1, y1, x2, y2 = [float(v) for v in box]
-        w = max(2.0, x2 - x1)
-        h = max(2.0, y2 - y1)
-        x1 -= w * self.side_margin
-        x2 += w * self.side_margin
-        y1 -= h * self.top_margin
-        y2 += h * self.bottom_margin
-        x1 = max(0.0, min(self.width - 2.0, x1))
-        y1 = max(0.0, min(self.height - 2.0, y1))
-        x2 = max(x1 + 1.0, min(self.width - 1.0, x2))
-        y2 = max(y1 + 1.0, min(self.height - 1.0, y2))
-        return x1, y1, x2, y2
 
-    def update(self, cid: str, captured_t: float, detections) -> None:
-        rows: list[tuple[float, float, float, float, float]] = []
-        for box, confidence in detections or ():
-            try:
-                coords = [float(v) for v in box]
-                conf = float(confidence)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if len(coords) != 4 or not all(math.isfinite(v) for v in (*coords, conf)):
-                continue
-            if conf <= 0.0 or coords[2] <= coords[0] or coords[3] <= coords[1]:
-                continue
-            x1, y1, x2, y2 = self._guard_box(coords)
-            rows.append((x1, y1, x2, y2, min(1.0, conf)))
+def _iou(a, b) -> float:
+    inter = _intersection(a, b)
+    union = _area(a) + _area(b) - inter
+    return inter / union if union > 0.0 else 0.0
 
-        with self.lock:
-            version = self._versions.get(cid, 0) + 1
-            self._versions[cid] = version
-            self._states[cid] = _RawState(
-                rows=rows,
-                captured=float(captured_t),
-                version=version,
-            )
 
-    def render(self, cid: str, now: float):
-        with self.lock:
-            state = self._states.get(cid)
-            if state is None or float(now) - state.captured > self.max_age:
-                return []
-            return list(state.rows)
+def _containment(a, b) -> float:
+    inter = _intersection(a, b)
+    smaller = min(_area(a), _area(b))
+    return inter / smaller if smaller > 0.0 else 0.0
 
-    def version(self, cid: str) -> int:
-        with self.lock:
-            state = self._states.get(cid)
-            return int(state.version) if state is not None else 0
 
-    def age(self, cid: str, now: float) -> float | None:
-        with self.lock:
-            state = self._states.get(cid)
-            if state is None:
-                return None
-            return max(0.0, float(now) - state.captured)
+def _center_distance(a, b) -> float:
+    acx = (float(a[0]) + float(a[2])) * 0.5
+    acy = (float(a[1]) + float(a[3])) * 0.5
+    bcx = (float(b[0]) + float(b[2])) * 0.5
+    bcy = (float(b[1]) + float(b[3])) * 0.5
+    scale = max(20.0, math.sqrt(max(_area(a), _area(b), 1.0)))
+    return math.hypot(acx - bcx, acy - bcy) / scale
+
+
+def _dedupe_rows(rows, max_det: int):
+    """Core-v1 source-aware duplicate fusion after full + ROI inference."""
+    ordered = sorted(rows, key=lambda item: float(item[1]), reverse=True)
+    kept = []
+    for box, score in ordered:
+        duplicate = False
+        for other, _other_score in kept:
+            if _iou(box, other) >= 0.58 or (
+                _containment(box, other) >= 0.84
+                and _center_distance(box, other) <= 0.40
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append((list(map(float, box)), float(score)))
+            if len(kept) >= max(1, int(max_det)):
+                break
+    return kept
+
+
+def _center_inside(box, roi, width: int, height: int) -> bool:
+    x1, y1, x2, y2 = roi
+    cx = (float(box[0]) + float(box[2])) * 0.5 / max(1.0, float(width))
+    cy = (float(box[1]) + float(box[3])) * 0.5 / max(1.0, float(height))
+    return x1 <= cx <= x2 and y1 <= cy <= y2
+
+
+def _cam06_excluded(box, width: int, height: int) -> bool:
+    """Reject the old known TV/static false-positive zone only for small boxes."""
+    if height <= 0 or width <= 0:
+        return False
+    bx1, by1, bx2, by2 = [float(v) for v in box]
+    box_h_ratio = max(0.0, by2 - by1) / float(height)
+    if box_h_ratio > 0.30:
+        return False
+    zx1, zy1, zx2, zy2 = _CAM06_EXCLUSION
+    zone = (zx1 * width, zy1 * height, zx2 * width, zy2 * height)
+    area = _area(box)
+    if area <= 0.0:
+        return True
+    return _intersection(box, zone) / area >= 0.15
+
+
+def _filter_static_zone(cid: str, rows, width: int, height: int):
+    if cid != "CAM-06":
+        return rows
+    return [(box, score) for box, score in rows if not _cam06_excluded(box, width, height)]
+
+
+def _single_prediction(value):
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        return value[0]
+    return value
 
 
 def rfdetr_worker(job_q, result_q) -> None:
-    """Spawn-safe CUDA RF-DETR-S worker with strict person-only output."""
-
+    """Spawn-safe RF-DETR-S worker with old-good full/ROI person policy."""
     try:
         try:
             os.nice(8)
@@ -154,26 +171,33 @@ def rfdetr_worker(job_q, result_q) -> None:
 
         from . import detection as det
 
-        startup_delay = float(os.environ.get("CAMERA_V2_DETECT_STARTUP_DELAY", "3.0"))
+        startup_delay = float(os.environ.get("CAMERA_V2_DETECT_STARTUP_DELAY", "2.0"))
         if startup_delay > 0:
             time.sleep(startup_delay)
 
         capture_shape = (int(det.INFER_HEIGHT), int(det.INFER_WIDTH))
+        # RF-DETR >=1.6.2 officially supports a non-square predict(shape=(h,w)).
+        # Match the model resize to the 16:9 analysis tile instead of distorting
+        # CCTV people to the default square operating point.
         model_shape = (
-            int(os.environ.get("CAMERA_V2_RFDETR_MODEL_HEIGHT", "512")),
-            int(os.environ.get("CAMERA_V2_RFDETR_MODEL_WIDTH", "512")),
+            int(os.environ.get("CAMERA_V2_RFDETR_MODEL_HEIGHT", str(capture_shape[0]))),
+            int(os.environ.get("CAMERA_V2_RFDETR_MODEL_WIDTH", str(capture_shape[1]))),
+        )
+        roi_shape = (
+            int(os.environ.get("CAMERA_V2_RFDETR_ROI_HEIGHT", "512")),
+            int(os.environ.get("CAMERA_V2_RFDETR_ROI_WIDTH", "640")),
         )
         threshold = float(det.CONF)
+        roi_threshold = float(os.environ.get("CAMERA_V2_RFDETR_ROI_CONF", "0.06"))
         max_det = int(det.MAX_DET)
         person_filter = PersonCandidateFilter()
+        per_camera_runs: dict[str, int] = {}
         telemetry_budget = max(
-            0, int(os.environ.get("CAMERA_V2_RFDETR_TRUTH_LOG_BUDGET", "72"))
+            0, int(os.environ.get("CAMERA_V2_RFDETR_TRUTH_LOG_BUDGET", "120"))
         )
 
         model = RFDETRSmall(device="cuda:0")
         warm = np.zeros((capture_shape[0], capture_shape[1], 3), dtype=np.uint8)
-        # RF-DETR expects RGB numpy input.  The live appsink is BGR, so the live
-        # path reverses channels below; a zero warmup frame is channel-invariant.
         with torch.inference_mode():
             model.predict(
                 warm,
@@ -188,17 +212,19 @@ def rfdetr_worker(job_q, result_q) -> None:
             version = "unknown"
 
         print(
-            "RFDETR_TRUTH_READY "
+            "RFDETR_OLDGOOD_READY "
             f"version={version} model=RF-DETR-S device={torch.cuda.get_device_name(0)} "
             f"capture={capture_shape[1]}x{capture_shape[0]} "
             f"model_shape={model_shape[1]}x{model_shape[0]} "
-            f"threshold={threshold:.2f} person_ids={person_filter.person_ids}",
+            f"roi_shape={roi_shape[1]}x{roi_shape[0]} threshold={threshold:.2f} "
+            f"roi_threshold={roi_threshold:.3f} person_ids={person_filter.person_ids} "
+            "policy=core-v1-full+roi+dedupe+kalman-byte",
             flush=True,
         )
         result_q.put(
             {
                 "type": "ready",
-                "backend": "RF-DETR-S-truth",
+                "backend": "RF-DETR-S-old-good",
                 "device": torch.cuda.get_device_name(0),
                 "cuda": str(torch.version.cuda),
                 "model": "RFDETRSmall",
@@ -206,7 +232,6 @@ def rfdetr_worker(job_q, result_q) -> None:
                 "capture_shape": capture_shape,
                 "model_shape": model_shape,
                 "threshold": threshold,
-                "person_class_ids": person_filter.person_ids,
             }
         )
 
@@ -214,12 +239,9 @@ def rfdetr_worker(job_q, result_q) -> None:
             job = job_q.get()
             if job is None:
                 return
-
             started = time.monotonic()
             try:
-                rgb_frames = [
-                    np.ascontiguousarray(frame[..., ::-1]) for frame in job["frames"]
-                ]
+                rgb_frames = [np.ascontiguousarray(frame[..., ::-1]) for frame in job["frames"]]
                 with torch.inference_mode():
                     predictions = model.predict(
                         rgb_frames,
@@ -227,62 +249,93 @@ def rfdetr_worker(job_q, result_q) -> None:
                         shape=model_shape,
                         include_source_image=False,
                     )
-                ended = time.monotonic()
-
                 if not isinstance(predictions, (list, tuple)):
                     predictions = [predictions]
                 if len(predictions) != len(job["cameras"]):
                     raise RuntimeError(
-                        f"RF-DETR batch mismatch: predictions={len(predictions)} "
-                        f"cameras={len(job['cameras'])}"
+                        f"RF-DETR batch mismatch: predictions={len(predictions)} cameras={len(job['cameras'])}"
                     )
 
                 output = {}
-                filter_stats = {}
-                summary = []
-                for cid, prediction in zip(job["cameras"], predictions):
-                    rows, stats = person_filter.filter(prediction, max_det)
-                    output[cid] = rows
-                    best = max((float(score) for _box, score in rows), default=0.0)
-                    summary.append(f"{cid}:{len(rows)}@{best:.2f}")
-                    filter_stats[cid] = {
-                        "raw": stats.raw,
-                        "class_rejected": stats.class_rejected,
-                        "geometry_rejected": stats.geometry_rejected,
-                        "duplicate_rejected": stats.duplicate_rejected,
-                        "kept": stats.kept,
-                        "class_mode": stats.class_mode,
-                        "raw_ids": stats.raw_ids,
-                        "raw_names": stats.raw_names,
-                    }
-                    if telemetry_budget > 0:
-                        names = ",".join(stats.raw_names) if stats.raw_names else "-"
-                        ids = ",".join(str(v) for v in stats.raw_ids) if stats.raw_ids else "-"
-                        print(
-                            "RFDETR_TRUTH_FILTER "
-                            f"camera={cid} mode={stats.class_mode} raw={stats.raw} "
-                            f"class_reject={stats.class_rejected} "
-                            f"geom_reject={stats.geometry_rejected} "
-                            f"dedup_reject={stats.duplicate_rejected} kept={stats.kept} "
-                            f"raw_ids=[{ids}] raw_names=[{names}]",
-                            flush=True,
+                telemetry = []
+                for cid, rgb, prediction in zip(job["cameras"], rgb_frames, predictions):
+                    full_rows, full_stats = person_filter.filter(prediction, max_det)
+                    h, w = rgb.shape[:2]
+                    full_rows = _filter_static_zone(cid, full_rows, w, h)
+                    merged = list(full_rows)
+                    roi_added = 0
+                    roi_ran = False
+
+                    policy = _ROI_POLICY.get(cid)
+                    if policy is not None:
+                        run_index = per_camera_runs.get(cid, 0) + 1
+                        per_camera_runs[cid] = run_index
+                        roi = policy["box"]
+                        inside_count = sum(
+                            1 for box, _score in full_rows if _center_inside(box, roi, w, h)
                         )
+                        due = run_index % max(1, int(policy["every_n"])) == 0
+                        trigger = inside_count <= int(policy["trigger_max"])
+                        if due and trigger:
+                            rx1 = max(0, min(w - 2, int(round(float(roi[0]) * w))))
+                            ry1 = max(0, min(h - 2, int(round(float(roi[1]) * h))))
+                            rx2 = max(rx1 + 2, min(w, int(round(float(roi[2]) * w))))
+                            ry2 = max(ry1 + 2, min(h, int(round(float(roi[3]) * h))))
+                            crop = np.ascontiguousarray(rgb[ry1:ry2, rx1:rx2])
+                            if crop.size:
+                                roi_ran = True
+                                with torch.inference_mode():
+                                    roi_pred = _single_prediction(
+                                        model.predict(
+                                            crop,
+                                            threshold=roi_threshold,
+                                            shape=roi_shape,
+                                            include_source_image=False,
+                                        )
+                                    )
+                                if roi_pred is not None:
+                                    roi_rows, _roi_stats = person_filter.filter(roi_pred, max_det)
+                                    mapped = []
+                                    for box, score in roi_rows:
+                                        if float(score) < float(policy["accept_conf"]):
+                                            continue
+                                        x1, y1, x2, y2 = [float(v) for v in box]
+                                        mapped_box = [x1 + rx1, y1 + ry1, x2 + rx1, y2 + ry1]
+                                        if cid == "CAM-06" and _cam06_excluded(mapped_box, w, h):
+                                            continue
+                                        mapped.append((mapped_box, float(score)))
+                                    roi_added = len(mapped)
+                                    if policy["mode"] == "verify":
+                                        outside = [
+                                            row for row in full_rows
+                                            if not _center_inside(row[0], roi, w, h)
+                                        ]
+                                        merged = outside + mapped
+                                    else:
+                                        merged = list(full_rows) + mapped
+
+                    merged = _dedupe_rows(merged, max_det)
+                    output[cid] = merged
+                    best = max((float(score) for _box, score in merged), default=0.0)
+                    telemetry.append(
+                        f"{cid}:{len(merged)}@{best:.2f}/raw{full_stats.raw}/roi{roi_added}{'*' if roi_ran else ''}"
+                    )
+
+                ended = time.monotonic()
                 if telemetry_budget > 0:
                     telemetry_budget -= 1
                     print(
-                        f"RFDETR_TRUTH_RESULT batch={(ended-started)*1000.0:.1f}ms "
-                        f"persons=[{' '.join(summary)}]",
+                        "RFDETR_OLDGOOD_RESULT "
+                        f"batch={(ended-started)*1000.0:.1f}ms persons=[{' '.join(telemetry)}]",
                         flush=True,
                     )
-
                 result_q.put(
                     {
                         "type": "result",
-                        "backend": "RF-DETR-S-truth",
+                        "backend": "RF-DETR-S-old-good",
                         "cameras": job["cameras"],
                         "captured": job["captured"],
                         "boxes": output,
-                        "filter_stats": filter_stats,
                         "batch_ms": (ended - started) * 1000.0,
                     }
                 )
@@ -291,20 +344,13 @@ def rfdetr_worker(job_q, result_q) -> None:
                     torch.cuda.empty_cache()
                 except Exception:
                     pass
-                result_q.put(
-                    {"type": "batch_error", "error": f"RF-DETR-S CUDA OOM: {exc}"}
-                )
+                result_q.put({"type": "batch_error", "error": f"RF-DETR-S CUDA OOM: {exc}"})
             except BaseException as exc:
                 result_q.put(
-                    {
-                        "type": "batch_error",
-                        "error": f"RF-DETR-S {type(exc).__name__}: {exc}",
-                    }
+                    {"type": "batch_error", "error": f"RF-DETR-S {type(exc).__name__}: {exc}"}
                 )
     except BaseException as exc:
-        result_q.put(
-            {"type": "fatal", "error": f"RF-DETR-S {type(exc).__name__}: {exc}"}
-        )
+        result_q.put({"type": "fatal", "error": f"RF-DETR-S {type(exc).__name__}: {exc}"})
 
 
 def _capture_gate_until_sample(self, _pad, _info, cid: str):
@@ -313,67 +359,31 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
     return self.Gst.PadProbeReturn.OK if requested else self.Gst.PadProbeReturn.DROP
 
 
-def _inject_rfdetr_truth_probe(self, _pad, info):
-    """Attach current real RF-DETR boxes to every mux batch for OSD rendering."""
-    buffer = info.get_buffer()
-    if buffer is None:
-        return self.Gst.PadProbeReturn.OK
-
-    now = time.monotonic()
-    added = 0
-    logged = getattr(self, "_rfdetr_truth_logged_versions", None)
-    if logged is None:
-        logged = {}
-        self._rfdetr_truth_logged_versions = logged
-
-    for cid, source_id in self.camera_index.items():
-        rows = self.boxes.render(cid, now)
-        result = self.bridge.add_boxes(buffer, source_id, rows) if rows else 0
-        if result > 0:
-            added += result
-
-        version = self.boxes.version(cid)
-        if version > logged.get(cid, 0):
-            logged[cid] = version
-            age = self.boxes.age(cid, now)
-            age_ms = -1.0 if age is None else age * 1000.0
-            print(
-                "RFDETR_TRUTH_META "
-                f"camera={cid} source_id={source_id} version={version} "
-                f"raw_boxes={len(rows)} injected={result} age={age_ms:.1f}ms",
-                flush=True,
-            )
-
-    with self.det_lock:
-        self.meta_boxes += added
+def _no_pretiler_detection_meta(self, _pad, _info):
+    """Old-good semantics: final presentation overlay is injected after tiling."""
     return self.Gst.PadProbeReturn.OK
 
 
 def install() -> None:
-    """Install the selected detector backend before CameraDetectionV2 is built."""
-
+    """Install RF-DETR-S + old-good Core-v1 policy into CameraDetectionV2."""
     selected = os.environ.get("CAMERA_V2_DETECT_BACKEND", "rfdetr-s").strip().lower()
     if selected in {"stable-yolo26m", "yolo26m", "yolo", "stable-yolo"}:
-        # Kept only as an explicit diagnostic compatibility mode.  Production
-        # launcher selects RF-DETR-S and never enters this branch.
         from .stable_yolo_backend import install as install_stable_yolo
-
         install_stable_yolo()
         return
-
     if selected not in {"rfdetr-s", "rfdetr", "rf-detr-s", ""}:
         raise RuntimeError(f"unsupported CAMERA_V2_DETECT_BACKEND={selected!r}")
 
     from . import detection
 
     detection._yolo_worker = rfdetr_worker
-    detection.SmoothBoxManager = RFDETRRawBoxManager
+    detection.SmoothBoxManager = OldGoodRFDETRBoxManager
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
-    detection.CameraDetectionV2._inject_boxes_probe = _inject_rfdetr_truth_probe
+    detection.CameraDetectionV2._inject_boxes_probe = _no_pretiler_detection_meta
 
     print(
-        "CAMERA_DETECT_BACKEND selected=rfdetr-s-truth "
-        "model=RF-DETR-S tracker=OFF flow=OFF reid=OFF "
-        "path=analysis-tile->person-filter->raw-meta->tiler->osd",
+        "CAMERA_DETECT_BACKEND selected=rfdetr-s-old-good model=RF-DETR-S "
+        "logic=core-v1-clean full+roi+dedupe+stale-gate+kalman-byte "
+        "overlay=post-tiler-wall-space flow=OFF reid=OFF nvtracker=OFF",
         flush=True,
     )
