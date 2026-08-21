@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import os
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +31,15 @@ def _loaded_nvinfer_paths() -> list[str]:
         if path.startswith("/"):
             paths.add(path)
     return sorted(paths)
+
+
+def _tensorrt_library_major(path: str) -> int | None:
+    """Return the ELF SONAME major for TensorRT core/plugin/builder libraries."""
+    name = Path(path).name
+    match = re.search(r"libnvinfer(?:_plugin|_builder_resource)?\.so\.(\d+)(?:\.|$)", name)
+    if not match:
+        return None
+    return int(match.group(1))
 
 
 def main() -> int:
@@ -77,14 +86,24 @@ def main() -> int:
         )
 
     loaded = _loaded_nvinfer_paths()
-    wrong = [path for path in loaded if "libnvinfer.so.8" not in path]
+    wrong = []
+    unknown = []
+    for path in loaded:
+        major = _tensorrt_library_major(path)
+        if major is None:
+            unknown.append(path)
+        elif major != 8:
+            wrong.append(path)
+
     print(
-        f"STEP4_2_LIBS loaded_nvinfer={loaded or ['not_visible']} wrong_major={wrong}",
+        "STEP4_2_LIBS "
+        f"loaded_nvinfer={loaded or ['not_visible']} "
+        f"wrong_major={wrong} unknown={unknown}",
         flush=True,
     )
     if wrong:
         raise SystemExit(
-            "STEP4_2_FAIL mixed_tensorrt_runtime expected_only_libnvinfer_so_8"
+            "STEP4_2_FAIL mixed_tensorrt_runtime expected_only_tensorrt_major_8"
         )
 
     inputs = []
