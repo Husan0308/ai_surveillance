@@ -14,11 +14,10 @@ old ``rebuild/core-v1-clean`` period that the live deployment found reliable:
 * old adaptive Kalman/Byte presentation tracker;
 * no optical flow, ReID or NvDCF in the Pascal path.
 
-Presentation rectangles are deliberately NOT injected here before the display
-tiler.  ``CameraPascalSafeRuntime`` maps source-space boxes to the final grid or
-fullscreen wall and injects them immediately before nvdsosd.  That mirrors the
-old-good direct-overlay semantics and avoids a second metadata coordinate
-transform when the tiler layout changes.
+Presentation rectangles are NOT injected before the display tiler.  They are
+mapped from source coordinates to the final grid/fullscreen wall and attached at
+the nvdsosd sink.  This restores the old-good direct-overlay semantics and avoids
+relying on the tiler's object-meta coordinate transform when layout changes.
 """
 
 import importlib.metadata
@@ -32,8 +31,6 @@ from .old_good_rfdetr_tracker import OldGoodRFDETRBoxManager
 from .person_candidate_filter import PersonCandidateFilter
 
 
-# Core-v1 camera-specific detector policy.  Coordinates are normalized to the
-# analysis/source image before CameraDetectionV2 scales them to mux coordinates.
 _ROI_POLICY = {
     "CAM-05": {
         "mode": "verify",
@@ -50,7 +47,6 @@ _ROI_POLICY = {
         "accept_conf": 0.075,
     },
 }
-
 _CAM06_EXCLUSION = (0.50, 0.00, 0.78, 0.22)
 
 
@@ -88,7 +84,7 @@ def _center_distance(a, b) -> float:
 
 
 def _dedupe_rows(rows, max_det: int):
-    """Core-v1 source-aware duplicate fusion after full + ROI inference."""
+    """Core-v1 duplicate fusion after full + ROI inference."""
     ordered = sorted(rows, key=lambda item: float(item[1]), reverse=True)
     kept = []
     for box, score in ordered:
@@ -115,7 +111,6 @@ def _center_inside(box, roi, width: int, height: int) -> bool:
 
 
 def _cam06_excluded(box, width: int, height: int) -> bool:
-    """Reject the old known TV/static false-positive zone only for small boxes."""
     if height <= 0 or width <= 0:
         return False
     bx1, by1, bx2, by2 = [float(v) for v in box]
@@ -138,9 +133,7 @@ def _filter_static_zone(cid: str, rows, width: int, height: int):
 
 def _single_prediction(value):
     if isinstance(value, (list, tuple)):
-        if not value:
-            return None
-        return value[0]
+        return value[0] if value else None
     return value
 
 
@@ -176,9 +169,6 @@ def rfdetr_worker(job_q, result_q) -> None:
             time.sleep(startup_delay)
 
         capture_shape = (int(det.INFER_HEIGHT), int(det.INFER_WIDTH))
-        # RF-DETR >=1.6.2 officially supports a non-square predict(shape=(h,w)).
-        # Match the model resize to the 16:9 analysis tile instead of distorting
-        # CCTV people to the default square operating point.
         model_shape = (
             int(os.environ.get("CAMERA_V2_RFDETR_MODEL_HEIGHT", str(capture_shape[0]))),
             int(os.environ.get("CAMERA_V2_RFDETR_MODEL_WIDTH", str(capture_shape[1]))),
@@ -360,8 +350,123 @@ def _capture_gate_until_sample(self, _pad, _info, cid: str):
 
 
 def _no_pretiler_detection_meta(self, _pad, _info):
-    """Old-good semantics: final presentation overlay is injected after tiling."""
     return self.Gst.PadProbeReturn.OK
+
+
+def _source_rows_to_wall(self, source_id: int, rows):
+    """Map source-frame xyxy to exactly the geometry produced by current tiler."""
+    if not rows:
+        return []
+    try:
+        focus = int(self.tiler.get_property("show-source"))
+    except Exception:
+        focus = -1
+
+    wall_w = float(max(1, int(self.wall_width)))
+    wall_h = float(max(1, int(self.wall_height)))
+    src_w = float(max(1, int(self.frame_width)))
+    src_h = float(max(1, int(self.frame_height)))
+
+    if focus >= 0:
+        if int(source_id) != focus:
+            return []
+        left = 0.0
+        top = 0.0
+        tile_w = wall_w
+        tile_h = wall_h
+    else:
+        columns = max(1, int(getattr(self, "tiler_columns", 2)))
+        grid_rows = max(1, int(getattr(self, "tiler_rows", 3)))
+        column = int(source_id) % columns
+        row = int(source_id) // columns
+        if row >= grid_rows:
+            return []
+        tile_w = wall_w / float(columns)
+        tile_h = wall_h / float(grid_rows)
+        left = float(column) * tile_w
+        top = float(row) * tile_h
+
+    sx = tile_w / src_w
+    sy = tile_h / src_h
+    mapped = []
+    for x1, y1, x2, y2, confidence in rows:
+        wx1 = left + max(0.0, min(src_w, float(x1))) * sx
+        wy1 = top + max(0.0, min(src_h, float(y1))) * sy
+        wx2 = left + max(0.0, min(src_w, float(x2))) * sx
+        wy2 = top + max(0.0, min(src_h, float(y2))) * sy
+        if wx2 > wx1 and wy2 > wy1:
+            mapped.append((wx1, wy1, wx2, wy2, float(confidence)))
+    return mapped
+
+
+def _posttiler_overlay_probe(self, _pad, info):
+    """Inject already-mapped boxes immediately before nvdsosd."""
+    buffer = info.get_buffer()
+    if buffer is None:
+        return self.Gst.PadProbeReturn.OK
+    now = time.monotonic()
+    added = 0
+    nonempty = 0
+    for cid, source_id in self.camera_index.items():
+        source_rows = self.boxes.render(cid, now)
+        wall_rows = _source_rows_to_wall(self, int(source_id), source_rows)
+        if not wall_rows:
+            continue
+        nonempty += len(wall_rows)
+        result = self.bridge.add_boxes(buffer, int(source_id), wall_rows)
+        if result > 0:
+            added += int(result)
+
+    if added:
+        with self.det_lock:
+            self.meta_boxes += added
+
+    budget = int(getattr(self, "_oldgood_overlay_log_budget", 24))
+    if nonempty and budget > 0:
+        self._oldgood_overlay_log_budget = budget - 1
+        try:
+            focus = int(self.tiler.get_property("show-source"))
+        except Exception:
+            focus = -1
+        print(
+            "CAMERA_OLDGOOD_OVERLAY "
+            f"focus={focus} wall={self.wall_width}x{self.wall_height} "
+            f"requested={nonempty} injected={added} stage=post-tiler-pre-osd",
+            flush=True,
+        )
+    return self.Gst.PadProbeReturn.OK
+
+
+def _install_posttiler_overlay(detection_module) -> None:
+    """Wrap CameraDetectionV2 init once so every Pascal runtime gets final overlay."""
+    cls = detection_module.CameraDetectionV2
+    if getattr(cls, "_camera_v2_oldgood_overlay_wrapped", False):
+        return
+
+    cls._oldgood_posttiler_overlay_probe = _posttiler_overlay_probe
+    original_init = cls.__init__
+
+    def _init_with_oldgood_overlay(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        osd = getattr(self, "osd", None)
+        if osd is None:
+            raise RuntimeError("old-good overlay requires nvdsosd")
+        sink_pad = osd.get_static_pad("sink")
+        if sink_pad is None:
+            raise RuntimeError("old-good overlay could not access nvdsosd sink pad")
+        self._oldgood_overlay_log_budget = 24
+        sink_pad.add_probe(
+            self.Gst.PadProbeType.BUFFER,
+            self._oldgood_posttiler_overlay_probe,
+        )
+        print(
+            "CAMERA_OLDGOOD_OVERLAY_READY stage=post-tiler-pre-osd "
+            "mapping=source->grid-or-focus object_meta_transform=disabled",
+            flush=True,
+        )
+
+    cls.__init__ = _init_with_oldgood_overlay
+    cls._camera_v2_oldgood_overlay_wrapped = True
 
 
 def install() -> None:
@@ -380,6 +485,7 @@ def install() -> None:
     detection.SmoothBoxManager = OldGoodRFDETRBoxManager
     detection.CameraDetectionV2._infer_gate_probe = _capture_gate_until_sample
     detection.CameraDetectionV2._inject_boxes_probe = _no_pretiler_detection_meta
+    _install_posttiler_overlay(detection)
 
     print(
         "CAMERA_DETECT_BACKEND selected=rfdetr-s-old-good model=RF-DETR-S "
