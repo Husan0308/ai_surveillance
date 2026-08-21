@@ -1,0 +1,3 @@
+# Detection dependency restored from ui-aspect-ratio-final @ 865bfedf.
+# Torch/CUDA, NumPy and OpenCV are already part of the current camera runtime.
+ultralytics>=8.2
