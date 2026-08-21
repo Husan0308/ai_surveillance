@@ -87,6 +87,16 @@ def _camera_rtsp_url(camera) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def _redacted_rtsp_url(url: str) -> str:
+    parts = urlsplit(url)
+    host = parts.hostname or "camera"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, f"***:***@{host}", parts.path, parts.query, parts.fragment))
+
+
 def _capture_camera_frame(camera_id: str, output_dir: Path) -> Path:
     from services.ml_service.app.config import load_settings
 
@@ -106,16 +116,19 @@ def _capture_camera_frame(camera_id: str, output_dir: Path) -> Path:
     safe_id = camera.camera_id.lower().replace("-", "_")
     frame_path = output_dir / f"{safe_id}_input.jpg"
     url = _camera_rtsp_url(camera)
+    redacted_url = _redacted_rtsp_url(url)
 
+    # Do not depend on ffmpeg-build-specific socket timeout options such as
+    # rw_timeout/stimeout.  The Python subprocess timeout is portable and also
+    # guarantees a wedged RTSP request cannot block this isolated detector test.
     cmd = [
         ffmpeg,
         "-hide_banner",
+        "-nostdin",
         "-loglevel",
         "error",
         "-rtsp_transport",
         "tcp",
-        "-rw_timeout",
-        "7000000",
         "-i",
         url,
         "-an",
@@ -141,8 +154,9 @@ def _capture_camera_frame(camera_id: str, output_dir: Path) -> Path:
 
     if result.returncode != 0 or not frame_path.is_file() or frame_path.stat().st_size == 0:
         error = (result.stderr or "ffmpeg capture failed").strip().replace("\n", " | ")
-        if len(error) > 400:
-            error = error[-400:]
+        error = error.replace(url, redacted_url)
+        if len(error) > 500:
+            error = error[-500:]
         raise SystemExit(
             f"STEP1_FAIL camera_capture camera={camera.camera_id} error={error}"
         )
