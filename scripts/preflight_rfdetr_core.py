@@ -37,8 +37,8 @@ capture_height = int(os.environ.get("CAMERA_V2_DETECT_HEIGHT", "384"))
 if capture_width <= 0 or capture_height <= 0:
     fail(f"invalid detector capture shape {capture_width}x{capture_height}")
 
-model_width = int(os.environ.get("CAMERA_V2_RFDETR_MODEL_WIDTH", "512"))
-model_height = int(os.environ.get("CAMERA_V2_RFDETR_MODEL_HEIGHT", "512"))
+model_width = int(os.environ.get("CAMERA_V2_RFDETR_MODEL_WIDTH", str(capture_width)))
+model_height = int(os.environ.get("CAMERA_V2_RFDETR_MODEL_HEIGHT", str(capture_height)))
 if model_width <= 0 or model_height <= 0:
     fail(f"invalid RF-DETR model shape {model_width}x{model_height}")
 
@@ -56,19 +56,20 @@ if block_size <= 0 or model_width % block_size or model_height % block_size:
         f"(patch={patch_size} windows={num_windows}), got {model_width}x{model_height}"
     )
 
-# RF-DETR-S is published/evaluated at 512x512.  Keep the live CCTV capture 16:9
-# and let RF-DETR own the final resize to its native model operating point.
-if (model_width, model_height) != (512, 512):
+# RF-DETR predict(shape=(h,w)) officially supports a non-square override.  The
+# old-good CCTV profile keeps the capture/model resize aspect matched so a person
+# is not squeezed from 16:9 into a square tensor.
+if (model_width, model_height) != (capture_width, capture_height):
     fail(
-        "production RF-DETR-S truth mode requires native model shape 512x512, "
-        f"got {model_width}x{model_height}"
+        "old-good RF-DETR profile requires model shape to match capture aspect/geometry, "
+        f"capture={capture_width}x{capture_height} model={model_width}x{model_height}"
     )
 
 micro_batch = int(os.environ.get("CAMERA_V2_MICRO_BATCH", "1"))
 if micro_batch != 1:
-    fail(f"production bring-up requires micro-batch=1 on the target GPU, got {micro_batch}")
+    fail(f"GTX 1050 Ti RF-DETR path requires micro-batch=1, got {micro_batch}")
 
-threshold = float(os.environ.get("CAMERA_V2_DETECT_CONF", "0.18"))
+threshold = float(os.environ.get("CAMERA_V2_DETECT_CONF", "0.12"))
 if not 0.05 <= threshold <= 0.60:
     fail(f"unexpected RF-DETR threshold {threshold}")
 
@@ -81,6 +82,7 @@ print(
     f"version={version} model=RF-DETR-S device={torch.cuda.get_device_name(0)} "
     f"cuda={torch.version.cuda} capture={capture_width}x{capture_height} "
     f"model_shape={model_width}x{model_height} block={block_size} "
-    f"batch={micro_batch} threshold={threshold:.2f} tracker=OFF flow=OFF",
+    f"batch={micro_batch} threshold={threshold:.2f} "
+    "logic=old-good-core-v1 tracker=kalman-byte flow=OFF reid=OFF",
     flush=True,
 )
