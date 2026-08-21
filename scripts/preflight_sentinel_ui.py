@@ -102,13 +102,14 @@ def main_preflight() -> int:
 
     backend = source("services/camera_v2/rfdetr_backend.py")
     for token in (
-        "RFDETRRawBoxManager",
-        "detection.SmoothBoxManager = RFDETRRawBoxManager",
-        "detection.CameraDetectionV2._inject_boxes_probe = _inject_rfdetr_truth_probe",
-        "tracker=OFF flow=OFF reid=OFF",
+        "OldGoodRFDETRBoxManager",
+        "RFDETR_OLDGOOD_READY",
+        "_posttiler_overlay_probe",
+        "CAMERA_OLDGOOD_OVERLAY_READY",
+        "overlay=post-tiler-wall-space",
     ):
         if token not in backend:
-            fail(f"RF-DETR detector-only guard missing: {token}")
+            fail(f"old-good RF-DETR presentation guard missing: {token}")
 
     secure = source("services/camera_v2/secure.py")
     for token in (
@@ -135,7 +136,10 @@ def main_preflight() -> int:
         "rtsp=tcp latency=250ms",
         "detector_path=analysis-tiler",
         "demux=disabled",
-        "raw_truth=1 tracker=OFF flow=OFF reid=OFF",
+        "logic=old-good-core-v1",
+        "tracker=kalman-byte",
+        "flow=OFF reid=OFF nvtracker=OFF",
+        "overlay=post-tiler-wall-space",
         "ui=camera-only-2x3-click-fullscreen",
     ):
         if token not in launcher:
@@ -145,8 +149,8 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT wall=6-camera fixed-2x3 click-fullscreen PASS")
     print("SENTINEL_PREFLIGHT native_video=direct-QWidget-xid idempotent-bind PASS")
     print("SENTINEL_PREFLIGHT rtsp=tcp latency=250ms dynamic-pad=late-caps-safe PASS")
-    print("SENTINEL_PREFLIGHT detector=RF-DETR-S analysis-tiler demux=disabled mux-retention=bounded PASS")
-    print("SENTINEL_PREFLIGHT runtime=pascal-safe tracker=OFF flow=OFF reid=OFF nvtracker=disabled PASS")
+    print("SENTINEL_PREFLIGHT detector=RF-DETR-S old-good-core-v1 analysis-tiler PASS")
+    print("SENTINEL_PREFLIGHT overlay=post-tiler-wall-space fullscreen-aware PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
 
