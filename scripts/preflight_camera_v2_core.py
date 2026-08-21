@@ -22,12 +22,12 @@ from services.camera_v2.pascal_safe_pipeline import CameraPascalSafeRuntime  # n
 from services.ml_service.app.config import load_settings  # noqa: E402
 
 
-def _detector_contract() -> tuple[str, tuple[int, int, int], tuple[int, int] | None]:
+def _detector_contract() -> tuple[str, tuple[int, int, int], tuple[int, int]]:
     backend = os.environ.get("CAMERA_V2_DETECT_BACKEND", "rfdetr-s").strip().lower()
+    if backend in {"rfdetr-s", "rfdetr", "rf-detr-s", ""}:
+        return "RF-DETR-S-old-good", (672, 384, 1), (672, 384)
     if backend in {"stable-yolo26m", "yolo26m", "yolo", "stable-yolo"}:
         return "YOLO26m-person-only", (704, 400, 2), (704, 448)
-    if backend in {"rfdetr-s", "rfdetr", "rf-detr-s", ""}:
-        return "RF-DETR-S", (672, 384, 1), None
     raise RuntimeError(f"unsupported CAMERA_V2_DETECT_BACKEND={backend!r}")
 
 
@@ -61,7 +61,7 @@ def main() -> int:
     if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
         raise RuntimeError(f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
 
-    detector_label, expected_capture, model_geometry = _detector_contract()
+    detector_label, expected_capture, expected_model = _detector_contract()
     actual_capture = (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH)
     if actual_capture != expected_capture:
         ew, eh, eb = expected_capture
@@ -70,17 +70,17 @@ def main() -> int:
             f"{INFER_WIDTH}x{INFER_HEIGHT} micro={MICRO_BATCH}"
         )
 
-    model_text = ""
-    if model_geometry is not None:
-        expected_model_w, expected_model_h = model_geometry
+    if detector_label.startswith("RF-DETR"):
+        model_w = int(os.environ.get("CAMERA_V2_RFDETR_MODEL_WIDTH", "0"))
+        model_h = int(os.environ.get("CAMERA_V2_RFDETR_MODEL_HEIGHT", "0"))
+    else:
         model_w = int(os.environ.get("CAMERA_V2_YOLO_IMGSZ_WIDTH", "0"))
         model_h = int(os.environ.get("CAMERA_V2_YOLO_IMGSZ_HEIGHT", "0"))
-        if (model_w, model_h) != (expected_model_w, expected_model_h):
-            raise RuntimeError(
-                f"{detector_label} model imgsz must be "
-                f"{expected_model_w}x{expected_model_h}, got {model_w}x{model_h}"
-            )
-        model_text = f" model_imgsz={model_w}x{model_h}"
+    if (model_w, model_h) != expected_model:
+        raise RuntimeError(
+            f"{detector_label} model geometry must be {expected_model[0]}x{expected_model[1]}, "
+            f"got {model_w}x{model_h}"
+        )
 
     runtime_source = (ROOT / "services/camera_v2/pascal_safe_pipeline.py").read_text(
         encoding="utf-8"
@@ -120,15 +120,31 @@ def main() -> int:
             raise RuntimeError(f"Pascal-safe runtime leaked forbidden dependency: {forbidden}")
 
     backend_source = (ROOT / "services/camera_v2/rfdetr_backend.py").read_text(encoding="utf-8")
-    if detector_label == "RF-DETR-S":
+    tracker_source = (ROOT / "services/camera_v2/old_good_rfdetr_tracker.py").read_text(encoding="utf-8")
+    if detector_label.startswith("RF-DETR"):
         for required in (
-            "class RFDETRRawBoxManager",
-            "detection.SmoothBoxManager = RFDETRRawBoxManager",
-            "detection.CameraDetectionV2._inject_boxes_probe = _inject_rfdetr_truth_probe",
-            "tracker=OFF flow=OFF reid=OFF",
+            "OldGoodRFDETRBoxManager",
+            "detection.SmoothBoxManager = OldGoodRFDETRBoxManager",
+            "_ROI_POLICY",
+            "_CAM06_EXCLUSION",
+            "_dedupe_rows",
+            "_posttiler_overlay_probe",
+            "CAMERA_OLDGOOD_OVERLAY_READY",
+            "RFDETR_OLDGOOD_READY",
         ):
             if required not in backend_source:
-                raise RuntimeError(f"RF-DETR detector-only guard missing: {required}")
+                raise RuntimeError(f"RF-DETR old-good guard missing: {required}")
+        for required in (
+            "VisualTracker",
+            "hold_ms",
+            "memory_ms",
+            "prediction_ms",
+            "max_result_age",
+            "strong_confirm_hits=2",
+            "weak_confirm_hits=3",
+        ):
+            if required not in tracker_source:
+                raise RuntimeError(f"old-good tracker guard missing: {required}")
 
     secure_source = (ROOT / "services/camera_v2/secure.py").read_text(encoding="utf-8")
     for required in (
@@ -176,20 +192,16 @@ def main() -> int:
 
     ensure_bridge()
 
-    tracker_label = (
-        "old-stable-adaptive-kalman-byte+lk"
-        if detector_label.startswith("YOLO26m")
-        else "OFF"
-    )
     print(
         f"CAMERA_PREFLIGHT cameras={camera_count} core=PASS heatmap=OFF "
         f"rtsp={transport} latency={latency}ms mux={mux_width}x{mux_height} "
         f"grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
-        f"detector={detector_label} capture={INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH}"
-        f"{model_text} detector_path=analysis-tiler demux=disabled "
-        f"mux_retention=bounded source_ingest=isolated dynamic_pad=late-caps-safe "
-        f"tracker={tracker_label} nvtracker=disabled capture=analysis-grid "
+        f"detector={detector_label} capture={INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
+        f"model={model_w}x{model_h} detector_path=analysis-tiler demux=disabled "
+        "mux_retention=bounded source_ingest=isolated dynamic_pad=late-caps-safe "
+        "tracker=old-good-kalman-byte nvtracker=disabled flow=OFF reid=OFF "
+        "overlay=post-tiler-wall-space capture=analysis-grid "
         "stage_counters=source+mux+wall+sink+analysis scaling=lanczos"
     )
     print("CAMERA_PREFLIGHT=PASS")
