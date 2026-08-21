@@ -35,6 +35,7 @@ def main() -> int:
     launcher = source("scripts/run_sentinel_vms.sh")
     secure = source("services/camera_v2/secure.py")
     detector_backend = source("services/camera_v2/rfdetr_backend.py")
+    oldgood = source("services/camera_v2/old_good_rfdetr_tracker.py")
 
     for token in (
         "class CameraPascalSafeRuntime(CameraDetectionV2)",
@@ -73,26 +74,39 @@ def main() -> int:
             return fail(f"Pascal runtime leaked forbidden code path: {forbidden}")
 
     for token in (
-        "class RFDETRRawBoxManager",
-        "detection.SmoothBoxManager = RFDETRRawBoxManager",
-        "detection.CameraDetectionV2._inject_boxes_probe = _inject_rfdetr_truth_probe",
-        "tracker=OFF flow=OFF reid=OFF",
-        "RFDETR_TRUTH_READY",
-        "RFDETR_TRUTH_RESULT",
-        "RFDETR_TRUTH_META",
+        "OldGoodRFDETRBoxManager",
+        "detection.SmoothBoxManager = OldGoodRFDETRBoxManager",
+        "detection.CameraDetectionV2._inject_boxes_probe = _no_pretiler_detection_meta",
+        "_posttiler_overlay_probe",
+        "CAMERA_OLDGOOD_OVERLAY_READY",
+        "RFDETR_OLDGOOD_READY",
+        "RFDETR_OLDGOOD_RESULT",
+        "CAM-05",
+        "CAM-06",
+        "flow=OFF reid=OFF nvtracker=OFF",
     ):
         if token not in detector_backend:
-            return fail(f"missing RF-DETR truth contract: {token}")
+            return fail(f"missing old-good RF-DETR contract: {token}")
+
+    for token in (
+        "class OldGoodRFDETRBoxManager",
+        "VisualTracker",
+        "hold_ms",
+        "memory_ms",
+        "prediction_ms",
+        "max_result_age",
+        "CAM-06",
+    ):
+        if token not in oldgood:
+            return fail(f"missing Core-v1 tracker contract: {token}")
 
     for forbidden in (
-        "detection.SmoothBoxManager = FlowAssistedPersonTracker",
+        "FlowAssistedPersonTracker",
         "attach_motion_flow(self)",
     ):
-        # These may exist in old explicit diagnostics, but must not be part of the
-        # selected/default RF-DETR branch anymore.
         selected_part = detector_backend.split("def install() -> None:", 1)[-1]
         if forbidden in selected_part:
-            return fail(f"RF-DETR truth path still installs temporal logic: {forbidden}")
+            return fail(f"RF-DETR old-good path leaked flow logic: {forbidden}")
 
     for token in (
         'CAMERA_V2_RTSP_TRANSPORT',
@@ -131,12 +145,14 @@ def main() -> int:
         "export CAMERA_V2_RTSP_TRANSPORT=tcp",
         "export CAMERA_V2_RTSP_LATENCY_MS=250",
         "export CAMERA_V2_DETECT_BACKEND=rfdetr-s",
-        "export CAMERA_V2_RFDETR_MODEL_WIDTH=512",
-        "export CAMERA_V2_RFDETR_MODEL_HEIGHT=512",
+        "export CAMERA_V2_RFDETR_MODEL_WIDTH=672",
+        "export CAMERA_V2_RFDETR_MODEL_HEIGHT=384",
         "detector_path=analysis-tiler",
-        "tracker=OFF",
+        "logic=old-good-core-v1",
+        "tracker=kalman-byte",
         "flow=OFF",
         "reid=OFF",
+        "overlay=post-tiler-wall-space",
         "export CAMERA_V2_DISPLAY_BACKEND=egl",
         "ui=camera-only-2x3-click-fullscreen",
     ):
@@ -170,8 +186,9 @@ def main() -> int:
         "PASCAL_SAFE_PREFLIGHT=PASS "
         f"gpu={gpu!r} runtime=CameraPascalSafeRuntime rtsp=tcp latency>=200ms "
         "source_path=direct-to-mux detector_path=analysis-tiler demux=disabled "
-        "mux_retention=bounded detector=RF-DETR-S tracker=OFF flow=OFF reid=OFF "
-        "nvtracker=disabled display=egl-primary+x11-zero-render-fallback "
+        "mux_retention=bounded detector=RF-DETR-S logic=old-good-core-v1 "
+        "tracker=kalman-byte flow=OFF reid=OFF nvtracker=disabled "
+        "overlay=post-tiler-wall-space display=egl-primary+x11-zero-render-fallback "
         "fullscreen=click+escape"
     )
     return 0
