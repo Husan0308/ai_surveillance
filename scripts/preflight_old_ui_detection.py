@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def fail(message: str) -> None:
@@ -79,11 +82,51 @@ for token in (
     if token not in tracker_source:
         fail(f"old UI tracker contract missing: {token}")
 
+selector_source = (ROOT / "services/camera_v2/backend_selector.py").read_text(encoding="utf-8")
+for token in (
+    "legacy_unknown_overlay",
+    "install_unknown_overlay",
+):
+    if token not in selector_source:
+        fail(f"legacy Unknown selector contract missing: {token}")
+
+overlay_source = (ROOT / "services/camera_v2/legacy_unknown_overlay.py").read_text(encoding="utf-8")
+native_source = (ROOT / "services/camera_v2/native_unknown_overlay.c").read_text(encoding="utf-8")
+for token in (
+    "LEGACY_UNKNOWN_OVERLAY_READY",
+    "Unknown_C{camera}_{track}",
+    "_visible_tracks",
+    "display-text",
+    "post-tiler-pre-osd",
+):
+    if token not in overlay_source:
+        fail(f"legacy Unknown overlay contract missing: {token}")
+for token in (
+    "camera_v2_add_unknown_tracks",
+    "Unknown_C%u_%02",
+    "0.965f",
+    "0.725f",
+    "0.294f",
+    "Monospace",
+):
+    if token not in native_source:
+        fail(f"legacy Unknown native style contract missing: {token}")
+
+# Compile the small native presentation helper before opening six cameras so a
+# toolchain/header issue fails early and cannot masquerade as a detector problem.
+try:
+    from services.camera_v2.legacy_unknown_overlay import _ensure_library
+
+    overlay_library = _ensure_library()
+except Exception as exc:
+    fail(f"legacy Unknown native overlay unavailable: {type(exc).__name__}: {exc}")
+
 print(
     "OLD_UI_DETECTION_PREFLIGHT=PASS "
-    f"source=ui-aspect-ratio-final@865bfedf model=YOLO26m "
+    f"source=core-v1-clean/ui-aspect-ratio-final model=YOLO26m "
     f"device={torch.cuda.get_device_name(0)} cuda={torch.version.cuda} "
     "input=704x448 conf=0.06 iou=0.50 max_det=50 batch=2 "
-    "roi=CAM05-verify+CAM06-augment tracker=exact-old-ui-kalman-byte",
+    "roi=CAM05-verify+CAM06-augment tracker=exact-old-ui-kalman-byte "
+    f"overlay=gpu-v2-yellow-Unknown native={overlay_library}",
     flush=True,
 )
