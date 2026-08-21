@@ -13,7 +13,10 @@ def fail(message: str) -> None:
 
 
 if importlib.util.find_spec("ultralytics") is None:
-    fail("ultralytics is not installed")
+    fail(
+        "ultralytics is not installed; run: "
+        "python -m pip install -r requirements/old_ui_detection.txt"
+    )
 
 try:
     import torch
