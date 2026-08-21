@@ -3,11 +3,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import statistics
+import subprocess
+import sys
 import time
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from PIL import Image, ImageDraw, ImageFont
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _coco_classes():
@@ -31,9 +39,15 @@ def _class_name(classes, class_id: int) -> str:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Step 1: isolated RF-DETR-S CUDA person detection on one image."
+        description="Step 1: isolated RF-DETR-S CUDA person detection on one image or one configured camera frame."
     )
-    parser.add_argument("image", type=Path, help="Camera JPG/PNG frame")
+    parser.add_argument("image", nargs="?", type=Path, help="Camera JPG/PNG frame")
+    parser.add_argument(
+        "--camera",
+        type=str,
+        default="",
+        help="Configured camera id, for example CAM-03. Captures one RTSP frame automatically.",
+    )
     parser.add_argument(
         "--output-dir", type=Path, default=Path("artifacts/rfdetr_step1")
     )
@@ -49,10 +63,111 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _camera_rtsp_url(camera) -> str:
+    """Build an authenticated RTSP URL without printing credentials."""
+    raw = str(camera.uri)
+    parts = urlsplit(raw)
+    if parts.username:
+        return raw
+    if not camera.username:
+        return raw
+
+    host = parts.hostname or ""
+    if not host:
+        raise RuntimeError(f"invalid RTSP URI for {camera.camera_id}")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+
+    user = quote(str(camera.username), safe="")
+    password = quote(str(camera.password or ""), safe="")
+    auth = user if not password else f"{user}:{password}"
+    netloc = f"{auth}@{host}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def _capture_camera_frame(camera_id: str, output_dir: Path) -> Path:
+    from services.ml_service.app.config import load_settings
+
+    settings = load_settings()
+    camera = next((row for row in settings.cameras if row.camera_id == camera_id), None)
+    if camera is None:
+        available = ",".join(row.camera_id for row in settings.cameras)
+        raise SystemExit(
+            f"STEP1_FAIL camera_not_found={camera_id} available=[{available}]"
+        )
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SystemExit("STEP1_FAIL ffmpeg_not_found install=ffmpeg")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = camera.camera_id.lower().replace("-", "_")
+    frame_path = output_dir / f"{safe_id}_input.jpg"
+    url = _camera_rtsp_url(camera)
+
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-rw_timeout",
+        "7000000",
+        "-i",
+        url,
+        "-an",
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        "-y",
+        str(frame_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"STEP1_FAIL camera_capture_timeout camera={camera.camera_id}")
+
+    if result.returncode != 0 or not frame_path.is_file() or frame_path.stat().st_size == 0:
+        error = (result.stderr or "ffmpeg capture failed").strip().replace("\n", " | ")
+        if len(error) > 400:
+            error = error[-400:]
+        raise SystemExit(
+            f"STEP1_FAIL camera_capture camera={camera.camera_id} error={error}"
+        )
+
+    print(
+        f"STEP1_CAPTURE camera={camera.camera_id} image={frame_path}",
+        flush=True,
+    )
+    return frame_path
+
+
 def main() -> int:
     args = _parse_args()
-    if not args.image.is_file():
-        raise SystemExit(f"STEP1_FAIL image_not_found={args.image}")
+    if bool(args.image) == bool(args.camera):
+        raise SystemExit("STEP1_FAIL choose_exactly_one_source image_or_--camera")
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    image_path = (
+        _capture_camera_frame(str(args.camera).strip(), args.output_dir)
+        if args.camera
+        else args.image
+    )
+    assert image_path is not None
+    if not image_path.is_file():
+        raise SystemExit(f"STEP1_FAIL image_not_found={image_path}")
     if args.height <= 0 or args.width <= 0:
         raise SystemExit("STEP1_FAIL invalid_shape")
     if args.height % 32 or args.width % 32:
@@ -71,7 +186,7 @@ def main() -> int:
 
     device_name = torch.cuda.get_device_name(0)
     capability = torch.cuda.get_device_capability(0)
-    image = Image.open(args.image).convert("RGB")
+    image = Image.open(image_path).convert("RGB")
     source_w, source_h = image.size
     shape = (int(args.height), int(args.width))
 
@@ -86,8 +201,6 @@ def main() -> int:
 
     model = RFDETRSmall(device="cuda:0")
 
-    # Warm-up is deliberately excluded from timing.  Keep the raw threshold low
-    # so we can inspect weak person candidates without rendering other COCO classes.
     raw_threshold = 0.05
     _ = model.predict(
         image,
@@ -146,7 +259,6 @@ def main() -> int:
 
     persons.sort(key=lambda row: row["confidence"], reverse=True)
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     annotated = image.copy()
     draw = ImageDraw.Draw(annotated)
     try:
@@ -157,7 +269,6 @@ def main() -> int:
     for index, row in enumerate(persons, start=1):
         x1, y1, x2, y2 = row["xyxy"]
         conf = row["confidence"]
-        # Yellow is used only for easy visual inspection in this isolated test.
         draw.rectangle((x1, y1, x2, y2), outline=(255, 196, 64), width=4)
         label = f"person {index}  {conf:.2f}"
         text_box = draw.textbbox((x1, y1), label, font=font)
@@ -174,7 +285,8 @@ def main() -> int:
     report = {
         "stage": 1,
         "backend": "RF-DETR-S PyTorch CUDA truth",
-        "source_image": str(args.image),
+        "source_image": str(image_path),
+        "source_camera": str(args.camera).strip() if args.camera else None,
         "source_size": [source_w, source_h],
         "model_shape_hw": [args.height, args.width],
         "raw_threshold": raw_threshold,
