@@ -35,6 +35,33 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolve_exported_onnx(result, output_dir: Path) -> Path:
+    """Trust RF-DETR's returned path first, then fall back to the only ONNX it wrote."""
+    candidates: list[Path] = []
+
+    if isinstance(result, (str, Path)):
+        returned = Path(result)
+        candidates.append(returned)
+        if not returned.is_absolute():
+            candidates.append(ROOT / returned)
+
+    candidates.extend(sorted(output_dir.glob("*.onnx")))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+
+    raise SystemExit(
+        "STEP4_1_FAIL onnx_missing "
+        f"output_dir={output_dir} export_result={result!r}"
+    )
+
+
 def main() -> int:
     args = _parse_args()
     if args.width <= 0 or args.height <= 0:
@@ -51,10 +78,12 @@ def main() -> int:
     if not torch.cuda.is_available():
         raise SystemExit("STEP4_1_FAIL torch_cuda_unavailable")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    onnx_path = args.output_dir / "inference_model.onnx"
-    if onnx_path.exists():
-        onnx_path.unlink()
+    output_dir = args.output_dir if args.output_dir.is_absolute() else ROOT / args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Avoid validating a stale model if RF-DETR changes its output filename.
+    for old in output_dir.glob("*.onnx"):
+        old.unlink()
 
     print(
         "STEP4_1_ENV "
@@ -70,18 +99,14 @@ def main() -> int:
     model = RFDETRSmall(device="cuda:0")
     result = model.export(
         format="onnx",
-        output_dir=str(args.output_dir),
+        output_dir=str(output_dir),
         shape=(int(args.height), int(args.width)),
         batch_size=1,
         dynamic_batch=False,
         opset_version=int(args.opset),
         verbose=False,
     )
-
-    if not onnx_path.is_file() or onnx_path.stat().st_size == 0:
-        raise SystemExit(
-            f"STEP4_1_FAIL onnx_missing expected={onnx_path} export_result={result!r}"
-        )
+    onnx_path = _resolve_exported_onnx(result, output_dir)
 
     onnx_check = "not_checked"
     input_info = []
@@ -140,7 +165,7 @@ def main() -> int:
             "cuda": str(torch.version.cuda),
         },
     }
-    report_path = args.output_dir / "export_report.json"
+    report_path = output_dir / "export_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     size_mb = onnx_path.stat().st_size / (1024.0 * 1024.0)
