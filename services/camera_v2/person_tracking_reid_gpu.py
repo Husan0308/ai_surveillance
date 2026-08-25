@@ -59,6 +59,48 @@ class CameraPersonTrackingReIDGpu(CameraPersonTrackingReID):
         self.latency_compensator.max_projection_s = 0.45
         self.latency_compensator.projection_gain = 0.82
 
+        # A single weak/occluded pose frame must not tell NvDCF "inference ran and
+        # found nobody". DeepStream uses NvDsFrameMeta.bInferDone to distinguish a
+        # skipped inference frame from a completed empty inference frame. The old
+        # sticky CAM-01 path effectively tolerated short detector misses. Confirm
+        # an empty scene across several independent detector refreshes before
+        # publishing an empty result to NvDCF; positive detections reset the miss
+        # streak immediately. This preserves tracking through bends/occlusion but
+        # still lets a person who really left disappear after a bounded delay.
+        self.empty_confirm_misses = max(
+            2,
+            int(os.environ.get("CAMERA_V2_EMPTY_CONFIRM_MISSES", "3")),
+        )
+        self._empty_detector_streak = {
+            camera.camera_id: 0 for camera in self.cameras
+        }
+
+    def _publish_prepared(self, cid: str, captured_t: float, prepared) -> None:
+        if prepared:
+            self._empty_detector_streak[cid] = 0
+            return super()._publish_prepared(cid, captured_t, prepared)
+
+        streak = self._empty_detector_streak.get(cid, 0) + 1
+        self._empty_detector_streak[cid] = streak
+        if streak < self.empty_confirm_misses:
+            if streak == 1:
+                print(
+                    "CAMERA_GPU_EMPTY_HOLD "
+                    f"cid={cid} miss={streak}/{self.empty_confirm_misses} "
+                    "action=keep-nvdcf",
+                    flush=True,
+                )
+            return
+
+        self._empty_detector_streak[cid] = 0
+        print(
+            "CAMERA_GPU_EMPTY_CONFIRM "
+            f"cid={cid} misses={self.empty_confirm_misses} "
+            "action=publish-empty",
+            flush=True,
+        )
+        return super()._publish_prepared(cid, captured_t, prepared)
+
     def _active_detector_ids(self) -> list[str]:
         configured = [
             value.strip()
@@ -107,6 +149,7 @@ class CameraPersonTrackingReIDGpu(CameraPersonTrackingReID):
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"max_result_age={self.max_detector_result_age_ms:.0f}ms "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
+            f"empty_confirm={self.empty_confirm_misses} "
             "policy=detector-refreshes-nvdcf nvdcf-per-frame=1 shadow-hold=1",
             flush=True,
         )
