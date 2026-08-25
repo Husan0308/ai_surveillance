@@ -51,14 +51,18 @@ def main() -> int:
         )
     if (GRID_COLUMNS, GRID_ROWS) != (2, 3):
         raise RuntimeError(f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
-    if (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH) != (672, 384, 1):
+    if (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH) != (832, 480, 1):
         raise RuntimeError(
-            "detector geometry must be 672x384 micro-batch=1, got "
+            "pose detector tensor must be 832x480 micro-batch=1, got "
             f"{INFER_WIDTH}x{INFER_HEIGHT} micro={MICRO_BATCH}"
         )
 
     detector_backend = os.environ.get(
         "CAMERA_V2_DETECTOR_BACKEND",
+        "",
+    ).strip().lower()
+    detector_task = os.environ.get(
+        "CAMERA_V2_DETECT_TASK",
         "",
     ).strip().lower()
     detector_model = Path(
@@ -77,15 +81,20 @@ def main() -> int:
             "production detector backend must be onnx-cpu, "
             f"got {detector_backend!r}"
         )
-    if detector_model != "yolo26s.onnx":
+    if detector_task != "pose":
         raise RuntimeError(
-            "production detector model must be yolo26s.onnx, "
+            "production detector task must be pose, "
+            f"got {detector_task!r}"
+        )
+    if detector_model != "yolo26s-pose.onnx":
+        raise RuntimeError(
+            "production detector model must be yolo26s-pose.onnx, "
             f"got {detector_model!r}"
         )
     model_path = ROOT / detector_model
     if not model_path.is_file():
         raise RuntimeError(
-            f"production ONNX detector is missing: {model_path}"
+            f"production ONNX pose detector is missing: {model_path}"
         )
     if detector_cameras != ["CAM-01"]:
         raise RuntimeError(
@@ -93,6 +102,27 @@ def main() -> int:
         )
     if os.environ.get("CAMERA_V2_SINGLE_SOURCE_ANALYSIS", "0") != "1":
         raise RuntimeError("CAM-01 tuning profile must enable single-source analysis")
+
+    analysis_width = int(os.environ.get("CAMERA_V2_ANALYSIS_TILE_WIDTH", "0"))
+    analysis_height = int(os.environ.get("CAMERA_V2_ANALYSIS_TILE_HEIGHT", "0"))
+    pose_width = int(os.environ.get("CAMERA_V2_POSE_INPUT_WIDTH", "0"))
+    pose_height = int(os.environ.get("CAMERA_V2_POSE_INPUT_HEIGHT", "0"))
+    pose_conf = float(os.environ.get("CAMERA_V2_POSE_CONF", "0"))
+    pose_iou = float(os.environ.get("CAMERA_V2_POSE_IOU", "0"))
+    if (analysis_width, analysis_height) != (1280, 720):
+        raise RuntimeError(
+            "CAM-01 pose source crop must be 1280x720, got "
+            f"{analysis_width}x{analysis_height}"
+        )
+    if (pose_width, pose_height) != (832, 480):
+        raise RuntimeError(
+            "pose ONNX tensor must be 832x480, got "
+            f"{pose_width}x{pose_height}"
+        )
+    if abs(pose_conf - 0.10) > 1e-9 or abs(pose_iou - 0.80) > 1e-9:
+        raise RuntimeError(
+            f"pose thresholds must be conf=0.10 iou=0.80, got {pose_conf}/{pose_iou}"
+        )
 
     runtime_source = (ROOT / "services/camera_v2/pascal_safe_pipeline.py").read_text(
         encoding="utf-8"
@@ -141,13 +171,16 @@ def main() -> int:
     ).read_text(encoding="utf-8")
     for required in (
         "def yolo_onnx_cpu_worker",
-        'YOLO(model_path, task="detect")',
+        "from .yolo_pose_backend import _rows_from_result",
+        'YOLO(model_path, task=task)',
         '"device": "cpu"',
-        '"backend": "onnxruntime-cpu"',
+        '"onnxruntime-cpu-pose"',
+        'task == "pose"',
+        "_rows_from_result(",
         "detection._yolo_worker = yolo_onnx_cpu_worker",
     ):
         if required not in onnx_backend_source:
-            raise RuntimeError(f"ONNX CPU detector guard missing: {required}")
+            raise RuntimeError(f"ONNX pose CPU detector guard missing: {required}")
 
     nvdcf_ab_enabled = (
         os.environ.get("CAMERA_V2_NVDCF_AB", "0")
@@ -163,8 +196,6 @@ def main() -> int:
         "CameraPersonTrackingFinal",
     ]
 
-    # Normal Pascal-safe production mode still forbids NvDCF.
-    # Explicit A/B mode may reference the isolated NvDCF branch.
     if not nvdcf_ab_enabled:
         forbidden_dependencies.extend([
             "libnvds_nvmultiobjecttracker",
@@ -228,7 +259,7 @@ def main() -> int:
         f"rtsp={transport} latency={latency}ms mux={mux_width}x{mux_height} "
         f"grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
-        f"detector=YOLO26s-ONNX-CPU@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
+        "detector=YOLO26s-POSE-ONNX-CPU@832x480 source=1280x720/micro1 "
         "active=CAM-01 detector_path=analysis-tiler(single-source-fastpath) "
         "demux=disabled mux_retention=bounded source_ingest=isolated "
         "dynamic_pad=late-caps-safe tracker=motion-predictor nvtracker=disabled "
