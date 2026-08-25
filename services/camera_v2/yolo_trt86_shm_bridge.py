@@ -31,7 +31,10 @@ def _read_json(proc, timeout: float):
     line = proc.stdout.readline()
     if not line:
         raise RuntimeError(f"TRT86 SHM detector closed rc={proc.poll()}")
-    return json.loads(line)
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"TRT86 SHM worker emitted non-JSON stdout: {line[:200]!r}") from exc
 
 
 def yolo_trt86_shm_worker(job_q, result_q) -> None:
@@ -136,6 +139,13 @@ def yolo_trt86_shm_worker(job_q, result_q) -> None:
                     "conf": float(
                         os.environ.get("CAMERA_V2_DETECT_CONF", "0.05")
                     ),
+                    "max_det": max(
+                        1,
+                        min(
+                            300,
+                            int(os.environ.get("CAMERA_V2_MAX_DET", "40")),
+                        ),
+                    ),
                 }
                 if proc.stdin is None:
                     raise RuntimeError("TRT86 SHM stdin unavailable")
@@ -154,6 +164,8 @@ def yolo_trt86_shm_worker(job_q, result_q) -> None:
 
                 rows = []
                 for row in response.get("boxes", []):
+                    if not isinstance(row, (list, tuple)) or len(row) != 5:
+                        raise RuntimeError(f"TRT86 SHM invalid detection row: {row!r}")
                     x1, y1, x2, y2, score = row
                     rows.append(
                         (
@@ -178,8 +190,11 @@ def yolo_trt86_shm_worker(job_q, result_q) -> None:
                         f"prep={prep_ms:.1f}ms trt={trt_ms:.1f}ms "
                         f"sidecar={sidecar_ms:.1f}ms boxes={len(rows)} "
                         f"raw_max_conf={health.get('raw_max_conf')} "
-                        f"raw_person_rows={health.get('raw_person_rows')} "
-                        f"raw_above_conf={health.get('raw_above_conf')} "
+                        f"person_max_conf={health.get('raw_person_max_conf')} "
+                        f"person_rows={health.get('raw_person_rows')} "
+                        f"person_above_conf={health.get('raw_person_above_conf')} "
+                        f"all_above_conf={health.get('raw_above_conf')} "
+                        f"raw_box_max={health.get('raw_box_max')} "
                         f"nonfinite={health.get('nonfinite_rows')} "
                         f"bgr_mean={health.get('bgr_mean')}",
                         flush=True,
@@ -197,12 +212,16 @@ def yolo_trt86_shm_worker(job_q, result_q) -> None:
             )
 
     except BaseException as exc:
-        result_q.put(
-            {
-                "type": "fatal",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        )
+        try:
+            result_q.put(
+                {
+                    "type": "fatal",
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                timeout=1.0,
+            )
+        except Exception:
+            pass
     finally:
         if proc is not None:
             try:
