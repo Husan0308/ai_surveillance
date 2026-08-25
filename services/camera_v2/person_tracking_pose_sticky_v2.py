@@ -14,8 +14,15 @@ Two details matter here:
   not part of the DeepStream 7.1 parameter table, so its absence must not abort
   startup.  Continuity is controlled with probation/shadow/current tracker
   confidence parameters instead.
+
+The six RTSP sources are also started deliberately one-by-one.  Camera V2 used to
+carry ``startup_stagger_sec`` in config but transition the whole pipeline to
+PLAYING in one shot, causing six nvurisrcbin sessions to hit the NVR together.
+The pose runtime locks every source at NULL first, lets the parent pipeline enter
+PLAYING, then unlocks/synchronizes CAM-01..CAM-06 at the configured interval.
 """
 
+import os
 from pathlib import Path
 
 from .person_tracking_pose_sticky import CameraPersonTrackingPoseSticky
@@ -187,6 +194,64 @@ class CameraPersonTrackingPoseStickyV2(CameraPersonTrackingPoseSticky):
             flush=True,
         )
         return path
+
+    def _startup_stagger_seconds(self) -> float:
+        configured = float(getattr(self.settings.deepstream, "startup_stagger_sec", 0.5))
+        return max(
+            0.10,
+            min(
+                5.0,
+                float(os.environ.get("CAMERA_V2_STARTUP_STAGGER_SEC", str(configured))),
+            ),
+        )
+
+    def _schedule_staggered_sources(self) -> None:
+        stagger_s = self._startup_stagger_seconds()
+        ordered = [camera.camera_id for camera in self.cameras]
+
+        # Keep RTSP bins out of the parent state transition.  Downstream mux,
+        # tracker, tiler and sink may enter PLAYING immediately; each live source
+        # is then attached to that already-running graph one at a time.
+        for cid in ordered:
+            source = self.sources.get(cid)
+            if source is None:
+                raise RuntimeError(f"{cid}: source missing before stagger startup")
+            source.set_locked_state(True)
+            source.set_state(self.Gst.State.NULL)
+
+        print(
+            "CAMERA_POSE_SOURCE_STAGGER "
+            f"order={ordered} interval={stagger_s:.2f}s locked_at_null=1",
+            flush=True,
+        )
+
+        for index, cid in enumerate(ordered):
+            delay_ms = max(1, int(round(index * stagger_s * 1000.0)))
+
+            def _start_one(camera_id=cid, ordinal=index):
+                if self._stopping:
+                    return False
+                source = self.sources.get(camera_id)
+                if source is None:
+                    print(
+                        f"CAMERA_POSE_SOURCE_START cid={camera_id} error=missing-source",
+                        flush=True,
+                    )
+                    return False
+                source.set_locked_state(False)
+                ok = bool(source.sync_state_with_parent())
+                print(
+                    "CAMERA_POSE_SOURCE_START "
+                    f"cid={camera_id} index={ordinal} sync={int(ok)}",
+                    flush=True,
+                )
+                return False
+
+            self.GLib.timeout_add(delay_ms, _start_one)
+
+    def run(self) -> int:
+        self._schedule_staggered_sources()
+        return super().run()
 
 
 def main() -> int:
