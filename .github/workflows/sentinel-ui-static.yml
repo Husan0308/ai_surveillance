@@ -1,31 +1,29 @@
-name: Sentinel Camera Wall Static
+name: Camera V2 Audited Static
 
 on:
   push:
-    branches:
-      - agent/rfdetr-s-core-final
+    paths:
+      - 'services/camera_v2/**'
+      - 'services/ml_service/app/config.py'
+      - 'scripts/run_cam01_trt86_audited.sh'
+      - 'scripts/yolo26_trt86_shm_worker*.py'
+      - 'scripts/preflight_cam01_audited_static.py'
+      - 'config/cameras.yaml'
+      - 'requirements-trt86.txt'
+      - '.github/workflows/sentinel-ui-static.yml'
   pull_request:
     paths:
-      - 'services/camera_v2/camera_wall_runtime.py'
-      - 'services/camera_v2/pascal_safe_pipeline.py'
-      - 'services/camera_v2/rfdetr_backend.py'
-      - 'services/camera_v2/detection.py'
-      - 'services/camera_v2/dynamic_wall.py'
-      - 'services/camera_v2/main.py'
-      - 'services/camera_v2/secure.py'
-      - 'services/camera_v2/sentinel_ui.py'
-      - 'services/camera_v2/sentinel_ui_monitoring_native.py'
-      - 'scripts/preflight_rfdetr_core.py'
-      - 'scripts/preflight_pascal_safe.py'
-      - 'scripts/preflight_sentinel_ui.py'
-      - 'scripts/preflight_camera_v2_core.py'
-      - 'scripts/run_sentinel_vms.sh'
-      - 'tests/test_camera_v2_rfdetr_core.py'
-      - 'tests/test_camera_v2_native_presentation.py'
+      - 'services/camera_v2/**'
+      - 'services/ml_service/app/config.py'
+      - 'scripts/run_cam01_trt86_audited.sh'
+      - 'scripts/yolo26_trt86_shm_worker*.py'
+      - 'scripts/preflight_cam01_audited_static.py'
+      - 'config/cameras.yaml'
+      - 'requirements-trt86.txt'
       - '.github/workflows/sentinel-ui-static.yml'
 
 jobs:
-  static-camera-wall:
+  audited-static:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,86 +31,29 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Compile active Python sources
+      - name: Verify cleanup and dependency manifest
+        run: python scripts/preflight_cam01_audited_static.py
+
+      - name: Bash syntax
+        run: bash -n scripts/run_cam01_trt86_audited.sh
+
+      - name: Compile canonical Python sources
         run: |
           python -m py_compile \
-            services/camera_v2/camera_wall_runtime.py \
-            services/camera_v2/pascal_safe_pipeline.py \
-            services/camera_v2/rfdetr_backend.py \
-            services/camera_v2/detection.py \
-            services/camera_v2/dynamic_wall.py \
+            services/ml_service/app/config.py \
             services/camera_v2/main.py \
+            services/camera_v2/dynamic_wall.py \
             services/camera_v2/secure.py \
-            services/camera_v2/sentinel_ui.py \
-            services/camera_v2/sentinel_ui_monitoring_native.py \
-            scripts/preflight_rfdetr_core.py \
-            scripts/preflight_pascal_safe.py \
-            scripts/preflight_sentinel_ui.py \
-            scripts/preflight_camera_v2_core.py \
-            tests/test_camera_v2_rfdetr_core.py \
-            tests/test_camera_v2_native_presentation.py
-
-      - name: Enforce active architecture contract
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          pascal = Path('services/camera_v2/pascal_safe_pipeline.py').read_text()
-          controller = Path('services/camera_v2/camera_wall_runtime.py').read_text()
-          secure = Path('services/camera_v2/secure.py').read_text()
-          ui = Path('services/camera_v2/sentinel_ui_monitoring_native.py').read_text()
-          shell = Path('services/camera_v2/sentinel_ui.py').read_text()
-          launcher = Path('scripts/run_sentinel_vms.sh').read_text()
-
-          assert 'class CameraPascalSafeRuntime(CameraDetectionV2)' in pascal
-          assert 'SecureCameraWallV2._add_camera(self, index, camera)' in pascal
-          assert 'def _install_analysis_inference(self)' in pascal
-          assert 'pascal_mux_tee' in pascal
-          assert 'pascal_analysis_tiler' in pascal
-          assert 'def _analysis_gate_probe' in pascal
-          assert 'def _on_analysis_sample' in pascal
-          assert 'CAMERA_DETECT_PATH mode=analysis-tiler' in pascal
-          assert 'source_path=direct-to-nvstreammux' in pascal
-          assert 'demux=disabled' in pascal
-          assert 'mux_batch_retention=bounded' in pascal
-          assert 'safe_mux_batches' in pascal
-          assert 'safe_wall_frames' in pascal
-          assert 'safe_sink_buffers' in pascal
-          assert 'analysis_frames' in pascal
-          assert 'CAMERA_STARTUP_STALL' in pascal
-          for forbidden in (
-              'nvstreamdemux',
-              'pascal_infer_demux',
-              'CameraPersonTrackingV2',
-              'CameraPersonTrackingFinal',
-              'libnvds_nvmultiobjecttracker',
-              'config_tracker_NvDCF',
-          ):
-              assert forbidden not in pascal, forbidden
-
-          assert 'CAMERA_V2_RTSP_TRANSPORT' in secure
-          assert 'select-rtp-protocol' in secure
-          assert 'self._set_if(element, "protocols", 4)' in secure
-          assert 'def _source_pad_added' in secure
-          assert 'caps.is_any()' in secure
-
-          assert 'def set_focus(source_id: int)' in controller
-          assert 'runtime.tiler.set_property("show-source", sid)' in controller
-          assert 'def focus(self, source_id: int)' in controller
-          assert 'if target == bound_xid' in controller
-          assert 'GstVideo.VideoOverlay.set_window_handle' in controller
-          assert 'cameraClicked = Signal(int)' in ui
-          assert 'def _grid_source_at' in ui
-          assert 'window.showFullScreen()' in ui
-          assert 'window.showMaximized()' in ui
-          assert 'BUILD_TAG = "2026.08.20-r19-analysis-tiler"' in shell
-          assert 'export CAMERA_V2_RTSP_TRANSPORT=tcp' in launcher
-          assert 'export CAMERA_V2_RTSP_LATENCY_MS=250' in launcher
-          assert 'rtsp=tcp latency=250ms' in launcher
-          assert 'export CAMERA_V2_PASCAL_SAFE=1' in launcher
-          assert 'detector_path=analysis-tiler' in launcher
-          assert 'demux=disabled' in launcher
-          assert 'ui=camera-only-2x3-click-fullscreen' in launcher
-          assert 'nvtracker=disabled' in launcher
-          print('SENTINEL_CAMERA_WALL_STATIC=PASS')
-          PY
+            services/camera_v2/detection.py \
+            services/camera_v2/person_tracking.py \
+            services/camera_v2/person_tracking_final.py \
+            services/camera_v2/person_tracking_trt86_fresh.py \
+            services/camera_v2/person_tracking_trt86_audited.py \
+            services/camera_v2/detector_latency.py \
+            services/camera_v2/tracker_profile.py \
+            services/camera_v2/native_bridge.py \
+            services/camera_v2/yolo_trt86_shm_bridge.py \
+            services/camera_v2/yolo_trt86_fresh_bridge.py \
+            scripts/yolo26_trt86_shm_worker.py \
+            scripts/yolo26_trt86_shm_worker_v2.py \
+            scripts/yolo26_trt86_shm_worker_v3.py
