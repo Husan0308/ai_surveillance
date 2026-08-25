@@ -72,13 +72,20 @@ def main() -> int:
         ).split(",")
         if value.strip()
     ]
-    if detector_backend != "yolo":
+    if detector_backend != "onnx-cpu":
         raise RuntimeError(
-            f"production detector backend must be yolo, got {detector_backend!r}"
+            "production detector backend must be onnx-cpu, "
+            f"got {detector_backend!r}"
         )
-    if detector_model != "yolo26s.pt":
+    if detector_model != "yolo26s.onnx":
         raise RuntimeError(
-            f"production detector model must be yolo26s.pt, got {detector_model!r}"
+            "production detector model must be yolo26s.onnx, "
+            f"got {detector_model!r}"
+        )
+    model_path = ROOT / detector_model
+    if not model_path.is_file():
+        raise RuntimeError(
+            f"production ONNX detector is missing: {model_path}"
         )
     if detector_cameras != ["CAM-01"]:
         raise RuntimeError(
@@ -120,13 +127,27 @@ def main() -> int:
     for required in (
         "CAMERA_DETECTOR_POLICY",
         "base_yolo_worker = detection_module._yolo_worker",
-        "detection_module._yolo_worker = base_yolo_worker",
+        'detector_backend == "onnx-cpu"',
+        "install_onnx_cpu()",
         "CameraPascalSafeRuntime.ANALYSIS_COLUMNS = 1",
         "CameraPascalSafeRuntime.ANALYSIS_ROWS = 1",
         'analysis_tiler.set_property("show-source", analysis_source)',
     ):
         if required not in controller_source:
             raise RuntimeError(f"CAM-01 detector fast-path guard missing: {required}")
+
+    onnx_backend_source = (
+        ROOT / "services/camera_v2/yolo_onnx_cpu_backend.py"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "def yolo_onnx_cpu_worker",
+        'YOLO(model_path, task="detect")',
+        '"device": "cpu"',
+        '"backend": "onnxruntime-cpu"',
+        "detection._yolo_worker = yolo_onnx_cpu_worker",
+    ):
+        if required not in onnx_backend_source:
+            raise RuntimeError(f"ONNX CPU detector guard missing: {required}")
 
     nvdcf_ab_enabled = (
         os.environ.get("CAMERA_V2_NVDCF_AB", "0")
@@ -207,7 +228,7 @@ def main() -> int:
         f"rtsp={transport} latency={latency}ms mux={mux_width}x{mux_height} "
         f"grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
-        f"detector=YOLO26s@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
+        f"detector=YOLO26s-ONNX-CPU@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
         "active=CAM-01 detector_path=analysis-tiler(single-source-fastpath) "
         "demux=disabled mux_retention=bounded source_ingest=isolated "
         "dynamic_pad=late-caps-safe tracker=motion-predictor nvtracker=disabled "
