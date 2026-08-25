@@ -7,23 +7,36 @@ from .dynamic_wall import DynamicCameraWallV2
 
 
 class SecureCameraWallV2(DynamicCameraWallV2):
-    """Camera V2 with deterministic RTSP authentication and transport.
-
-    The deployment NVR is on the local LAN, but the previous ``rtp-multi`` mode
-    negotiated UDP first. The hardware log then failed inside ``udpsrc`` with
-    ``not-negotiated (-4)`` before a decoded frame reached nvstreammux. Production
-    therefore defaults to RTSP/RTP-over-TCP and applies the same policy both to
-    nvurisrcbin and its internal rtspsrc child.
-    """
+    """Camera V2 with deterministic RTSP authentication and transport."""
 
     def _transport(self) -> str:
         configured = str(getattr(self.settings.deepstream, "rtsp_transport", "auto") or "auto")
         value = os.environ.get("CAMERA_V2_RTSP_TRANSPORT", configured).strip().lower()
         if value not in {"auto", "tcp", "udp"}:
-            raise RuntimeError(
-                "CAMERA_V2_RTSP_TRANSPORT must be one of: auto, tcp, udp"
-            )
+            raise RuntimeError("CAMERA_V2_RTSP_TRANSPORT must be one of: auto, tcp, udp")
         return value
+
+    @staticmethod
+    def _env_bool(name: str, fallback: bool) -> bool:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return bool(fallback)
+        value = raw.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        raise RuntimeError(f"{name} must be boolean (0/1, true/false, yes/no, on/off)")
+
+    def _rtsp_keepalive(self, camera_id: str) -> bool:
+        # Per-camera override wins over the global policy. Default remains ON,
+        # matching GStreamer rtspsrc. Some RTSP/NVR implementations terminate
+        # sessions when keep-alive requests are handled poorly, so this knob lets
+        # us test a single problematic channel without weakening the other feeds.
+        per_camera = f"{camera_id.replace('-', '_')}_RTSP_KEEPALIVE"
+        if per_camera in os.environ:
+            return self._env_bool(per_camera, True)
+        return self._env_bool("CAMERA_V2_RTSP_KEEPALIVE", True)
 
     def _configure_rtsp_child(self, _bin, _sub_bin, element, camera) -> None:
         factory = element.get_factory()
@@ -32,13 +45,12 @@ class SecureCameraWallV2(DynamicCameraWallV2):
             return
 
         transport = self._transport()
+        keepalive = self._rtsp_keepalive(camera.camera_id)
         if camera.username:
             self._set_if(element, "user-id", camera.username)
             self._set_if(element, "user-pw", camera.password)
 
         # rtspsrc protocols is GstRTSPLowerTrans flags: UDP=1, TCP=4.
-        # Setting this on the child prevents a future nvurisrcbin implementation
-        # change from silently re-enabling the failing UDP path.
         if transport == "tcp":
             self._set_if(element, "protocols", 4)
         elif transport == "udp":
@@ -48,12 +60,13 @@ class SecureCameraWallV2(DynamicCameraWallV2):
         self._set_if(element, "drop-on-latency", True)
         self._set_if(element, "udp-buffer-size", self.udp_buffer_size)
         self._set_if(element, "buffer-mode", 3)  # auto
-        self._set_if(element, "do-rtsp-keep-alive", True)
+        self._set_if(element, "do-rtsp-keep-alive", keepalive)
 
         print(
             f"CAMERA_V2 {camera.camera_id} rtspsrc configured "
             f"auth={'yes' if camera.username else 'no'} "
-            f"transport={transport} latency={self.rtsp_latency_ms}ms",
+            f"transport={transport} latency={self.rtsp_latency_ms}ms "
+            f"keepalive={int(keepalive)}",
             flush=True,
         )
 
@@ -68,8 +81,6 @@ class SecureCameraWallV2(DynamicCameraWallV2):
         self._set_if(source, "disable-audio", True)
 
         # DeepStream nvurisrcbin: 0 = UDP + multicast + TCP, 4 = TCP only.
-        # For explicit UDP the internal rtspsrc child is restricted to UDP above;
-        # nvurisrcbin itself has no UDP-only enum.
         self._set_if(source, "select-rtp-protocol", 4 if transport == "tcp" else 0)
         self._set_if(source, "latency", self.rtsp_latency_ms)
         self._set_if(source, "drop-on-latency", True)
@@ -104,20 +115,11 @@ class SecureCameraWallV2(DynamicCameraWallV2):
 
         print(
             f"CAMERA_V2 {cid} source configured transport={transport} "
-            f"latency={self.rtsp_latency_ms}ms",
+            f"latency={self.rtsp_latency_ms}ms keepalive={int(self._rtsp_keepalive(cid))}",
             flush=True,
         )
 
     def _source_pad_added(self, _source, pad, queue, cid: str) -> None:
-        """Link the decoded source pad even when caps arrive slightly later.
-
-        The old callback returned permanently when get_current_caps() was empty at
-        pad-added time. A dynamic pad is not re-announced merely because caps become
-        fixed later, so that race could leave a camera disconnected forever.
-        ``disable-audio`` is enabled on nvurisrcbin; if caps are already known we
-        still reject a non-video pad explicitly.
-        """
-
         caps = pad.get_current_caps()
         if caps is None or caps.get_size() == 0:
             try:
