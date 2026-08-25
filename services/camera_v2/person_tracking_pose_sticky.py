@@ -5,22 +5,16 @@ from __future__ import annotations
 YOLO26s-pose refreshes a person on sparse, fresh frames. DeepStream NvDCF owns
 the bbox on every display frame. This runtime is deliberately local-camera only;
 Global ID/ReID is added only after this detection/tracking baseline is proven.
-
-Important sparse-tracker rule: detector refreshes are much slower than video
-frames, so a new NvDCF target must not spend a multi-frame probation period and
-be early-terminated before the next detector refresh arrives. We therefore make
-pose-seeded targets active immediately (probationAge=0) and let shadow tracking
-own continuity between detector observations.
 """
 
 import os
 import queue as pyqueue
 import time
 
-# Patch only the generated local NvDCF profile used by this runtime. The generic
-# tracker profile remains unchanged for the rollback/known-good branches.
 from . import tracker_profile as _tracker_profile
 
+# Sparse detector target creation must be immediate. A ~1 Hz pose refresh cannot
+# satisfy a multi-frame tentative probation period on a ~20 FPS video stream.
 _tracker_profile._REQUIRED_PATCHES.update(
     {
         "minDetectorConfidence": "0.05",
@@ -39,7 +33,6 @@ _tracker_profile._OPTIONAL_PATCHES.update(
 
 from .yolo_pose_backend import install as _install_pose_backend
 
-# Must happen before CameraPersonTrackingFinal imports the detector worker target.
 _install_pose_backend()
 
 from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
@@ -49,10 +42,29 @@ from .person_tracking_final import CameraPersonTrackingFinal
 class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
     """YOLO26s-pose refreshes; NvDCF owns camera-local temporal tracking."""
 
+    def _add_camera(self, index, camera) -> None:
+        # CameraDetectionV2 builds the tee/inference branch itself and historically
+        # reset the outer nvurisrcbin transport to rtp-multi. Re-apply the same
+        # deterministic source policy as SecureCameraWallV2: TCP on both the outer
+        # bin and the child rtspsrc, plus async handling for reconnects.
+        super()._add_camera(index, camera)
+        source = self.pipeline.get_by_name(f"camera_v2_source_{index}")
+        if source is None:
+            raise RuntimeError(f"{camera.camera_id}: nvurisrcbin missing")
+        transport = self._transport()
+        self._set_if(source, "select-rtp-protocol", 4 if transport == "tcp" else 0)
+        self._set_if(source, "async-handling", True)
+        self._set_if(source, "rtsp-reconnect-interval", 2)
+        self._set_if(source, "rtsp-reconnect-attempts", -1)
+        print(
+            "CAMERA_POSE_SOURCE_HARDENED "
+            f"cid={camera.camera_id} transport={transport} async=1 reconnect=2s/-1",
+            flush=True,
+        )
+
     def __init__(self) -> None:
         super().__init__()
 
-        # Sparse appsinks must not block PAUSED->PLAYING waiting for preroll.
         sparse_sinks: list[int] = []
         for index, _camera in enumerate(self.cameras):
             sink = self.pipeline.get_by_name(f"detect_sink_{index}")
@@ -76,9 +88,6 @@ class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
             flush=True,
         )
 
-        # Pose inference on Pascal can finish several hundred milliseconds after
-        # capture. Project a stable detector observation toward the live frame;
-        # NvDCF remains authoritative between refreshes.
         self.latency_compensator.max_projection_s = float(
             os.environ.get("CAMERA_V2_POSE_MAX_PROJECTION_S", "0.45")
         )
@@ -164,7 +173,7 @@ class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
             f"max_result_age={self.max_detector_result_age_ms:.0f}ms "
             f"empty_confirm={self.empty_confirm_misses} "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
-            "policy=pose-refreshes-nvdcf nvdcf-per-frame=1 jit-no-prefetch=1",
+            "policy=pose-refreshes-nvdcf nvdcf-per-frame=1 jit-one-shot=1 no-prefetch=1",
             flush=True,
         )
 
@@ -181,8 +190,6 @@ class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
             group = groups[group_index % len(groups)]
             group_index += 1
 
-            # JIT latest frame only. Never request the next frame while the
-            # current inference is still running.
             self._request_group(group)
             rows = self.mailbox.wait_group(group, versions, timeout=0.8)
             if rows is None:
@@ -288,7 +295,7 @@ class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
             "CAMERA_POSE_STICKY "
             f"calls={calls} inputs={inputs} meta_boxes={meta} tracked_now={tracked} "
             f"result_age={age:.1f}ms stale={stale} timeouts={timeouts} "
-            f"empty_confirm={self.empty_confirm_misses} no_prefetch=1",
+            f"empty_confirm={self.empty_confirm_misses} one_shot=1 no_prefetch=1",
             flush=True,
         )
         return keep
