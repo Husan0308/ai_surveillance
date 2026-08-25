@@ -44,6 +44,26 @@ def _put_latest(q, state: str, detail: object = "") -> None:
         pass
 
 
+def _detector_camera_ids() -> list[str]:
+    return [
+        value.strip()
+        for value in os.environ.get(
+            "CAMERA_V2_DETECT_ACTIVE_CAMERAS",
+            "",
+        ).split(",")
+        if value.strip()
+    ]
+
+
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _run_backend(
     window_id: int,
     command_q,
@@ -70,13 +90,80 @@ def _run_backend(
         gi.require_version("GstVideo", "1.0")
         from gi.repository import Gst, GstVideo
 
+        # pascal_safe_pipeline imports yolo_pose_backend for the historical pose
+        # experiment. Save the real bbox detector before that import so production
+        # can explicitly select the lighter YOLO worker instead of being silently
+        # monkey-patched to a pose model.
+        from . import detection as detection_module
+
+        base_yolo_worker = detection_module._yolo_worker
         from .pascal_safe_pipeline import CameraPascalSafeRuntime
+
+        detector_backend = os.environ.get(
+            "CAMERA_V2_DETECTOR_BACKEND",
+            "yolo",
+        ).strip().lower()
+        if detector_backend == "yolo":
+            detection_module._yolo_worker = base_yolo_worker
+        elif detector_backend != "pose":
+            raise RuntimeError(
+                "CAMERA_V2_DETECTOR_BACKEND must be 'yolo' or 'pose', "
+                f"got {detector_backend!r}"
+            )
+
+        active_detector_ids = _detector_camera_ids()
+        single_cam01_analysis = (
+            _truthy_env("CAMERA_V2_SINGLE_SOURCE_ANALYSIS", "1")
+            and active_detector_ids == ["CAM-01"]
+            and int(os.environ.get("CAMERA_V2_MICRO_BATCH", "1")) == 1
+        )
+
+        # With CAM-01-only inference there is no reason to compose/download a
+        # 2x3 analysis wall. nvmultistreamtiler supports show-source for a single
+        # zoomed stream. Build the analysis output as 1x1 before the runtime graph
+        # is constructed; the display tiler remains the normal 2x3 wall.
+        if single_cam01_analysis:
+            CameraPascalSafeRuntime.ANALYSIS_COLUMNS = 1
+            CameraPascalSafeRuntime.ANALYSIS_ROWS = 1
 
         runtime = CameraPascalSafeRuntime()
         if len(runtime.cameras) != CAMERA_COUNT:
             raise RuntimeError(
                 f"production wall requires {CAMERA_COUNT} cameras, found {len(runtime.cameras)}"
             )
+
+        analysis_mode = "grid"
+        analysis_source = -1
+        analysis_tiler = getattr(runtime, "analysis_tiler", None)
+        if analysis_tiler is not None:
+            interpolation = max(
+                0,
+                int(os.environ.get("CAMERA_V2_ANALYSIS_INTERPOLATION", "1")),
+            )
+            if analysis_tiler.find_property("interpolation-method") is not None:
+                analysis_tiler.set_property("interpolation-method", interpolation)
+
+            if single_cam01_analysis:
+                analysis_source = int(runtime.camera_index.get("CAM-01", 0))
+                analysis_tiler.set_property("rows", 1)
+                analysis_tiler.set_property("columns", 1)
+                if analysis_tiler.find_property("show-source") is not None:
+                    analysis_tiler.set_property("show-source", analysis_source)
+                analysis_mode = "single-source"
+
+        model_name = os.environ.get(
+            "CAMERA_V2_YOLO_MODEL",
+            "yolo26m.pt",
+        )
+        print(
+            "CAMERA_DETECTOR_POLICY "
+            f"backend={detector_backend} model={model_name} "
+            f"active={active_detector_ids or ['ALL']} "
+            f"analysis={analysis_mode} source={analysis_source} "
+            f"tile={CameraPascalSafeRuntime.ANALYSIS_TILE_WIDTH}x"
+            f"{CameraPascalSafeRuntime.ANALYSIS_TILE_HEIGHT}",
+            flush=True,
+        )
 
         def set_focus(source_id: int) -> None:
             nonlocal current_focus
