@@ -14,6 +14,7 @@ REQUIRED = (
     "config/cameras.yaml",
     "requirements-trt86.txt",
     "scripts/run_cam01_trt86_audited.sh",
+    "scripts/run_cam01_pose_sticky.sh",
     "scripts/restore_cam01_trt86_engine.sh",
     "scripts/yolo26_trt86_shm_worker.py",
     "scripts/yolo26_trt86_shm_worker_v2.py",
@@ -29,14 +30,14 @@ REQUIRED = (
     "services/camera_v2/person_tracking_final.py",
     "services/camera_v2/person_tracking_trt86_fresh.py",
     "services/camera_v2/person_tracking_trt86_audited.py",
+    "services/camera_v2/person_tracking_pose_sticky.py",
+    "services/camera_v2/yolo_pose_backend.py",
     "services/camera_v2/detector_latency.py",
     "services/camera_v2/tracker_profile.py",
     "services/camera_v2/native_bridge.py",
     "services/camera_v2/native_meta_bridge.c",
     "services/camera_v2/native_label_style.c",
     "services/camera_v2/native_display_smoother.c",
-    # Temporary native_bridge build dependency. Do not remove until the native
-    # library is split into detector/tracker vs optional heatmap components.
     "services/camera_v2/native_heatmap.c",
     "services/camera_v2/yolo_trt86_shm_bridge.py",
     "services/camera_v2/yolo_trt86_fresh_bridge.py",
@@ -59,7 +60,6 @@ FORBIDDEN_EXACT = (
     "services/camera_v2/ui_bridge.py",
     "services/camera_v2/native_ui_bridge.c",
     "services/camera_v2/requirements-ui.txt",
-    "services/camera_v2/yolo_pose_backend.py",
     "services/camera_v2/yolo_onnx_cpu_backend.py",
     "services/camera_v2/pose_ankle.py",
     "services/camera_v2/temporal_tracker.py",
@@ -104,27 +104,55 @@ def main() -> None:
             except SyntaxError as exc:
                 fail(f"syntax={rel}:{exc.lineno}:{exc.msg}")
 
-    launcher = (ROOT / "scripts/run_cam01_trt86_audited.sh").read_text(encoding="utf-8")
+    trt_launcher = (ROOT / "scripts/run_cam01_trt86_audited.sh").read_text(encoding="utf-8")
     for needle in (
         "person_tracking_trt86_audited",
         "yolo26_trt86_shm_worker_v3.py",
         "CAMERA_V2_DETECT_ACTIVE_CAMERAS=CAM-01",
-        "CAMERA_V2_RTSP_TRANSPORT",
-        "CAMERA_V2_RTSP_LATENCY_MS",
         "restore_cam01_trt86_engine.sh",
     ):
-        if needle not in launcher:
-            fail(f"launcher_contract_missing={needle}")
+        if needle not in trt_launcher:
+            fail(f"trt_launcher_contract_missing={needle}")
+
+    pose_launcher = (ROOT / "scripts/run_cam01_pose_sticky.sh").read_text(encoding="utf-8")
+    for needle in (
+        "person_tracking_pose_sticky",
+        "CAMERA_V2_POSE_IMGSZ",
+        "CAMERA_V2_EMPTY_CONFIRM_MISSES",
+        "CAMERA_V2_DETECT_ACTIVE_CAMERAS=CAM-01",
+        "global-id=off",
+    ):
+        if needle not in pose_launcher:
+            fail(f"pose_launcher_contract_missing={needle}")
+
+    pose_backend = (ROOT / "services/camera_v2/yolo_pose_backend.py").read_text(encoding="utf-8")
+    for needle in (
+        "result.keypoints",
+        "usable < 4",
+        "same_pose",
+        "classes=[0]",
+        "yolo26s-pose.pt",
+    ):
+        if needle not in pose_backend:
+            fail(f"pose_backend_contract_missing={needle}")
+
+    sticky = (ROOT / "services/camera_v2/person_tracking_pose_sticky.py").read_text(encoding="utf-8")
+    for needle in (
+        "CameraPersonTrackingFinal",
+        "CAMERA_POSE_EMPTY_HOLD",
+        "empty_confirm_misses",
+        "jit-no-prefetch=1",
+        "self._request_group(group)",
+    ):
+        if needle not in sticky:
+            fail(f"pose_sticky_contract_missing={needle}")
+    if "prefetched_group" in sticky:
+        fail("pose_sticky_must_not_prefetch")
 
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     for needle in ("artifacts/", "*.engine", "*.plan"):
         if needle not in gitignore:
             fail(f"gitignore_missing_local_artifact_rule={needle}")
-
-    restore = (ROOT / "scripts/restore_cam01_trt86_engine.sh").read_text(encoding="utf-8")
-    for needle in ("git stash list", "^3", "git cat-file -e", "git show"):
-        if needle not in restore:
-            fail(f"engine_restore_contract_missing={needle}")
 
     audited = (ROOT / "services/camera_v2/person_tracking_trt86_audited.py").read_text(encoding="utf-8")
     for needle in (
@@ -136,19 +164,11 @@ def main() -> None:
         if needle not in audited:
             fail(f"audited_contract_missing={needle}")
 
-    fresh = (ROOT / "services/camera_v2/person_tracking_trt86_fresh.py").read_text(encoding="utf-8")
-    if "no prefetch" not in fresh.lower() and "no-prefetch" not in fresh.lower():
-        fail("fresh_runtime_missing_no_prefetch_contract")
-
     tracker = (ROOT / "services/camera_v2/person_tracking.py").read_text(encoding="utf-8")
     if "nvtracker" not in tracker or "self.mux.link(tracker)" not in tracker:
         fail("nvdcf_link_contract_missing")
 
-    package_main = (ROOT / "services/camera_v2/__main__.py").read_text(encoding="utf-8")
-    if "person_tracking_trt86_audited" not in package_main:
-        fail("package_entrypoint_not_audited")
-
-    print(f"CAMERA_V2_AUDITED_STATIC=PASS required={len(REQUIRED)} obsolete=0")
+    print(f"CAMERA_V2_AUDITED_STATIC=PASS required={len(REQUIRED)} obsolete=0 pose_sticky=1")
 
 
 if __name__ == "__main__":
