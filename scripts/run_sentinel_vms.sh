@@ -26,11 +26,12 @@ export CAMERA_V2_FRAME_HEIGHT=1440
 export CAMERA_V2_WALL_WIDTH=2880
 export CAMERA_V2_WALL_HEIGHT=1080
 
-# GTX 1050 Ti production detector profile.
-# Person detection does not need pose keypoints. Use the much lighter YOLO26s
-# detector and keep the pose worker available only as an explicit opt-in backend.
-export CAMERA_V2_DETECTOR_BACKEND=yolo
-export CAMERA_V2_YOLO_MODEL=yolo26s.pt
+# Production person detector profile for the GTX 1050 Ti machine:
+# keep NVDEC/display on the GPU, but run CAM-01 detection through ONNX Runtime
+# on the CPU. Local benchmark on this host is ~56-74 ms wall time, avoiding the
+# GPU contention that pushed the CUDA detector above 250 ms in the live wall.
+export CAMERA_V2_DETECTOR_BACKEND=onnx-cpu
+export CAMERA_V2_YOLO_MODEL=yolo26s.onnx
 export CAMERA_V2_DETECT_WIDTH=672
 export CAMERA_V2_DETECT_HEIGHT=384
 export CAMERA_V2_DETECT_CONF=0.08
@@ -38,7 +39,7 @@ export CAMERA_V2_DETECT_IOU=0.70
 export CAMERA_V2_MAX_DET=40
 export CAMERA_V2_MICRO_BATCH=1
 export CAMERA_V2_DETECT_ACTIVE_CAMERAS=CAM-01
-export CAMERA_V2_DETECT_STARTUP_DELAY=1.0
+export CAMERA_V2_DETECT_STARTUP_DELAY=0.5
 
 # The analysis branch is capture-only. Do not build/download a 2560x2160 2x3
 # analysis wall just to infer CAM-01. The runtime enables a single-source tiler
@@ -48,8 +49,9 @@ export CAMERA_V2_ANALYSIS_TILE_HEIGHT=384
 export CAMERA_V2_ANALYSIS_INTERPOLATION=1
 export CAMERA_V2_SINGLE_SOURCE_ANALYSIS=1
 
-# Bound detector GPU duty so display/NVDEC keep priority. The scheduler can move
-# inside this range based on measured wall cadence.
+# This now controls detector cadence rather than GPU occupancy. At ~65 ms CPU
+# inference, 18% duty lands near 2.5-3 Hz while leaving plenty of CPU headroom
+# for Qt, GStreamer callbacks and ReID bookkeeping.
 export CAMERA_V2_DETECT_GPU_DUTY=0.18
 export CAMERA_V2_DETECT_GPU_DUTY_MIN=0.12
 export CAMERA_V2_DETECT_GPU_DUTY_MAX=0.24
@@ -76,7 +78,7 @@ unset NVDS_ENABLE_LATENCY_MEASUREMENT NVDS_ENABLE_COMPONENT_LATENCY_MEASUREMENT 
 
 export QWEN_REID_ENABLED=0
 
-echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=YOLO26s@672x384 threshold=0.08 batch=1 scheduler=adaptive-duty:12-24% detector_path=analysis-tiler(single-source-fastpath) demux=disabled tracker=motion-predictor nvtracker=disabled display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
+echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=YOLO26s-ONNX-CPU@672x384 threshold=0.08 batch=1 scheduler=adaptive-duty:12-24% detector_path=analysis-tiler(single-source-fastpath) demux=disabled tracker=motion-predictor nvtracker=disabled display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
 
 python scripts/preflight_pascal_safe.py
 python scripts/preflight_sentinel_ui.py
