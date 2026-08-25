@@ -53,8 +53,6 @@ def _rows_from_result(result, max_det: int = 300):
         usable = int((kp_conf >= 0.25).sum())
         conf = float(conf)
 
-        # Keep seated / bent / partially occluded people, but require pose
-        # evidence for weak candidates so random object boxes do not seed tracks.
         if conf < 0.20:
             if usable < 4 or strong < 2:
                 continue
@@ -72,7 +70,6 @@ def _rows_from_result(result, max_det: int = 300):
             }
         )
 
-    # Two real people may overlap. Suppress only near-identical pose duplicates.
     candidates.sort(key=lambda row: row["quality"], reverse=True)
     kept = []
     for cand in candidates:
@@ -137,10 +134,19 @@ def yolo_pose_worker(job_q, result_q) -> None:
         conf = float(os.environ.get("CAMERA_V2_POSE_CONF", str(DEFAULT_CONF)))
         iou = float(os.environ.get("CAMERA_V2_POSE_IOU", str(DEFAULT_IOU)))
         max_det = int(det.MAX_DET)
-        default_model = Path(__file__).resolve().parents[2] / "yolo26s-pose.pt"
-        model_spec = os.environ.get("CAMERA_V2_POSE_MODEL", str(default_model))
-        model = YOLO(model_spec)
 
+        local_model = Path(__file__).resolve().parents[2] / "yolo26s-pose.pt"
+        configured = os.environ.get("CAMERA_V2_POSE_MODEL", "").strip()
+        if configured:
+            model_spec = configured
+        elif local_model.is_file():
+            model_spec = str(local_model)
+        else:
+            # Ultralytics official model name. If it is not cached locally,
+            # Ultralytics will download it on first use.
+            model_spec = "yolo26s-pose.pt"
+
+        model = YOLO(model_spec)
         warm = np.zeros((det.INFER_HEIGHT, det.INFER_WIDTH, 3), dtype=np.uint8)
         model.predict(
             warm,
