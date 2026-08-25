@@ -1,123 +1,126 @@
-# AI Surveillance — Sentinel Camera V2
+# AI Surveillance — Camera V2
 
-Current stabilization branch: `agent/rfdetr-s-core-final`.
+Canonical stabilization branch: `cleanup/camera-v2-audited-20260825`.
 
-## Canonical production path
+The current milestone is intentionally narrow: prove the six-camera DeepStream wall
+and one-camera YOLO26 TensorRT -> NvDCF path before enabling cross-camera ReID,
+identity, API/UI integration or other side models.
 
-The deployment machine uses a GTX 1050 Ti. DeepStream 7.1 does not list Pascal in
-its validated x86 dGPU matrix, and the hardware smoke logs showed NvDCF stopping
-downstream after the first tracker batch while RTSP, NVDEC, nvstreammux and
-RF-DETR continued to work. The production launcher therefore does **not** insert
-`gst-nvtracker` on this machine.
+## Canonical runtime
 
-```text
-6 RTSP cameras
-    ↓
-nvurisrcbin / NVDEC
-    ↓
-per-camera latest-frame tee
-    ├── sparse RF-DETR-S side capture (672x384, micro-batch 1)
-    └── GPU display path
-            ↓
-        nvstreammux (2560x1440)
-            ↓
-        bounded motion-predictor bbox metadata
-            ↓
-        nvmultistreamtiler (2 columns x 3 rows)
-            ↓
-        nvvideoconvert -> RGBA NVMM
-            ↓
-        nvdsosd
-            ↓
-        nveglglessink
-            ↓
-        one persistent Qt/X11 native QWidget XID
-```
-
-The active UI is intentionally camera-only. It does not instantiate the legacy
-Sentinel dashboard, People/Events/Rooms pages, MJPEG frontend or old Qt runtime.
-
-## Active files
-
-- `scripts/run_sentinel_vms.sh` — production launcher and hardware profile.
-- `services/camera_v2/sentinel_ui.py` — minimal maximized Qt shell.
-- `services/camera_v2/sentinel_ui_monitoring_native.py` — one native video host.
-- `services/camera_v2/camera_wall_runtime.py` — process-isolated XID/GStreamer controller.
-- `services/camera_v2/pascal_safe_pipeline.py` — no-NvDCF RF-DETR runtime.
-- `services/camera_v2/rfdetr_backend.py` — RF-DETR-S CUDA worker.
-- `services/camera_v2/detection.py` — side-capture scheduler and motion predictor.
-- `services/camera_v2/dynamic_wall.py` / `main.py` / `secure.py` — RTSP/NVDEC/mux/tiler/EGL core.
-- `config/cameras.yaml` — authoritative six-camera topology.
-
-Legacy ReID, NvDCF, historical Sentinel UI and MJPEG service modules remain in the
-repository for later migration/cleanup, but they are not part of the production
-launcher above.
-
-## Camera topology
-
-`config/cameras.yaml` is authoritative:
-
-- `Devs`: CAM-01 + CAM-04
-- `Entrance`: CAM-02 + CAM-05
-- `Main Rooms`: CAM-03 + CAM-06
-
-RTSP usernames/passwords are loaded from `.env`, normally through:
-
-```text
-SURVEILLANCE_RTSP_USERNAME=...
-SURVEILLANCE_RTSP_PASSWORD=...
-```
-
-Do not commit real credentials.
-
-## Why NvDCF is disabled on this deployment
-
-The observed failure was not an RTSP or detector failure. All six streams reached
-~20 FPS, RF-DETR produced detections, and external inference metadata was marked,
-but NvDCF stopped advancing while the EGL sink remained at zero rendered frames.
-
-For the GTX 1050 Ti stabilization path, temporal continuity is therefore provided
-by the existing bounded `SmoothBoxManager` motion predictor. It does not use pixel
-features or DeepStream's low-level tracker library. This is a display/local-motion
-fallback, not cross-camera ReID.
-
-## Preflight
-
-The launcher runs these checks automatically:
+Run only:
 
 ```bash
-python scripts/preflight_rfdetr_core.py
-python scripts/preflight_pascal_safe.py
-python scripts/preflight_sentinel_ui.py
-python scripts/preflight_camera_v2_core.py
+bash scripts/run_cam01_trt86_audited.sh
 ```
 
-Important runtime diagnostics after startup:
+Current graph:
 
 ```text
-CAMERA_INFER_LAYOUT ... stride=... tight=...
-CAMERA_PASCAL_SAFE mux_batches=... wall_frames=... rendered=...
+6 x RTSP
+  -> nvurisrcbin / NVDEC (NVMM)
+  -> per-camera tee
+       -> display queue(1, leaky) -> nvstreammux(batch=6, live)
+       -> CAM-01 sparse JIT detector branch
+            -> queue(1, leaky)
+            -> nvvideoconvert / fixed 672x384 letterbox surface
+            -> appsink(max-buffers=1, drop, async=0)
+            -> shared memory
+            -> TensorRT 8.6.1 YOLO26
+            -> fresh detector result
+  -> detector NvDsObjectMeta injected at nvstreammux.src
+  -> nvtracker / NvDCF (512x288, per-frame)
+  -> nvmultistreamtiler
+  -> nvvideoconvert -> RGBA NVMM
+  -> nvdsosd
+  -> nveglglessink
 ```
 
-`mux_batches` and `wall_frames` must continually increase. If they increase while
-`rendered` stays at zero, the remaining problem is isolated to EGL/X11 presentation
-rather than RTSP, detector or tracking.
+This order follows the DeepStream detector -> tracker -> tiler -> OSD model. The
+runtime verifies the critical static links before PLAYING and aborts instead of
+silently running a malformed graph.
 
-## Run
+## Canonical files
+
+- `scripts/run_cam01_trt86_audited.sh` — only CAM-01 TRT86/NvDCF launcher.
+- `scripts/preflight_cam01_audited_static.py` — static dependency/cleanup check.
+- `scripts/yolo26_trt86_shm_worker.py` — TensorRT 8.6 CUDA runner/base.
+- `scripts/yolo26_trt86_shm_worker_v2.py` — class/input diagnostics.
+- `scripts/yolo26_trt86_shm_worker_v3.py` — audited fixed-shape letterbox worker.
+- `services/camera_v2/person_tracking_trt86_audited.py` — audited entrypoint.
+- `services/camera_v2/person_tracking_trt86_fresh.py` — JIT latest-frame scheduler.
+- `services/camera_v2/person_tracking_final.py` — freshness + detector-to-NvDCF bridge.
+- `services/camera_v2/person_tracking.py` — DeepStream NvDCF insertion.
+- `services/camera_v2/detection.py` — source tee/appsink mailbox and detector worker contract.
+- `services/camera_v2/detector_latency.py` — bounded detector-latency compensation.
+- `services/camera_v2/tracker_profile.py` — generated sparse NvDCF profile.
+- `services/camera_v2/yolo_trt86_shm_bridge.py` / `yolo_trt86_fresh_bridge.py` — SHM process bridge.
+- `services/camera_v2/main.py` / `dynamic_wall.py` / `secure.py` — RTSP/NVDEC/mux/tiler/EGL core.
+- `services/camera_v2/native_bridge.py` + native C sources — NvDs metadata bridge.
+- `services/ml_service/app/config.py` + `config/cameras.yaml` — camera configuration.
+- `requirements-trt86.txt` — isolated TensorRT 8.6 environment.
+
+## Preserved for later milestones
+
+ReID/global-identity, API service, frontend and Sentinel UI files are deliberately
+kept. They are not enabled by the canonical CAM-01 launcher, but they are future
+project work rather than disposable experiments.
+
+Historical `stage1..stage22`, RF-DETR experiment scripts/backends and superseded
+CAM-01 TRT launchers were removed from the cleanup branch. The older
+`fix/cam01-trt86-e2e-20260825` branch remains a rollback reference.
+
+## Static preflight
+
+Before touching the cameras:
 
 ```bash
-source .venv/bin/activate
-bash scripts/run_sentinel_vms.sh 2>&1 | tee /tmp/camera-direct.log
+python3 scripts/preflight_cam01_audited_static.py
+bash -n scripts/run_cam01_trt86_audited.sh
 ```
 
-Expected startup markers include:
+Expected:
 
 ```text
-RFDETR_PREFLIGHT=PASS
-PASCAL_SAFE_PREFLIGHT=PASS
-SENTINEL_UI_PREFLIGHT=PASS
-CAMERA_PREFLIGHT=PASS
-CAMERA_PASCAL_SAFE ready backend=RF-DETR-S tracker=motion-predictor nvtracker=disabled
+CAMERA_V2_AUDITED_STATIC=PASS ...
 ```
 
-The production wall is fixed at six cameras in a 2x3 layout.
+## Runtime proof
+
+Start:
+
+```bash
+bash scripts/run_cam01_trt86_audited.sh 2>&1 | tee /tmp/CAM01_AUDITED.log
+```
+
+Required startup markers:
+
+```text
+CAM01_TRT86_PREFLIGHT ... tensorrt=8.6.1
+CAM01_TRT86_SOURCE_HARDENED ...
+CAM01_TRT86_LETTERBOX ...
+CAMERA_PIPELINE_AUDIT status=OK ...
+CAMERA_TRACK_FINAL ready: ...
+```
+
+Healthy scheduling should show:
+
+```text
+calls > 0
+inputs > 0
+timeouts = 0
+stale_results = 0
+result_age < max_result_age
+```
+
+For the final detector-to-tracker proof, place a clearly visible person in CAM-01.
+A completed end-to-end path must then reach:
+
+```text
+boxes > 0
+meta_boxes > 0
+detector_injected > 0
+tracked_now > 0
+```
+
+Do not enable ReID or other models until that contract is proven.
