@@ -1,8 +1,8 @@
 """YOLO26s-pose detector backend for Camera V2 sticky tracking.
 
-Pose is used only to validate person detections. NvDCF remains the temporal
-tracker. The validator is intentionally tolerant of seated, bent and partially
-occluded people while still requiring body-keypoint evidence for weak boxes.
+Pose validates person detections; DeepStream NvDCF owns temporal tracking. The
+backend logs the exact detector input so capture/preprocess faults are visible and
+uses a one-shot JIT gate so no in-flight frame can leak into the next request.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ DEFAULT_IMGSZ = 832
 DEFAULT_CONF = 0.05
 DEFAULT_IOU = 0.80
 _DIAG_CALLS = 0
+_INPUT_DIAG_CALLS = 0
+_INPUT_SAVED = False
 
 
 def _overlap(a, b) -> tuple[float, float]:
@@ -66,9 +68,6 @@ def _rows_from_result(result, max_det: int = 300):
         max_strong = max(max_strong, strong)
         conf = float(conf)
 
-        # Tiered pose evidence. Very weak boxes still need a convincing skeleton,
-        # but medium/high-confidence person boxes are not discarded just because
-        # legs/arms are hidden by a desk, chair or another person.
         if conf < 0.08:
             if usable < 4 or strong < 2:
                 continue
@@ -89,7 +88,6 @@ def _rows_from_result(result, max_det: int = 300):
             }
         )
 
-    # Two real people may overlap. Suppress only near-identical pose duplicates.
     candidates.sort(key=lambda row: row["quality"], reverse=True)
     kept = []
     for cand in candidates:
@@ -118,12 +116,7 @@ def _rows_from_result(result, max_det: int = 300):
 
     raw_count = int(len(confs))
     raw_max = float(np.max(confs)) if raw_count else 0.0
-    if (
-        _DIAG_CALLS <= 3
-        or _DIAG_CALLS % 10 == 0
-        or (raw_count > 0 and not kept)
-        or kept
-    ):
+    if _DIAG_CALLS <= 3 or _DIAG_CALLS % 10 == 0 or (raw_count > 0 and not kept) or kept:
         print(
             "CAMERA_POSE_DIAG "
             f"n={_DIAG_CALLS} raw={raw_count} kept={len(kept)} "
@@ -132,6 +125,38 @@ def _rows_from_result(result, max_det: int = 300):
         )
 
     return [(row["box"], row["conf"]) for row in kept]
+
+
+def _log_input(cid: str, frame: np.ndarray) -> None:
+    global _INPUT_DIAG_CALLS, _INPUT_SAVED
+    _INPUT_DIAG_CALLS += 1
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise RuntimeError(f"{cid}: invalid pose input shape={frame.shape}")
+    if frame.dtype != np.uint8:
+        raise RuntimeError(f"{cid}: invalid pose input dtype={frame.dtype}")
+
+    if _INPUT_DIAG_CALLS <= 3 or _INPUT_DIAG_CALLS % 10 == 0:
+        flat = frame.reshape(-1, 3)
+        means = flat.mean(axis=0)
+        std = float(frame.std())
+        print(
+            "CAMERA_POSE_INPUT "
+            f"n={_INPUT_DIAG_CALLS} cid={cid} shape={frame.shape[1]}x{frame.shape[0]} "
+            f"min={int(frame.min())} max={int(frame.max())} mean={float(frame.mean()):.1f} "
+            f"std={std:.1f} bgr=({means[0]:.1f},{means[1]:.1f},{means[2]:.1f})",
+            flush=True,
+        )
+
+    if cid == "CAM-01" and not _INPUT_SAVED:
+        try:
+            import cv2
+
+            out = "/tmp/CAM01_POSE_INPUT.jpg"
+            if cv2.imwrite(out, frame):
+                _INPUT_SAVED = True
+                print(f"CAMERA_POSE_INPUT_SAVED path={out}", flush=True)
+        except Exception as exc:
+            print(f"CAMERA_POSE_INPUT_SAVE warning={type(exc).__name__}:{exc}", flush=True)
 
 
 def yolo_pose_worker(job_q, result_q) -> None:
@@ -180,6 +205,14 @@ def yolo_pose_worker(job_q, result_q) -> None:
             model_spec = "yolo26s-pose.pt"
 
         model = YOLO(model_spec)
+        task = str(getattr(model, "task", "") or "")
+        names = getattr(model, "names", {}) or {}
+        class0 = names.get(0, "") if isinstance(names, dict) else ""
+        if task and task != "pose":
+            raise RuntimeError(f"model task must be pose, got {task!r}")
+        if class0 and str(class0).lower() != "person":
+            raise RuntimeError(f"pose class 0 must be person, got {class0!r}")
+
         warm = np.zeros((det.INFER_HEIGHT, det.INFER_WIDTH, 3), dtype=np.uint8)
         model.predict(
             warm,
@@ -196,6 +229,13 @@ def yolo_pose_worker(job_q, result_q) -> None:
             version = importlib.metadata.version("ultralytics")
         except Exception:
             version = "unknown"
+
+        print(
+            "CAMERA_POSE_MODEL "
+            f"spec={model_spec} task={task or 'unknown'} class0={class0 or 'unknown'} "
+            f"capture={det.INFER_WIDTH}x{det.INFER_HEIGHT} imgsz={imgsz} conf={conf}",
+            flush=True,
+        )
         result_q.put(
             {
                 "type": "ready",
@@ -215,6 +255,9 @@ def yolo_pose_worker(job_q, result_q) -> None:
                 return
             started = time.monotonic()
             try:
+                for cid, frame in zip(job["cameras"], job["frames"]):
+                    _log_input(cid, frame)
+
                 predictions = model.predict(
                     job["frames"],
                     imgsz=imgsz,
@@ -259,13 +302,19 @@ def yolo_pose_worker(job_q, result_q) -> None:
 
 
 def _capture_gate_until_sample(self, _pad, _info, cid: str):
+    """Allow exactly one fresh buffer per detector request."""
     with self.capture_lock:
-        requested = bool(self.capture_requested.get(cid, False))
-    return self.Gst.PadProbeReturn.OK if requested else self.Gst.PadProbeReturn.DROP
+        if not self.capture_requested.get(cid, False):
+            return self.Gst.PadProbeReturn.DROP
+        # Disarm atomically at the gate. Without this, several in-flight frames
+        # can enter appsink and a late sample can satisfy the NEXT request,
+        # producing the observed ~1.3s result-age spikes despite no prefetch.
+        self.capture_requested[cid] = False
+    return self.Gst.PadProbeReturn.OK
 
 
 def install() -> None:
-    """Install pose worker and strict JIT capture gate into CameraDetectionV2."""
+    """Install pose worker and one-shot JIT capture gate into CameraDetectionV2."""
     from . import detection
 
     detection._yolo_worker = yolo_pose_worker
