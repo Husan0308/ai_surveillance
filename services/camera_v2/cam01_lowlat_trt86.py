@@ -62,7 +62,9 @@ def _trt86_worker(job_q, result_q) -> None:
                 "device": "NVIDIA/TensorRT86",
                 "cuda": f"TRT{ready.get('tensorrt')}",
                 "model": str(ENGINE),
-                "backend": "trt86-sidecar-shm-bgr",
+                "backend": "trt86-sidecar-shm-bgr-highprio",
+                "stream_priority": ready.get("stream_priority"),
+                "stream_priority_range": ready.get("stream_priority_range"),
             }
         )
 
@@ -192,17 +194,25 @@ class Cam01LowLatencyTRT86(base.Cam01LowLatencyReID):
 
 
 def _force_trt_runtime_profile() -> None:
-    # NvDCF is explicitly responsible for the frames between detector refreshes.
-    # 3 Hz gives the six-stream wall enough GPU recovery time that TensorRT does
-    # not execute under a permanently backlogged graphics/tracker workload.
+    # Preserve a sharp HD source for the UI/fullscreen path. The previous
+    # 640x360 experiment did not materially improve TRT latency, so do not trade
+    # visible camera quality for compute time that was not recovered.
+    os.environ["CAMERA_V2_FRAME_WIDTH"] = "1280"
+    os.environ["CAMERA_V2_FRAME_HEIGHT"] = "720"
+    os.environ["CAMERA_V2_TRACKER_WIDTH"] = "512"
+    os.environ["CAMERA_V2_TRACKER_HEIGHT"] = "288"
+
+    # NvDCF owns the frames between detector refreshes. Keep detector cadence
+    # moderate while the high-priority CUDA stream shortens each refresh latency.
     os.environ["CAMERA_V2_DETECT_TARGET_HZ"] = "3.0"
     os.environ["CAMERA_V2_DETECT_MIN_HZ"] = "2.7"
     os.environ["CAMERA_V2_DETECT_MAX_HZ"] = "3.3"
     os.environ["CAMERA_V2_DETECT_GPU_DUTY"] = "0.26"
     os.environ["CAMERA_V2_DETECT_GPU_DUTY_MIN"] = "0.20"
     os.environ["CAMERA_V2_DETECT_GPU_DUTY_MAX"] = "0.32"
-    # Keep the freshness gate strict. The goal of this revision is to lower the
-    # actual TRT compute time, not to legitimize stale detector boxes.
+
+    # Keep the freshness gate strict. We are reducing actual GPU wait time rather
+    # than hiding it by accepting old detector coordinates.
     os.environ["CAMERA_V2_MAX_DETECT_RESULT_AGE_MS"] = "160"
 
 
@@ -215,8 +225,12 @@ def main() -> int:
     base._validate_profile()
 
     runtime = Cam01LowLatencyTRT86()
-    runtime._set_if(runtime.mux, "interpolation-method", 1)
-    runtime._set_if(runtime.tiler, "interpolation-method", 1)
+
+    # High-quality scaling stays enabled for the visible wall. Detector capture is
+    # an independent 672x384 branch, so UI quality and detector geometry remain
+    # separate concerns.
+    runtime._set_if(runtime.mux, "interpolation-method", 4)
+    runtime._set_if(runtime.tiler, "interpolation-method", 4)
 
     capsfilter = runtime.pipeline.get_by_name("detect_caps_0")
     appsink = runtime.pipeline.get_by_name("detect_sink_0")
@@ -243,14 +257,14 @@ def main() -> int:
         "CAM01_TRT86_PROFILE "
         f"engine={ENGINE.name} input=672x384/b1/fp32 active=CAM-01 "
         "capture=postconvert-buffer-probe-latest target=3.0Hz "
-        "max_result_age=160ms rtsp=50ms frame=640x360 "
-        "tracker=384x224 qwen=0",
+        "max_result_age=160ms rtsp=50ms display=1280x720 "
+        "tracker=512x288 qwen=0",
         flush=True,
     )
     print(
-        "CAM01_TRT86_PIPELINE backend=trt86-sidecar-shm-bgr "
+        "CAM01_TRT86_PIPELINE backend=trt86-sidecar-shm-bgr-highprio "
         "base64=0 jpeg=0 prefetch=0 queue_depth=1 nvdcf=per-frame "
-        "wall_tiles=native-640x360",
+        "display_quality=hd-lanczos detector_independent=672x384",
         flush=True,
     )
     return runtime.run()
