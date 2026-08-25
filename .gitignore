@@ -20,3 +20,10 @@ venv-*/
 .runtime/
 __pycache__/
 *.pyc
+
+# Hardware-specific generated TensorRT artifacts. Keep these local: TensorRT
+# plan files are tied to the build/runtime/GPU compatibility contract and should
+# not be moved by `git stash -u` or committed accidentally.
+artifacts/
+*.engine
+*.plan
