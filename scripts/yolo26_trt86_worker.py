@@ -7,6 +7,7 @@ import ctypes
 import ctypes.util
 import io
 import json
+from multiprocessing import shared_memory
 import sys
 import time
 from pathlib import Path
@@ -43,8 +44,6 @@ def load_cudart():
         ctypes.c_int,
     ]
     lib.cudaMemcpy.restype = ctypes.c_int
-    lib.cudaDeviceSynchronize.argtypes = []
-    lib.cudaDeviceSynchronize.restype = ctypes.c_int
     return lib
 
 
@@ -86,6 +85,9 @@ class Runner:
         if self.output_shape != (1, 300, 6):
             raise RuntimeError(f"unexpected output shape={self.output_shape}")
 
+        # Reuse all host/device buffers for the life of the worker. The fast raw
+        # path writes BGR channels directly into this CHW float32 tensor, avoiding
+        # rgb.astype(...), transpose temporaries and one full-frame allocation.
         self.x = np.empty(self.input_shape, dtype=np.float32)
         self.y = np.empty(self.output_shape, dtype=np.float32)
         self.in_dev = ctypes.c_void_p()
@@ -101,15 +103,26 @@ class Runner:
         self.bindings = [0] * self.engine.num_bindings
         self.bindings[self.input_index] = int(self.in_dev.value)
         self.bindings[self.output_index] = int(self.out_dev.value)
+        self._shm_cache: dict[str, shared_memory.SharedMemory] = {}
 
     def preprocess_rgb(self, rgb: np.ndarray):
         if rgb.shape[:2] != (384, 672):
             image = Image.fromarray(rgb, mode="RGB")
             image = image.resize((672, 384), Image.Resampling.BILINEAR)
             rgb = np.asarray(image, dtype=np.uint8)
-        arr = rgb.astype(np.float32, copy=False)
-        arr *= (1.0 / 255.0)
-        self.x[0] = arr.transpose(2, 0, 1)
+        scale = np.float32(1.0 / 255.0)
+        np.multiply(rgb[..., 0], scale, out=self.x[0, 0], casting="unsafe")
+        np.multiply(rgb[..., 1], scale, out=self.x[0, 1], casting="unsafe")
+        np.multiply(rgb[..., 2], scale, out=self.x[0, 2], casting="unsafe")
+
+    def preprocess_bgr_array(self, bgr: np.ndarray):
+        if bgr.shape != (384, 672, 3):
+            raise RuntimeError(f"unexpected BGR array shape={bgr.shape}")
+        scale = np.float32(1.0 / 255.0)
+        # BGR camera frame -> RGB model tensor, directly into preallocated CHW.
+        np.multiply(bgr[..., 2], scale, out=self.x[0, 0], casting="unsafe")
+        np.multiply(bgr[..., 1], scale, out=self.x[0, 1], casting="unsafe")
+        np.multiply(bgr[..., 0], scale, out=self.x[0, 2], casting="unsafe")
 
     def preprocess_jpeg(self, jpeg_bytes: bytes):
         rgb = np.asarray(
@@ -125,10 +138,19 @@ class Runner:
                 f"raw BGR size mismatch got={len(raw)} expected={expected}"
             )
         bgr = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
-        # Exported YOLO engine was benchmarked with RGB preprocessing. Camera probe
-        # delivers BGR from BGRx, so reverse channels without JPEG encode/decode.
-        rgb = bgr[..., ::-1]
-        self.preprocess_rgb(rgb)
+        self.preprocess_bgr_array(bgr)
+
+    def shared_bgr(self, name: str, width: int, height: int) -> np.ndarray:
+        if (height, width) != (384, 672):
+            raise RuntimeError(f"unexpected shared frame shape={width}x{height}")
+        shm = self._shm_cache.get(name)
+        if shm is None:
+            shm = shared_memory.SharedMemory(name=name)
+            self._shm_cache[name] = shm
+        expected = height * width * 3
+        if shm.size < expected:
+            raise RuntimeError(f"shared memory too small got={shm.size} expected={expected}")
+        return np.ndarray((height, width, 3), dtype=np.uint8, buffer=shm.buf)
 
     def infer_preprocessed(self, conf: float):
         started_total = time.perf_counter()
@@ -144,7 +166,8 @@ class Runner:
         started_trt = time.perf_counter()
         if not self.context.execute_v2(self.bindings):
             raise RuntimeError("execute_v2=false")
-        cuda_check(self.cuda.cudaDeviceSynchronize(), "infer sync")
+        # execute_v2 is synchronous. Do not add cudaDeviceSynchronize here; that
+        # was redundant and extended the measured critical path.
         trt_ms = (time.perf_counter() - started_trt) * 1000.0
         cuda_check(
             self.cuda.cudaMemcpy(
@@ -184,7 +207,21 @@ class Runner:
         rows, trt_ms, core_ms = self.infer_preprocessed(conf)
         return rows, trt_ms, prep_ms + core_ms, prep_ms
 
+    def infer_shared_bgr(self, name: str, width: int, height: int, conf: float):
+        started = time.perf_counter()
+        bgr = self.shared_bgr(name, width, height)
+        self.preprocess_bgr_array(bgr)
+        prep_ms = (time.perf_counter() - started) * 1000.0
+        rows, trt_ms, core_ms = self.infer_preprocessed(conf)
+        return rows, trt_ms, prep_ms + core_ms, prep_ms
+
     def close(self):
+        for shm in self._shm_cache.values():
+            try:
+                shm.close()
+            except Exception:
+                pass
+        self._shm_cache.clear()
         if self.in_dev.value:
             self.cuda.cudaFree(self.in_dev)
         if self.out_dev.value:
@@ -215,7 +252,15 @@ def main():
 
                 request_id = req.get("id")
                 conf = float(req.get("conf", 0.05))
-                if "raw_bgr_b64" in req:
+                if "shm_name" in req:
+                    boxes, trt_ms, total_ms, prep_ms = runner.infer_shared_bgr(
+                        str(req["shm_name"]),
+                        int(req.get("width", 672)),
+                        int(req.get("height", 384)),
+                        conf,
+                    )
+                    input_mode = "shared-bgr"
+                elif "raw_bgr_b64" in req:
                     raw = base64.b64decode(req["raw_bgr_b64"])
                     boxes, trt_ms, total_ms, prep_ms = runner.infer_raw_bgr(
                         raw,
