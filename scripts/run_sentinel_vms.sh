@@ -48,8 +48,8 @@ export CAMERA_V2_ANALYSIS_TILE_HEIGHT=384
 export CAMERA_V2_ANALYSIS_INTERPOLATION=1
 export CAMERA_V2_SINGLE_SOURCE_ANALYSIS=1
 
-# Bound detector GPU duty so display/NVDEC/NvDCF keep priority. The scheduler can
-# move inside this range based on measured wall cadence.
+# Bound detector GPU duty so display/NVDEC keep priority. The scheduler can move
+# inside this range based on measured wall cadence.
 export CAMERA_V2_DETECT_GPU_DUTY=0.18
 export CAMERA_V2_DETECT_GPU_DUTY_MIN=0.12
 export CAMERA_V2_DETECT_GPU_DUTY_MAX=0.24
@@ -76,7 +76,7 @@ unset NVDS_ENABLE_LATENCY_MEASUREMENT NVDS_ENABLE_COMPONENT_LATENCY_MEASUREMENT 
 
 export QWEN_REID_ENABLED=0
 
-echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=YOLO26s@672x384 threshold=0.08 batch=1 scheduler=adaptive-duty:12-24% detector_path=analysis-tiler(single-source-fastpath) demux=disabled tracker=motion-predictor nvtracker=optional display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
+echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=YOLO26s@672x384 threshold=0.08 batch=1 scheduler=adaptive-duty:12-24% detector_path=analysis-tiler(single-source-fastpath) demux=disabled tracker=motion-predictor nvtracker=disabled display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
 
 python scripts/preflight_pascal_safe.py
 python scripts/preflight_sentinel_ui.py
