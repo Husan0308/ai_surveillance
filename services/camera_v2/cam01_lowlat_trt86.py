@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 import subprocess
 import time
+from multiprocessing import shared_memory
 from pathlib import Path
 
 import numpy as np
@@ -16,22 +16,30 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / "artifacts/yolo26s_trt86/yolo26s-672x384-b1-fp32-trt86.engine"
 TRT_PYTHON = ROOT / ".venv-trt86/bin/python"
 TRT_WORKER = ROOT / "scripts/yolo26_trt86_worker.py"
+FRAME_SHAPE = (384, 672, 3)
+FRAME_BYTES = int(np.prod(FRAME_SHAPE))
 
 
 def _trt86_worker(job_q, result_q) -> None:
     """Persistent TensorRT 8.6 sidecar adapter for detection.py's worker contract.
 
-    The camera process stays in the normal project venv, while the engine runs in
-    the known-good TensorRT 8.6.1 venv. Frames are already 672x384 BGR uint8 from
-    the post-convert capture probe; send them as raw bytes so JPEG encode/decode is
-    not part of live latency.
+    V1 sent every 672x384 frame as ~1 MB of base64 JSON through a text pipe.
+    That defeated much of TensorRT's kernel speed. V2 keeps one fixed shared-memory
+    slot and sends only a tiny JSON control message. There is still exactly one
+    in-flight frame, so the slot cannot be overwritten before the worker replies.
     """
 
     proc = None
+    shm = None
+    shm_frame = None
+    request_id = 0
     try:
         for required in (ENGINE, TRT_PYTHON, TRT_WORKER):
             if not required.exists():
                 raise RuntimeError(f"TRT86 dependency missing: {required}")
+
+        shm = shared_memory.SharedMemory(create=True, size=FRAME_BYTES)
+        shm_frame = np.ndarray(FRAME_SHAPE, dtype=np.uint8, buffer=shm.buf)
 
         proc = subprocess.Popen(
             [str(TRT_PYTHON), str(TRT_WORKER), "--engine", str(ENGINE)],
@@ -60,17 +68,16 @@ def _trt86_worker(job_q, result_q) -> None:
                 "device": "NVIDIA/TensorRT86",
                 "cuda": f"TRT{ready.get('tensorrt')}",
                 "model": str(ENGINE),
-                "backend": "trt86-sidecar-raw-bgr",
+                "backend": "trt86-sidecar-shm-bgr",
             }
         )
 
-        request_id = 0
         while True:
             job = job_q.get()
             if job is None:
                 break
 
-            started = time.monotonic()
+            started = time.perf_counter()
             try:
                 cameras = list(job["cameras"])
                 frames = list(job["frames"])
@@ -81,15 +88,17 @@ def _trt86_worker(job_q, result_q) -> None:
                     )
 
                 frame = np.asarray(frames[0], dtype=np.uint8)
-                if frame.shape != (384, 672, 3):
+                if frame.shape != FRAME_SHAPE:
                     raise RuntimeError(f"unexpected detector frame shape={frame.shape}")
-                if not frame.flags.c_contiguous:
-                    frame = np.ascontiguousarray(frame)
+
+                copy_started = time.perf_counter()
+                np.copyto(shm_frame, frame, casting="no")
+                shm_copy_ms = (time.perf_counter() - copy_started) * 1000.0
 
                 request_id += 1
                 payload = {
                     "id": request_id,
-                    "raw_bgr_b64": base64.b64encode(frame).decode("ascii"),
+                    "shm_name": shm.name,
                     "width": 672,
                     "height": 384,
                     "conf": float(os.environ.get("CAMERA_V2_DETECT_CONF", "0.05")),
@@ -116,20 +125,34 @@ def _trt86_worker(job_q, result_q) -> None:
                     x1, y1, x2, y2, score = [float(v) for v in item]
                     rows.append(([x1, y1, x2, y2], score))
 
-                roundtrip_ms = (time.monotonic() - started) * 1000.0
+                roundtrip_ms = (time.perf_counter() - started) * 1000.0
+                sidecar_total_ms = float(reply.get("total_ms") or 0.0)
+                trt_ms = float(reply.get("trt_ms") or 0.0)
+                prep_ms = float(reply.get("prep_ms") or 0.0)
+                ipc_ms = max(0.0, roundtrip_ms - sidecar_total_ms - shm_copy_ms)
+
+                if request_id <= 3 or request_id % 20 == 0:
+                    print(
+                        "CAM01_TRT86_BREAKDOWN "
+                        f"n={request_id} roundtrip={roundtrip_ms:.1f}ms "
+                        f"shm_copy={shm_copy_ms:.1f}ms prep={prep_ms:.1f}ms "
+                        f"trt={trt_ms:.1f}ms sidecar={sidecar_total_ms:.1f}ms "
+                        f"ipc={ipc_ms:.1f}ms boxes={len(rows)}",
+                        flush=True,
+                    )
+
                 result_q.put(
                     {
                         "type": "result",
                         "cameras": cameras,
                         "captured": captured,
                         "boxes": {"CAM-01": rows},
-                        # Use end-to-end detector sidecar time here rather than only
-                        # engine kernel time. This is the number that matters to the
-                        # freshness budget.
                         "batch_ms": roundtrip_ms,
-                        "trt_ms": float(reply.get("trt_ms") or 0.0),
-                        "prep_ms": float(reply.get("prep_ms") or 0.0),
-                        "sidecar_total_ms": float(reply.get("total_ms") or 0.0),
+                        "trt_ms": trt_ms,
+                        "prep_ms": prep_ms,
+                        "sidecar_total_ms": sidecar_total_ms,
+                        "shm_copy_ms": shm_copy_ms,
+                        "ipc_ms": ipc_ms,
                     }
                 )
             except BaseException as exc:
@@ -156,6 +179,15 @@ def _trt86_worker(job_q, result_q) -> None:
                     proc.terminate()
                 except Exception:
                     pass
+        if shm is not None:
+            try:
+                shm.close()
+            except Exception:
+                pass
+            try:
+                shm.unlink()
+            except Exception:
+                pass
 
 
 # CameraDetectionV2.run resolves this module global when Process(target=...) is
@@ -169,13 +201,16 @@ class Cam01LowLatencyTRT86(base.Cam01LowLatencyReID):
 
 
 def _force_trt_runtime_profile() -> None:
-    # Engine is fast enough to refresh NvDCF more often without building a queue.
-    os.environ["CAMERA_V2_DETECT_TARGET_HZ"] = "4.5"
-    os.environ["CAMERA_V2_DETECT_MIN_HZ"] = "4.0"
-    os.environ["CAMERA_V2_DETECT_MAX_HZ"] = "5.0"
-    os.environ["CAMERA_V2_DETECT_GPU_DUTY"] = "0.30"
-    os.environ["CAMERA_V2_DETECT_GPU_DUTY_MIN"] = "0.24"
-    os.environ["CAMERA_V2_DETECT_GPU_DUTY_MAX"] = "0.38"
+    # 4 Hz is enough to correct NvDCF while preserving GPU headroom for the wall.
+    os.environ["CAMERA_V2_DETECT_TARGET_HZ"] = "4.0"
+    os.environ["CAMERA_V2_DETECT_MIN_HZ"] = "3.5"
+    os.environ["CAMERA_V2_DETECT_MAX_HZ"] = "4.5"
+    os.environ["CAMERA_V2_DETECT_GPU_DUTY"] = "0.28"
+    os.environ["CAMERA_V2_DETECT_GPU_DUTY_MIN"] = "0.22"
+    os.environ["CAMERA_V2_DETECT_GPU_DUTY_MAX"] = "0.34"
+    # Keep a strict freshness budget. Shared-memory transport should bring normal
+    # results below this; if not, the breakdown log tells us whether TRT or IPC is
+    # the remaining bottleneck instead of hiding it with a huge stale threshold.
     os.environ["CAMERA_V2_MAX_DETECT_RESULT_AGE_MS"] = "160"
 
 
@@ -215,13 +250,13 @@ def main() -> int:
     print(
         "CAM01_TRT86_PROFILE "
         f"engine={ENGINE.name} input=672x384/b1/fp32 active=CAM-01 "
-        "capture=postconvert-buffer-probe-latest target=4.5Hz "
+        "capture=postconvert-buffer-probe-latest target=4.0Hz "
         "max_result_age=160ms rtsp=50ms tracker=512x288 qwen=0",
         flush=True,
     )
     print(
-        "CAM01_TRT86_PIPELINE backend=trt86-sidecar-raw-bgr "
-        "jpeg=0 prefetch=0 queue_depth=1 nvdcf=per-frame",
+        "CAM01_TRT86_PIPELINE backend=trt86-sidecar-shm-bgr "
+        "base64=0 jpeg=0 prefetch=0 queue_depth=1 nvdcf=per-frame",
         flush=True,
     )
     return runtime.run()
