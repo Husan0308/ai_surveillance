@@ -30,6 +30,7 @@ export CAMERA_V2_MIN_DISPLAY_TRACK_CONF="${CAMERA_V2_MIN_DISPLAY_TRACK_CONF:-0.1
 export CAMERA_V2_TRT86_PYTHON="${CAMERA_V2_TRT86_PYTHON:-$ROOT/.venv-trt86/bin/python}"
 export CAMERA_V2_TRT86_ENGINE="${CAMERA_V2_TRT86_ENGINE:-$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b1-fp32-trt86.engine}"
 export CAMERA_V2_TRT86_SHM_WORKER="${CAMERA_V2_TRT86_SHM_WORKER:-$ROOT/scripts/yolo26_trt86_shm_worker_v3.py}"
+RESTORE_HELPER="$ROOT/scripts/restore_cam01_trt86_engine.sh"
 
 export QWEN_REID_ENABLED=0
 unset QWEN_REID_URL QWEN_REID_MODEL QWEN_REID_TIMEOUT_SEC || true
@@ -40,7 +41,17 @@ fail() {
 }
 
 [[ -x "$CAMERA_V2_TRT86_PYTHON" ]] || fail "TRT86 python missing/not executable: $CAMERA_V2_TRT86_PYTHON"
-[[ -f "$CAMERA_V2_TRT86_ENGINE" ]] || fail "TensorRT engine missing: $CAMERA_V2_TRT86_ENGINE"
+
+# The engine is intentionally a local, hardware-specific artifact. If it was
+# hidden by a previous `git stash -u`, recover only that engine from the stash;
+# never pop/apply the full stash because it may contain obsolete source files.
+if [[ ! -f "$CAMERA_V2_TRT86_ENGINE" ]]; then
+  if [[ -f "$RESTORE_HELPER" ]]; then
+    echo "CAM01_TRT86_PREFLIGHT engine_missing=1 recovery=stash/local-search" >&2
+    bash "$RESTORE_HELPER" "$CAMERA_V2_TRT86_ENGINE" || true
+  fi
+fi
+[[ -f "$CAMERA_V2_TRT86_ENGINE" && -s "$CAMERA_V2_TRT86_ENGINE" ]] || fail "TensorRT engine missing after recovery: $CAMERA_V2_TRT86_ENGINE (run: bash scripts/restore_cam01_trt86_engine.sh)"
 [[ -f "$CAMERA_V2_TRT86_SHM_WORKER" ]] || fail "TRT86 worker missing: $CAMERA_V2_TRT86_SHM_WORKER"
 
 "$CAMERA_V2_TRT86_PYTHON" - <<'PY'
