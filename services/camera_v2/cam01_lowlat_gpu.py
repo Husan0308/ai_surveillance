@@ -12,33 +12,23 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _force_runtime_profile() -> None:
-    """Install the production CAM-01 low-latency profile before camera modules import.
-
-    This deliberately avoids the Pascal-safe pose monkey-patch and the old
-    YOLO26m defaults. The detector is YOLO26s on CUDA, CAM-01 only, while NvDCF
-    owns per-frame motion between detector refreshes.
-    """
+    """Install the production CAM-01 low-latency profile before camera modules import."""
 
     model = ROOT / "yolo26s.pt"
     if not model.is_file():
         raise RuntimeError(f"required detector model not found: {model}")
 
     forced = {
-        # One 20 FPS frame is 50 ms. Keep exactly one-frame RTSP jitter budget on
-        # the local NVR path; drop-on-latency remains enabled in the base source.
         "CAMERA_V2_RTSP_TRANSPORT": "tcp",
         "CAMERA_V2_RTSP_LATENCY_MS": "50",
         "CAMERA_V2_LOW_LATENCY_MODE": "1",
         "CAMERA_V2_MUX_TIMEOUT_US": "25000",
         "CAMERA_V2_SOURCE_FPS": "20",
         "CAMERA_V2_EXTRA_SURFACES": "4",
-        # Detection taps the decoded source before mux. 960x540 is therefore only
-        # the display/tracker working surface, not the detector source resolution.
         "CAMERA_V2_FRAME_WIDTH": "960",
         "CAMERA_V2_FRAME_HEIGHT": "540",
         "CAMERA_V2_WALL_WIDTH": "1920",
         "CAMERA_V2_WALL_HEIGHT": "720",
-        # Fast CUDA person detector. Explicitly one camera and one image per job.
         "CAMERA_V2_YOLO_MODEL": str(model),
         "CAMERA_V2_DETECT_WIDTH": "672",
         "CAMERA_V2_DETECT_HEIGHT": "384",
@@ -48,16 +38,12 @@ def _force_runtime_profile() -> None:
         "CAMERA_V2_DETECT_IOU": "0.70",
         "CAMERA_V2_MAX_DET": "50",
         "CAMERA_V2_DETECT_STARTUP_DELAY": "1.0",
-        # NvDCF is the visual authority between detector refreshes. 3 Hz detector
-        # refresh is enough for correction while leaving decode/display headroom.
         "CAMERA_V2_DETECT_TARGET_HZ": "3.0",
         "CAMERA_V2_DETECT_MIN_HZ": "2.5",
         "CAMERA_V2_DETECT_MAX_HZ": "3.4",
         "CAMERA_V2_DETECT_GPU_DUTY": "0.34",
         "CAMERA_V2_DETECT_GPU_DUTY_MIN": "0.30",
         "CAMERA_V2_DETECT_GPU_DUTY_MAX": "0.38",
-        # Normal latest-frame results must remain fresh; never hide latency by
-        # accepting 500-800 ms old detections as tracker truth.
         "CAMERA_V2_MAX_DETECT_RESULT_AGE_MS": "320",
         "CAMERA_V2_TRACKER_WIDTH": "512",
         "CAMERA_V2_TRACKER_HEIGHT": "288",
@@ -83,75 +69,104 @@ def _force_runtime_profile() -> None:
 
 _force_runtime_profile()
 
-# These imports MUST stay below _force_runtime_profile(). detection.py snapshots
-# model/geometry/batch constants at import time.
 from . import detection as _det  # noqa: E402
 from .person_tracking_reid import CameraPersonTrackingReID  # noqa: E402
 
 
 class Cam01LowLatencyReID(CameraPersonTrackingReID):
-    """CAM-01 runtime with a true latest-frame detector path.
+    """CAM-01-only detector with latest-frame capture and no inference prefetch."""
 
-    The generic path used a one-shot pad gate before nvvideoconvert. That gate can
-    consume the request before appsink receives a usable PLAYING-state sample,
-    leaving the scheduler in repeated capture timeouts. For CAM-01 we keep the
-    inference branch flowing to appsink and apply the one-shot gate *inside the
-    appsink callback*. The callback always drains the max-buffers=1 sink, but only
-    maps/copies one frame when the scheduler asks for it. This preserves latest
-    frame semantics without queue growth or prefetch ageing.
-    """
+    def __init__(self) -> None:
+        self._capture_probe_seen = 0
+        self._capture_probe_delivered = 0
+        self._capture_probe_last_log = 0.0
+        super().__init__()
 
     def _infer_gate_probe(self, _pad, _info, cid: str):
-        # CAM-01 must keep flowing all the way to appsink so preroll/PLAYING and
-        # subsequent new-sample delivery cannot be starved by the old pad gate.
+        # CAM-01 is allowed through the converter continuously. Other cameras are
+        # display-only and are dropped before detector conversion/copy work.
         if cid == "CAM-01":
             return self.Gst.PadProbeReturn.OK
-
-        # Other cameras are display-only in this tuning phase. Drop them before
-        # nvvideoconvert so they consume no detector conversion/copy bandwidth.
         return self.Gst.PadProbeReturn.DROP
 
     def _on_infer_sample(self, sink, cid: str):
+        # The base class connected this signal during construction. V5 disables
+        # emit-signals before PLAYING and captures on the converted-buffer pad
+        # instead, so this is only a defensive drain if a signal slips through.
         sample = sink.emit("pull-sample")
-        if sample is None:
-            return self.Gst.FlowReturn.OK
+        return self.Gst.FlowReturn.OK
 
-        # Always drain the CAM-01 appsink, but do no CPU map/copy work unless the
-        # scheduler currently wants a fresh detector frame.
+    def _capture_converted_probe(self, pad, info, cid: str):
+        """Copy exactly one requested BGRx frame from the post-convert raw buffer.
+
+        This avoids appsink signal/preroll semantics entirely. The probe sits after
+        nvvideoconvert + fixed BGRx caps, so the mapped buffer is normal CPU-visible
+        RAW memory. It always returns OK and never blocks the streaming path.
+        """
         if cid != "CAM-01":
-            return self.Gst.FlowReturn.OK
+            return self.Gst.PadProbeReturn.OK
+
+        self._capture_probe_seen += 1
 
         with self.capture_lock:
             requested = bool(self.capture_requested.get(cid, False))
         if not requested:
-            return self.Gst.FlowReturn.OK
+            self._maybe_log_capture_probe()
+            return self.Gst.PadProbeReturn.OK
 
-        captured_t = time.monotonic()
-        caps = sample.get_caps().get_structure(0)
-        width = int(caps.get_value("width"))
-        height = int(caps.get_value("height"))
-        buffer = sample.get_buffer()
+        buffer = info.get_buffer()
+        if buffer is None:
+            self._maybe_log_capture_probe()
+            return self.Gst.PadProbeReturn.OK
+
+        caps = pad.get_current_caps()
+        if caps is None or caps.get_size() == 0:
+            self._maybe_log_capture_probe()
+            return self.Gst.PadProbeReturn.OK
+
+        structure = caps.get_structure(0)
+        width = int(structure.get_value("width"))
+        height = int(structure.get_value("height"))
+        needed = width * height * 4
+
         ok, mapped = buffer.map(self.Gst.MapFlags.READ)
         if not ok:
-            # Leave the request armed; the next live sample can satisfy it.
-            return self.Gst.FlowReturn.OK
+            self._maybe_log_capture_probe()
+            return self.Gst.PadProbeReturn.OK
 
         try:
-            needed = width * height * 4
+            if len(mapped.data) < needed:
+                return self.Gst.PadProbeReturn.OK
             raw = np.frombuffer(mapped.data, dtype=np.uint8, count=needed)
             frame = raw.reshape((height, width, 4))[..., :3].copy()
         finally:
             buffer.unmap(mapped)
 
-        # Clear only after a complete frame is safely copied. If the scheduler
-        # cancelled while mapping, avoid publishing an unsolicited sample.
+        captured_t = time.monotonic()
         with self.capture_lock:
             if not self.capture_requested.get(cid, False):
-                return self.Gst.FlowReturn.OK
+                self._maybe_log_capture_probe()
+                return self.Gst.PadProbeReturn.OK
             self.capture_requested[cid] = False
 
         self.mailbox.put(cid, captured_t, frame)
-        return self.Gst.FlowReturn.OK
+        self._capture_probe_delivered += 1
+        self._maybe_log_capture_probe()
+        return self.Gst.PadProbeReturn.OK
+
+    def _maybe_log_capture_probe(self) -> None:
+        now = time.monotonic()
+        if now - self._capture_probe_last_log < 2.0:
+            return
+        self._capture_probe_last_log = now
+        with self.capture_lock:
+            armed = int(bool(self.capture_requested.get("CAM-01", False)))
+        print(
+            "CAM01_CAPTURE_PROBE "
+            f"seen={self._capture_probe_seen} "
+            f"delivered={self._capture_probe_delivered} armed={armed}",
+            flush=True,
+        )
 
     def _scheduler(self) -> None:
         assert self.result_q is not None and self.job_q is not None
@@ -170,31 +185,17 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
 
         configured = [
             value.strip()
-            for value in os.environ.get(
-                "CAMERA_V2_DETECT_ACTIVE_CAMERAS",
-                "",
-            ).split(",")
+            for value in os.environ.get("CAMERA_V2_DETECT_ACTIVE_CAMERAS", "").split(",")
             if value.strip()
         ]
         all_ids = [camera.camera_id for camera in self.cameras]
-        if configured:
-            allowed = set(configured)
-            ids = [cid for cid in all_ids if cid in allowed]
-        else:
-            ids = all_ids
+        ids = [cid for cid in all_ids if cid in set(configured)] if configured else all_ids
 
         if ids != ["CAM-01"]:
-            raise RuntimeError(
-                "CAM01_LOWLAT scheduler requires exactly CAM-01, got "
-                f"{ids!r}"
-            )
+            raise RuntimeError(f"CAM01_LOWLAT scheduler requires exactly CAM-01, got {ids!r}")
 
-        groups = [
-            ids[i : i + int(_det.MICRO_BATCH)]
-            for i in range(0, len(ids), int(_det.MICRO_BATCH))
-        ]
-        versions = {cid: 0 for cid in ids}
-        group_index = 0
+        groups = [ids]
+        versions = {"CAM-01": 0}
 
         with self.det_lock:
             self.det_ready = True
@@ -212,21 +213,21 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
             f"display_conf={os.environ.get('CAMERA_V2_MIN_DISPLAY_TRACK_CONF')} "
             f"max_result_age={self.max_detector_result_age_ms:.0f}ms "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
-            "capture_policy=appsink-latest-no-prefetch",
+            "capture_policy=postconvert-buffer-probe-latest",
             flush=True,
         )
         print(
-            f"CAMERA_DETECT_ACTIVE cameras={ids} policy=appsink-latest-no-prefetch",
+            "CAMERA_DETECT_ACTIVE cameras=['CAM-01'] "
+            "policy=postconvert-buffer-probe-latest",
             flush=True,
         )
 
         while not self.det_stop.is_set():
             cycle_started = time.monotonic()
-            group = groups[group_index % len(groups)]
-            group_index += 1
+            group = groups[0]
 
-            # Arm one capture request. CAM-01's appsink is continuously drained,
-            # so the next live sample satisfies this without an upstream pad race.
+            # Arm the request only when the worker is ready. The next converted
+            # live frame satisfies it; no frame is prefetched while inference runs.
             self._request_group(group)
             rows = self.mailbox.wait_group(group, versions, timeout=0.75)
             if rows is None:
@@ -247,11 +248,7 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
 
             try:
                 self.job_q.put(
-                    {
-                        "cameras": group,
-                        "frames": frames,
-                        "captured": captured,
-                    },
+                    {"cameras": group, "frames": frames, "captured": captured},
                     timeout=0.20,
                 )
                 result = self.result_q.get(timeout=5.0)
@@ -279,11 +276,7 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
 
             for cid, captured_t in zip(result["cameras"], result["captured"]):
                 detections = self._dedup_and_expand(result["boxes"].get(cid, []))
-                prepared = self.latency_compensator.prepare(
-                    cid,
-                    captured_t,
-                    detections,
-                )
+                prepared = self.latency_compensator.prepare(cid, captured_t, detections)
                 self._publish_prepared(cid, captured_t, prepared)
                 counts[cid] = len(detections)
                 ages_ms.append(max(0.0, (completed_t - captured_t) * 1000.0))
@@ -292,7 +285,7 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
             batch_ms = float(result.get("batch_ms") or 0.0)
             with self.det_lock:
                 self.det_calls += 1
-                self.det_inputs += len(group)
+                self.det_inputs += 1
                 self.det_batch_ms = batch_ms
                 self.det_counts.update(counts)
                 if ages_ms:
@@ -300,7 +293,7 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
                 self.det_error = ""
                 target_hz = self.detector_target_hz
 
-            desired_call_interval = 1.0 / max(0.1, target_hz * len(groups))
+            desired_call_interval = 1.0 / max(0.1, target_hz)
             elapsed = time.monotonic() - cycle_started
             idle = max(self.detector_min_idle, desired_call_interval - elapsed)
             self.det_stop.wait(min(0.20, idle))
@@ -331,7 +324,7 @@ def _validate_profile() -> None:
         f"active={active} detector={_det.INFER_WIDTH}x{_det.INFER_HEIGHT}/micro{_det.MICRO_BATCH} "
         "rtsp=50ms mux_timeout=25ms frame=960x540 wall=1920x720 "
         "tracker=512x288 max_result_age=320ms qwen=0 "
-        "capture=appsink-latest-no-prefetch",
+        "capture=postconvert-buffer-probe-latest",
         flush=True,
     )
 
@@ -342,8 +335,33 @@ def main() -> int:
 
     runtime._set_if(runtime.mux, "interpolation-method", 1)
     runtime._set_if(runtime.tiler, "interpolation-method", 1)
+
+    capsfilter = runtime.pipeline.get_by_name("detect_caps_0")
+    appsink = runtime.pipeline.get_by_name("detect_sink_0")
+    if capsfilter is None or appsink is None:
+        raise RuntimeError("CAM-01 inference branch elements not found")
+
+    # Capture directly from the RAW BGRx buffer after nvvideoconvert. Disable the
+    # signal API so preroll/new-sample behavior cannot gate capture delivery.
+    appsink.set_property("emit-signals", False)
+    appsink.set_property("sync", False)
+    appsink.set_property("drop", True)
+    appsink.set_property("max-buffers", 1)
+    runtime._set_if(appsink, "async", False)
+    runtime._set_if(appsink, "qos", False)
+
+    srcpad = capsfilter.get_static_pad("src")
+    if srcpad is None:
+        raise RuntimeError("CAM-01 detect caps src pad not found")
+    srcpad.add_probe(
+        runtime.Gst.PadProbeType.BUFFER,
+        runtime._capture_converted_probe,
+        "CAM-01",
+    )
+
     print(
-        "CAM01_LOWLAT_SCALER mux=bilinear tiler=bilinear detector_path=independent",
+        "CAM01_LOWLAT_SCALER mux=bilinear tiler=bilinear "
+        "detector_path=postconvert-buffer-probe",
         flush=True,
     )
 
