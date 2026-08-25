@@ -183,9 +183,12 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
             group_index += 1
 
             # Critical latency rule: request a frame only when the worker is ready
-            # for the next inference. Do not capture during the previous inference.
+            # for the next inference.  The wait itself does NOT age the detector
+            # input: captured_t is stamped only when appsink actually delivers the
+            # fresh frame.  Therefore use a generous wait to avoid starving the
+            # one-shot gate during decoder/converter scheduling jitter.
             self._request_group(group)
-            rows = self.mailbox.wait_group(group, versions, timeout=0.30)
+            rows = self.mailbox.wait_group(group, versions, timeout=1.50)
             if rows is None:
                 self._clear_requests()
                 with self.det_lock:
