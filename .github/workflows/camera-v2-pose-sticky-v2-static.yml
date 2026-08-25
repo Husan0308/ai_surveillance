@@ -1,0 +1,30 @@
+name: Camera V2 Pose Sticky V2 Static
+
+on:
+  push:
+    branches:
+      - feature/pose-sticky-detection-20260825
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/camera_v2/person_tracking_pose_sticky_v2.py \
+            services/camera_v2/person_tracking_pose_sticky.py \
+            services/camera_v2/yolo_pose_backend.py \
+            services/camera_v2/person_tracking_final.py \
+            services/camera_v2/tracker_profile.py
+      - name: Bash syntax
+        run: bash -n scripts/run_cam01_pose_sticky_v2.sh
+      - name: Contract
+        run: |
+          grep -q 'probationAge": "0"' services/camera_v2/person_tracking_pose_sticky_v2.py
+          grep -q 'maxShadowTrackingAge": "50"' services/camera_v2/person_tracking_pose_sticky_v2.py
+          grep -q 'CAMERA_V2_DETECT_WIDTH=1280' scripts/run_cam01_pose_sticky_v2.sh
+          grep -q 'CAMERA_V2_MIN_DISPLAY_TRACK_CONF=0.00' scripts/run_cam01_pose_sticky_v2.sh
+          grep -q 'person_tracking_pose_sticky_v2' scripts/run_cam01_pose_sticky_v2.sh
