@@ -32,7 +32,16 @@ from .person_tracking_final import CameraPersonTrackingFinal
 
 
 class CameraPersonTrackingTRT86(CameraPersonTrackingFinal):
-    """CAM-01 correctness runtime: YOLO26 TRT8.6 SHM + per-frame NvDCF."""
+    """CAM-01 correctness runtime: YOLO26 TRT8.6 SHM + per-frame NvDCF.
+
+    The inference side branch is intentionally sparse: the upstream pad probe only
+    lets a frame through when the detector scheduler asks for one. GstBaseSink
+    normally waits for a preroll buffer during the PAUSED state transition. That
+    is a bad fit for a sparse/gated appsink and can deadlock the capture path:
+    display keeps moving, but the detector mailbox never receives a frame. This
+    runtime therefore disables async preroll on every detector appsink and primes
+    the active camera with one bootstrap capture request.
+    """
 
     def __init__(self) -> None:
         self._result_age_samples: deque[float] = deque(maxlen=120)
@@ -40,8 +49,81 @@ class CameraPersonTrackingTRT86(CameraPersonTrackingFinal):
             350.0,
             float(os.environ.get("CAMERA_V2_MAX_DETECT_RESULT_AGE_MS", "350")),
         )
+        # _add_camera() is dispatched while parent constructors build the graph,
+        # so these sets must exist before super().__init__().
+        self._capture_gate_logged: set[str] = set()
+        self._capture_sample_logged: set[str] = set()
+        self._capture_sink_logged: set[str] = set()
         super().__init__()
         self.max_detector_result_age_ms = self._configured_result_age_ms
+
+    @staticmethod
+    def _active_camera_set() -> set[str]:
+        values = {
+            value.strip()
+            for value in os.environ.get(
+                "CAMERA_V2_DETECT_ACTIVE_CAMERAS", "CAM-01"
+            ).split(",")
+            if value.strip()
+        }
+        return values or {"CAM-01"}
+
+    def _add_camera(self, index, camera) -> None:
+        """Build the normal branch, then make its sparse appsink preroll-safe."""
+        super()._add_camera(index, camera)
+        cid = camera.camera_id
+        appsink = self.pipeline.get_by_name(f"detect_sink_{index}")
+        if appsink is None:
+            raise RuntimeError(f"{cid}: detector appsink was not created")
+
+        # GstBaseSink async=FALSE is the documented mode for sparse streams: the
+        # sink enters PAUSED immediately instead of waiting for a preroll buffer.
+        # sync=FALSE remains set by CameraDetectionV2, so inference never waits on
+        # the presentation clock either.
+        appsink.set_property("async", False)
+        appsink.set_property("sync", False)
+        self._set_if(appsink, "wait-on-eos", False)
+
+        # Prime only detector-active cameras. This lets the first decoded frame
+        # traverse the gate as soon as streaming starts and gives the scheduler a
+        # fresh mailbox row even before its first request/timeout cycle finishes.
+        if cid in self._active_camera_set():
+            with self.capture_lock:
+                self.capture_requested[cid] = True
+
+        if cid not in self._capture_sink_logged:
+            self._capture_sink_logged.add(cid)
+            print(
+                "CAM01_TRT86_CAPTURE_SETUP "
+                f"camera={cid} appsink_async=0 sync=0 "
+                f"bootstrap={int(cid in self._active_camera_set())}",
+                flush=True,
+            )
+
+    def _infer_gate_probe(self, pad, info, cid: str):
+        result = super()._infer_gate_probe(pad, info, cid)
+        if (
+            result == self.Gst.PadProbeReturn.OK
+            and cid in self._active_camera_set()
+            and cid not in self._capture_gate_logged
+        ):
+            self._capture_gate_logged.add(cid)
+            print(
+                f"CAM01_TRT86_CAPTURE_GATE camera={cid} first_buffer_passed=1",
+                flush=True,
+            )
+        return result
+
+    def _on_infer_sample(self, sink, cid: str):
+        first = cid not in self._capture_sample_logged
+        result = super()._on_infer_sample(sink, cid)
+        if first:
+            self._capture_sample_logged.add(cid)
+            print(
+                f"CAM01_TRT86_CAPTURE_SAMPLE camera={cid} first_sample=1",
+                flush=True,
+            )
+        return result
 
     @staticmethod
     def _p95_local(values: deque[float]) -> float:
@@ -79,14 +161,7 @@ class CameraPersonTrackingTRT86(CameraPersonTrackingFinal):
             self.det_ready = True
 
         all_ids = [camera.camera_id for camera in self.cameras]
-        configured = [
-            value.strip()
-            for value in os.environ.get(
-                "CAMERA_V2_DETECT_ACTIVE_CAMERAS", "CAM-01"
-            ).split(",")
-            if value.strip()
-        ]
-        allowed = set(configured)
+        allowed = self._active_camera_set()
         ids = [cid for cid in all_ids if cid in allowed]
         if not ids:
             raise RuntimeError(
@@ -103,11 +178,12 @@ class CameraPersonTrackingTRT86(CameraPersonTrackingFinal):
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"max_result_age={self.max_detector_result_age_ms:.0f}ms "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
-            f"active={','.join(ids)} backend={ready.get('backend')}",
+            f"active={','.join(ids)} backend={ready.get('backend')} "
+            "capture=sparse-gate-appsink-async0-bootstrap",
             flush=True,
         )
 
-        groups = [ids[i : i + 1] for i in range(0, len(ids), 1)]
+        groups = [[cid] for cid in ids]
         versions = {cid: 0 for cid in ids}
         group_index = 0
         prefetched_group: tuple[str, ...] | None = None
@@ -126,6 +202,15 @@ class CameraPersonTrackingTRT86(CameraPersonTrackingFinal):
                 self._clear_requests()
                 with self.det_lock:
                     self.capture_timeouts += 1
+                    timeout_count = self.capture_timeouts
+                if timeout_count <= 3 or timeout_count % 20 == 0:
+                    print(
+                        "CAM01_TRT86_CAPTURE_TIMEOUT "
+                        f"count={timeout_count} waiting={','.join(group)} "
+                        f"gate_seen={int(all(cid in self._capture_gate_logged for cid in group))} "
+                        f"sample_seen={int(all(cid in self._capture_sample_logged for cid in group))}",
+                        flush=True,
+                    )
                 self.det_stop.wait(0.025)
                 continue
 
