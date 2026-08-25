@@ -276,6 +276,20 @@ class AutoReIdEmbedder:
     def _select(self):
         if self._active is not None:
             return self._active
+
+        if self.requested in {
+            "trt86",
+            "trt86_worker",
+            "trt86-worker",
+            "nvidia_trt86",
+        }:
+            from .reid_trt86_embedder import Trt86SubprocessEmbedder
+
+            self._active = Trt86SubprocessEmbedder(
+                self._cfg,
+                self._root,
+            )
+            return self._active
         if self.requested in {"auto", "osnet", "osnet_ain", "osnet-ain"}:
             if OsnetAinCpuEmbedder.available():
                 self._active = OsnetAinCpuEmbedder(self._cfg, self._root)

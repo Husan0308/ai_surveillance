@@ -4,35 +4,43 @@ cameras:
     room: Devs
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/101
+    latency_ms: 20
   - id: CAM-02
     name: Entrance 2
     room: Entrance
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/201
+    latency_ms: 20
   - id: CAM-03
     name: Main Room 1
     room: Main Rooms
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/301
+    latency_ms: 20
   - id: CAM-04
     name: Dev Room 1
     room: Devs
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/601
+    latency_ms: 80
   - id: CAM-05
     name: Entrance 1
     room: Entrance
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/501
+    latency_ms: 80
   - id: CAM-06
     name: Main Room 2
     room: Main Rooms
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/401
+    latency_ms: 80
 
 deepstream:
   gpu_id: 0
-  rtsp_transport: auto
+  cudadec_memtype: 0
+  rtsp_transport: tcp
+  # Fallback only; production cameras carry their proven per-camera latency.
   latency_ms: 150
   drop_on_latency: true
   decoder_extra_surfaces: 4
@@ -44,8 +52,39 @@ deepstream:
   reconnect_delay_max_sec: 10.0
   startup_stagger_sec: 0.50
 
-display:
+detection:
+  enabled: true
+  model: yolo26m.pt
+  device: cuda:0
+  # Restored from the old stable detection/smooth-camera baseline. The camera
+  # display stays 960x540 while YOLO receives a stride-friendly 736x416 tensor.
   width: 736
   height: 416
+  batch_size: 2
+  target_fps_per_camera: 4.0
+  # Keep weak person candidates for ByteTrack continuation.
+  confidence: 0.08
+  # A higher same-class NMS IoU keeps two heavily-overlapping person candidates
+  # alive more often instead of suppressing one before ByteTrack sees them.
+  iou: 0.70
+  max_detections: 50
+  half: false
+  overlay: true
+  overlay_max_age_ms: 900
+
+tracking:
+  enabled: true
+  track_high_thresh: 0.25
+  track_low_thresh: 0.08
+  new_track_thresh: 0.25
+  track_buffer_seconds: 2.5
+  match_thresh: 0.80
+  fuse_score: true
+
+display:
+  # Proven clear/smooth wall profile from the old sigbus-safe-mmap branch.
+  width: 960
+  height: 540
   fps: 20
-  jpeg_quality: 70
+  # Used only by the on-demand diagnostic MJPEG fallback; mmap has no codec.
+  jpeg_quality: 88

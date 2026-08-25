@@ -59,17 +59,34 @@ def main() -> int:
         if token not in runtime:
             return fail(f"missing runtime contract: {token}")
 
-    for forbidden in (
+    nvdcf_ab_enabled = (
+        os.environ.get("CAMERA_V2_NVDCF_AB", "0")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+    forbidden_paths = [
         'self._make("nvstreamdemux"',
         "pascal_infer_demux",
         "self.infer_demux",
         "CameraPersonTrackingV2",
         "CameraPersonTrackingFinal",
-        "libnvds_nvmultiobjecttracker",
-        "config_tracker_NvDCF",
-    ):
+    ]
+
+    # Production Pascal-safe mode still forbids NvDCF.
+    # Only the explicitly enabled isolated A/B branch may reference it.
+    if not nvdcf_ab_enabled:
+        forbidden_paths.extend([
+            "libnvds_nvmultiobjecttracker",
+            "config_tracker_NvDCF",
+        ])
+
+    for forbidden in forbidden_paths:
         if forbidden in runtime:
-            return fail(f"Pascal runtime leaked forbidden code path: {forbidden}")
+            return fail(
+                f"Pascal runtime leaked forbidden code path: {forbidden}"
+            )
 
     for token in (
         'CAMERA_V2_RTSP_TRANSPORT',

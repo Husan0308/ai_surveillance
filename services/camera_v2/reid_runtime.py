@@ -98,6 +98,20 @@ class ReIdIdentityEngine:
         self._embed_thread = None
         self._qwen_thread = None
 
+        close_embedder = getattr(
+            self.embedder,
+            "close",
+            None,
+        )
+        if callable(close_embedder):
+            try:
+                close_embedder()
+            except Exception as exc:
+                self._last_error = (
+                    f"embedder-close:"
+                    f"{type(exc).__name__}:{exc}"
+                )
+
     def observe_tracks(self, camera_id: str, room_id: str, tracks: list[dict], now: float | None = None) -> None:
         now = time.monotonic() if now is None else float(now)
         visible: list[int] = []

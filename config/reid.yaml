@@ -1,10 +1,16 @@
 reid:
   enabled: true
 
-  # CPU-only side path. "auto" prefers OSNet-AIN x1.0 when torchreid is installed
-  # and falls back to Intel/OpenVINO person-reidentification-retail-0288 through
-  # OpenCV DNN. YOLO/NvDCF keep the GPU to protect the six-camera wall.
-  backend: auto
+  # NVIDIA ReIdentificationNet runs in an isolated Python 3.10 / TensorRT 8.6
+  # subprocess so DeepStream 7.1's TensorRT 10 runtime is never mixed with TRT 8.6.
+  backend: trt86_worker
+  trt86_python: .venv-trt86/bin/python
+  trt86_worker: scripts/reid_trt86_worker.py
+  trt86_engine: artifacts/reid/resnet50_market1501_aicity156_b1-8_fp32_trt86.engine
+  trt86_timeout_sec: 5.0
+  trt86_jpeg_quality: 95
+
+  # CPU backends remain available by switching backend back to "auto".
   download_if_missing: true
   cpu_threads: 2
 
@@ -29,7 +35,6 @@ reid:
   confirm_similarity: 0.77
   strong_similarity: 0.86
   reject_similarity: 0.56
-  qwen_rescue_similarity: 0.60
   min_margin: 0.045
   strong_margin: 0.025
   confirm_votes: 2
@@ -46,25 +51,28 @@ reid:
   active_timeout_sec: 1.8
   missing_active_grace_sec: 0.35
   lost_timeout_sec: 8.0
-  same_camera_reconnect_sec: 10.0
+  same_camera_reconnect_sec: 90000.0
   same_camera_reconnect_similarity: 0.62
   same_camera_reconnect_confirm_similarity: 0.72
+
+  # Daily reconnect safety:
+  # require a clear winner to avoid merging people in similar clothing.
+  daily_reconnect_min_margin: 0.08
+
+  # Never create a duplicate Daily ID while an existing identity is
+  # still plausibly similar.
+  daily_new_identity_max_similarity: 0.50
+
+  # Moderate long-gap reconnect requires repeated evidence + clear margin.
+  # Similar clothing with a close runner-up therefore stays ambiguous.
+  daily_reconnect_vote_similarity: 0.56
+  daily_reconnect_vote_margin: 0.10
+  daily_reconnect_votes: 4
+
+  daily_ambiguous_hold_similarity: 0.56
   gallery_ttl_sec: 21600
 
   # Different rooms cannot contain the same Global ID simultaneously. Same-room
   # paired cameras are allowed to share one Global ID at the same time.
   min_room_transition_sec: 0.8
-
-  # Qwen is independent evidence and never blocks video/ReID. Configure URL via
-  # QWEN_REID_URL (OpenAI-compatible base or chat/completions endpoint).
-  qwen_enabled: true
-  qwen_model: qwen3-vl
-  qwen_timeout_sec: 3.0
-  qwen_queue: 24
-  qwen_same_confidence: 0.72
-  qwen_different_confidence: 0.78
-  qwen_gray_confirm_confidence: 0.90
-  qwen_suspect_confidence: 0.90
-  qwen_negative_ttl_sec: 20.0
   rollback_contradictions: 2
-  qwen_jpeg_quality: 82

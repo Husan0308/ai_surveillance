@@ -128,6 +128,14 @@ class NativeMetaBridge:
         ]
         self.lib.camera_v2_add_boxes.restype = ctypes.c_int
 
+        self.lib.camera_v2_add_tracked_boxes.argtypes = [
+            ctypes.c_uint64,
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_int,
+        ]
+        self.lib.camera_v2_add_tracked_boxes.restype = ctypes.c_int
+
         self.lib.camera_v2_apply_detector_result.argtypes = [
             ctypes.c_uint64,
             ctypes.c_uint,
@@ -161,6 +169,20 @@ class NativeMetaBridge:
             ctypes.c_float,
         ]
         self.lib.camera_v2_expand_display_boxes.restype = ctypes.c_int
+
+        self.lib.camera_v2_add_wall_rects.argtypes = [
+            ctypes.c_uint64,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_int,
+        ]
+        self.lib.camera_v2_add_wall_rects.restype = ctypes.c_int
+
+        self.lib.camera_v2_add_wall_tracks.argtypes = [
+            ctypes.c_uint64,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_int,
+        ]
+        self.lib.camera_v2_add_wall_tracks.restype = ctypes.c_int
 
         self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_count_tracked.restype = ctypes.c_int
@@ -215,6 +237,112 @@ class NativeMetaBridge:
                 ctypes.c_uint(int(source_id)),
                 pointer,
                 ctypes.c_int(len(boxes)),
+            )
+        )
+
+    def add_tracked_boxes(
+        self,
+        gst_buffer,
+        source_id: int,
+        boxes: list[tuple[int, float, float, float, float, float]],
+    ) -> int:
+        """Add motion-predictor boxes while preserving camera-local track IDs."""
+        if not boxes:
+            return 0
+
+        flat: list[float] = []
+
+        for track_id, x1, y1, x2, y2, conf in boxes:
+            if int(track_id) < 0:
+                continue
+
+            flat.extend(
+                (
+                    float(track_id),
+                    float(x1),
+                    float(y1),
+                    float(x2),
+                    float(y2),
+                    float(conf),
+                )
+            )
+
+        if not flat:
+            return 0
+
+        array_type = ctypes.c_float * len(flat)
+        payload = array_type(*flat)
+        pointer = ctypes.cast(
+            payload,
+            ctypes.POINTER(ctypes.c_float),
+        )
+
+        return int(
+            self.lib.camera_v2_add_tracked_boxes(
+                ctypes.c_uint64(hash(gst_buffer)),
+                ctypes.c_uint(int(source_id)),
+                pointer,
+                ctypes.c_int(len(flat) // 6),
+            )
+        )
+
+    def add_wall_rects(
+        self,
+        gst_buffer,
+        boxes: list[tuple[float, float, float, float, float]],
+    ) -> int:
+        if not boxes:
+            return 0
+
+        payload, pointer = self._payload(boxes)
+        _ = payload
+
+        return int(
+            self.lib.camera_v2_add_wall_rects(
+                ctypes.c_uint64(hash(gst_buffer)),
+                pointer,
+                ctypes.c_int(len(boxes)),
+            )
+        )
+
+    def add_wall_tracks(
+        self,
+        gst_buffer,
+        tracks: list[
+            tuple[int, float, float, float, float, float]
+        ],
+    ) -> int:
+        """Draw post-tiler motion boxes with camera-local IDs."""
+        if not tracks:
+            return 0
+
+        flat: list[float] = []
+
+        for track_id, x1, y1, x2, y2, conf in tracks:
+            flat.extend(
+                (
+                    float(track_id),
+                    float(x1),
+                    float(y1),
+                    float(x2),
+                    float(y2),
+                    float(conf),
+                )
+            )
+
+        array_type = ctypes.c_float * len(flat)
+        payload = array_type(*flat)
+
+        pointer = ctypes.cast(
+            payload,
+            ctypes.POINTER(ctypes.c_float),
+        )
+
+        return int(
+            self.lib.camera_v2_add_wall_tracks(
+                ctypes.c_uint64(hash(gst_buffer)),
+                pointer,
+                ctypes.c_int(len(tracks)),
             )
         )
 

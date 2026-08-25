@@ -32,9 +32,9 @@ static NvDsFrameMeta *find_frame(NvDsBatchMeta *batch_meta, unsigned int source_
 
 static void style_green(NvDsObjectMeta *obj) {
     obj->rect_params.border_width = 3;
-    obj->rect_params.border_color.red = 0.10;
-    obj->rect_params.border_color.green = 1.00;
-    obj->rect_params.border_color.blue = 0.15;
+    obj->rect_params.border_color.red = 1.00;
+    obj->rect_params.border_color.green = 0.77;
+    obj->rect_params.border_color.blue = 0.25;
     obj->rect_params.border_color.alpha = 1.00;
     obj->rect_params.has_bg_color = 0;
 }
@@ -143,6 +143,92 @@ int camera_v2_add_boxes(uintptr_t buffer_ptr,
     NvDsFrameMeta *frame_meta = find_frame(batch_meta, source_id);
     if (!frame_meta) return 0;
     return add_boxes_to_frame(batch_meta, frame_meta, boxes, count);
+}
+
+int camera_v2_add_tracked_boxes(uintptr_t buffer_ptr,
+                                unsigned int source_id,
+                                const float *boxes,
+                                int count) {
+    if (!buffer_ptr || !boxes || count <= 0) return 0;
+
+    GstBuffer *buffer = (GstBuffer *) buffer_ptr;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
+    if (!batch_meta) return -1;
+
+    NvDsFrameMeta *frame_meta = find_frame(batch_meta, source_id);
+    if (!frame_meta) return 0;
+
+    int added = 0;
+
+    for (int i = 0; i < count; ++i) {
+        /*
+         * Dedicated motion-track contract:
+         *
+         * [local_id, x1, y1, x2, y2, confidence]
+         *
+         * The ordinary detector API remains five floats and continues
+         * to use UNTRACKED_OBJECT_ID.
+         */
+        const float *b = boxes + (i * 6);
+
+        uint64_t local_id = (uint64_t) llroundf(b[0]);
+        float x1 = b[1];
+        float y1 = b[2];
+        float x2 = b[3];
+        float y2 = b[4];
+        float conf = b[5];
+
+        if (x2 <= x1 || y2 <= y1) continue;
+
+        NvDsObjectMeta *obj = nvds_acquire_obj_meta_from_pool(batch_meta);
+        if (!obj) continue;
+
+        float width = x2 - x1;
+        float height = y2 - y1;
+
+        obj->unique_component_id = 91;
+        obj->class_id = 0;
+
+        /*
+         * This is a camera-local motion-predictor ID, not a Global-ID.
+         * Global ReID will map (source_id, object_id) -> global_id later.
+         */
+        obj->object_id = local_id;
+
+        obj->confidence = conf;
+
+        /*
+         * Negative tracker confidence deliberately means "not supplied".
+         * Existing copy_tracks() filtering therefore accepts the object
+         * without pretending it came from NvDCF.
+         */
+        obj->tracker_confidence = -0.1f;
+
+        strncpy(obj->obj_label, "Person", MAX_LABEL_SIZE - 1);
+        obj->obj_label[MAX_LABEL_SIZE - 1] = '\0';
+
+        obj->detector_bbox_info.org_bbox_coords.left = x1;
+        obj->detector_bbox_info.org_bbox_coords.top = y1;
+        obj->detector_bbox_info.org_bbox_coords.width = width;
+        obj->detector_bbox_info.org_bbox_coords.height = height;
+
+        obj->rect_params.left = x1;
+        obj->rect_params.top = y1;
+        obj->rect_params.width = width;
+        obj->rect_params.height = height;
+
+        style_green(obj);
+
+        nvds_add_obj_meta_to_frame(
+            frame_meta,
+            obj,
+            NULL
+        );
+
+        ++added;
+    }
+
+    return added;
 }
 
 int camera_v2_apply_detector_result(uintptr_t buffer_ptr,
@@ -333,4 +419,210 @@ uint64_t camera_v2_shadow_promoted_total(void) {
 
 int camera_v2_count_tracked(uintptr_t buffer_ptr) {
     return camera_v2_style_and_count_tracked(buffer_ptr);
+}
+
+/*
+ * Draw persistent screen-space rectangles on the already-composited wall.
+ * This is intentionally NvDsDisplayMeta, not NvDsObjectMeta: these rectangles
+ * are presentation-only and do not affect detector/tracker identity state.
+ *
+ * rows: [x1,y1,x2,y2,confidence] repeated `count` times.
+ */
+int camera_v2_add_wall_rects(uintptr_t buffer_ptr,
+                             const float *rows,
+                             int count) {
+    if (!buffer_ptr || !rows || count <= 0) return 0;
+
+    GstBuffer *buffer = (GstBuffer *)buffer_ptr;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
+    if (!batch_meta || !batch_meta->frame_meta_list) return -1;
+
+    /*
+     * nvmultistreamtiler output is one composited video frame. Use the first
+     * frame meta only as the carrier for display metadata.
+     */
+    NvDsFrameMeta *frame_meta =
+        (NvDsFrameMeta *)batch_meta->frame_meta_list->data;
+    if (!frame_meta) return -2;
+
+    int added = 0;
+    int index = 0;
+
+    while (index < count) {
+        NvDsDisplayMeta *display =
+            nvds_acquire_display_meta_from_pool(batch_meta);
+        if (!display) break;
+
+        display->num_rects = 0;
+
+        while (index < count &&
+               display->num_rects < MAX_ELEMENTS_IN_DISPLAY_META) {
+            const float *b = rows + (index * 5);
+            ++index;
+
+            float x1 = b[0];
+            float y1 = b[1];
+            float x2 = b[2];
+            float y2 = b[3];
+
+            if (x2 <= x1 || y2 <= y1)
+                continue;
+
+            NvOSD_RectParams *rect =
+                &display->rect_params[display->num_rects];
+
+            memset(rect, 0, sizeof(*rect));
+
+            rect->left = x1;
+            rect->top = y1;
+            rect->width = x2 - x1;
+            rect->height = y2 - y1;
+
+            rect->border_width = 3;
+            rect->border_color.red = 1.00f;
+            rect->border_color.green = 0.77f;
+            rect->border_color.blue = 0.25f;
+            rect->border_color.alpha = 1.00f;
+            rect->has_bg_color = 0;
+
+            ++display->num_rects;
+            ++added;
+        }
+
+        if (display->num_rects > 0)
+            nvds_add_display_meta_to_frame(frame_meta, display);
+    }
+
+    return added;
+}
+
+
+/*
+ * Draw camera-local motion tracks on the already-composited wall.
+ *
+ * rows:
+ * [local_id, x1, y1, x2, y2, confidence]
+ *
+ * Presentation only. Does not modify detector/tracker state.
+ */
+int camera_v2_add_wall_tracks(uintptr_t buffer_ptr,
+                              const float *rows,
+                              int count) {
+    if (!buffer_ptr || !rows || count <= 0) return 0;
+
+    GstBuffer *buffer = (GstBuffer *)buffer_ptr;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
+
+    if (!batch_meta || !batch_meta->frame_meta_list)
+        return -1;
+
+    NvDsFrameMeta *frame_meta =
+        (NvDsFrameMeta *)batch_meta->frame_meta_list->data;
+
+    if (!frame_meta)
+        return -2;
+
+    int added = 0;
+    int index = 0;
+
+    while (index < count) {
+        NvDsDisplayMeta *display =
+            nvds_acquire_display_meta_from_pool(batch_meta);
+
+        if (!display)
+            break;
+
+        display->num_rects = 0;
+        display->num_labels = 0;
+
+        while (
+            index < count &&
+            display->num_rects < MAX_ELEMENTS_IN_DISPLAY_META &&
+            display->num_labels < MAX_ELEMENTS_IN_DISPLAY_META
+        ) {
+            const float *b = rows + (index * 6);
+            ++index;
+
+            uint64_t local_id =
+                (uint64_t)llroundf(b[0]);
+
+            float x1 = b[1];
+            float y1 = b[2];
+            float x2 = b[3];
+            float y2 = b[4];
+
+            if (x2 <= x1 || y2 <= y1)
+                continue;
+
+            /* Rectangle */
+            NvOSD_RectParams *rect =
+                &display->rect_params[display->num_rects];
+
+            memset(rect, 0, sizeof(*rect));
+
+            rect->left = x1;
+            rect->top = y1;
+            rect->width = x2 - x1;
+            rect->height = y2 - y1;
+
+            rect->border_width = 3;
+
+            rect->border_color.red = 1.00f;
+            rect->border_color.green = 0.77f;
+            rect->border_color.blue = 0.25f;
+            rect->border_color.alpha = 1.00f;
+
+            rect->has_bg_color = 0;
+
+            ++display->num_rects;
+
+            /* ID label */
+            NvOSD_TextParams *text =
+                &display->text_params[display->num_labels];
+
+            memset(text, 0, sizeof(*text));
+
+            text->display_text =
+                g_strdup_printf(
+                    "ID %" G_GUINT64_FORMAT,
+                    (guint64)local_id
+                );
+
+            text->x_offset =
+                x1 > 0.0f ? (gint)x1 : 0;
+
+            text->y_offset =
+                y1 >= 24.0f
+                    ? (gint)y1 - 22
+                    : (gint)y1 + 4;
+
+            text->font_params.font_name = "Sans";
+            text->font_params.font_size = 15;
+
+            text->font_params.font_color.red = 1.0f;
+            text->font_params.font_color.green = 1.0f;
+            text->font_params.font_color.blue = 1.0f;
+            text->font_params.font_color.alpha = 1.0f;
+
+            text->set_bg_clr = 1;
+
+            text->text_bg_clr.red = 0.05f;
+            text->text_bg_clr.green = 0.05f;
+            text->text_bg_clr.blue = 0.05f;
+            text->text_bg_clr.alpha = 0.80f;
+
+            ++display->num_labels;
+            ++added;
+        }
+
+        if (display->num_rects > 0 ||
+            display->num_labels > 0) {
+            nvds_add_display_meta_to_frame(
+                frame_meta,
+                display
+            );
+        }
+    }
+
+    return added;
 }

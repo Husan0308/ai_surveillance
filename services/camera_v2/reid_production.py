@@ -46,10 +46,48 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
             cfg.get("qwen_suspect_confidence", 0.90)
         )
         self._canonical_by_gid: dict[int, tuple[str, int]] = {}
+        # Daily reconnect must prefer "unknown/hold" over a false merge
+        # or an unnecessary duplicate Global-ID.
+        self.daily_reconnect_min_margin = max(
+            self.min_margin,
+            float(cfg.get("daily_reconnect_min_margin", 0.08)),
+        )
+        self.daily_ambiguous_hold_similarity = max(
+            self.reject_similarity,
+            float(
+                cfg.get(
+                    "daily_ambiguous_hold_similarity",
+                    self.reject_similarity,
+                )
+            ),
+        )
+
+        # If the best known Daily identity is at least this similar,
+        # do NOT create a new Global-ID yet.
+        self.daily_new_identity_max_similarity = float(
+            cfg.get("daily_new_identity_max_similarity", 0.50)
+        )
+
+        # Moderate ReID can restore an old Daily ID only when the same
+        # candidate wins repeatedly and clearly beats the runner-up.
+        self.daily_reconnect_vote_similarity = float(
+            cfg.get("daily_reconnect_vote_similarity", 0.56)
+        )
+        self.daily_reconnect_vote_margin = float(
+            cfg.get("daily_reconnect_vote_margin", 0.10)
+        )
+        self.daily_reconnect_votes = max(
+            2,
+            int(cfg.get("daily_reconnect_votes", 4)),
+        )
+
         self._metrics.setdefault("gallery_update_skips", 0)
         self._metrics.setdefault("reid_contradiction_rollbacks", 0)
         self._metrics.setdefault("qwen_gray_confirms", 0)
         self._metrics.setdefault("qwen_suspects", 0)
+        self._metrics.setdefault("daily_reconnect_assigns", 0)
+        self._metrics.setdefault("daily_ambiguous_holds", 0)
+        self._metrics.setdefault("daily_new_waits", 0)
 
     def _canonical_origin(
         self, identity: GlobalIdentity
@@ -188,6 +226,150 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
         self._confirm_without_gallery(track, now)
 
     def _evaluate(self, track: TrackletState, now: float) -> dict:
+        # Daily long-gap reconnect policy.
+        #
+        # Important:
+        # - clear same-camera match -> reuse old Global-ID;
+        # - plausible but ambiguous appearance -> HOLD, never create a
+        #   duplicate merely because max_track_samples was reached;
+        # - if appearance is clearly different, wait for a full crop bank
+        #   before allowing creation of a new identity.
+        if (
+            track.global_id is None
+            and len(track.samples) >= self.min_samples
+        ):
+            ranked = self.rank_candidates(track, now)
+            best = ranked[0] if ranked else None
+
+            if best is not None:
+                plausible = (
+                    best.score
+                    >= self.daily_new_identity_max_similarity
+                )
+
+                # Remember repeated wins by the SAME candidate.
+                if plausible:
+                    if track.last_candidate_id == best.global_id:
+                        track.positive_votes += 1
+                    else:
+                        track.last_candidate_id = best.global_id
+                        track.positive_votes = 1
+                        track.assigned_score = 0.0
+                        track.assigned_margin = 0.0
+
+                    # Keep the strongest evidence seen during this tracklet.
+                    track.assigned_score = max(
+                        track.assigned_score,
+                        best.score,
+                    )
+                    track.assigned_margin = max(
+                        track.assigned_margin,
+                        best.margin,
+                    )
+                else:
+                    track.last_candidate_id = None
+                    track.positive_votes = 0
+                    track.assigned_score = 0.0
+                    track.assigned_margin = 0.0
+
+                # Strong ordinary same-camera reconnect.
+                if (
+                    best.reason == "same_camera_reconnect"
+                    and best.score >= self.same_camera_reconnect_similarity
+                    and best.margin >= self.daily_reconnect_min_margin
+                ):
+                    self._assign_candidate(track, best, now)
+                    self._metrics["daily_reconnect_assigns"] += 1
+
+                    return {
+                        "action": "daily_reconnect_tentative",
+                        "global_id": track.global_id,
+                        "candidate": best.global_id,
+                        "score": best.score,
+                        "margin": best.margin,
+                        "state": track.state,
+                        "needs_qwen": False,
+                        "evidence_version": track.evidence_round,
+                    }
+
+                # Long-gap reconnect:
+                # moderate appearance is accepted ONLY after repeated,
+                # clear wins over the runner-up. Confirm binding without
+                # modifying the canonical gallery.
+                if (
+                    best.reason == "same_camera_reconnect"
+                    and track.last_candidate_id == best.global_id
+                    and track.positive_votes >= self.daily_reconnect_votes
+                    and track.assigned_score
+                        >= self.daily_reconnect_vote_similarity
+                    and track.assigned_margin
+                        >= self.daily_reconnect_vote_margin
+                ):
+                    self._assign_candidate(track, best, now)
+                    self._confirm_without_gallery(track, now)
+
+                    self._metrics["daily_reconnect_assigns"] += 1
+                    self._metrics["confirmed_matches"] += 1
+
+                    return {
+                        "action": "daily_reconnect_confirmed_no_gallery",
+                        "global_id": track.global_id,
+                        "candidate": best.global_id,
+                        "score": best.score,
+                        "margin": best.margin,
+                        "votes": track.positive_votes,
+                        "state": track.state,
+                        "needs_qwen": False,
+                        "evidence_version": track.evidence_round,
+                    }
+
+                # Plausible known person:
+                # NEVER manufacture Global 4 -> 5 -> 6 merely because
+                # max_track_samples has been reached.
+                if plausible:
+                    self._metrics["daily_ambiguous_holds"] += 1
+
+                    return {
+                        "action": "daily_ambiguous_hold",
+                        "candidate": best.global_id,
+                        "score": best.score,
+                        "margin": best.margin,
+                        "votes": track.positive_votes,
+                        "state": track.state,
+                        "needs_qwen": False,
+                        "evidence_version": track.evidence_round,
+                    }
+
+            # A genuinely new person must remain unlike ALL known people
+            # through a complete crop bank before a new Global-ID is allowed.
+            if (
+                self._globals
+                and len(track.samples) < self.max_track_samples
+            ):
+                self._metrics["daily_new_waits"] += 1
+
+                return {
+                    "action": "daily_new_wait",
+                    "candidate": (
+                        best.global_id
+                        if best is not None
+                        else None
+                    ),
+                    "score": (
+                        best.score
+                        if best is not None
+                        else None
+                    ),
+                    "margin": (
+                        best.margin
+                        if best is not None
+                        else None
+                    ),
+                    "state": track.state,
+                    "needs_qwen": False,
+                    "evidence_version": track.evidence_round,
+                }
+
         result = super()._evaluate(track, now)
 
         # The base core records a fresh low-similarity observation in negative_votes.
@@ -228,15 +410,19 @@ class ProductionGlobalIdentityCore(GlobalIdentityCore):
             and len(track.samples) >= self.max_track_samples
             and track.assigned_score < self.qwen_rescue_similarity
         ):
-            rejected = track.global_id
-            self._detach_track(track, now, reject_gid=rejected)
-            identity = self._new_identity(track, now)
-            self._commit_track_to_gallery(track, now)
+            # Qwen is intentionally absent from this runtime. A weak
+            # tentative reconnect therefore remains unresolved instead of
+            # manufacturing a duplicate Daily Global-ID.
+            self._metrics["daily_ambiguous_holds"] += 1
+
             return {
-                "action": "tentative_timeout_new",
-                "rejected_global": rejected,
-                "global_id": identity.global_id,
+                "action": "daily_tentative_hold",
+                "global_id": track.global_id,
+                "candidate": track.global_id,
+                "score": track.assigned_score,
                 "state": track.state,
+                "needs_qwen": False,
+                "evidence_version": track.evidence_round,
             }
         return result
 

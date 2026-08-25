@@ -58,6 +58,116 @@ def _person_rows(detections, max_det: int) -> list[tuple[list[float], float]]:
     return rows
 
 
+
+def _dedupe_person_rows(
+    rows,
+    iou_gate: float = 0.62,
+    containment_gate: float = 0.90,
+    center_gate: float = 0.35,
+):
+    """Suppress overlapping duplicate person detections before tracking."""
+    import math
+
+    def area(box):
+        return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+    def intersection(a, b):
+        return (
+            max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+            * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+        )
+
+    def iou(a, b):
+        inter = intersection(a, b)
+        union = area(a) + area(b) - inter
+        return inter / union if union > 0.0 else 0.0
+
+    def containment(a, b):
+        inter = intersection(a, b)
+        smaller = min(area(a), area(b))
+        return inter / smaller if smaller > 0.0 else 0.0
+
+    def center_distance(a, b):
+        acx = (a[0] + a[2]) * 0.5
+        acy = (a[1] + a[3]) * 0.5
+        bcx = (b[0] + b[2]) * 0.5
+        bcy = (b[1] + b[3]) * 0.5
+
+        aw = max(1.0, a[2] - a[0])
+        ah = max(1.0, a[3] - a[1])
+        bw = max(1.0, b[2] - b[0])
+        bh = max(1.0, b[3] - b[1])
+
+        scale = max(
+            20.0,
+            math.hypot(aw, ah),
+            math.hypot(bw, bh),
+        )
+        return math.hypot(acx - bcx, acy - bcy) / scale
+
+    ordered = sorted(rows, key=lambda row: float(row[1]), reverse=True)
+    kept = []
+    rejected = 0
+
+    for box, conf in ordered:
+        duplicate = False
+
+        for kept_box, _kept_conf in kept:
+            pair_iou = iou(box, kept_box)
+            pair_containment = containment(box, kept_box)
+            pair_center = center_distance(box, kept_box)
+
+            if (
+                pair_iou >= iou_gate
+                or (
+                    pair_containment >= containment_gate
+                    and pair_center <= center_gate
+                )
+            ):
+                duplicate = True
+                break
+
+        if duplicate:
+            rejected += 1
+        else:
+            kept.append((box, conf))
+
+    return kept, rejected
+
+
+def _filter_bottom_fragments(
+    rows,
+    frame_w: float,
+    frame_h: float,
+):
+    """Reject RF-DETR bottom-edge body fragments, not normal seated people."""
+    kept = []
+    rejected = 0
+
+    for box, conf in rows:
+        x1, y1, x2, y2 = [float(v) for v in box]
+        width = max(1e-6, x2 - x1)
+        height = max(1e-6, y2 - y1)
+
+        bottom_ratio = y2 / max(1.0, frame_h)
+        height_ratio = height / max(1.0, frame_h)
+        aspect = width / height
+
+        is_fragment = (
+            bottom_ratio >= 0.985
+            and height_ratio <= 0.12
+            and aspect >= 1.60
+        )
+
+        if is_fragment:
+            rejected += 1
+            continue
+
+        kept.append((box, conf))
+
+    return kept, rejected
+
+
 def rfdetr_worker(job_q, result_q) -> None:
     """Spawn-safe CUDA RF-DETR-S worker."""
 
@@ -154,10 +264,33 @@ def rfdetr_worker(job_q, result_q) -> None:
                         f"cameras={len(job['cameras'])}"
                     )
 
-                output = {
-                    cid: _person_rows(prediction, max_det)
-                    for cid, prediction in zip(job["cameras"], predictions)
-                }
+                output = {}
+                fragment_rejected = {}
+
+                for cid, prediction, source_frame in zip(
+                    job["cameras"],
+                    predictions,
+                    job["frames"],
+                ):
+                    rows = _person_rows(prediction, max_det)
+
+                    rows, duplicate_rejected = _dedupe_person_rows(
+                        rows,
+                        0.62,
+                        0.90,
+                        0.35,
+                    )
+
+                    source_h, source_w = source_frame.shape[:2]
+
+                    rows, rejected = _filter_bottom_fragments(
+                        rows,
+                        float(source_w),
+                        float(source_h),
+                    )
+
+                    output[cid] = rows
+                    fragment_rejected[cid] = rejected
                 result_q.put(
                     {
                         "type": "result",
@@ -165,6 +298,7 @@ def rfdetr_worker(job_q, result_q) -> None:
                         "cameras": job["cameras"],
                         "captured": job["captured"],
                         "boxes": output,
+                        "fragment_rejected": fragment_rejected,
                         "batch_ms": (ended - started) * 1000.0,
                     }
                 )

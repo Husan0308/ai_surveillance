@@ -198,8 +198,17 @@ class SmoothBoxManager:
         self.side_margin = float(os.environ.get("CAMERA_V2_BOX_SIDE_MARGIN", "0.08"))
         self.top_margin = float(os.environ.get("CAMERA_V2_BOX_TOP_MARGIN", "0.05"))
         self.bottom_margin = float(os.environ.get("CAMERA_V2_BOX_BOTTOM_MARGIN", "0.08"))
-        self.max_age = float(os.environ.get("CAMERA_V2_BOX_MAX_AGE", "1.8"))
-        self.max_predict = float(os.environ.get("CAMERA_V2_BOX_MAX_PREDICT", "0.75"))
+        # Track can stay internally alive for reacquisition/ID continuity,
+        # but stale predictions must not remain visible as ghost/double boxes.
+        self.max_age = float(
+            os.environ.get("CAMERA_V2_BOX_MAX_AGE", "1.8")
+        )
+        self.max_predict = float(
+            os.environ.get("CAMERA_V2_BOX_MAX_PREDICT", "0.75")
+        )
+        self.render_age = float(
+            os.environ.get("CAMERA_V2_BOX_RENDER_AGE", "0.20")
+        )
 
     def _guard_box(self, box):
         x1, y1, x2, y2 = box
@@ -218,11 +227,16 @@ class SmoothBoxManager:
 
     def _predict(self, track: MotionTrack, when: float):
         dt = min(self.max_predict, max(0.0, when - track.last_det_t))
-        damping = 1.0 / (1.0 + 0.75 * dt)
-        cx = track.cx + track.vx * dt * damping
-        cy = track.cy + track.vy * dt * damping
-        w = max(8.0, track.w + track.vw * dt * 0.35)
-        h = max(16.0, track.h + track.vh * dt * 0.35)
+        # Constant-velocity prediction.
+        # Do not damp motion here: detector observations are sparse and
+        # damping makes the display bbox visibly trail behind the person.
+        cx = track.cx + track.vx * dt
+        cy = track.cy + track.vy * dt
+        # Keep bbox size fixed between detector observations.
+        # Predict only the center; RF-DETR will correct width/height
+        # on the next real observation.
+        w = max(8.0, track.w)
+        h = max(16.0, track.h)
         x1, y1, x2, y2 = _state_to_xyxy(cx, cy, w, h)
         shift_x = 0.0
         shift_y = 0.0
@@ -303,20 +317,52 @@ class SmoothBoxManager:
                 current.pop(tid, None)
 
     def render(self, cid: str, now: float) -> list[tuple[float, float, float, float, float]]:
+        """Legacy bbox-only rendering contract."""
+        return [
+            (x1, y1, x2, y2, conf)
+            for _tid, x1, y1, x2, y2, conf in self.render_with_ids(cid, now)
+        ]
+
+    def render_with_ids(
+        self,
+        cid: str,
+        now: float,
+    ) -> list[tuple[int, float, float, float, float, float]]:
+        """Render active motion tracks while preserving their camera-local IDs."""
         with self.lock:
             current = self.tracks.get(cid, {})
             rows = []
             stale = []
+
             for tid, track in current.items():
                 age = now - track.last_det_t
                 if age > self.max_age:
                     stale.append(tid)
                     continue
+
+                # Keep stale tracks internally for reacquisition, but do not
+                # draw them. This prevents an old predicted track and a fresh
+                # detector-born track from appearing as two boxes.
+                if age > self.render_age:
+                    continue
+
                 x1, y1, x2, y2 = self._predict(track, now)
+
                 if x2 > x1 and y2 > y1:
-                    rows.append((x1, y1, x2, y2, track.confidence))
+                    rows.append(
+                        (
+                            int(tid),
+                            float(x1),
+                            float(y1),
+                            float(x2),
+                            float(y2),
+                            float(track.confidence),
+                        )
+                    )
+
             for tid in stale:
                 current.pop(tid, None)
+
             return rows
 
 
@@ -337,6 +383,7 @@ class CameraDetectionV2(SecureCameraWallV2):
         self.det_counts: dict[str, int] = {}
         self.capture_timeouts = 0
         self.meta_boxes = 0
+        self._motion_id_contract_logged = False
         self.det_duty = float(os.environ.get("CAMERA_V2_DETECT_GPU_DUTY", "0.24"))
         self.det_duty_min = float(os.environ.get("CAMERA_V2_DETECT_GPU_DUTY_MIN", "0.12"))
         self.det_duty_max = float(os.environ.get("CAMERA_V2_DETECT_GPU_DUTY_MAX", "0.30"))
@@ -484,12 +531,88 @@ class CameraDetectionV2(SecureCameraWallV2):
             return self.Gst.PadProbeReturn.OK
         now = time.monotonic()
         added = 0
+        debug_rows = {}
+
         for cid, source_id in self.camera_index.items():
-            rows = self.boxes.render(cid, now)
+            rows = self.boxes.render_with_ids(cid, now)
+
+            if cid in {"CAM-03", "CAM-06"}:
+                debug_rows[cid] = [
+                    int(row[0])
+                    for row in rows
+                ]
+
+            if cid == "CAM-06" and len(rows) >= 3:
+                print(
+                    "CAM06_TRACK3 "
+                    + " ".join(
+                        f"id={int(r[0])}"
+                        f":box=({r[1]:.0f},{r[2]:.0f},{r[3]:.0f},{r[4]:.0f})"
+                        f":conf={r[5]:.3f}"
+                        for r in rows
+                    ),
+                    flush=True,
+                )
+
             if rows:
-                result = self.bridge.add_boxes(buffer, source_id, rows)
+                result = self.bridge.add_tracked_boxes(
+                    buffer,
+                    source_id,
+                    rows,
+                )
+
+                if cid == "CAM-06":
+                    last_meta_debug = getattr(
+                        self,
+                        "_cam06_meta_debug_last",
+                        0.0,
+                    )
+                    if now - last_meta_debug >= 0.25:
+                        self._cam06_meta_debug_last = now
+                        print(
+                            "CAM06_META_DEBUG "
+                            f"tracks={len(rows)} "
+                            f"native_added={result}",
+                            flush=True,
+                        )
+
                 if result > 0:
                     added += result
+
+        last_debug = getattr(
+            self,
+            "_bbox_debug_last",
+            0.0,
+        )
+
+        if now - last_debug >= 0.25:
+            self._bbox_debug_last = now
+            print(
+                "BBOX_DEBUG "
+                f"CAM-03={debug_rows.get('CAM-03', [])} "
+                f"CAM-06={debug_rows.get('CAM-06', [])}",
+                flush=True,
+            )
+
+        # One-time runtime proof that the Python motion ID survived the
+        # native metadata boundary as NvDsObjectMeta.object_id.
+        if added > 0 and not self._motion_id_contract_logged:
+            copied = self.bridge.copy_tracks(buffer, max_rows=128)
+            visible = [
+                (
+                    int(row["source_id"]),
+                    int(row["object_id"]),
+                )
+                for row in copied
+            ]
+            if visible:
+                self._motion_id_contract_logged = True
+                print(
+                    "CAMERA_MOTION_ID_CONTRACT "
+                    f"tracked_meta={visible}",
+                    flush=True,
+                )
+
         with self.det_lock:
             self.meta_boxes += added
         return self.Gst.PadProbeReturn.OK
@@ -522,6 +645,20 @@ class CameraDetectionV2(SecureCameraWallV2):
             output.append(((x1 * sx, y1 * sy, x2 * sx, y2 * sy), conf))
         return output
 
+    def _after_motion_tracks_updated(
+        self,
+        cid: str,
+        captured_t: float,
+        frame: np.ndarray,
+    ) -> None:
+        """Optional side-path hook after motion tracks match this detector frame.
+
+        Base detector does nothing. Pascal-safe ReID subclasses can consume the
+        exact captured frame and the just-updated local motion-track state without
+        changing or blocking the display path.
+        """
+        return None
+
     def _scheduler(self) -> None:
         assert self.result_q is not None and self.job_q is not None
         try:
@@ -538,8 +675,42 @@ class CameraDetectionV2(SecureCameraWallV2):
             self.det_ready = True
         print(f"CAMERA_DETECT ready: YOLO26m micro_batch={MICRO_BATCH} input={INFER_WIDTH}x{INFER_HEIGHT} device={ready.get('device')} cuda={ready.get('cuda')} box_motion_stabilizer=1 camera_baseline_preserved=1", flush=True)
 
-        ids = [camera.camera_id for camera in self.cameras]
-        groups = [ids[i : i + MICRO_BATCH] for i in range(0, len(ids), MICRO_BATCH)]
+        all_ids = [camera.camera_id for camera in self.cameras]
+
+        configured = [
+            value.strip()
+            for value in os.environ.get(
+                "CAMERA_V2_DETECT_ACTIVE_CAMERAS",
+                "",
+            ).split(",")
+            if value.strip()
+        ]
+
+        if configured:
+            allowed = set(configured)
+            ids = [
+                cid
+                for cid in all_ids
+                if cid in allowed
+            ]
+        else:
+            ids = all_ids
+
+        if not ids:
+            raise RuntimeError(
+                "CAMERA_V2_DETECT_ACTIVE_CAMERAS selected no cameras"
+            )
+
+        print(
+            "CAMERA_DETECT_ACTIVE "
+            f"cameras={ids}",
+            flush=True,
+        )
+
+        groups = [
+            ids[i : i + MICRO_BATCH]
+            for i in range(0, len(ids), MICRO_BATCH)
+        ]
         versions = {cid: 0 for cid in ids}
         group_index = 0
         while not self.det_stop.is_set():
@@ -581,10 +752,55 @@ class CameraDetectionV2(SecureCameraWallV2):
             if result.get("type") != "result":
                 continue
             counts = {}
+            frame_by_camera = {
+                str(cid): frame
+                for cid, frame in zip(group, frames)
+            }
+
             for cid, captured_t in zip(result["cameras"], result["captured"]):
                 dets = self._scaled_detections(result["boxes"].get(cid, []))
                 counts[cid] = len(dets)
+
+                # Keep the latest RAW detector observations separately from
+                # motion-predictor tracks. Coordinates are already scaled to
+                # native camera resolution here.
+                with self.det_lock:
+                    raw_cache = getattr(self, "_raw_detector_boxes", None)
+                    if raw_cache is None:
+                        raw_cache = {}
+                        self._raw_detector_boxes = raw_cache
+
+                    raw_cache[str(cid)] = (
+                        float(captured_t),
+                        list(dets),
+                    )
+
+                if cid == "CAM-01" and len(dets) >= 3:
+                    print(
+                        "CAM01_RAW3 "
+                        + " ".join(
+                            f"box=({b[0][0]:.0f},{b[0][1]:.0f},{b[0][2]:.0f},{b[0][3]:.0f})"
+                            f":conf={b[1]:.3f}"
+                            for b in dets
+                        ),
+                        flush=True,
+                    )
                 self.boxes.update(cid, captured_t, dets)
+
+                frame = frame_by_camera.get(str(cid))
+                if frame is not None:
+                    try:
+                        self._after_motion_tracks_updated(
+                            str(cid),
+                            float(captured_t),
+                            frame,
+                        )
+                    except Exception as exc:
+                        print(
+                            "CAMERA_MOTION_SIDE_PATH "
+                            f"{cid} warning={type(exc).__name__}:{exc}",
+                            flush=True,
+                        )
             batch_ms = float(result.get("batch_ms") or 0.0)
             with self.det_lock:
                 self.det_calls += 1

@@ -76,6 +76,12 @@ class ProductionCoreTests(unittest.TestCase):
 
     def test_repeated_independent_reid_contradictions_rollback(self):
         core = self.core()
+
+        # This test validates rollback, not the production cross-camera
+        # probation policy. Allow confirmation after two strong peer votes
+        # so the test can establish its CONFIRMED precondition.
+        core.daily_cross_camera_votes = 2
+
         self.feed(core, "CAM-01", 1, [A, A2, A3, A], 20.0)
         self.feed(core, "CAM-04", 2, [A, A2, A3, A], 21.5)
         track = core._tracks[("CAM-04", 2)]

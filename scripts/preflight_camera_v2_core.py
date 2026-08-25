@@ -84,16 +84,33 @@ def main() -> int:
         if required not in runtime_source:
             raise RuntimeError(f"Pascal-safe runtime guard missing: {required}")
 
-    for forbidden in (
+    nvdcf_ab_enabled = (
+        os.environ.get("CAMERA_V2_NVDCF_AB", "0")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+    forbidden_dependencies = [
         "nvstreamdemux",
         "pascal_infer_demux",
         "CameraPersonTrackingV2",
         "CameraPersonTrackingFinal",
-        "libnvds_nvmultiobjecttracker",
-        "config_tracker_NvDCF",
-    ):
+    ]
+
+    # Normal Pascal-safe production mode still forbids NvDCF.
+    # Explicit A/B mode may reference the isolated NvDCF branch.
+    if not nvdcf_ab_enabled:
+        forbidden_dependencies.extend([
+            "libnvds_nvmultiobjecttracker",
+            "config_tracker_NvDCF",
+        ])
+
+    for forbidden in forbidden_dependencies:
         if forbidden in runtime_source:
-            raise RuntimeError(f"Pascal-safe runtime leaked forbidden dependency: {forbidden}")
+            raise RuntimeError(
+                f"Pascal-safe runtime leaked forbidden dependency: {forbidden}"
+            )
 
     secure_source = (ROOT / "services/camera_v2/secure.py").read_text(encoding="utf-8")
     for required in (
@@ -110,8 +127,8 @@ def main() -> int:
     for required in (
         "mapped_size",
         "row_stride",
-        "INFER_WIDTH",
-        "INFER_HEIGHT",
+        "ANALYSIS_TILE_WIDTH",
+        "ANALYSIS_TILE_HEIGHT",
         "CAMERA_INFER_LAYOUT",
     ):
         if required not in sample_source:
