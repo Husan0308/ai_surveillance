@@ -127,12 +127,16 @@ def main_preflight() -> int:
         "export CAMERA_V2_RTSP_TRANSPORT=tcp",
         "export CAMERA_V2_RTSP_LATENCY_MS=250",
         "export CAMERA_V2_DETECTOR_BACKEND=onnx-cpu",
-        "export CAMERA_V2_YOLO_MODEL=yolo26s.onnx",
+        "export CAMERA_V2_DETECT_TASK=pose",
+        "export CAMERA_V2_YOLO_MODEL=yolo26s-pose.onnx",
         "export CAMERA_V2_SINGLE_SOURCE_ANALYSIS=1",
-        "export CAMERA_V2_ANALYSIS_TILE_WIDTH=672",
-        "export CAMERA_V2_ANALYSIS_TILE_HEIGHT=384",
+        "export CAMERA_V2_ANALYSIS_TILE_WIDTH=1280",
+        "export CAMERA_V2_ANALYSIS_TILE_HEIGHT=720",
+        "export CAMERA_V2_POSE_INPUT_WIDTH=832",
+        "export CAMERA_V2_POSE_INPUT_HEIGHT=480",
         "rtsp=tcp latency=250ms",
-        "detector=YOLO26s-ONNX-CPU@672x384",
+        "detector=YOLO26s-POSE-ONNX-CPU@832x480",
+        "source=1280x720",
         "detector_path=analysis-tiler(single-source-fastpath)",
         "demux=disabled",
         "ui=camera-only-2x3-click-fullscreen",
@@ -144,7 +148,7 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT wall=6-camera fixed-2x3 click-fullscreen PASS")
     print("SENTINEL_PREFLIGHT native_video=direct-QWidget-xid idempotent-bind PASS")
     print("SENTINEL_PREFLIGHT rtsp=tcp latency=250ms dynamic-pad=late-caps-safe PASS")
-    print("SENTINEL_PREFLIGHT detector=YOLO26s-ONNX-CPU analysis-tiler single-source-fastpath PASS")
+    print("SENTINEL_PREFLIGHT detector=YOLO26s-POSE-ONNX-CPU source=1280x720 analysis-tiler single-source-fastpath PASS")
     print("SENTINEL_PREFLIGHT runtime=pascal-safe motion-predictor display-first PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
