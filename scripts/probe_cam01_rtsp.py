@@ -2,7 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+# When executed as `python scripts/probe_cam01_rtsp.py`, Python puts the scripts/
+# directory (not the repository root) at sys.path[0].  Make the probe runnable
+# exactly as documented without requiring a global PYTHONPATH tweak.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import gi
 
@@ -134,7 +143,7 @@ def main() -> int:
     args = parser.parse_args()
 
     Gst.init(None)
-    settings = load_settings()
+    settings = load_settings(ROOT / "config/cameras.yaml")
     camera = next((c for c in settings.cameras if c.camera_id == args.camera), None)
     if camera is None:
         raise SystemExit(f"camera not found: {args.camera}")
