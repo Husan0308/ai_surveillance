@@ -29,6 +29,29 @@ class CameraPersonTrackingReIDGpu(CameraPersonTrackingReID):
     def __init__(self) -> None:
         super().__init__()
 
+        # detection.py deliberately gates the inference branch before appsink so
+        # only requested frames are converted/copied. A normal GstBaseSink waits
+        # for a preroll buffer during the PAUSED -> PLAYING transition. Because
+        # our inference stream is intentionally sparse, that can leave appsink
+        # waiting for preroll while the scheduler waits for appsink: mailbox=[]
+        # forever. Disable async state changes only on the sparse analysis sinks;
+        # the display sink remains unchanged.
+        sparse_sinks = []
+        for index, _camera in enumerate(self.cameras):
+            sink = self.pipeline.get_by_name(f"detect_sink_{index}")
+            if sink is None:
+                continue
+            self._set_if(sink, "async", False)
+            self._set_if(sink, "sync", False)
+            self._set_if(sink, "qos", False)
+            sparse_sinks.append(index)
+
+        print(
+            "CAMERA_GPU_SPARSE_APPSINK "
+            f"async=0 sync=0 qos=0 sinks={sparse_sinks}",
+            flush=True,
+        )
+
         # The current Pascal/driver combination can return a pose refresh several
         # hundred milliseconds after capture. Do not inject that old coordinate
         # unchanged into the live tracker: project it toward the current frame.
