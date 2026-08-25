@@ -6,6 +6,7 @@ on:
       - 'services/camera_v2/**'
       - 'services/ml_service/app/config.py'
       - 'scripts/run_cam01_trt86_audited.sh'
+      - 'scripts/run_cam01_pose_sticky.sh'
       - 'scripts/restore_cam01_trt86_engine.sh'
       - 'scripts/yolo26_trt86_shm_worker*.py'
       - 'scripts/preflight_cam01_audited_static.py'
@@ -18,6 +19,7 @@ on:
       - 'services/camera_v2/**'
       - 'services/ml_service/app/config.py'
       - 'scripts/run_cam01_trt86_audited.sh'
+      - 'scripts/run_cam01_pose_sticky.sh'
       - 'scripts/restore_cam01_trt86_engine.sh'
       - 'scripts/yolo26_trt86_shm_worker*.py'
       - 'scripts/preflight_cam01_audited_static.py'
@@ -41,6 +43,7 @@ jobs:
       - name: Bash syntax
         run: |
           bash -n scripts/run_cam01_trt86_audited.sh
+          bash -n scripts/run_cam01_pose_sticky.sh
           bash -n scripts/restore_cam01_trt86_engine.sh
 
       - name: Compile canonical Python sources
@@ -55,6 +58,8 @@ jobs:
             services/camera_v2/person_tracking_final.py \
             services/camera_v2/person_tracking_trt86_fresh.py \
             services/camera_v2/person_tracking_trt86_audited.py \
+            services/camera_v2/person_tracking_pose_sticky.py \
+            services/camera_v2/yolo_pose_backend.py \
             services/camera_v2/detector_latency.py \
             services/camera_v2/tracker_profile.py \
             services/camera_v2/native_bridge.py \
