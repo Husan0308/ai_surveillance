@@ -6,20 +6,24 @@ on:
       - 'services/camera_v2/**'
       - 'services/ml_service/app/config.py'
       - 'scripts/run_cam01_trt86_audited.sh'
+      - 'scripts/restore_cam01_trt86_engine.sh'
       - 'scripts/yolo26_trt86_shm_worker*.py'
       - 'scripts/preflight_cam01_audited_static.py'
       - 'config/cameras.yaml'
       - 'requirements-trt86.txt'
+      - '.gitignore'
       - '.github/workflows/camera-v2-audited-static.yml'
   pull_request:
     paths:
       - 'services/camera_v2/**'
       - 'services/ml_service/app/config.py'
       - 'scripts/run_cam01_trt86_audited.sh'
+      - 'scripts/restore_cam01_trt86_engine.sh'
       - 'scripts/yolo26_trt86_shm_worker*.py'
       - 'scripts/preflight_cam01_audited_static.py'
       - 'config/cameras.yaml'
       - 'requirements-trt86.txt'
+      - '.gitignore'
       - '.github/workflows/camera-v2-audited-static.yml'
 
 jobs:
@@ -35,7 +39,9 @@ jobs:
         run: python scripts/preflight_cam01_audited_static.py
 
       - name: Bash syntax
-        run: bash -n scripts/run_cam01_trt86_audited.sh
+        run: |
+          bash -n scripts/run_cam01_trt86_audited.sh
+          bash -n scripts/restore_cam01_trt86_engine.sh
 
       - name: Compile canonical Python sources
         run: |
