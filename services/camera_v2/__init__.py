@@ -1,16 +1,16 @@
-"""Camera V2 production defaults.
+"""Camera V2 audited production defaults.
 
-The hot path remains camera ingest -> YOLO person metadata -> per-camera NvDCF.
-Cross-camera Global ReID is layered on top as a bounded asynchronous side path:
-quality/diversity crop bank -> CPU ReID gallery -> room/time constraints -> optional
-Qwen visual verification -> reversible Global ID state machine. ReID/Qwen never own
-or block the local tracker/display path.
+The active hot path is six-camera DeepStream ingest/display plus CAM-01 YOLO26
+TensorRT detector metadata feeding per-frame NvDCF. ReID/global identity remains a
+later asynchronous layer and must not own or block the local camera/tracker path.
 """
 
 from __future__ import annotations
 
 import os
 
-# Stride-32 detector geometry; keeps configured and actual YOLO input identical.
-os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "704")
+# Canonical TensorRT engine geometry. Launchers may override before import, but a
+# direct `python -m services.camera_v2` must resolve the same shape.
+os.environ.setdefault("CAMERA_V2_DETECT_WIDTH", "672")
 os.environ.setdefault("CAMERA_V2_DETECT_HEIGHT", "384")
+os.environ.setdefault("CAMERA_V2_MICRO_BATCH", "1")
