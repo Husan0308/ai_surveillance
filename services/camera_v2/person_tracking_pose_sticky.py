@@ -13,21 +13,22 @@ import time
 
 from . import tracker_profile as _tracker_profile
 
-# Sparse detector target creation must be immediate. A ~1 Hz pose refresh cannot
-# satisfy a multi-frame tentative probation period on a ~20 FPS video stream.
+# Sparse detector target creation must be immediate. Pose refresh is deliberately
+# slower than the ~20 FPS video stream, so NvDCF must tolerate several detector
+# misses without terminating a valid visual track.
 _tracker_profile._REQUIRED_PATCHES.update(
     {
-        "minDetectorConfidence": "0.05",
-        "minTrackerConfidence": "0.12",
+        "minDetectorConfidence": "0.03",
+        "minTrackerConfidence": "0.08",
         "probationAge": "0",
-        "maxShadowTrackingAge": "50",
+        "maxShadowTrackingAge": "100",
         "earlyTerminationAge": "6",
     }
 )
 _tracker_profile._OPTIONAL_PATCHES.update(
     {
-        "minTrackingConfidenceDuringInactive": "0.08",
-        "tentativeDetectorConfidence": "0.05",
+        "minTrackingConfidenceDuringInactive": "0.05",
+        "tentativeDetectorConfidence": "0.03",
     }
 )
 
@@ -82,9 +83,9 @@ class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
         )
         print(
             "CAMERA_POSE_NVDCF_PROFILE "
-            "probationAge=0 earlyTerminationAge=6 maxShadowTrackingAge=50 "
-            "minDetectorConfidence=0.05 minTrackerConfidence=0.12 "
-            "inactiveOutputConfidence=0.08 outputShadowTracks=1",
+            "probationAge=0 earlyTerminationAge=6 maxShadowTrackingAge=100 "
+            "minDetectorConfidence=0.03 minTrackerConfidence=0.08 "
+            "inactiveOutputConfidence=0.05 outputShadowTracks=1",
             flush=True,
         )
 
@@ -96,8 +97,8 @@ class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
         )
 
         self.empty_confirm_misses = max(
-            2,
-            int(os.environ.get("CAMERA_V2_EMPTY_CONFIRM_MISSES", "3")),
+            3,
+            int(os.environ.get("CAMERA_V2_EMPTY_CONFIRM_MISSES", "5")),
         )
         self._empty_detector_streak = {
             camera.camera_id: 0 for camera in self.cameras
