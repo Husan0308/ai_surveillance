@@ -44,6 +44,22 @@ def load_cudart():
         ctypes.c_int,
     ]
     lib.cudaMemcpy.restype = ctypes.c_int
+
+    lib.cudaDeviceGetStreamPriorityRange.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    lib.cudaDeviceGetStreamPriorityRange.restype = ctypes.c_int
+    lib.cudaStreamCreateWithPriority.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_uint,
+        ctypes.c_int,
+    ]
+    lib.cudaStreamCreateWithPriority.restype = ctypes.c_int
+    lib.cudaStreamSynchronize.argtypes = [ctypes.c_void_p]
+    lib.cudaStreamSynchronize.restype = ctypes.c_int
+    lib.cudaStreamDestroy.argtypes = [ctypes.c_void_p]
+    lib.cudaStreamDestroy.restype = ctypes.c_int
     return lib
 
 
@@ -84,6 +100,35 @@ class Runner:
             raise RuntimeError(f"unexpected input shape={self.input_shape}")
         if self.output_shape != (1, 300, 6):
             raise RuntimeError(f"unexpected output shape={self.output_shape}")
+
+        # Run detector kernels on a dedicated highest-priority non-blocking CUDA
+        # stream. The six-camera EGL/DeepStream wall uses other/default streams;
+        # this gives pending detector kernels preference without reducing display
+        # resolution. CUDA priorities are hints, not hard preemption guarantees.
+        least_priority = ctypes.c_int()
+        greatest_priority = ctypes.c_int()
+        cuda_check(
+            self.cuda.cudaDeviceGetStreamPriorityRange(
+                ctypes.byref(least_priority),
+                ctypes.byref(greatest_priority),
+            ),
+            "cudaDeviceGetStreamPriorityRange",
+        )
+        self.stream = ctypes.c_void_p()
+        CUDA_STREAM_NON_BLOCKING = 1
+        cuda_check(
+            self.cuda.cudaStreamCreateWithPriority(
+                ctypes.byref(self.stream),
+                CUDA_STREAM_NON_BLOCKING,
+                greatest_priority.value,
+            ),
+            "cudaStreamCreateWithPriority",
+        )
+        self.stream_priority = int(greatest_priority.value)
+        self.stream_priority_range = (
+            int(greatest_priority.value),
+            int(least_priority.value),
+        )
 
         # Reuse all host/device buffers for the life of the worker. The fast raw
         # path writes BGR channels directly into this CHW float32 tensor, avoiding
@@ -154,6 +199,8 @@ class Runner:
 
     def infer_preprocessed(self, conf: float):
         started_total = time.perf_counter()
+        # H2D/D2H are tiny compared with the live TRT delay and stream priority
+        # does not affect memcpy scheduling, so keep the copies simple/synchronous.
         cuda_check(
             self.cuda.cudaMemcpy(
                 self.in_dev,
@@ -163,12 +210,19 @@ class Runner:
             ),
             "H2D",
         )
+
         started_trt = time.perf_counter()
-        if not self.context.execute_v2(self.bindings):
-            raise RuntimeError("execute_v2=false")
-        # execute_v2 is synchronous. Do not add cudaDeviceSynchronize here; that
-        # was redundant and extended the measured critical path.
+        if not self.context.execute_async_v2(
+            self.bindings,
+            int(self.stream.value),
+        ):
+            raise RuntimeError("execute_async_v2=false")
+        cuda_check(
+            self.cuda.cudaStreamSynchronize(self.stream),
+            "cudaStreamSynchronize detector",
+        )
         trt_ms = (time.perf_counter() - started_trt) * 1000.0
+
         cuda_check(
             self.cuda.cudaMemcpy(
                 ctypes.c_void_p(self.y.ctypes.data),
@@ -226,6 +280,8 @@ class Runner:
             self.cuda.cudaFree(self.in_dev)
         if self.out_dev.value:
             self.cuda.cudaFree(self.out_dev)
+        if self.stream.value:
+            self.cuda.cudaStreamDestroy(self.stream)
 
 
 def main():
@@ -240,6 +296,8 @@ def main():
         "engine": str(Path(args.engine).resolve()),
         "input_shape": runner.input_shape,
         "output_shape": runner.output_shape,
+        "stream_priority": runner.stream_priority,
+        "stream_priority_range": runner.stream_priority_range,
     })
 
     try:
