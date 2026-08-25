@@ -4,19 +4,21 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-# Keep the current stable DeepStream ingest/display profile. The detector is a
-# sparse side path and must never block the six-camera wall.
-export CAMERA_V2_RTSP_TRANSPORT="${CAMERA_V2_RTSP_TRANSPORT:-tcp}"
-export CAMERA_V2_RTSP_LATENCY_MS="${CAMERA_V2_RTSP_LATENCY_MS:-100}"
-export CAMERA_V2_FRAME_WIDTH="${CAMERA_V2_FRAME_WIDTH:-2560}"
-export CAMERA_V2_FRAME_HEIGHT="${CAMERA_V2_FRAME_HEIGHT:-1440}"
-export CAMERA_V2_WALL_WIDTH="${CAMERA_V2_WALL_WIDTH:-1920}"
-export CAMERA_V2_WALL_HEIGHT="${CAMERA_V2_WALL_HEIGHT:-720}"
+# Stable six-camera DeepStream ingest/display profile.
+export CAMERA_V2_RTSP_TRANSPORT=tcp
+export CAMERA_V2_RTSP_LATENCY_MS=100
+export CAMERA_V2_FRAME_WIDTH=2560
+export CAMERA_V2_FRAME_HEIGHT=1440
+export CAMERA_V2_WALL_WIDTH=1920
+export CAMERA_V2_WALL_HEIGHT=720
 
-# CAM-01 pose capture geometry. Ultralytics keeps aspect ratio and applies its
-# own minimum-rectangle padding for the PyTorch pose model.
-export CAMERA_V2_DETECT_WIDTH=672
-export CAMERA_V2_DETECT_HEIGHT=384
+# Restore the historical pose analysis geometry. Do NOT reuse the 672x384 TRT
+# sidecar capture here: pose/keypoint quality on distant/seated people benefits
+# from retaining the 1280x720 analysis frame before Ultralytics letterboxes to 832.
+# The capture gate is before nvvideoconvert, so this conversion/copy happens only
+# for the requested ~1 Hz detector frame, not for every display frame.
+export CAMERA_V2_DETECT_WIDTH=1280
+export CAMERA_V2_DETECT_HEIGHT=720
 export CAMERA_V2_MICRO_BATCH=1
 export CAMERA_V2_DETECT_ACTIVE_CAMERAS=CAM-01
 export CAMERA_V2_DETECT_CONF=0.05
@@ -24,41 +26,36 @@ export CAMERA_V2_DETECT_IOU=0.80
 export CAMERA_V2_MAX_DET=50
 export CAMERA_V2_DETECT_STARTUP_DELAY=0.5
 
-export CAMERA_V2_POSE_IMGSZ="${CAMERA_V2_POSE_IMGSZ:-832}"
-export CAMERA_V2_POSE_CONF="${CAMERA_V2_POSE_CONF:-0.05}"
-export CAMERA_V2_POSE_IOU="${CAMERA_V2_POSE_IOU:-0.80}"
+export CAMERA_V2_POSE_IMGSZ=832
+export CAMERA_V2_POSE_CONF=0.05
+export CAMERA_V2_POSE_IOU=0.80
 if [[ -f "$ROOT/yolo26s-pose.pt" ]]; then
   export CAMERA_V2_POSE_MODEL="$ROOT/yolo26s-pose.pt"
 else
   unset CAMERA_V2_POSE_MODEL || true
 fi
 
-# GTX 1050 Ti needs ~0.43s for YOLO26s-pose@832 in the current measurements.
-# Do not run that CUDA burst every ~0.6s: NvDCF is specifically responsible for
-# the frames between detections. ~1.2 Hz refresh keeps the tracker corrected while
-# giving NVDEC/tiler/OSD more GPU time and avoiding the 8-12 FPS wall regression.
-export CAMERA_V2_DETECT_TARGET_HZ="${CAMERA_V2_DETECT_TARGET_HZ:-1.2}"
-export CAMERA_V2_DETECT_MIN_HZ="${CAMERA_V2_DETECT_MIN_HZ:-1.0}"
-export CAMERA_V2_DETECT_MAX_HZ="${CAMERA_V2_DETECT_MAX_HZ:-1.4}"
-export CAMERA_V2_MAX_DETECT_RESULT_AGE_MS="${CAMERA_V2_MAX_DETECT_RESULT_AGE_MS:-800}"
-export CAMERA_V2_POSE_MAX_PROJECTION_S="${CAMERA_V2_POSE_MAX_PROJECTION_S:-0.45}"
-export CAMERA_V2_POSE_PROJECTION_GAIN="${CAMERA_V2_POSE_PROJECTION_GAIN:-0.82}"
-export CAMERA_V2_EMPTY_CONFIRM_MISSES="${CAMERA_V2_EMPTY_CONFIRM_MISSES:-3}"
+# GTX 1050 Ti pose refresh. NvDCF owns every frame between these observations.
+# Use deterministic values for the baseline test rather than inheriting stale
+# shell overrides from previous experiments.
+export CAMERA_V2_DETECT_TARGET_HZ=1.0
+export CAMERA_V2_DETECT_MIN_HZ=1.0
+export CAMERA_V2_DETECT_MAX_HZ=1.0
+export CAMERA_V2_MAX_DETECT_RESULT_AGE_MS=800
+export CAMERA_V2_POSE_MAX_PROJECTION_S=0.45
+export CAMERA_V2_POSE_PROJECTION_GAIN=0.82
+export CAMERA_V2_EMPTY_CONFIRM_MISSES=3
 
-# Sticky camera-local NvDCF profile. The pose runtime forces probationAge=0 so
-# one valid detector box immediately becomes an active local track; subsequent
-# detector gaps use shadow tracking instead of tentative-target early termination.
-export CAMERA_V2_TRACKER_WIDTH="${CAMERA_V2_TRACKER_WIDTH:-512}"
-export CAMERA_V2_TRACKER_HEIGHT="${CAMERA_V2_TRACKER_HEIGHT:-288}"
-export CAMERA_V2_MIN_DISPLAY_TRACK_CONF="${CAMERA_V2_MIN_DISPLAY_TRACK_CONF:-0.08}"
+# Sticky local NvDCF. Global ID is deliberately OFF until this path is green.
+export CAMERA_V2_TRACKER_WIDTH=512
+export CAMERA_V2_TRACKER_HEIGHT=288
+export CAMERA_V2_MIN_DISPLAY_TRACK_CONF=0.08
 export CAMERA_V2_TRACK_BOX_SIDE_MARGIN=0.00
 export CAMERA_V2_TRACK_BOX_TOP_MARGIN=0.00
 export CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN=0.00
-export CAMERA_V2_DEDUP_IOU="${CAMERA_V2_DEDUP_IOU:-0.82}"
-export CAMERA_V2_DEDUP_CONTAINMENT="${CAMERA_V2_DEDUP_CONTAINMENT:-0.94}"
+export CAMERA_V2_DEDUP_IOU=0.82
+export CAMERA_V2_DEDUP_CONTAINMENT=0.94
 
-# Detection/tracking baseline only. Global ReID/Qwen comes after this path is
-# proven green.
 export QWEN_REID_ENABLED=0
 unset QWEN_REID_URL QWEN_REID_MODEL QWEN_REID_TIMEOUT_SEC || true
 unset CAMERA_V2_TRT86_ENGINE CAMERA_V2_TRT86_PYTHON CAMERA_V2_TRT86_WORKER CAMERA_V2_TRT86_SHM_WORKER || true
@@ -106,8 +103,8 @@ print(
 PY
 
 printf '%s\n' \
-  "CAM01_POSE_PROFILE detector=YOLO26s-pose imgsz=${CAMERA_V2_POSE_IMGSZ} capture=672x384 conf=${CAMERA_V2_POSE_CONF} iou=${CAMERA_V2_POSE_IOU} active=CAM-01" \
+  "CAM01_POSE_PROFILE detector=YOLO26s-pose imgsz=${CAMERA_V2_POSE_IMGSZ} capture=${CAMERA_V2_DETECT_WIDTH}x${CAMERA_V2_DETECT_HEIGHT} conf=${CAMERA_V2_POSE_CONF} iou=${CAMERA_V2_POSE_IOU} active=CAM-01" \
   "CAM01_POSE_PROFILE tracker=NvDCF@${CAMERA_V2_TRACKER_WIDTH}x${CAMERA_V2_TRACKER_HEIGHT} target=${CAMERA_V2_DETECT_TARGET_HZ}Hz max_result_age=${CAMERA_V2_MAX_DETECT_RESULT_AGE_MS}ms empty_confirm=${CAMERA_V2_EMPTY_CONFIRM_MISSES} probation=0 shadow=50" \
-  "CAM01_POSE_PIPELINE capture=jit-latest no_prefetch=1 pose-validates-person nvdcf-per-frame=1 global-id=off rtsp=${CAMERA_V2_RTSP_TRANSPORT}/${CAMERA_V2_RTSP_LATENCY_MS}ms"
+  "CAM01_POSE_PIPELINE capture=jit-one-shot no_prefetch=1 pose-validates-person nvdcf-per-frame=1 global-id=off rtsp=${CAMERA_V2_RTSP_TRANSPORT}/${CAMERA_V2_RTSP_LATENCY_MS}ms"
 
 exec "$MAIN_PYTHON" -u -m services.camera_v2.person_tracking_pose_sticky
