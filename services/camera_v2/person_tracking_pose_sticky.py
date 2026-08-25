@@ -2,19 +2,40 @@ from __future__ import annotations
 
 """CAM-01 pose-validated detector + sticky per-frame NvDCF tracking.
 
-This restores the visually stable detection path that previously worked well:
-YOLO26s-pose validates a person on sparse fresh frames, while NvDCF owns the
-bbox on every display frame. One weak/occluded pose frame does not kill a live
-track; an empty scene must be confirmed across several detector refreshes.
+YOLO26s-pose refreshes a person on sparse, fresh frames. DeepStream NvDCF owns
+the bbox on every display frame. This runtime is deliberately local-camera only;
+Global ID/ReID is added only after this detection/tracking baseline is proven.
 
-Unlike the historical implementation, detector frames are requested JIT and are
-never prefetched while the previous inference is running, so old mailbox frames
-cannot accumulate latency.
+Important sparse-tracker rule: detector refreshes are much slower than video
+frames, so a new NvDCF target must not spend a multi-frame probation period and
+be early-terminated before the next detector refresh arrives. We therefore make
+pose-seeded targets active immediately (probationAge=0) and let shadow tracking
+own continuity between detector observations.
 """
 
 import os
 import queue as pyqueue
 import time
+
+# Patch only the generated local NvDCF profile used by this runtime. The generic
+# tracker profile remains unchanged for the rollback/known-good branches.
+from . import tracker_profile as _tracker_profile
+
+_tracker_profile._REQUIRED_PATCHES.update(
+    {
+        "minDetectorConfidence": "0.05",
+        "minTrackerConfidence": "0.12",
+        "probationAge": "0",
+        "maxShadowTrackingAge": "50",
+        "earlyTerminationAge": "6",
+    }
+)
+_tracker_profile._OPTIONAL_PATCHES.update(
+    {
+        "minTrackingConfidenceDuringInactive": "0.08",
+        "tentativeDetectorConfidence": "0.05",
+    }
+)
 
 from .yolo_pose_backend import install as _install_pose_backend
 
@@ -45,6 +66,13 @@ class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
         print(
             "CAMERA_POSE_SPARSE_APPSINK "
             f"async=0 sync=0 qos=0 sinks={sparse_sinks}",
+            flush=True,
+        )
+        print(
+            "CAMERA_POSE_NVDCF_PROFILE "
+            "probationAge=0 earlyTerminationAge=6 maxShadowTrackingAge=50 "
+            "minDetectorConfidence=0.05 minTrackerConfidence=0.12 "
+            "inactiveOutputConfidence=0.08 outputShadowTracks=1",
             flush=True,
         )
 
@@ -236,8 +264,6 @@ class CameraPersonTrackingPoseSticky(CameraPersonTrackingFinal):
                 self.det_error = ""
                 target_hz = self.detector_target_hz
 
-            # target_hz is per camera. With N micro-batch groups, each call must
-            # occur N times as often to service every active camera fairly.
             desired_call_interval = 1.0 / max(
                 0.1, target_hz * len(groups)
             )
