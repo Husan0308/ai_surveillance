@@ -29,13 +29,16 @@ from .person_tracking_pose_sticky import CameraPersonTrackingPoseSticky
 
 
 # Values that MUST exist in the exact final YAML consumed by nvtracker.
+# At ~20 FPS, maxShadowTrackingAge=100 gives NvDCF roughly five seconds to
+# survive pose false-negatives while still allowing genuinely departed targets
+# to expire without creating very long-lived ghost boxes.
 _REQUIRED_EFFECTIVE: dict[str, str] = {
-    "minDetectorConfidence": "0.05",
+    "minDetectorConfidence": "0.03",
     "minTrackerConfidence": "0.08",
     "probationAge": "0",
-    "maxShadowTrackingAge": "50",
+    "maxShadowTrackingAge": "100",
     "earlyTerminationAge": "6",
-    "tentativeDetectorConfidence": "0.05",
+    "tentativeDetectorConfidence": "0.03",
     "outputShadowTracks": "1",
 }
 
