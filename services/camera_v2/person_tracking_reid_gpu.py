@@ -2,9 +2,10 @@ from __future__ import annotations
 
 """CAM-01 production test runtime: GPU pose detector + NvDCF + ReID.
 
-This intentionally restores the late-August CAM-01 behaviour where the detector
-only refreshes NvDCF and NvDCF owns the bbox on every video frame.  A brief
-missed detector observation therefore does not make the visible box disappear.
+The detector only refreshes NvDCF. NvDCF owns the bbox on every live video frame,
+so a short detector miss or a slow pose inference does not make the visible box
+blink off. This mirrors the stable CAM-01 behaviour used during yesterday's
+single-camera tuning.
 """
 
 import os
@@ -24,6 +25,16 @@ from .person_tracking_reid import CameraPersonTrackingReID
 
 class CameraPersonTrackingReIDGpu(CameraPersonTrackingReID):
     """GPU YOLO26s-pose detections feeding sticky camera-local NvDCF tracks."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        # The current Pascal/driver combination can return a pose refresh several
+        # hundred milliseconds after capture. Do not inject that old coordinate
+        # unchanged into the live tracker: project it toward the current frame.
+        # NvDCF still remains authoritative between detector observations.
+        self.latency_compensator.max_projection_s = 0.45
+        self.latency_compensator.projection_gain = 0.82
 
     def _active_detector_ids(self) -> list[str]:
         configured = [
@@ -84,6 +95,7 @@ class CameraPersonTrackingReIDGpu(CameraPersonTrackingReID):
         versions = {cid: 0 for cid in active_ids}
         group_index = 0
         prefetched_group: tuple[str, ...] | None = None
+        consecutive_capture_timeouts = 0
 
         while not self.det_stop.is_set():
             cycle_started = time.monotonic()
@@ -98,11 +110,21 @@ class CameraPersonTrackingReIDGpu(CameraPersonTrackingReID):
             prefetched_group = None
             if rows is None:
                 self._clear_requests()
+                consecutive_capture_timeouts += 1
                 with self.det_lock:
                     self.capture_timeouts += 1
+                if consecutive_capture_timeouts in {3, 10, 30}:
+                    print(
+                        "CAMERA_GPU_CAPTURE_WAIT "
+                        f"group={group} consecutive={consecutive_capture_timeouts} "
+                        f"mailbox={sorted(self.mailbox.rows)} "
+                        "hint=inference-appsink-not-delivering",
+                        flush=True,
+                    )
                 self.det_stop.wait(0.025)
                 continue
 
+            consecutive_capture_timeouts = 0
             frames = []
             captured = []
             for cid, row in zip(group, rows):
