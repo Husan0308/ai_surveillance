@@ -1,173 +1,135 @@
-# AI Surveillance V2 — GPU-First Clean Rebuild
+# AI Surveillance V2 — Audited Camera Pipeline
 
-Branch: `rebuild/gpu-v2-clean`
+Branch: `cleanup/camera-v2-audited-20260825`
 
-## Non-negotiable goals
+## Current milestone
 
-1. Six RTSP cameras remain visually smooth before any AI is enabled.
-2. Camera display stays GPU-native: no JPEG, MJPEG, Qt frame copies, NumPy copies, mmap, or Python per-frame drawing in the display hot path.
-3. One RTSP connection and one hardware decode session per camera.
-4. A slow/reconnecting camera must not freeze the other five.
-5. AI is a side path. It is never allowed to block camera ingest or display.
-6. We add exactly one capability at a time and keep a measured rollback baseline.
+Prove one bounded production hot path before adding more AI:
 
-## Phase 0 — Environment and camera truth
+1. six RTSP streams decode and render continuously;
+2. CAM-01 is sampled just-in-time without creating a detector backlog;
+3. YOLO26 TensorRT 8.6.1 returns a fresh person detection;
+4. that detection is attached as DeepStream object metadata before NvDCF;
+5. NvDCF owns per-frame local tracking between detector refreshes;
+6. tiler/OSD/display remain independent from detector inference latency.
 
-Before building the pipeline, collect facts instead of assuming them:
+Cross-camera ReID/global identity, API and frontend are later layers. They remain in
+the repository but are not part of this acceptance test.
 
-- installed DeepStream/GStreamer plugin versions;
-- GPU name, compute capability, driver and CUDA runtime;
-- each camera's real codec, width, height, PTS cadence and FPS;
-- RTSP TCP vs UDP stability;
-- packet/jitter/drop statistics;
-- whether the display session is X11 or Wayland;
-- whether EGL/OpenGL rendering is really using NVIDIA.
-
-The application config must not pretend a camera is 25/30 FPS if the RTSP stream actually sends 20 FPS.
-
-## Phase 1 — Golden camera-only GPU wall
-
-Canonical pipeline:
+## Canonical graph
 
 ```text
-CAM-01 nvurisrcbin/NVDEC -> queue(max=1, leaky) -> nvstreammux sink_0
-CAM-02 nvurisrcbin/NVDEC -> queue(max=1, leaky) -> nvstreammux sink_1
-CAM-03 nvurisrcbin/NVDEC -> queue(max=1, leaky) -> nvstreammux sink_2
-CAM-04 nvurisrcbin/NVDEC -> queue(max=1, leaky) -> nvstreammux sink_3
-CAM-05 nvurisrcbin/NVDEC -> queue(max=1, leaky) -> nvstreammux sink_4
-CAM-06 nvurisrcbin/NVDEC -> queue(max=1, leaky) -> nvstreammux sink_5
-                                                   |
-                                                   v
-                                          nvmultistreamtiler
-                                                   |
-                                                   v
-                                            queue(max=1)
-                                                   |
-                                                   v
-                                           nveglglessink
+RTSP CAM-01..CAM-06
+    |
+    v
+nvurisrcbin / NVDEC -> NVMM NV12
+    |
+    v
+per-camera tee
+    |\
+    | \-- CAM-01 detector side path only when requested
+    |       queue(max=1, leaky)
+    |       -> JIT gate
+    |       -> nvvideoconvert
+    |       -> 672x384 BGRx letterbox surface
+    |       -> appsink(max-buffers=1, drop=true, async=false, sync=false)
+    |       -> shared memory
+    |       -> isolated TensorRT 8.6.1 process
+    |       -> YOLO26 E2E output (1,300,6)
+    |       -> fresh person result
+    |
+    \-- display path
+            queue(max=1, leaky)
+            -> nvstreammux(batch-size=6, live-source=true)
+            -> attach detector NvDsObjectMeta at mux.src
+            -> nvtracker / NvDCF (512x288)
+            -> nvmultistreamtiler
+            -> final queue(max=1, leaky)
+            -> nvvideoconvert / RGBA NVMM
+            -> nvdsosd
+            -> nveglglessink
 ```
 
-Rules:
+The critical invariant is detector metadata **before** `nvtracker` and tracking
+**before** `nvmultistreamtiler`. The audited runtime validates the static links at
+startup and prints `CAMERA_PIPELINE_AUDIT status=OK` only when this topology is
+present.
 
-- `nvurisrcbin` owns RTSP negotiation, reconnect and NVDEC.
-- `drop-on-latency=true`.
-- `low-latency-mode=true` only when the bitstream structure is compatible.
-- `nvstreammux.batch-size=6`.
-- `live-source=true`.
-- mux width/height match the actual input resolution so there is no accidental extra scaling.
-- `batched-push-timeout` is derived from measured source FPS, not guessed.
-- `sync-inputs=false` for the first low-latency baseline so one source cannot block all cameras.
-- output wall defaults to `1920x720` for a 3x2 wall; do not render an unnecessary `3840x1440` wall on a 1050 Ti.
-- final queue is latest-only.
-- sink starts with `sync=false`, `qos=false` for the low-latency baseline.
+## Real-time rules
 
-Acceptance criteria for Phase 1:
+- one RTSP connection and one hardware decode session per camera;
+- TCP RTSP for deterministic NVR transport during stabilization;
+- all hot-path queues are bounded/latest-only;
+- detector frame capture happens immediately before inference, never prefetched
+  during the previous inference/sleep interval;
+- detector work is a side path and cannot block the six-camera display branch;
+- TensorRT runs in an isolated Python environment/process;
+- shared memory is used instead of JPEG/base64 IPC;
+- stale detector results are rejected before tracker injection;
+- NvDCF, not a Python predictor, owns temporal bbox propagation;
+- no ReID, face recognition, Qwen or heatmap is enabled until this milestone passes.
 
-- all six sources stay within roughly one frame of their measured RTSP cadence;
-- queue depth stays 0/1;
-- no `A lot of buffers are being dropped` warnings;
-- no monotonic growth in latency;
-- one camera disconnect does not freeze the remaining five;
-- visually smooth motion is confirmed locally, not only through AnyDesk;
-- camera-only baseline runs for at least 15 minutes before AI is added.
+## Geometry contracts
 
-## Phase 2 — YOLO26m person detection side path
+- detector tensor: `672x384`, batch 1, FP32 TensorRT 8.6.1 engine;
+- camera content keeps aspect ratio and is centered in the fixed tensor surface;
+- detector coordinates are un-letterboxed and mapped to nvstreammux geometry
+  before metadata injection;
+- NvDCF surface: `512x288`; both dimensions are multiples of 32;
+- tiler operates only after tracker metadata has been produced.
 
-Do not put PyTorch in series with the display pipeline.
+## Freshness contract
 
-Per camera:
+The scheduler opens the CAM-01 gate only when it is ready to consume a frame. A
+healthy run should show:
 
 ```text
-NVDEC -> tee
-  |       \
-  |        -> inference gate -> resize/convert only on demand -> appsink
-  |
-  -> display queue -> nvstreammux -> tiler -> EGL
+calls > 0
+inputs > 0
+timeouts = 0
+stale_results = 0
+result_age < max_result_age
 ```
 
-The inference gate drops frames BEFORE expensive color conversion / host copy. Only a requested detector frame is converted.
+The current debugging floor for detector result age is 350 ms. It is not a target
+latency; normal fresh results should stay much closer to TensorRT inference time.
 
-### GTX 1050 Ti policy
+## End-to-end acceptance
 
-Smoothness is more important than maximum detector throughput.
-
-Do not assume `batch=6` is optimal. A single large YOLO26m batch can create a long CUDA burst that visibly stalls graphics on Pascal even when average GPU utilization is low.
-
-Benchmark in this order:
-
-1. micro-batch=2;
-2. micro-batch=3;
-3. batch=6 only if camera smoothness remains identical to Phase 1.
-
-All six cameras are still serviced fairly using round-robin scheduling. The detector consumes the latest frame only; stale work is discarded.
-
-Initial inference profile:
-
-- model: YOLO26m;
-- class: person only;
-- input: start around 448x256 or 512x288;
-- detector cadence: start low and increase only while camera metrics stay healthy;
-- `torch.inference_mode()`;
-- no FP16 assumption on GTX 1050 Ti until measured;
-- no TensorRT 10 path on SM 6.1;
-- PyTorch worker isolated from GStreamer control threads.
-
-Acceptance criteria for Phase 2:
-
-- camera FPS/latency stays effectively equal to Phase 1;
-- detector never creates queue backlog;
-- no stale inference queue;
-- zero inference errors;
-- person count results are correct before any bbox overlay is added.
-
-## Phase 2.1 — Visible bbox only
-
-Only after detection is stable:
-
-- add object metadata / OSD;
-- do not use Python/Cairo drawing in the per-frame display path;
-- prefer DeepStream metadata + `nvdsosd` if available and verified;
-- keep OSD removable with one config flag so its cost can be measured independently.
-
-Acceptance criteria:
-
-- boxes visible;
-- no display FPS regression;
-- no sink late-drop warnings.
-
-## Later phases — not implemented until camera+detection is green
-
-1. local tracker;
-2. cross-camera ReID;
-3. face recognition;
-4. camera-space heatmap;
-5. API/database;
-6. final UI.
-
-Each stage is a sidecar or metadata stage and must be benchmarked against the previous golden baseline.
-
-## Observability built in from day one
-
-Every five seconds print:
+With a clearly visible person in CAM-01, the path is accepted only when all of the
+following are observed in the same run:
 
 ```text
-CAM-01 src_fps pts_interval queue reconnects
-...
-CAM-06 src_fps pts_interval queue reconnects
-WALL rendered_fps warnings
-DETECT batches/s inputs/s batch_ms frame_age_ms queue_depth errors
-GPU util memory decoder_util
+CAMERA_PIPELINE_AUDIT status=OK
+boxes > 0
+meta_boxes > 0
+detector_injected > 0
+tracked_now > 0
+stale_results = 0
+timeouts = 0
 ```
 
-Also support:
+Only after this passes should ReID/global identity be enabled.
+
+## Canonical entrypoints
 
 ```bash
-NVDS_ENABLE_LATENCY_MEASUREMENT=1
-NVDS_ENABLE_COMPONENT_LATENCY_MEASUREMENT=1
+python3 scripts/preflight_cam01_audited_static.py
+bash -n scripts/run_cam01_trt86_audited.sh
+bash scripts/run_cam01_trt86_audited.sh
 ```
 
-No optimization is accepted without before/after numbers.
+`python -m services.camera_v2` is kept aligned with the audited runtime as a
+secondary entrypoint; the shell launcher remains canonical because it establishes
+the TensorRT 8.6 environment and runtime profile explicitly.
 
-## Repository rule
+## Repository policy
 
-The old `main` implementation is kept as reference only. New V2 code lives separately and does not import old experimental `core_v1` camera/detection modules. When V2 Phase 1 and Phase 2 pass their acceptance tests, they can replace the old runtime deliberately.
+Historical stage-by-stage camera experiments, RF-DETR experiments, old pose/ONNX
+alternatives, duplicate CAM-01 launchers, legacy Camera-V2 Sentinel UI and obsolete
+heatmap/custom-tracker paths are not kept on the cleanup branch. The branch
+`fix/cam01-trt86-e2e-20260825` remains the rollback reference.
+
+Future ReID/global identity code, `services/api_service`, `services/ml_service` and
+`services/frontend` are intentionally retained because they belong to the next
+milestones rather than the discarded camera-pipeline experiments.
