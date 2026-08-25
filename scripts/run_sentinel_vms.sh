@@ -28,13 +28,13 @@ export CAMERA_V2_WALL_HEIGHT=1080
 
 # CAM-01 production detector: restore the pose/keypoint-based person validation
 # that gave the best occlusion/seated-person results, but execute the exported
-# fixed-shape model through ONNX Runtime on CPU.  GPU remains reserved for
+# fixed-shape model through ONNX Runtime on CPU. GPU remains reserved for
 # NVDEC/display/ReID instead of PyTorch detector kernels.
 export CAMERA_V2_DETECTOR_BACKEND=onnx-cpu
 export CAMERA_V2_DETECT_TASK=pose
 export CAMERA_V2_YOLO_MODEL=yolo26s-pose.onnx
-export CAMERA_V2_DETECT_WIDTH=672
-export CAMERA_V2_DETECT_HEIGHT=384
+export CAMERA_V2_DETECT_WIDTH=832
+export CAMERA_V2_DETECT_HEIGHT=480
 export CAMERA_V2_DETECT_CONF=0.10
 export CAMERA_V2_DETECT_IOU=0.80
 export CAMERA_V2_MAX_DET=50
@@ -55,7 +55,7 @@ export CAMERA_V2_POSE_CONF=0.10
 export CAMERA_V2_POSE_IOU=0.80
 
 # ~80-105 ms CPU pose inference at 22-32% duty gives roughly 2.2-3.5 fresh
-# detector updates/sec while the motion tracker fills the gaps.  Keep this
+# detector updates/sec while the motion tracker fills the gaps. Keep this
 # independent of camera-wall GPU occupancy.
 export CAMERA_V2_DETECT_GPU_DUTY=0.28
 export CAMERA_V2_DETECT_GPU_DUTY_MIN=0.22
