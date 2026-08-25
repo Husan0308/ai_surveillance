@@ -91,9 +91,8 @@ def _run_backend(
         from gi.repository import Gst, GstVideo
 
         # pascal_safe_pipeline imports yolo_pose_backend for the historical pose
-        # experiment. Save the real bbox detector before that import so production
-        # can explicitly select the lighter YOLO worker instead of being silently
-        # monkey-patched to a pose model.
+        # experiment. Save the real bbox detector before that import, then make
+        # the requested backend authoritative after the import has completed.
         from . import detection as detection_module
 
         base_yolo_worker = detection_module._yolo_worker
@@ -101,13 +100,17 @@ def _run_backend(
 
         detector_backend = os.environ.get(
             "CAMERA_V2_DETECTOR_BACKEND",
-            "yolo",
+            "onnx-cpu",
         ).strip().lower()
         if detector_backend == "yolo":
             detection_module._yolo_worker = base_yolo_worker
+        elif detector_backend == "onnx-cpu":
+            from .yolo_onnx_cpu_backend import install as install_onnx_cpu
+
+            install_onnx_cpu()
         elif detector_backend != "pose":
             raise RuntimeError(
-                "CAMERA_V2_DETECTOR_BACKEND must be 'yolo' or 'pose', "
+                "CAMERA_V2_DETECTOR_BACKEND must be 'onnx-cpu', 'yolo' or 'pose', "
                 f"got {detector_backend!r}"
             )
 
@@ -153,7 +156,7 @@ def _run_backend(
 
         model_name = os.environ.get(
             "CAMERA_V2_YOLO_MODEL",
-            "yolo26m.pt",
+            "yolo26s.onnx",
         )
         print(
             "CAMERA_DETECTOR_POLICY "
