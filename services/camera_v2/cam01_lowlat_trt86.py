@@ -21,13 +21,7 @@ FRAME_BYTES = int(np.prod(FRAME_SHAPE))
 
 
 def _trt86_worker(job_q, result_q) -> None:
-    """Persistent TensorRT 8.6 sidecar adapter for detection.py's worker contract.
-
-    V1 sent every 672x384 frame as ~1 MB of base64 JSON through a text pipe.
-    That defeated much of TensorRT's kernel speed. V2 keeps one fixed shared-memory
-    slot and sends only a tiny JSON control message. There is still exactly one
-    in-flight frame, so the slot cannot be overwritten before the worker replies.
-    """
+    """Persistent TensorRT 8.6 sidecar adapter for detection.py's worker contract."""
 
     proc = None
     shm = None
@@ -190,9 +184,6 @@ def _trt86_worker(job_q, result_q) -> None:
                 pass
 
 
-# CameraDetectionV2.run resolves this module global when Process(target=...) is
-# created. Replace only the detector worker; V5 capture/NvDCF/ReID behavior stays
-# unchanged.
 base._det._yolo_worker = _trt86_worker
 
 
@@ -201,16 +192,17 @@ class Cam01LowLatencyTRT86(base.Cam01LowLatencyReID):
 
 
 def _force_trt_runtime_profile() -> None:
-    # 4 Hz is enough to correct NvDCF while preserving GPU headroom for the wall.
-    os.environ["CAMERA_V2_DETECT_TARGET_HZ"] = "4.0"
-    os.environ["CAMERA_V2_DETECT_MIN_HZ"] = "3.5"
-    os.environ["CAMERA_V2_DETECT_MAX_HZ"] = "4.5"
-    os.environ["CAMERA_V2_DETECT_GPU_DUTY"] = "0.28"
-    os.environ["CAMERA_V2_DETECT_GPU_DUTY_MIN"] = "0.22"
-    os.environ["CAMERA_V2_DETECT_GPU_DUTY_MAX"] = "0.34"
-    # Keep a strict freshness budget. Shared-memory transport should bring normal
-    # results below this; if not, the breakdown log tells us whether TRT or IPC is
-    # the remaining bottleneck instead of hiding it with a huge stale threshold.
+    # NvDCF is explicitly responsible for the frames between detector refreshes.
+    # 3 Hz gives the six-stream wall enough GPU recovery time that TensorRT does
+    # not execute under a permanently backlogged graphics/tracker workload.
+    os.environ["CAMERA_V2_DETECT_TARGET_HZ"] = "3.0"
+    os.environ["CAMERA_V2_DETECT_MIN_HZ"] = "2.7"
+    os.environ["CAMERA_V2_DETECT_MAX_HZ"] = "3.3"
+    os.environ["CAMERA_V2_DETECT_GPU_DUTY"] = "0.26"
+    os.environ["CAMERA_V2_DETECT_GPU_DUTY_MIN"] = "0.20"
+    os.environ["CAMERA_V2_DETECT_GPU_DUTY_MAX"] = "0.32"
+    # Keep the freshness gate strict. The goal of this revision is to lower the
+    # actual TRT compute time, not to legitimize stale detector boxes.
     os.environ["CAMERA_V2_MAX_DETECT_RESULT_AGE_MS"] = "160"
 
 
@@ -250,13 +242,15 @@ def main() -> int:
     print(
         "CAM01_TRT86_PROFILE "
         f"engine={ENGINE.name} input=672x384/b1/fp32 active=CAM-01 "
-        "capture=postconvert-buffer-probe-latest target=4.0Hz "
-        "max_result_age=160ms rtsp=50ms tracker=512x288 qwen=0",
+        "capture=postconvert-buffer-probe-latest target=3.0Hz "
+        "max_result_age=160ms rtsp=50ms frame=640x360 "
+        "tracker=384x224 qwen=0",
         flush=True,
     )
     print(
         "CAM01_TRT86_PIPELINE backend=trt86-sidecar-shm-bgr "
-        "base64=0 jpeg=0 prefetch=0 queue_depth=1 nvdcf=per-frame",
+        "base64=0 jpeg=0 prefetch=0 queue_depth=1 nvdcf=per-frame "
+        "wall_tiles=native-640x360",
         flush=True,
     )
     return runtime.run()
