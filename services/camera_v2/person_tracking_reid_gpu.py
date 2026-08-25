@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+"""CAM-01 production test runtime: GPU pose detector + NvDCF + ReID.
+
+This intentionally restores the late-August CAM-01 behaviour where the detector
+only refreshes NvDCF and NvDCF owns the bbox on every video frame.  A brief
+missed detector observation therefore does not make the visible box disappear.
+"""
+
+import os
+import queue as pyqueue
+import time
+
+# Install the old pose/keypoint detector before importing the NvDCF/ReID stack.
+# The install function replaces detection._yolo_worker, which is the spawn target
+# CameraDetectionV2 uses for the asynchronous detector process.
+from .yolo_pose_backend import install as _install_pose_backend
+
+_install_pose_backend()
+
+from .detection import INFER_HEIGHT, INFER_WIDTH, MICRO_BATCH
+from .person_tracking_reid import CameraPersonTrackingReID
+
+
+class CameraPersonTrackingReIDGpu(CameraPersonTrackingReID):
+    """GPU YOLO26s-pose detections feeding sticky camera-local NvDCF tracks."""
+
+    def _active_detector_ids(self) -> list[str]:
+        configured = [
+            value.strip()
+            for value in os.environ.get(
+                "CAMERA_V2_DETECT_ACTIVE_CAMERAS",
+                "",
+            ).split(",")
+            if value.strip()
+        ]
+        all_ids = [camera.camera_id for camera in self.cameras]
+        if not configured:
+            return all_ids
+        allowed = set(configured)
+        ids = [cid for cid in all_ids if cid in allowed]
+        if not ids:
+            raise RuntimeError(
+                "CAMERA_V2_DETECT_ACTIVE_CAMERAS selected no configured cameras"
+            )
+        return ids
+
+    def _scheduler(self) -> None:
+        assert self.result_q is not None and self.job_q is not None
+        try:
+            ready = self.result_q.get(timeout=40.0)
+        except pyqueue.Empty:
+            with self.det_lock:
+                self.det_error = "YOLO pose worker startup timeout"
+            return
+
+        if ready.get("type") != "ready":
+            with self.det_lock:
+                self.det_error = ready.get("error", "YOLO pose worker failed")
+            return
+
+        active_ids = self._active_detector_ids()
+        with self.det_lock:
+            self.det_ready = True
+
+        print(
+            "CAMERA_GPU_NVDCF ready: "
+            f"backend={ready.get('backend', 'YOLO26s-pose')} "
+            f"model={ready.get('model')} "
+            f"active={active_ids} input={INFER_WIDTH}x{INFER_HEIGHT} "
+            f"pose_imgsz={ready.get('imgsz')} conf={ready.get('threshold')} "
+            f"target={self.detector_target_hz:.1f}Hz/cam "
+            f"tracker={self.tracker_width}x{self.tracker_height} "
+            f"max_result_age={self.max_detector_result_age_ms:.0f}ms "
+            f"device={ready.get('device')} cuda={ready.get('cuda')} "
+            "policy=detector-refreshes-nvdcf nvdcf-per-frame=1 shadow-hold=1",
+            flush=True,
+        )
+
+        groups = [
+            active_ids[i : i + MICRO_BATCH]
+            for i in range(0, len(active_ids), MICRO_BATCH)
+        ]
+        versions = {cid: 0 for cid in active_ids}
+        group_index = 0
+        prefetched_group: tuple[str, ...] | None = None
+
+        while not self.det_stop.is_set():
+            cycle_started = time.monotonic()
+            group = groups[group_index % len(groups)]
+            group_index += 1
+            group_key = tuple(group)
+
+            if prefetched_group != group_key:
+                self._request_group(group)
+
+            rows = self.mailbox.wait_group(group, versions, timeout=0.8)
+            prefetched_group = None
+            if rows is None:
+                self._clear_requests()
+                with self.det_lock:
+                    self.capture_timeouts += 1
+                self.det_stop.wait(0.025)
+                continue
+
+            frames = []
+            captured = []
+            for cid, row in zip(group, rows):
+                version, captured_t, frame = row
+                versions[cid] = version
+                captured.append(captured_t)
+                frames.append(frame)
+            self._clear_requests()
+
+            next_group = groups[group_index % len(groups)]
+            self._request_group(next_group)
+            prefetched_group = tuple(next_group)
+
+            try:
+                self.job_q.put(
+                    {
+                        "cameras": group,
+                        "frames": frames,
+                        "captured": captured,
+                    },
+                    timeout=0.3,
+                )
+                result = self.result_q.get(timeout=5.0)
+            except pyqueue.Empty:
+                with self.det_lock:
+                    self.det_error = "YOLO pose result timeout"
+                self.det_stop.wait(0.05)
+                continue
+
+            if result.get("type") == "fatal":
+                with self.det_lock:
+                    self.det_error = result.get("error", "YOLO pose fatal error")
+                return
+            if result.get("type") == "batch_error":
+                with self.det_lock:
+                    self.det_error = result.get("error", "YOLO pose batch error")
+                self.det_stop.wait(0.10)
+                continue
+            if result.get("type") != "result":
+                continue
+
+            completed_t = time.monotonic()
+            counts: dict[str, int] = {}
+            ages_ms: list[float] = []
+
+            for cid, captured_t in zip(result["cameras"], result["captured"]):
+                detections = self._dedup_and_expand(
+                    result["boxes"].get(cid, [])
+                )
+                prepared = self.latency_compensator.prepare(
+                    cid,
+                    captured_t,
+                    detections,
+                )
+                self._publish_prepared(cid, captured_t, prepared)
+                counts[cid] = len(detections)
+                ages_ms.append(
+                    max(0.0, (completed_t - captured_t) * 1000.0)
+                )
+                self.detector_times[cid].append(completed_t)
+
+            batch_ms = float(result.get("batch_ms") or 0.0)
+            with self.det_lock:
+                self.det_calls += 1
+                self.det_inputs += len(group)
+                self.det_batch_ms = batch_ms
+                self.det_counts.update(counts)
+                if ages_ms:
+                    self.detector_result_age_ms = max(ages_ms)
+                self.det_error = ""
+                target_hz = self.detector_target_hz
+
+            desired_call_interval = 1.0 / max(
+                0.1,
+                target_hz * len(groups),
+            )
+            elapsed = time.monotonic() - cycle_started
+            idle = max(
+                self.detector_min_idle,
+                desired_call_interval - elapsed,
+            )
+            self.det_stop.wait(min(0.25, idle))
+
+
+def main() -> int:
+    return CameraPersonTrackingReIDGpu().run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
