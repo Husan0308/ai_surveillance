@@ -1,8 +1,8 @@
-"""Pose-validated YOLO26 person detector for the Camera V2 sticky tracking path.
+"""YOLO26s-pose detector backend for Camera V2 sticky tracking.
 
-The pose model is used only as a detector/validator. It returns ordinary person
-bounding boxes to CameraPersonTrackingFinal; DeepStream NvDCF remains the owner
-of temporal tracking between sparse detector refreshes.
+Pose is used only to validate person detections. NvDCF remains the temporal
+tracker. The validator is intentionally tolerant of seated, bent and partially
+occluded people while still requiring body-keypoint evidence for weak boxes.
 """
 
 from __future__ import annotations
@@ -15,8 +15,9 @@ from pathlib import Path
 import numpy as np
 
 DEFAULT_IMGSZ = 832
-DEFAULT_CONF = 0.10
+DEFAULT_CONF = 0.05
 DEFAULT_IOU = 0.80
+_DIAG_CALLS = 0
 
 
 def _overlap(a, b) -> tuple[float, float]:
@@ -37,13 +38,23 @@ def _overlap(a, b) -> tuple[float, float]:
 
 def _rows_from_result(result, max_det: int = 300):
     """Convert one Ultralytics pose Result to validated person bbox rows."""
+    global _DIAG_CALLS
+    _DIAG_CALLS += 1
+
     if result.boxes is None or result.keypoints is None:
+        if _DIAG_CALLS <= 3 or _DIAG_CALLS % 10 == 0:
+            print(
+                f"CAMERA_POSE_DIAG n={_DIAG_CALLS} raw=0 kept=0 reason=no_boxes_or_keypoints",
+                flush=True,
+            )
         return []
 
     boxes = result.boxes.xyxy.detach().cpu().numpy()
     confs = result.boxes.conf.detach().cpu().numpy()
     kpts = result.keypoints.data.detach().cpu().numpy()
     candidates = []
+    max_usable = 0
+    max_strong = 0
 
     for box, conf, kp in zip(boxes, confs, kpts):
         if kp.ndim != 2 or kp.shape[1] < 3:
@@ -51,12 +62,20 @@ def _rows_from_result(result, max_det: int = 300):
         kp_conf = kp[:, 2]
         strong = int((kp_conf >= 0.50).sum())
         usable = int((kp_conf >= 0.25).sum())
+        max_usable = max(max_usable, usable)
+        max_strong = max(max_strong, strong)
         conf = float(conf)
 
-        if conf < 0.20:
+        # Tiered pose evidence. Very weak boxes still need a convincing skeleton,
+        # but medium/high-confidence person boxes are not discarded just because
+        # legs/arms are hidden by a desk, chair or another person.
+        if conf < 0.08:
             if usable < 4 or strong < 2:
                 continue
-        elif usable < 2:
+        elif conf < 0.20:
+            if usable < 2 or strong < 1:
+                continue
+        elif usable < 1:
             continue
 
         x1, y1, x2, y2 = map(float, box)
@@ -70,6 +89,7 @@ def _rows_from_result(result, max_det: int = 300):
             }
         )
 
+    # Two real people may overlap. Suppress only near-identical pose duplicates.
     candidates.sort(key=lambda row: row["quality"], reverse=True)
     kept = []
     for cand in candidates:
@@ -95,6 +115,21 @@ def _rows_from_result(result, max_det: int = 300):
             kept.append(cand)
         if len(kept) >= max_det:
             break
+
+    raw_count = int(len(confs))
+    raw_max = float(np.max(confs)) if raw_count else 0.0
+    if (
+        _DIAG_CALLS <= 3
+        or _DIAG_CALLS % 10 == 0
+        or (raw_count > 0 and not kept)
+        or kept
+    ):
+        print(
+            "CAMERA_POSE_DIAG "
+            f"n={_DIAG_CALLS} raw={raw_count} kept={len(kept)} "
+            f"raw_max={raw_max:.3f} max_usable={max_usable} max_strong={max_strong}",
+            flush=True,
+        )
 
     return [(row["box"], row["conf"]) for row in kept]
 
@@ -142,8 +177,6 @@ def yolo_pose_worker(job_q, result_q) -> None:
         elif local_model.is_file():
             model_spec = str(local_model)
         else:
-            # Ultralytics official model name. If it is not cached locally,
-            # Ultralytics will download it on first use.
             model_spec = "yolo26s-pose.pt"
 
         model = YOLO(model_spec)
