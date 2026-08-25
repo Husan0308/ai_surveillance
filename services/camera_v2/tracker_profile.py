@@ -6,22 +6,20 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = ROOT / ".runtime" / "camera_v2"
 SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
-# Local NvDCF tuning only. ReID/re-association is forcibly disabled below.
-#
-# The detector is deliberately sparse. Once a person is confirmed, NvDCF must
-# remain the visual owner between YOLO observations. A short bend/turn/partial
-# occlusion may move a target from ACTIVE to SHADOW even while the person is still
-# plainly visible. We therefore keep that tracker state alive long enough and,
-# critically, allow its current-frame bbox metadata to continue downstream.
+# Camera-local NvDCF only. Cross-camera ReID is deliberately disabled here.
+# Sparse pose detections may be ~1 Hz, while video is ~20 FPS. A newly seeded
+# person therefore cannot stay Tentative waiting for another detector hit: it
+# would be early-terminated long before the next pose refresh. Make a valid
+# detector seed active immediately, then let NvDCF shadow tracking own continuity.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "0",
     "maxTargetsPerStream": "24",
     "minIouDiff4NewTarget": "0.72",
-    "minTrackerConfidence": "0.15",
-    "probationAge": "1",
-    "maxShadowTrackingAge": "40",
-    "earlyTerminationAge": "2",
+    "minTrackerConfidence": "0.12",
+    "probationAge": "0",
+    "maxShadowTrackingAge": "50",
+    "earlyTerminationAge": "6",
 }
 
 _OPTIONAL_PATCHES: dict[str, str] = {
@@ -30,14 +28,14 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "featureImgSizeLevel": "3",
     "searchRegionPaddingScale": "1",
     "associationMatcherType": "1",
-    "tentativeDetectorConfidence": "0.20",
-    "minMatchingScore4TentativeIou": "0.12",
+    "tentativeDetectorConfidence": "0.05",
+    "minMatchingScore4TentativeIou": "0.08",
     "minMatchingScore4Overall": "0.08",
     "minMatchingScore4SizeSimilarity": "0.08",
     "minMatchingScore4Iou": "0.03",
     "minMatchingScore4VisualSimilarity": "0.08",
     "usePrediction4Assoc": "1",
-    "minTrackingConfidenceDuringInactive": "0.12",
+    "minTrackingConfidenceDuringInactive": "0.08",
     "minIou4TargetDuplicate": "0.94",
     "targetDuplicateRunInterval": "5",
 }
@@ -153,10 +151,6 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing)
         )
 
-    # This is the key continuity rule. A shadow target is not a synthetic UI box:
-    # it is NvDCF's own current-frame localization for an already-established ID
-    # while detector evidence is temporarily absent/weak. Keeping it downstream
-    # prevents the visible bbox from blinking off between sparse YOLO updates.
     _set_section_key(output, "TargetManagement", "outputShadowTracks", "1")
     _disable_reid(output)
 
@@ -165,10 +159,10 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
     header = [
         f"# Auto-generated from {stock.name}.",
         "# Camera V2 local NvDCF profile; cross-camera ReID is intentionally absent.",
-        "# maxShadowTrackingAge=40; outputShadowTracks=1; continuity-first local tracking.",
-        "# Shadow output is real NvDCF current-frame metadata, not a fabricated hold box.",
+        "# probationAge=0; earlyTerminationAge=6; maxShadowTrackingAge=50.",
+        "# One valid sparse detector seed becomes Active immediately.",
+        "# outputShadowTracks=1 keeps NvDCF current-frame localization downstream.",
         "# TrajectoryManagement.enableReAssoc=0; ReID.reidType=0; outputReidTensor=0.",
-        "# No ReID model, TensorRT engine, gallery, sidecar or room topology is loaded.",
         "# Optional patches applied: "
         + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
