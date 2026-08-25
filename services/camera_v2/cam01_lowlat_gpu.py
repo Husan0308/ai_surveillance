@@ -25,8 +25,12 @@ def _force_runtime_profile() -> None:
         "CAMERA_V2_MUX_TIMEOUT_US": "25000",
         "CAMERA_V2_SOURCE_FPS": "20",
         "CAMERA_V2_EXTRA_SURFACES": "4",
-        "CAMERA_V2_FRAME_WIDTH": "960",
-        "CAMERA_V2_FRAME_HEIGHT": "540",
+        # The 3x2 wall is 1920x720, so each tile is exactly 640x360. Feed the
+        # mux/tiler at native tile size to remove a pointless 960x540 -> 640x360
+        # GPU scale on all six streams. Detector capture is independent and stays
+        # 672x384 from CAM-01, so detector detail is unchanged.
+        "CAMERA_V2_FRAME_WIDTH": "640",
+        "CAMERA_V2_FRAME_HEIGHT": "360",
         "CAMERA_V2_WALL_WIDTH": "1920",
         "CAMERA_V2_WALL_HEIGHT": "720",
         "CAMERA_V2_YOLO_MODEL": str(model),
@@ -45,8 +49,10 @@ def _force_runtime_profile() -> None:
         "CAMERA_V2_DETECT_GPU_DUTY_MIN": "0.30",
         "CAMERA_V2_DETECT_GPU_DUTY_MAX": "0.38",
         "CAMERA_V2_MAX_DETECT_RESULT_AGE_MS": "320",
-        "CAMERA_V2_TRACKER_WIDTH": "512",
-        "CAMERA_V2_TRACKER_HEIGHT": "288",
+        # NvDCF still runs per-frame, but 384x224 is ~42% fewer tracker pixels
+        # than 512x288 while remaining multiples of 32 as required by NvDCF.
+        "CAMERA_V2_TRACKER_WIDTH": "384",
+        "CAMERA_V2_TRACKER_HEIGHT": "224",
         "CAMERA_V2_MIN_DISPLAY_TRACK_CONF": "0.05",
         "CAMERA_V2_BOX_RENDER_AGE": "0.45",
         "QWEN_REID_ENABLED": "0",
@@ -322,8 +328,8 @@ def _validate_profile() -> None:
         "CAM01_LOWLAT_PROFILE "
         f"model={Path(str(_det.MODEL_SPEC)).name} device=cuda:0 "
         f"active={active} detector={_det.INFER_WIDTH}x{_det.INFER_HEIGHT}/micro{_det.MICRO_BATCH} "
-        "rtsp=50ms mux_timeout=25ms frame=960x540 wall=1920x720 "
-        "tracker=512x288 max_result_age=320ms qwen=0 "
+        "rtsp=50ms mux_timeout=25ms frame=640x360 wall=1920x720 "
+        "tracker=384x224 max_result_age=320ms qwen=0 "
         "capture=postconvert-buffer-probe-latest",
         flush=True,
     )
@@ -360,7 +366,7 @@ def main() -> int:
     )
 
     print(
-        "CAM01_LOWLAT_SCALER mux=bilinear tiler=bilinear "
+        "CAM01_LOWLAT_SCALER mux=native-tile tiler=native-tile "
         "detector_path=postconvert-buffer-probe",
         flush=True,
     )
