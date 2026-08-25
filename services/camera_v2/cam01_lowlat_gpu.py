@@ -20,8 +20,7 @@ def _force_runtime_profile() -> None:
         raise RuntimeError(f"required detector model not found: {model}")
 
     forced = {
-        # Keep the live wall bounded and latest-frame-only. 80 ms is enough for
-        # the local-LAN RTSP jitter buffer without deliberately adding 250 ms.
+        # Local-LAN live profile: bounded jitter buffer instead of the old 250 ms.
         "CAMERA_V2_RTSP_TRANSPORT": "tcp",
         "CAMERA_V2_RTSP_LATENCY_MS": "80",
         "CAMERA_V2_LOW_LATENCY_MODE": "1",
@@ -53,8 +52,8 @@ def _force_runtime_profile() -> None:
         "CAMERA_V2_DETECT_GPU_DUTY": "0.34",
         "CAMERA_V2_DETECT_GPU_DUTY_MIN": "0.30",
         "CAMERA_V2_DETECT_GPU_DUTY_MAX": "0.38",
-        # Never accept half-second-old boxes. Slightly above the old 280 ms gate
-        # gives the measured YOLO26s path room without turning latency into truth.
+        # Reject genuinely stale boxes. This is deliberately nowhere near the
+        # 800 ms experiment that made the tracker chase old positions.
         "CAMERA_V2_MAX_DETECT_RESULT_AGE_MS": "320",
         # NvDCF remains the sticky display/tracking authority between detections.
         "CAMERA_V2_TRACKER_WIDTH": "512",
@@ -121,7 +120,19 @@ def _validate_profile() -> None:
 
 def main() -> int:
     _validate_profile()
-    return CameraPersonTrackingReID().run()
+    runtime = CameraPersonTrackingReID()
+
+    # The restored wall uses Lanczos for mux/tiler scaling. On a GTX 1050 Ti that
+    # competes directly with YOLO/NvDCF. Bilinear is sufficient for the live wall
+    # and materially cheaper; detector input has its own conversion path.
+    runtime._set_if(runtime.mux, "interpolation-method", 1)
+    runtime._set_if(runtime.tiler, "interpolation-method", 1)
+    print(
+        "CAM01_LOWLAT_SCALER mux=bilinear tiler=bilinear detector_path=independent",
+        flush=True,
+    )
+
+    return runtime.run()
 
 
 if __name__ == "__main__":
