@@ -81,6 +81,11 @@ def main_preflight() -> int:
         "bound_xid = 0",
         "if target == bound_xid",
         "GstVideo.VideoOverlay.set_window_handle",
+        "CAMERA_DETECTOR_POLICY",
+        "base_yolo_worker = detection_module._yolo_worker",
+        "detection_module._yolo_worker = base_yolo_worker",
+        "CameraPascalSafeRuntime.ANALYSIS_COLUMNS = 1",
+        'analysis_tiler.set_property("show-source", analysis_source)',
     ):
         if token not in runtime:
             fail(f"camera wall runtime guard missing: {token}")
@@ -113,7 +118,6 @@ def main_preflight() -> int:
 
     launcher = source("scripts/run_sentinel_vms.sh")
     for token in (
-        "python scripts/preflight_rfdetr_core.py",
         "python scripts/preflight_pascal_safe.py",
         "python scripts/preflight_sentinel_ui.py",
         "python scripts/preflight_camera_v2_core.py",
@@ -121,8 +125,13 @@ def main_preflight() -> int:
         "expected_ui=2026.08.20-r19-analysis-tiler",
         "export CAMERA_V2_RTSP_TRANSPORT=tcp",
         "export CAMERA_V2_RTSP_LATENCY_MS=250",
+        "export CAMERA_V2_DETECTOR_BACKEND=yolo",
+        "export CAMERA_V2_YOLO_MODEL=yolo26s.pt",
+        "export CAMERA_V2_SINGLE_SOURCE_ANALYSIS=1",
+        "export CAMERA_V2_ANALYSIS_TILE_WIDTH=672",
+        "export CAMERA_V2_ANALYSIS_TILE_HEIGHT=384",
         "rtsp=tcp latency=250ms",
-        "detector_path=analysis-tiler",
+        "detector_path=analysis-tiler(single-source-fastpath)",
         "demux=disabled",
         "ui=camera-only-2x3-click-fullscreen",
     ):
@@ -133,8 +142,8 @@ def main_preflight() -> int:
     print("SENTINEL_PREFLIGHT wall=6-camera fixed-2x3 click-fullscreen PASS")
     print("SENTINEL_PREFLIGHT native_video=direct-QWidget-xid idempotent-bind PASS")
     print("SENTINEL_PREFLIGHT rtsp=tcp latency=250ms dynamic-pad=late-caps-safe PASS")
-    print("SENTINEL_PREFLIGHT detector=analysis-tiler demux=disabled mux-retention=bounded PASS")
-    print("SENTINEL_PREFLIGHT runtime=pascal-safe RF-DETR motion-predictor no-nvtracker PASS")
+    print("SENTINEL_PREFLIGHT detector=YOLO26s analysis-tiler single-source-fastpath PASS")
+    print("SENTINEL_PREFLIGHT runtime=pascal-safe motion-predictor display-first PASS")
     print("SENTINEL_UI_PREFLIGHT=PASS")
     return 0
 
