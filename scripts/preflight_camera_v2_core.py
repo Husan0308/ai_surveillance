@@ -53,9 +53,39 @@ def main() -> int:
         raise RuntimeError(f"monitoring grid must be 2x3, got {GRID_COLUMNS}x{GRID_ROWS}")
     if (INFER_WIDTH, INFER_HEIGHT, MICRO_BATCH) != (672, 384, 1):
         raise RuntimeError(
-            "RF-DETR-S geometry must be 672x384 micro-batch=1, got "
+            "detector geometry must be 672x384 micro-batch=1, got "
             f"{INFER_WIDTH}x{INFER_HEIGHT} micro={MICRO_BATCH}"
         )
+
+    detector_backend = os.environ.get(
+        "CAMERA_V2_DETECTOR_BACKEND",
+        "",
+    ).strip().lower()
+    detector_model = Path(
+        os.environ.get("CAMERA_V2_YOLO_MODEL", "")
+    ).name
+    detector_cameras = [
+        value.strip()
+        for value in os.environ.get(
+            "CAMERA_V2_DETECT_ACTIVE_CAMERAS",
+            "",
+        ).split(",")
+        if value.strip()
+    ]
+    if detector_backend != "yolo":
+        raise RuntimeError(
+            f"production detector backend must be yolo, got {detector_backend!r}"
+        )
+    if detector_model != "yolo26s.pt":
+        raise RuntimeError(
+            f"production detector model must be yolo26s.pt, got {detector_model!r}"
+        )
+    if detector_cameras != ["CAM-01"]:
+        raise RuntimeError(
+            f"CAM-01 tuning profile must detect only CAM-01, got {detector_cameras!r}"
+        )
+    if os.environ.get("CAMERA_V2_SINGLE_SOURCE_ANALYSIS", "0") != "1":
+        raise RuntimeError("CAM-01 tuning profile must enable single-source analysis")
 
     runtime_source = (ROOT / "services/camera_v2/pascal_safe_pipeline.py").read_text(
         encoding="utf-8"
@@ -83,6 +113,20 @@ def main() -> int:
     ):
         if required not in runtime_source:
             raise RuntimeError(f"Pascal-safe runtime guard missing: {required}")
+
+    controller_source = (
+        ROOT / "services/camera_v2/camera_wall_runtime.py"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "CAMERA_DETECTOR_POLICY",
+        "base_yolo_worker = detection_module._yolo_worker",
+        "detection_module._yolo_worker = base_yolo_worker",
+        "CameraPascalSafeRuntime.ANALYSIS_COLUMNS = 1",
+        "CameraPascalSafeRuntime.ANALYSIS_ROWS = 1",
+        'analysis_tiler.set_property("show-source", analysis_source)',
+    ):
+        if required not in controller_source:
+            raise RuntimeError(f"CAM-01 detector fast-path guard missing: {required}")
 
     nvdcf_ab_enabled = (
         os.environ.get("CAMERA_V2_NVDCF_AB", "0")
@@ -132,7 +176,7 @@ def main() -> int:
         "CAMERA_INFER_LAYOUT",
     ):
         if required not in sample_source:
-            raise RuntimeError(f"analysis-wall RF-DETR capture is missing: {required}")
+            raise RuntimeError(f"analysis capture is missing: {required}")
 
     display_source = (ROOT / "services/camera_v2/dynamic_wall.py").read_text(
         encoding="utf-8"
@@ -163,11 +207,11 @@ def main() -> int:
         f"rtsp={transport} latency={latency}ms mux={mux_width}x{mux_height} "
         f"grid={WALL_WIDTH}x{WALL_HEIGHT} "
         f"tile={WALL_WIDTH // GRID_COLUMNS}x{WALL_HEIGHT // GRID_ROWS} "
-        f"detector=RF-DETR-S@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
-        "detector_path=analysis-tiler demux=disabled mux_retention=bounded "
-        "source_ingest=isolated dynamic_pad=late-caps-safe "
-        "tracker=motion-predictor nvtracker=disabled capture=analysis-grid "
-        "stage_counters=source+mux+wall+sink+analysis scaling=lanczos"
+        f"detector=YOLO26s@{INFER_WIDTH}x{INFER_HEIGHT}/micro{MICRO_BATCH} "
+        "active=CAM-01 detector_path=analysis-tiler(single-source-fastpath) "
+        "demux=disabled mux_retention=bounded source_ingest=isolated "
+        "dynamic_pad=late-caps-safe tracker=motion-predictor nvtracker=disabled "
+        "capture=single-source-analysis stage_counters=source+mux+wall+sink+analysis"
     )
     print("CAMERA_PREFLIGHT=PASS")
     return 0
