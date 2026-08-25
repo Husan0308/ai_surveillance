@@ -5,6 +5,8 @@ import queue as pyqueue
 import time
 from pathlib import Path
 
+import numpy as np
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -22,18 +24,16 @@ def _force_runtime_profile() -> None:
         raise RuntimeError(f"required detector model not found: {model}")
 
     forced = {
-        # Local-LAN live profile. Around one 20 FPS frame of RTSP buffering is
-        # enough for this NVR; the display path stays latest-frame-only.
+        # One 20 FPS frame is 50 ms. Keep exactly one-frame RTSP jitter budget on
+        # the local NVR path; drop-on-latency remains enabled in the base source.
         "CAMERA_V2_RTSP_TRANSPORT": "tcp",
-        "CAMERA_V2_RTSP_LATENCY_MS": "60",
+        "CAMERA_V2_RTSP_LATENCY_MS": "50",
         "CAMERA_V2_LOW_LATENCY_MODE": "1",
         "CAMERA_V2_MUX_TIMEOUT_US": "25000",
         "CAMERA_V2_SOURCE_FPS": "20",
         "CAMERA_V2_EXTRA_SURFACES": "4",
         # Detection taps the decoded source before mux. 960x540 is therefore only
         # the display/tracker working surface, not the detector source resolution.
-        # It cuts six-stream downstream bandwidth versus 1280x720 without reducing
-        # detector detail.
         "CAMERA_V2_FRAME_WIDTH": "960",
         "CAMERA_V2_FRAME_HEIGHT": "540",
         "CAMERA_V2_WALL_WIDTH": "1920",
@@ -56,22 +56,19 @@ def _force_runtime_profile() -> None:
         "CAMERA_V2_DETECT_GPU_DUTY": "0.34",
         "CAMERA_V2_DETECT_GPU_DUTY_MIN": "0.30",
         "CAMERA_V2_DETECT_GPU_DUTY_MAX": "0.38",
-        # With latest-only capture, a normal result should land below this. Do not
-        # stretch this to 500-800 ms; old positions must never become tracker truth.
+        # Normal latest-frame results must remain fresh; never hide latency by
+        # accepting 500-800 ms old detections as tracker truth.
         "CAMERA_V2_MAX_DETECT_RESULT_AGE_MS": "320",
         "CAMERA_V2_TRACKER_WIDTH": "512",
         "CAMERA_V2_TRACKER_HEIGHT": "288",
         "CAMERA_V2_MIN_DISPLAY_TRACK_CONF": "0.05",
         "CAMERA_V2_BOX_RENDER_AGE": "0.45",
-        # Qwen is not allowed to steal GPU/CPU time from the live path.
         "QWEN_REID_ENABLED": "0",
     }
 
     for key, value in forced.items():
         os.environ[key] = value
 
-    # Explicitly remove experiment selectors that could silently replace the
-    # YOLO26s CUDA worker or re-enable a stale TensorRT/pose path.
     for key in (
         "CAMERA_V2_POSE_MODEL",
         "CAMERA_V2_POSE_IMGSZ",
@@ -93,20 +90,68 @@ from .person_tracking_reid import CameraPersonTrackingReID  # noqa: E402
 
 
 class Cam01LowLatencyReID(CameraPersonTrackingReID):
-    """CAM-01 runtime with strict latest-only detector scheduling.
+    """CAM-01 runtime with a true latest-frame detector path.
 
-    The generic CameraPersonTrackingFinal scheduler historically re-created an
-    all-camera round-robin and prefetched the next inference frame while the GPU
-    was still busy. With a ~230 ms detector, that prefetched frame was already
-    ~200 ms old before inference started, so completion age approached 450 ms and
-    the 320 ms freshness gate correctly rejected it. It also ignored
-    CAMERA_V2_DETECT_ACTIVE_CAMERAS.
-
-    This scheduler restores the earlier Detection Log Analysis contract:
-    wait until the detector is ready for work -> request ONE fresh frame -> infer
-    immediately -> publish -> idle. There is never a queued/prefetched camera
-    frame waiting behind GPU work.
+    The generic path used a one-shot pad gate before nvvideoconvert. That gate can
+    consume the request before appsink receives a usable PLAYING-state sample,
+    leaving the scheduler in repeated capture timeouts. For CAM-01 we keep the
+    inference branch flowing to appsink and apply the one-shot gate *inside the
+    appsink callback*. The callback always drains the max-buffers=1 sink, but only
+    maps/copies one frame when the scheduler asks for it. This preserves latest
+    frame semantics without queue growth or prefetch ageing.
     """
+
+    def _infer_gate_probe(self, _pad, _info, cid: str):
+        # CAM-01 must keep flowing all the way to appsink so preroll/PLAYING and
+        # subsequent new-sample delivery cannot be starved by the old pad gate.
+        if cid == "CAM-01":
+            return self.Gst.PadProbeReturn.OK
+
+        # Other cameras are display-only in this tuning phase. Drop them before
+        # nvvideoconvert so they consume no detector conversion/copy bandwidth.
+        return self.Gst.PadProbeReturn.DROP
+
+    def _on_infer_sample(self, sink, cid: str):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return self.Gst.FlowReturn.OK
+
+        # Always drain the CAM-01 appsink, but do no CPU map/copy work unless the
+        # scheduler currently wants a fresh detector frame.
+        if cid != "CAM-01":
+            return self.Gst.FlowReturn.OK
+
+        with self.capture_lock:
+            requested = bool(self.capture_requested.get(cid, False))
+        if not requested:
+            return self.Gst.FlowReturn.OK
+
+        captured_t = time.monotonic()
+        caps = sample.get_caps().get_structure(0)
+        width = int(caps.get_value("width"))
+        height = int(caps.get_value("height"))
+        buffer = sample.get_buffer()
+        ok, mapped = buffer.map(self.Gst.MapFlags.READ)
+        if not ok:
+            # Leave the request armed; the next live sample can satisfy it.
+            return self.Gst.FlowReturn.OK
+
+        try:
+            needed = width * height * 4
+            raw = np.frombuffer(mapped.data, dtype=np.uint8, count=needed)
+            frame = raw.reshape((height, width, 4))[..., :3].copy()
+        finally:
+            buffer.unmap(mapped)
+
+        # Clear only after a complete frame is safely copied. If the scheduler
+        # cancelled while mapping, avoid publishing an unsolicited sample.
+        with self.capture_lock:
+            if not self.capture_requested.get(cid, False):
+                return self.Gst.FlowReturn.OK
+            self.capture_requested[cid] = False
+
+        self.mailbox.put(cid, captured_t, frame)
+        return self.Gst.FlowReturn.OK
 
     def _scheduler(self) -> None:
         assert self.result_q is not None and self.job_q is not None
@@ -154,9 +199,7 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
         with self.det_lock:
             self.det_ready = True
 
-        model_name = Path(
-            str(ready.get("model") or _det.MODEL_SPEC)
-        ).name
+        model_name = Path(str(ready.get("model") or _det.MODEL_SPEC)).name
         print(
             "CAMERA_TRACK_FINAL ready: "
             f"model={model_name} micro_batch={_det.MICRO_BATCH} "
@@ -169,11 +212,11 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
             f"display_conf={os.environ.get('CAMERA_V2_MIN_DISPLAY_TRACK_CONF')} "
             f"max_result_age={self.max_detector_result_age_ms:.0f}ms "
             f"device={ready.get('device')} cuda={ready.get('cuda')} "
-            "capture_policy=latest-only-no-prefetch",
+            "capture_policy=appsink-latest-no-prefetch",
             flush=True,
         )
         print(
-            f"CAMERA_DETECT_ACTIVE cameras={ids} policy=latest-only-no-prefetch",
+            f"CAMERA_DETECT_ACTIVE cameras={ids} policy=appsink-latest-no-prefetch",
             flush=True,
         )
 
@@ -182,13 +225,10 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
             group = groups[group_index % len(groups)]
             group_index += 1
 
-            # Critical latency rule: request a frame only when the worker is ready
-            # for the next inference.  The wait itself does NOT age the detector
-            # input: captured_t is stamped only when appsink actually delivers the
-            # fresh frame.  Therefore use a generous wait to avoid starving the
-            # one-shot gate during decoder/converter scheduling jitter.
+            # Arm one capture request. CAM-01's appsink is continuously drained,
+            # so the next live sample satisfies this without an upstream pad race.
             self._request_group(group)
-            rows = self.mailbox.wait_group(group, versions, timeout=1.50)
+            rows = self.mailbox.wait_group(group, versions, timeout=0.75)
             if rows is None:
                 self._clear_requests()
                 with self.det_lock:
@@ -237,13 +277,8 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
             counts: dict[str, int] = {}
             ages_ms: list[float] = []
 
-            for cid, captured_t in zip(
-                result["cameras"],
-                result["captured"],
-            ):
-                detections = self._dedup_and_expand(
-                    result["boxes"].get(cid, [])
-                )
+            for cid, captured_t in zip(result["cameras"], result["captured"]):
+                detections = self._dedup_and_expand(result["boxes"].get(cid, []))
                 prepared = self.latency_compensator.prepare(
                     cid,
                     captured_t,
@@ -251,9 +286,7 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
                 )
                 self._publish_prepared(cid, captured_t, prepared)
                 counts[cid] = len(detections)
-                ages_ms.append(
-                    max(0.0, (completed_t - captured_t) * 1000.0)
-                )
+                ages_ms.append(max(0.0, (completed_t - captured_t) * 1000.0))
                 self.detector_times[cid].append(completed_t)
 
             batch_ms = float(result.get("batch_ms") or 0.0)
@@ -267,17 +300,9 @@ class Cam01LowLatencyReID(CameraPersonTrackingReID):
                 self.det_error = ""
                 target_hz = self.detector_target_hz
 
-            # Idle AFTER the completed inference. The next camera frame is not
-            # requested until the next loop, so idle time never makes an input old.
-            desired_call_interval = 1.0 / max(
-                0.1,
-                target_hz * len(groups),
-            )
+            desired_call_interval = 1.0 / max(0.1, target_hz * len(groups))
             elapsed = time.monotonic() - cycle_started
-            idle = max(
-                self.detector_min_idle,
-                desired_call_interval - elapsed,
-            )
+            idle = max(self.detector_min_idle, desired_call_interval - elapsed)
             self.det_stop.wait(min(0.20, idle))
 
 
@@ -304,9 +329,9 @@ def _validate_profile() -> None:
         "CAM01_LOWLAT_PROFILE "
         f"model={Path(str(_det.MODEL_SPEC)).name} device=cuda:0 "
         f"active={active} detector={_det.INFER_WIDTH}x{_det.INFER_HEIGHT}/micro{_det.MICRO_BATCH} "
-        "rtsp=60ms mux_timeout=25ms frame=960x540 wall=1920x720 "
+        "rtsp=50ms mux_timeout=25ms frame=960x540 wall=1920x720 "
         "tracker=512x288 max_result_age=320ms qwen=0 "
-        "capture=latest-only-no-prefetch",
+        "capture=appsink-latest-no-prefetch",
         flush=True,
     )
 
@@ -315,9 +340,6 @@ def main() -> int:
     _validate_profile()
     runtime = Cam01LowLatencyReID()
 
-    # The restored wall uses Lanczos for mux/tiler scaling. Bilinear is sufficient
-    # for the live wall and materially cheaper; detector input has an independent
-    # conversion path and is not affected by this choice.
     runtime._set_if(runtime.mux, "interpolation-method", 1)
     runtime._set_if(runtime.tiler, "interpolation-method", 1)
     print(
