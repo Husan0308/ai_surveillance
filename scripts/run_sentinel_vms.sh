@@ -15,9 +15,8 @@ echo "SENTINEL_DISPLAY session=${XDG_SESSION_TYPE:-unknown} qt_platform=${QT_QPA
 INHERITED_DETECT="${CAMERA_V2_DETECT_WIDTH:-unset}x${CAMERA_V2_DETECT_HEIGHT:-unset}"
 INHERITED_MUX="${CAMERA_V2_FRAME_WIDTH:-unset}x${CAMERA_V2_FRAME_HEIGHT:-unset}"
 
-# Keep RTSP deterministic on the target NVR. The r18 hardware log proved TCP
-# negotiation itself succeeds; later rtspsrc errors were downstream backpressure
-# propagated upstream, not a transport failure.
+# Keep RTSP deterministic on the target NVR. The display path stays independent
+# from detector scheduling, so a slow AI pass must never build a video backlog.
 export CAMERA_V2_RTSP_TRANSPORT=tcp
 export CAMERA_V2_RTSP_LATENCY_MS=250
 export CAMERA_V2_MUX_TIMEOUT_US=50000
@@ -26,23 +25,35 @@ export CAMERA_V2_FRAME_WIDTH=2560
 export CAMERA_V2_FRAME_HEIGHT=1440
 export CAMERA_V2_WALL_WIDTH=2880
 export CAMERA_V2_WALL_HEIGHT=1080
+
+# GTX 1050 Ti production detector profile.
+# Person detection does not need pose keypoints. Use the much lighter YOLO26s
+# detector and keep the pose worker available only as an explicit opt-in backend.
+export CAMERA_V2_DETECTOR_BACKEND=yolo
+export CAMERA_V2_YOLO_MODEL=yolo26s.pt
 export CAMERA_V2_DETECT_WIDTH=672
 export CAMERA_V2_DETECT_HEIGHT=384
-export CAMERA_V2_ANALYSIS_TILE_WIDTH=1280
-export CAMERA_V2_ANALYSIS_TILE_HEIGHT=720
-export CAMERA_V2_DETECT_CONF=0.32
-export CAMERA_V2_DETECT_IOU=0.65
+export CAMERA_V2_DETECT_CONF=0.08
+export CAMERA_V2_DETECT_IOU=0.70
 export CAMERA_V2_MAX_DET=40
 export CAMERA_V2_MICRO_BATCH=1
 export CAMERA_V2_DETECT_ACTIVE_CAMERAS=CAM-01
+export CAMERA_V2_DETECT_STARTUP_DELAY=1.0
 
-export CAMERA_V2_DETECT_GPU_DUTY=0.30
-export CAMERA_V2_DETECT_GPU_DUTY_MIN=0.30
-export CAMERA_V2_DETECT_GPU_DUTY_MAX=0.30
+# The analysis branch is capture-only. Do not build/download a 2560x2160 2x3
+# analysis wall just to infer CAM-01. The runtime enables a single-source tiler
+# fast path when exactly one detector camera is selected.
+export CAMERA_V2_ANALYSIS_TILE_WIDTH=672
+export CAMERA_V2_ANALYSIS_TILE_HEIGHT=384
+export CAMERA_V2_ANALYSIS_INTERPOLATION=1
+export CAMERA_V2_SINGLE_SOURCE_ANALYSIS=1
 
-# GTX 1050 Ti production path. Camera ingest remains direct-to-mux. RF-DETR uses
-# a gated secondary analysis tiler; nvstreamdemux is deliberately absent because
-# its zero-copy children retained mux batches and exhausted the 8-buffer pool.
+# Bound detector GPU duty so display/NVDEC/NvDCF keep priority. The scheduler can
+# move inside this range based on measured wall cadence.
+export CAMERA_V2_DETECT_GPU_DUTY=0.18
+export CAMERA_V2_DETECT_GPU_DUTY_MIN=0.12
+export CAMERA_V2_DETECT_GPU_DUTY_MAX=0.24
+
 export CAMERA_V2_PASCAL_SAFE=1
 export CAMERA_V2_HEATMAP=0
 
@@ -56,10 +67,17 @@ export CAMERA_V2_BOX_TOP_MARGIN=0.04
 export CAMERA_V2_BOX_BOTTOM_MARGIN=0.10
 export CAMERA_V2_BOX_MAX_AGE=2.0
 export CAMERA_V2_BOX_MAX_PREDICT=0.40
+export CAMERA_V2_BOX_RENDER_AGE=0.35
 
-echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=RF-DETR-S@672x384 threshold=0.18 batch=1 scheduler=adaptive-duty:12-30% detector_path=analysis-tiler demux=disabled tracker=motion-predictor nvtracker=disabled display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
+# Avoid stale shell overrides from earlier pose/TensorRT experiments.
+unset CAMERA_V2_POSE_MODEL CAMERA_V2_POSE_IMGSZ CAMERA_V2_POSE_CONF CAMERA_V2_POSE_IOU || true
+unset CAMERA_V2_TRT86_ENGINE CAMERA_V2_TRT86_PYTHON CAMERA_V2_TRT86_WORKER CAMERA_V2_TRT86_JPEG_QUALITY || true
+unset NVDS_ENABLE_LATENCY_MEASUREMENT NVDS_ENABLE_COMPONENT_LATENCY_MEASUREMENT || true
 
-python scripts/preflight_rfdetr_core.py
+export QWEN_REID_ENABLED=0
+
+echo "SENTINEL_PROFILE inherited_mux=${INHERITED_MUX} inherited_detector=${INHERITED_DETECT} effective_mux=2560x1440 rtsp=tcp latency=250ms detector=YOLO26s@672x384 threshold=0.08 batch=1 scheduler=adaptive-duty:12-24% detector_path=analysis-tiler(single-source-fastpath) demux=disabled tracker=motion-predictor nvtracker=optional display=egl->x11-on-zero-render pascal_safe=1 ui=camera-only-2x3-click-fullscreen"
+
 python scripts/preflight_pascal_safe.py
 python scripts/preflight_sentinel_ui.py
 python scripts/preflight_camera_v2_core.py
