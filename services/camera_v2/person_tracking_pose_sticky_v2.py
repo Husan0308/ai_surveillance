@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-"""Verified pose-sticky runtime.
+"""Verified pose-sticky runtime for DeepStream 7.1.
 
-The historical CameraPersonTrackingFinal._stabilize_tracker_config() rewrites the
-NvDCF YAML after tracker_profile.prepare_sparse_tracker_config().  That silently
-restored probationAge=1 / earlyTerminationAge=2 and defeated the sparse ~1 Hz
-pose design.  This subclass owns the *final* YAML passed to nvtracker and verifies
-its effective values before the plugin is constructed.
+CameraPersonTrackingFinal resolves the generated NvDCF YAML through
+``self._stabilize_tracker_config``.  This subclass therefore owns the final file
+passed to nvtracker and verifies the parameters that are part of the current
+DeepStream 7.1 NvMultiObjectTracker configuration contract.
+
+Two details matter here:
+* ``tentativeDetectorConfidence`` is a current DataAssociator parameter, but the
+  max-perf stock config may omit it.  We insert it into the correct section.
+* ``minTrackingConfidenceDuringInactive`` belongs to older NvDCF configs and is
+  not part of the DeepStream 7.1 parameter table, so its absence must not abort
+  startup.  Continuity is controlled with probation/shadow/current tracker
+  confidence parameters instead.
 """
 
 from pathlib import Path
@@ -14,49 +21,97 @@ from pathlib import Path
 from .person_tracking_pose_sticky import CameraPersonTrackingPoseSticky
 
 
-_EFFECTIVE = {
+# Values that MUST exist in the exact final YAML consumed by nvtracker.
+_REQUIRED_EFFECTIVE: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "minTrackerConfidence": "0.08",
     "probationAge": "0",
     "maxShadowTrackingAge": "50",
     "earlyTerminationAge": "6",
     "tentativeDetectorConfidence": "0.05",
-    "minTrackingConfidenceDuringInactive": "0.05",
     "outputShadowTracks": "1",
 }
 
+# DeepStream 7.1 section ownership for parameters that a stock max-perf file may
+# legitimately omit.  Add them rather than treating their absence as corruption.
+_SECTION_FOR_MISSING: dict[str, str] = {
+    "tentativeDetectorConfidence": "DataAssociator",
+    "outputShadowTracks": "TargetManagement",
+}
 
-def _rewrite_yaml_keys(path: Path, values: dict[str, str]) -> dict[str, str]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    seen: dict[str, str] = {}
-    output: list[str] = []
+# Older NvDCF releases exposed this parameter.  If a local stock config still
+# contains it we tune it, but DeepStream 7.1 does not require it to be present.
+_LEGACY_OPTIONAL: dict[str, str] = {
+    "minTrackingConfidenceDuringInactive": "0.05",
+}
 
-    for line in lines:
+
+def _section_header(line: str) -> str | None:
+    if not line or line[0].isspace():
+        return None
+    body = line.split("#", 1)[0].strip()
+    if body.endswith(":") and body[:-1].strip():
+        return body[:-1].strip()
+    return None
+
+
+def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
+    start = None
+    for index, line in enumerate(lines):
+        if _section_header(line) == section:
+            start = index
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if _section_header(lines[index]) is not None:
+            end = index
+            break
+    return start, end
+
+
+def _ensure_section_key(lines: list[str], section: str, key: str, value: str) -> None:
+    bounds = _section_bounds(lines, section)
+    if bounds is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"{section}:")
+        lines.append(f"  {key}: {value}")
+        return
+
+    start, end = bounds
+    for index in range(start + 1, end):
+        stripped = lines[index].lstrip()
+        if stripped.startswith(key + ":"):
+            indent = lines[index][: len(lines[index]) - len(stripped)] or "  "
+            comment = ""
+            if "#" in stripped:
+                comment = "  #" + stripped.split("#", 1)[1]
+            lines[index] = f"{indent}{key}: {value}{comment}"
+            return
+
+    lines.insert(end, f"  {key}: {value}")
+
+
+def _rewrite_existing(lines: list[str], values: dict[str, str]) -> set[str]:
+    seen: set[str] = set()
+    for index, line in enumerate(lines):
         stripped = line.lstrip()
         indent = line[: len(line) - len(stripped)]
-        replaced = False
         for key, value in values.items():
-            if stripped.startswith(key + ":"):
-                comment = ""
-                if "#" in stripped:
-                    comment = "  #" + stripped.split("#", 1)[1]
-                output.append(f"{indent}{key}: {value}{comment}")
-                seen[key] = value
-                replaced = True
-                break
-        if not replaced:
-            output.append(line)
+            if not stripped.startswith(key + ":"):
+                continue
+            comment = ""
+            if "#" in stripped:
+                comment = "  #" + stripped.split("#", 1)[1]
+            lines[index] = f"{indent}{key}: {value}{comment}"
+            seen.add(key)
+            break
+    return seen
 
-    missing = sorted(set(values) - set(seen))
-    if missing:
-        raise RuntimeError(
-            "pose NvDCF config is missing required keys after generation: "
-            + ", ".join(missing)
-        )
 
-    path.write_text("\n".join(output) + "\n", encoding="utf-8")
-
-    # Re-read the exact file nvtracker will consume.  Do not trust startup labels.
+def _parse_effective(path: Path, keys: set[str]) -> dict[str, str]:
     effective: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         body = line.split("#", 1)[0].strip()
@@ -64,17 +119,55 @@ def _rewrite_yaml_keys(path: Path, values: dict[str, str]) -> dict[str, str]:
             continue
         key, value = body.split(":", 1)
         key = key.strip()
-        if key in values:
+        if key in keys:
             effective[key] = value.strip()
+    return effective
 
+
+def _rewrite_yaml_keys(path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    seen = _rewrite_existing(lines, _REQUIRED_EFFECTIVE)
+
+    # Required current DS7.1 parameters that are absent from a lean stock config
+    # are inserted into their documented modules.
+    for key, value in _REQUIRED_EFFECTIVE.items():
+        if key in seen:
+            continue
+        section = _SECTION_FOR_MISSING.get(key)
+        if section is None:
+            raise RuntimeError(
+                "pose NvDCF config is missing required DeepStream 7.1 key "
+                f"{key!r} and no safe insertion section is defined"
+            )
+        _ensure_section_key(lines, section, key, value)
+
+    # Tune legacy fields only when the installed config happens to expose them.
+    legacy_seen = _rewrite_existing(lines, _LEGACY_OPTIONAL)
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Re-read the exact file nvtracker will consume.  Startup text is not proof.
+    effective = _parse_effective(path, set(_REQUIRED_EFFECTIVE))
     wrong = {
-        key: (values[key], effective.get(key))
-        for key in values
-        if effective.get(key) != values[key]
+        key: (_REQUIRED_EFFECTIVE[key], effective.get(key))
+        for key in _REQUIRED_EFFECTIVE
+        if effective.get(key) != _REQUIRED_EFFECTIVE[key]
     }
     if wrong:
         raise RuntimeError(f"pose NvDCF effective config mismatch: {wrong}")
-    return effective
+
+    legacy_effective = _parse_effective(path, set(_LEGACY_OPTIONAL))
+    if legacy_seen:
+        wrong_legacy = {
+            key: (_LEGACY_OPTIONAL[key], legacy_effective.get(key))
+            for key in legacy_seen
+            if legacy_effective.get(key) != _LEGACY_OPTIONAL[key]
+        }
+        if wrong_legacy:
+            raise RuntimeError(f"pose NvDCF legacy config mismatch: {wrong_legacy}")
+
+    return effective, legacy_effective
 
 
 class CameraPersonTrackingPoseStickyV2(CameraPersonTrackingPoseSticky):
@@ -82,13 +175,15 @@ class CameraPersonTrackingPoseStickyV2(CameraPersonTrackingPoseSticky):
 
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
-        # Intentionally do NOT call CameraPersonTrackingFinal's implementation:
-        # that legacy method is the component that changes probation back to 1.
+        # Do not call CameraPersonTrackingFinal's legacy stabilizer here.  This
+        # method is the final policy owner before GstNvTracker consumes the YAML.
         path = Path(path)
-        effective = _rewrite_yaml_keys(path, _EFFECTIVE)
+        effective, legacy = _rewrite_yaml_keys(path)
         print(
             "CAMERA_POSE_NVDCF_EFFECTIVE "
-            + " ".join(f"{key}={effective[key]}" for key in _EFFECTIVE),
+            + " ".join(f"{key}={effective[key]}" for key in _REQUIRED_EFFECTIVE)
+            + " legacyInactiveConf="
+            + (legacy.get("minTrackingConfidenceDuringInactive", "not-present-ds7.1")),
             flush=True,
         )
         return path
