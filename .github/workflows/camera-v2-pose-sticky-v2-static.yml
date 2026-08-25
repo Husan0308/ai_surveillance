@@ -24,7 +24,11 @@ jobs:
       - name: Contract
         run: |
           grep -q 'probationAge": "0"' services/camera_v2/person_tracking_pose_sticky_v2.py
-          grep -q 'maxShadowTrackingAge": "50"' services/camera_v2/person_tracking_pose_sticky_v2.py
+          grep -q 'maxShadowTrackingAge": "100"' services/camera_v2/person_tracking_pose_sticky_v2.py
+          grep -q 'minDetectorConfidence": "0.03"' services/camera_v2/person_tracking_pose_sticky_v2.py
           grep -q 'CAMERA_V2_DETECT_WIDTH=1280' scripts/run_cam01_pose_sticky_v2.sh
+          grep -q 'CAMERA_V2_POSE_CONF=0.03' scripts/run_cam01_pose_sticky_v2.sh
+          grep -q 'CAMERA_V2_DETECT_TARGET_HZ=2.0' scripts/run_cam01_pose_sticky_v2.sh
+          grep -q 'CAMERA_V2_EMPTY_CONFIRM_MISSES=5' scripts/run_cam01_pose_sticky_v2.sh
           grep -q 'CAMERA_V2_MIN_DISPLAY_TRACK_CONF=0.00' scripts/run_cam01_pose_sticky_v2.sh
           grep -q 'person_tracking_pose_sticky_v2' scripts/run_cam01_pose_sticky_v2.sh
