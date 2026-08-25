@@ -7,6 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 REQUIRED = (
+    "README.md",
+    "docs/ARCHITECTURE_V2.md",
+    ".github/workflows/camera-v2-audited-static.yml",
     "config/cameras.yaml",
     "requirements-trt86.txt",
     "scripts/run_cam01_trt86_audited.sh",
@@ -14,6 +17,8 @@ REQUIRED = (
     "scripts/yolo26_trt86_shm_worker_v2.py",
     "scripts/yolo26_trt86_shm_worker_v3.py",
     "services/ml_service/app/config.py",
+    "services/camera_v2/__init__.py",
+    "services/camera_v2/__main__.py",
     "services/camera_v2/main.py",
     "services/camera_v2/dynamic_wall.py",
     "services/camera_v2/secure.py",
@@ -28,12 +33,15 @@ REQUIRED = (
     "services/camera_v2/native_meta_bridge.c",
     "services/camera_v2/native_label_style.c",
     "services/camera_v2/native_display_smoother.c",
+    # Temporary native_bridge build dependency. Do not remove until the native
+    # library is split into detector/tracker vs optional heatmap components.
     "services/camera_v2/native_heatmap.c",
     "services/camera_v2/yolo_trt86_shm_bridge.py",
     "services/camera_v2/yolo_trt86_fresh_bridge.py",
 )
 
 FORBIDDEN_EXACT = (
+    ".github/workflows/sentinel-ui-static.yml",
     "requirements-camera-v2-rfdetr.txt",
     "services/camera_v2/rfdetr_backend.py",
     "services/camera_v2/person_tracking_trt86.py",
@@ -42,11 +50,29 @@ FORBIDDEN_EXACT = (
     "scripts/run_cam01_trt86_fixed.sh",
     "scripts/run_cam01_trt86_fresh.sh",
     "scripts/yolo26_trt86_worker.py",
+    "services/camera_v2/camera_wall_runtime.py",
+    "services/camera_v2/pascal_safe_pipeline.py",
+    "services/camera_v2/data.py",
+    "services/camera_v2/qt_runtime.py",
+    "services/camera_v2/ui_bridge.py",
+    "services/camera_v2/native_ui_bridge.c",
+    "services/camera_v2/requirements-ui.txt",
+    "services/camera_v2/yolo_pose_backend.py",
+    "services/camera_v2/yolo_onnx_cpu_backend.py",
+    "services/camera_v2/pose_ankle.py",
+    "services/camera_v2/temporal_tracker.py",
+    "services/camera_v2/sparse_tracker_contract.py",
+    "services/camera_v2/native_sparse_tracker_contract.c",
+    "config/tracker/config_tracker_NvDCF_pascal.yml",
 )
 
 
 def fail(message: str) -> None:
     raise SystemExit(f"CAMERA_V2_AUDITED_STATIC=FAIL {message}")
+
+
+def rels(paths):
+    return [str(path.relative_to(ROOT)) for path in sorted(paths)]
 
 
 def main() -> None:
@@ -55,18 +81,16 @@ def main() -> None:
         fail("missing=" + ",".join(missing))
 
     leftovers = [rel for rel in FORBIDDEN_EXACT if (ROOT / rel).exists()]
-    leftovers += [
-        str(path.relative_to(ROOT))
-        for path in sorted((ROOT / "services/camera_v2").glob("stage*.py"))
-    ]
-    leftovers += [
-        str(path.relative_to(ROOT))
-        for path in sorted((ROOT / "scripts").glob("run_camera_stage*.sh"))
-    ]
-    leftovers += [
-        str(path.relative_to(ROOT))
-        for path in sorted((ROOT / "scripts").glob("rfdetr*.py"))
-    ]
+    leftovers += rels((ROOT / "services/camera_v2").glob("stage*.py"))
+    leftovers += rels((ROOT / "scripts").glob("run_camera_stage*.sh"))
+    leftovers += rels((ROOT / "scripts").glob("rfdetr*.py"))
+    leftovers += rels((ROOT / "services/camera_v2").glob("sentinel_*.py"))
+    leftovers += rels((ROOT / "services/camera_v2").glob("monitor_ui*.py"))
+    leftovers += rels((ROOT / "services/camera_v2").glob("*heatmap*.py"))
+    leftovers += rels((ROOT / "scripts").glob("preflight_*heatmap*.py"))
+    leftovers += rels((ROOT / "scripts").glob("preflight_sentinel*.py"))
+    leftovers += rels((ROOT / "scripts").glob("preflight_monitor_ui*.py"))
+    leftovers = sorted(set(leftovers))
     if leftovers:
         fail("obsolete_files=" + ",".join(leftovers))
 
@@ -106,6 +130,10 @@ def main() -> None:
     tracker = (ROOT / "services/camera_v2/person_tracking.py").read_text(encoding="utf-8")
     if "nvtracker" not in tracker or "self.mux.link(tracker)" not in tracker:
         fail("nvdcf_link_contract_missing")
+
+    package_main = (ROOT / "services/camera_v2/__main__.py").read_text(encoding="utf-8")
+    if "person_tracking_trt86_audited" not in package_main:
+        fail("package_entrypoint_not_audited")
 
     print(f"CAMERA_V2_AUDITED_STATIC=PASS required={len(REQUIRED)} obsolete=0")
 
