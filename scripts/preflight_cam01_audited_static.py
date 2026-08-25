@@ -7,12 +7,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 REQUIRED = (
+    ".gitignore",
     "README.md",
     "docs/ARCHITECTURE_V2.md",
     ".github/workflows/camera-v2-audited-static.yml",
     "config/cameras.yaml",
     "requirements-trt86.txt",
     "scripts/run_cam01_trt86_audited.sh",
+    "scripts/restore_cam01_trt86_engine.sh",
     "scripts/yolo26_trt86_shm_worker.py",
     "scripts/yolo26_trt86_shm_worker_v2.py",
     "scripts/yolo26_trt86_shm_worker_v3.py",
@@ -109,9 +111,20 @@ def main() -> None:
         "CAMERA_V2_DETECT_ACTIVE_CAMERAS=CAM-01",
         "CAMERA_V2_RTSP_TRANSPORT",
         "CAMERA_V2_RTSP_LATENCY_MS",
+        "restore_cam01_trt86_engine.sh",
     ):
         if needle not in launcher:
             fail(f"launcher_contract_missing={needle}")
+
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    for needle in ("artifacts/", "*.engine", "*.plan"):
+        if needle not in gitignore:
+            fail(f"gitignore_missing_local_artifact_rule={needle}")
+
+    restore = (ROOT / "scripts/restore_cam01_trt86_engine.sh").read_text(encoding="utf-8")
+    for needle in ("git stash list", "^3", "git cat-file -e", "git show"):
+        if needle not in restore:
+            fail(f"engine_restore_contract_missing={needle}")
 
     audited = (ROOT / "services/camera_v2/person_tracking_trt86_audited.py").read_text(encoding="utf-8")
     for needle in (
