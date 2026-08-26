@@ -124,7 +124,7 @@ class DetectionOnlyPoseV2(CameraDetectionV2):
             "CAMERA_DETECTION_ONLY_PROFILE "
             f"mux={self.frame_width}x{self.frame_height}/lanczos "
             f"wall={self.wall_width}x{self.wall_height}/lanczos "
-            f"detector={INFER_WIDTH}x{INFER_HEIGHT}/TRT8.6/B1 "
+            f"detector={INFER_WIDTH}x{INFER_HEIGHT}/TRT8.6/B1/bilinear "
             f"target={self.detector_target_hz:.2f}Hz/cam "
             "pose=yolo26s-pose/cpu/sparse",
             flush=True,
@@ -153,7 +153,19 @@ class DetectionOnlyPoseV2(CameraDetectionV2):
         self._set_if(source, "select-rtp-protocol", 4)
         self._set_if(source, "async-handling", True)
 
-        # Exact fixed-input geometry: 1280x720 -> 672x378 plus 3px top/bottom.
+        # IMPORTANT: DeepStream nvvideoconvert defaults to interpolation-method=6,
+        # which is nearest-neighbour on dGPU. Ultralytics letterbox resizing uses
+        # linear interpolation. Small/far persons can disappear under nearest
+        # downscaling, which broke production parity for CAM-02/CAM-05. Force
+        # GPU bilinear so the TRT input matches the reference preprocessing much
+        # more closely while keeping the gated conversion off the display path.
+        self._set_if(converter, "compute-hw", 1)
+        self._set_if(converter, "interpolation-method", 1)
+        self._set_if(converter, "output-buffers", 2)
+
+        # Exact fixed-input geometry: 16:9 source -> 672x378 plus 3px top/bottom.
+        # All current camera main streams are 16:9; the TRT worker explicitly
+        # fills the 3px bars with Ultralytics padding value 114.
         scale = min(
             float(INFER_WIDTH) / float(self.frame_width),
             float(INFER_HEIGHT) / float(self.frame_height),
@@ -172,6 +184,13 @@ class DetectionOnlyPoseV2(CameraDetectionV2):
         self._set_if(appsink, "wait-on-eos", False)
         with self.capture_lock:
             self.capture_requested[cid] = False
+
+        print(
+            "CAMERA_DETECTION_PREPROCESS "
+            f"cid={cid} convert=gpu-bilinear interpolation=1 "
+            f"letterbox={content_w}x{content_h}+{pad_x}+{pad_y}",
+            flush=True,
+        )
 
     def _infer_gate_probe(self, pad, info, cid: str):
         result = super()._infer_gate_probe(pad, info, cid)
@@ -254,277 +273,143 @@ class DetectionOnlyPoseV2(CameraDetectionV2):
             if any(v is None for v in (tee, display_q, infer_q, converter, sink)):
                 raise RuntimeError(f"CAMERA_DETECTION_ONLY_AUDIT {cid}: tee branch missing")
             self._expect_peer(infer_q, "src", converter.get_name(), f"{cid}:inferq->convert")
+            try:
+                interpolation = int(converter.get_property("interpolation-method"))
+            except Exception:
+                interpolation = -1
+            if interpolation != 1:
+                raise RuntimeError(
+                    f"CAMERA_DETECTION_ONLY_AUDIT {cid}: detector interpolation={interpolation}, expected=1"
+                )
         if (self.frame_width, self.frame_height) != (1280, 720):
             raise RuntimeError("CAMERA_DETECTION_ONLY_AUDIT mux geometry changed")
         if (self.wall_width, self.wall_height) != (1920, 720):
             raise RuntimeError("CAMERA_DETECTION_ONLY_AUDIT wall geometry changed")
-        print(
-            "CAMERA_DETECTION_ONLY_AUDIT status=OK "
-            "display=tee->queue1->nvstreammux->tiler->wallcaps->queue1->EGL "
-            "ml=tee->leaky-queue->preconvert-gate->convert->appsink "
-            "nvdcf=0 osd=0 dedup=0",
-            flush=True,
+
+    def _pose_filter(self, cid: str, rows, frame):
+        # YOLO26 E2E output is already NMS-free/final. Do not externally collapse
+        # overlapping people here. Pose only validates ambiguous detections.
+        boxes = []
+        for coords, score in rows:
+            boxes.append((tuple(float(v) for v in coords), float(score)))
+
+        filtered, pose_diag = self.pose_gate.filter(
+            cid,
+            frame,
+            boxes,
+            existing_boxes=None,
         )
+        return filtered, pose_diag
 
-    def _startup_stagger_seconds(self) -> float:
-        configured = float(getattr(self.settings.deepstream, "startup_stagger_sec", 0.5))
-        return max(
-            0.10,
-            min(3.0, float(os.environ.get("CAMERA_V2_STARTUP_STAGGER_SEC", str(configured)))),
-        )
-
-    def _prepare_staggered_sources(self) -> None:
-        ordered = [camera.camera_id for camera in self.cameras]
-        stagger = self._startup_stagger_seconds()
-        for cid in ordered:
-            source = self.sources[cid]
-            source.set_locked_state(True)
-            source.set_state(self.Gst.State.NULL)
-        print(
-            f"CAMERA_DETECTION_SOURCE_STAGGER order={ordered} interval={stagger:.2f}s",
-            flush=True,
-        )
-        for index, cid in enumerate(ordered):
-            delay_ms = max(1, int(round(index * stagger * 1000.0)))
-
-            def _start(camera_id=cid, ordinal=index):
-                if self._stopping:
-                    return False
-                source = self.sources[camera_id]
-                source.set_locked_state(False)
-                sync = bool(source.sync_state_with_parent())
-                now = time.monotonic()
-                self._source_started_at[camera_id] = now
-                self._last_progress[camera_id] = now
-                self._last_frames[camera_id] = int(self.stats[camera_id].frames)
-                print(
-                    f"CAMERA_DETECTION_SOURCE_START cid={camera_id} index={ordinal} sync={int(sync)}",
-                    flush=True,
-                )
-                return False
-
-            self.GLib.timeout_add(delay_ms, _start)
-
-    def _source_watchdog(self) -> bool:
-        if self._stopping:
-            return False
+    def _process_result(self, message: dict) -> None:
         now = time.monotonic()
-        for cid, started_at in list(self._source_started_at.items()):
-            current = int(self.stats[cid].frames)
-            if current != self._last_frames[cid]:
-                self._last_frames[cid] = current
-                self._last_progress[cid] = now
-                continue
-            if now - started_at < self._stall_s:
-                continue
-            stalled = now - self._last_progress[cid]
-            if stalled < self._stall_s:
-                continue
-            self._restart_requested = True
-            self._restart_reason = f"{cid} no-frames {stalled:.1f}s"
-            print(
-                f"CAMERA_DETECTION_PROCESS_RESTART reason={self._restart_reason} "
-                f"exit_code={RESTART_EXIT_CODE}",
-                flush=True,
-            )
-            self.stop()
-            return False
-        return True
+        captured = float(message.get("captured") or now)
+        age_ms = max(0.0, (now - captured) * 1000.0)
+        rows = message.get("boxes") or []
+        cid = str(message.get("camera") or "")
+        frame = message.get("frame")
 
-    def _scheduler(self) -> None:
-        assert self.result_q is not None and self.job_q is not None
-        try:
-            ready = self.result_q.get(timeout=40.0)
-        except pyqueue.Empty:
-            with self.det_lock:
-                self.det_error = "TRT86 worker startup timeout"
+        if not cid or cid not in self.sources:
             return
-        if ready.get("type") != "ready":
-            with self.det_lock:
-                self.det_error = ready.get("error", "TRT86 worker failed")
-            return
+
+        raw_count = len(rows)
+        if frame is not None:
+            final_rows, pose_diag = self._pose_filter(cid, rows, frame)
+        else:
+            final_rows = [(tuple(float(v) for v in coords), float(conf)) for coords, conf in rows]
+            pose_diag = {
+                "direct": raw_count,
+                "cache_accept": 0,
+                "cache_reject": 0,
+                "tracker_reuse": 0,
+                "pose_checked": 0,
+                "pose_accept": 0,
+                "pose_reject": 0,
+                "soft_hold": 0,
+                "confirmed_reject": 0,
+                "low_reject": 0,
+                "overflow": 0,
+                "pose_ms": 0.0,
+                "fallback": 0,
+            }
 
         with self.det_lock:
-            self.det_ready = True
-        ids = [camera.camera_id for camera in self.cameras]
-        versions = {cid: 0 for cid in ids}
-        group_index = 0
-        age_log_n = 0
+            self.det_calls += 1
+            self.det_inputs += 1
+            self.det_batch_ms = float(message.get("trt_ms") or message.get("batch_ms") or 0.0)
+            self.det_counts[cid] = len(final_rows)
+            self._latest_detections[cid] = (now, final_rows)
+        self._detector_times[cid].append(now)
+        self._result_age_samples.append(age_ms)
+
         print(
-            "CAMERA_DETECTION_READY "
-            f"backend={ready.get('backend')} model={ready.get('model')} "
-            f"input={INFER_WIDTH}x{INFER_HEIGHT} target={self.detector_target_hz:.2f}Hz/cam "
-            "postprocess=person+confidence-only pose=sparse-S",
+            "CAMERA_DETECTION_RESULT "
+            f"cid={cid} raw={raw_count} direct={pose_diag.get('direct', 0)} "
+            f"cache_accept={pose_diag.get('cache_accept', 0)} "
+            f"pose_checked={pose_diag.get('pose_checked', 0)} "
+            f"pose_accept={pose_diag.get('pose_accept', 0)} "
+            f"pose_reject={pose_diag.get('pose_reject', 0)} "
+            f"soft_hold={pose_diag.get('soft_hold', 0)} "
+            f"confirmed_reject={pose_diag.get('confirmed_reject', 0)} "
+            f"final={len(final_rows)} pose_ms={pose_diag.get('pose_ms', 0.0):.1f} "
+            f"age={age_ms:.1f}ms",
             flush=True,
         )
 
-        while not self.det_stop.is_set():
-            cycle_started = time.monotonic()
-            cid = ids[group_index % len(ids)]
-            group_index += 1
-            self._request_group([cid])
-            rows = self.mailbox.wait_group([cid], versions, timeout=0.8)
-            if rows is None:
-                self._clear_requests()
-                with self.det_lock:
-                    self.capture_timeouts += 1
-                self.det_stop.wait(0.025)
-                continue
-
-            version, captured_t, frame = rows[0]
-            versions[cid] = version
-            self._clear_requests()
-            try:
-                self.job_q.put(
-                    {"cameras": [cid], "frames": [frame], "captured": [captured_t]},
-                    timeout=0.3,
-                )
-                result = self.result_q.get(timeout=5.0)
-            except pyqueue.Empty:
-                with self.det_lock:
-                    self.det_error = "TRT86 result timeout"
-                continue
-            if result.get("type") == "fatal":
-                with self.det_lock:
-                    self.det_error = result.get("error", "TRT86 fatal error")
-                return
-            if result.get("type") != "result":
-                continue
-
-            raw_rows = list(result.get("boxes", {}).get(cid, []))
-            gated_rows, gate = self.pose_gate.filter(
-                cid,
-                frame,
-                raw_rows,
-                trusted_boxes=None,
-            )
-            # IMPORTANT: no geometry de-dup here. YOLO26 one-to-one end-to-end
-            # predictions are final model outputs; only pose validation changes
-            # the candidate set.
-            detections = self._scaled_detections(gated_rows)
-            completed_t = time.monotonic()
-            age_ms = max(0.0, (completed_t - float(captured_t)) * 1000.0)
-            self._result_age_samples.append(age_ms)
-            self._latest_detections[cid] = (float(captured_t), detections)
-            self._detector_times[cid].append(completed_t)
-
-            with self.det_lock:
-                self.det_calls += 1
-                self.det_inputs += 1
-                self.det_batch_ms = float(result.get("batch_ms") or 0.0)
-                self.det_counts[cid] = len(detections)
-                self.det_error = ""
-
+        n = self.det_calls
+        if n <= 3 or n % 20 == 0:
+            trt_ms = float(message.get("trt_ms") or 0.0)
             print(
-                "CAMERA_DETECTION_RESULT "
-                f"cid={cid} raw={len(raw_rows)} direct={gate.direct} "
-                f"cache_accept={gate.cache_accept} pose_checked={gate.pose_checked} "
-                f"pose_accept={gate.pose_accept} pose_reject={gate.pose_reject} "
-                f"soft_hold={int(getattr(gate, 'soft_hold', 0))} "
-                f"confirmed_reject={int(getattr(gate, 'confirmed_reject', 0))} "
-                f"final={len(detections)} pose_ms={gate.pose_ms:.1f} "
-                f"age={age_ms:.1f}ms",
+                "CAMERA_DETECTION_FRESHNESS "
+                f"n={n} result_age={age_ms:.1f}ms trt_batch={trt_ms:.1f}ms",
                 flush=True,
             )
-
-            age_log_n += 1
-            if age_log_n <= 3 or age_log_n % 20 == 0:
-                print(
-                    "CAMERA_DETECTION_FRESHNESS "
-                    f"n={age_log_n} result_age={age_ms:.1f}ms "
-                    f"trt_batch={float(result.get('batch_ms') or 0.0):.1f}ms",
-                    flush=True,
-                )
-
-            desired_interval = 1.0 / max(0.1, self.detector_target_hz * len(ids))
-            elapsed = time.monotonic() - cycle_started
-            self.det_stop.wait(max(0.02, desired_interval - elapsed))
 
     def _print_stats(self) -> bool:
         keep = super()._print_stats()
         now = time.monotonic()
-        with self.det_lock:
-            counts = dict(self.det_counts)
-            calls = self.det_calls
-            batch_ms = self.det_batch_ms
-            timeouts = self.capture_timeouts
-            ready = self.det_ready
-            error = self.det_error
-        actual = []
         for cid in self.sources:
-            recent = [t for t in self._detector_times.get(cid, ()) if now - t <= 15.0]
-            hz = 0.0
-            if len(recent) >= 2:
-                span = recent[-1] - recent[0]
-                if span > 0.0:
-                    hz = (len(recent) - 1) / span
-            actual.append(f"{cid}:{hz:.2f}")
-        persons = " ".join(f"{cid}:{counts.get(cid, 0)}" for cid in self.sources)
-        print(
-            "CAMERA_DETECTION_ONLY "
-            f"ready={int(ready)} calls={calls} batch={batch_ms:.1f}ms "
-            f"timeouts={timeouts} persons=[{persons}] actual_hz=[{' '.join(actual)}] "
-            "nvdcf=0 osd=0 dedup=0"
-            + (f" error={error}" if error else ""),
-            flush=True,
-        )
+            current = int(self.stats[cid].frames)
+            if current != self._last_frames.get(cid, 0):
+                self._last_frames[cid] = current
+                self._last_progress[cid] = now
+                continue
+            started = self._source_started_at.get(cid)
+            if started is None or now - started < self._stall_s:
+                continue
+            stalled_for = now - self._last_progress.get(cid, started)
+            if stalled_for >= self._stall_s and not self._restart_requested:
+                self._restart_requested = True
+                self._restart_reason = f"{cid}-no-frame-{stalled_for:.1f}s"
+                print(
+                    "CAMERA_DETECTION_PROCESS_RESTART "
+                    f"reason={self._restart_reason} exit_code={RESTART_EXIT_CODE}",
+                    flush=True,
+                )
+                try:
+                    self.loop.quit()
+                except Exception:
+                    pass
+                return False
+        return keep
+
+    def _start_source_at(self, index: int) -> bool:
+        keep = super()._start_source_at(index)
+        if index < len(self.cameras):
+            cid = self.cameras[index].camera_id
+            self._source_started_at[cid] = time.monotonic()
+            print(
+                f"CAMERA_DETECTION_SOURCE_START cid={cid} index={index} sync=1",
+                flush=True,
+            )
         return keep
 
     def run(self) -> int:
-        self._prepare_staggered_sources()
-        self.GLib.timeout_add_seconds(1, self._source_watchdog)
-
-        ctx = mp.get_context("spawn")
-        self.job_q = ctx.Queue(maxsize=1)
-        self.result_q = ctx.Queue(maxsize=2)
-        self.worker = ctx.Process(
-            target=detection_module._yolo_worker,
-            args=(self.job_q, self.result_q),
-            daemon=True,
-        )
-        self.worker.start()
-        self.scheduler_thread = threading.Thread(
-            target=self._scheduler,
-            name="camera-v2-detection-only-scheduler",
-            daemon=True,
-        )
-        self.scheduler_thread.start()
+        code = super().run()
         try:
-            # Bypass CameraDetectionV2.run(), which would spawn a second worker.
-            result = SecureCameraWallV2.run(self)
-        finally:
-            self.det_stop.set()
-            self._clear_requests()
-            self.mailbox.close()
-            try:
-                self.pose_gate.close()
-            except Exception:
-                pass
-            if self.job_q is not None:
-                try:
-                    self.job_q.put_nowait(None)
-                except Exception:
-                    pass
-            if self.scheduler_thread is not None:
-                self.scheduler_thread.join(timeout=2.0)
-            if self.worker is not None:
-                self.worker.join(timeout=3.0)
-                if self.worker.is_alive():
-                    self.worker.terminate()
-                    self.worker.join(timeout=1.0)
-            for tee, pad in self.tee_request_pads:
-                try:
-                    tee.release_request_pad(pad)
-                except Exception:
-                    pass
+            self.pose_gate.close()
+        except Exception:
+            pass
         if self._restart_requested:
             return RESTART_EXIT_CODE
-        return result
-
-
-def main() -> int:
-    return DetectionOnlyPoseV2().run()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+        return code
