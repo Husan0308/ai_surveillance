@@ -51,7 +51,7 @@ export CAMERA_V2_TRT86_PYTHON="${CAMERA_V2_TRT86_PYTHON:-$ROOT/.venv-trt86/bin/p
 export CAMERA_V2_TRT86_ENGINE="${CAMERA_V2_TRT86_ENGINE:-$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b1-fp32-trt86.engine}"
 export CAMERA_V2_TRT86_SHM_WORKER="${CAMERA_V2_TRT86_SHM_WORKER:-$ROOT/scripts/yolo26_trt86_shm_worker_v3.py}"
 RESTORE_HELPER="$ROOT/scripts/restore_cam01_trt86_engine.sh"
-MODULE="services.camera_v2.detection_only_pose"
+MODULE="services.camera_v2.detection_only_pose_v3"
 
 export QWEN_REID_ENABLED=0
 unset QWEN_REID_URL QWEN_REID_MODEL QWEN_REID_TIMEOUT_SEC || true
@@ -86,7 +86,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: F401
 import numpy, yaml, dotenv, torch, ultralytics  # noqa: F401
 import services.camera_v2.pose_gate_v3  # noqa: F401
-import services.camera_v2.detection_only_pose  # noqa: F401
+import services.camera_v2.detection_only_pose_v3  # noqa: F401
 PY
   then MAIN_PYTHON="$candidate"; break; fi
 done
