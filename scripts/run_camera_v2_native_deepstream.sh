@@ -120,7 +120,7 @@ from gi.repository import Gst  # noqa: F401
 import numpy  # noqa: F401
 import yaml  # noqa: F401
 import dotenv  # noqa: F401
-import services.camera_v2.person_tracking_native_deepstream_v2  # noqa: F401
+import services.camera_v2.person_tracking_native_deepstream_v3  # noqa: F401
 PY
   then
     MAIN_PYTHON="$candidate"
@@ -136,12 +136,13 @@ printf '%s\n' \
   "CAMERA_NATIVE_PROFILE source=6xRTSP mux=1280x720/b6 wall=1920x720" \
   "CAMERA_NATIVE_ANALYTICS pgie=nvinfer/YOLO26-E2E/672x384/fp16/interval19 tracker=NvDCF/640x384" \
   "CAMERA_NATIVE_ZERO_COPY appsink=0 numpy-detector=0 pytorch=0 manual-meta-injection=0" \
-  "CAMERA_NATIVE_RECOVERY internal=nvurisrcbin whole-process-watchdog=12s per-source-recycle=0"
+  "CAMERA_NATIVE_RECOVERY internal=nvurisrcbin whole-process-watchdog=12s per-source-recycle=0" \
+  "CAMERA_NATIVE_GRAPH_POLICY pad-verified=1 unlink-return-ignored=1"
 
 restart_count=0
 while true; do
   set +e
-  "$MAIN_PYTHON" -u -m services.camera_v2.person_tracking_native_deepstream_v2
+  "$MAIN_PYTHON" -u -m services.camera_v2.person_tracking_native_deepstream_v3
   rc=$?
   set -e
 
