@@ -15,6 +15,7 @@ jobs:
         run: |
           python3 -m py_compile \
             services/camera_v2/person_tracking_native_deepstream.py \
+            services/camera_v2/person_tracking_native_deepstream_v2.py \
             scripts/export_yolo26s_deepstream_onnx.py
       - name: Bash syntax
         run: bash -n scripts/run_camera_v2_native_deepstream.sh
@@ -34,6 +35,8 @@ jobs:
           grep -q -- '-Wno-missing-field-initializers' services/camera_v2/native_yolo26/Makefile
           grep -q -- '-Wno-unused-parameter' services/camera_v2/native_yolo26/Makefile
           ! grep -q -- '-Werror' services/camera_v2/native_yolo26/Makefile
+          grep -q '_set_section_key(lines, "TargetManagement", "outputShadowTracks", "1")' services/camera_v2/person_tracking_native_deepstream_v2.py
+          grep -q 'person_tracking_native_deepstream_v2' scripts/run_camera_v2_native_deepstream.sh
           grep -q '/usr/local/cuda-12.6' scripts/run_camera_v2_native_deepstream.sh
           grep -q 'CUDA_HOME="$CUDA_HOME"' scripts/run_camera_v2_native_deepstream.sh
           grep -q 'CAMERA_V2_FRAME_WIDTH=1280' scripts/run_camera_v2_native_deepstream.sh
