@@ -10,11 +10,13 @@ from services.ml_service.app.trt86_detector import CONTENT_H, INPUT_W, TRT86Dete
 
 
 class DetectorSubstreamLiveService(DetectorSubstreamService):
-    """Live-source lifecycle + one-frame capture pipeline for detector substreams.
+    """Live-source lifecycle + bounded one-frame capture pipeline.
 
-    The source graph remains latest-only. At most one next camera is armed while
-    TensorRT works on the current camera. This hides the RTSP frame-period wait
-    without creating a frame queue or continuously converting all six streams.
+    At most one next camera is armed while TensorRT works on the current camera.
+    A prearmed camera is never allowed to head-of-line block the detector for the
+    full RTSP capture timeout: after inference it gets only a small completion
+    budget. If it misses that budget the request is cancelled and the scheduler
+    advances to another due camera. There is still no historical frame queue.
     """
 
     def __init__(self) -> None:
@@ -22,10 +24,14 @@ class DetectorSubstreamLiveService(DetectorSubstreamService):
         self.prearm_horizon_ms = max(
             0.0, min(300.0, float(os.environ.get("ML_SUBSTREAM_PREARM_HORIZON_MS", "180")))
         )
+        self.prearm_block_budget_ms = max(
+            0.0, min(100.0, float(os.environ.get("ML_SUBSTREAM_PREARM_BLOCK_MS", "40")))
+        )
         self.capture_latency_ms: deque[float] = deque(maxlen=240)
         self.capture_block_ms: deque[float] = deque(maxlen=240)
         self.prearm_count = 0
         self.prearm_hits = 0
+        self.prearm_skips = 0
 
     @staticmethod
     def _state_name(value) -> str:
@@ -79,9 +85,24 @@ class DetectorSubstreamLiveService(DetectorSubstreamService):
             self.capture_requested[cid] = True
         return baseline, time.monotonic()
 
-    def _await_armed_capture(self, cid: str, baseline: int, armed_at: float):
+    def _cancel_capture(self, cid: str) -> None:
+        with self.capture_condition:
+            self.capture_requested[cid] = False
+
+    def _await_armed_capture(
+        self,
+        cid: str,
+        baseline: int,
+        armed_at: float,
+        *,
+        block_budget_ms: float | None = None,
+    ):
         block_started = time.monotonic()
-        deadline = armed_at + self.capture_timeout_ms / 1000.0
+        hard_deadline = armed_at + self.capture_timeout_ms / 1000.0
+        deadline = hard_deadline
+        if block_budget_ms is not None:
+            deadline = min(deadline, block_started + max(0.0, block_budget_ms) / 1000.0)
+
         with self.capture_condition:
             while not self.stop_requested:
                 slot = self.capture_slots[cid]
@@ -89,15 +110,20 @@ class DetectorSubstreamLiveService(DetectorSubstreamService):
                     now = time.monotonic()
                     capture_latency = (now - armed_at) * 1000.0
                     blocked = (now - block_started) * 1000.0
-                    return slot.seq, slot.captured_ns, slot.frame.copy(), capture_latency, blocked
-                remaining = deadline - time.monotonic()
+                    return slot.seq, slot.captured_ns, slot.frame.copy(), capture_latency, blocked, False
+
+                now = time.monotonic()
+                remaining = deadline - now
                 if remaining <= 0:
                     self.capture_requested[cid] = False
-                    self.capture_timeouts[cid] += 1
-                    now = time.monotonic()
-                    return baseline, 0, None, (now - armed_at) * 1000.0, (now - block_started) * 1000.0
-                self.capture_condition.wait(timeout=min(remaining, 0.02))
-        return baseline, 0, None, 0.0, 0.0
+                    hard_timeout = now >= hard_deadline
+                    if hard_timeout:
+                        self.capture_timeouts[cid] += 1
+                    capture_latency = (now - armed_at) * 1000.0
+                    blocked = (now - block_started) * 1000.0
+                    return baseline, 0, None, capture_latency, blocked, not hard_timeout
+                self.capture_condition.wait(timeout=min(remaining, 0.01))
+        return baseline, 0, None, 0.0, 0.0, False
 
     def _select_due(self, cursor: int, horizon_ms: float = 0.0):
         if not self.cameras:
@@ -116,10 +142,11 @@ class DetectorSubstreamLiveService(DetectorSubstreamService):
         hit_rate = 100.0 * self.prearm_hits / max(1, self.prearm_count)
         print(
             "ML_DETECTOR_PIPELINE_STATS "
-            f"prearm={self.prearm_count} hit_rate={hit_rate:.1f}% "
+            f"prearm={self.prearm_count} hit_rate={hit_rate:.1f}% skips={self.prearm_skips} "
             f"capture_latency_p95={_percentile(self.capture_latency_ms, 0.95):.1f}ms "
             f"capture_block_p95={_percentile(self.capture_block_ms, 0.95):.1f}ms "
-            f"horizon={self.prearm_horizon_ms:.0f}ms queue_depth=1",
+            f"horizon={self.prearm_horizon_ms:.0f}ms "
+            f"block_budget={self.prearm_block_budget_ms:.0f}ms queue_depth=1",
             flush=True,
         )
 
@@ -135,14 +162,15 @@ class DetectorSubstreamLiveService(DetectorSubstreamService):
         print(
             "ML_DETECTOR_BOUNDARY camera_service=independent main_stream=0 camera_shm=0 "
             "tracker=0 api=0 ui=0 substream_nvdec=1 JIT_convert=1 "
-            "capture_prearm=1 queue_depth=1",
+            "capture_prearm=1 head_of_line_block=bounded queue_depth=1",
             flush=True,
         )
         self._start_sources()
         self.detector = TRT86DetectorClient()
 
         cursor = 0
-        pending_capture: tuple[str, int, float] | None = None
+        # cid, baseline, armed_at, was_prearmed
+        pending_capture: tuple[str, int, float, bool] | None = None
 
         while not self.stop_requested:
             self._poll_bus()
@@ -156,31 +184,43 @@ class DetectorSubstreamLiveService(DetectorSubstreamService):
                     continue
                 index, cid = selected
                 baseline, armed_at = self._arm_capture(cid)
-                pending_capture = (cid, baseline, armed_at)
+                pending_capture = (cid, baseline, armed_at, False)
                 cursor = (index + 1) % len(self.cameras)
 
-            cid, baseline, armed_at = pending_capture
+            cid, baseline, armed_at, was_prearmed = pending_capture
             pending_capture = None
-            seq, captured_ns, frame, capture_latency, capture_block = self._await_armed_capture(
-                cid, baseline, armed_at
+            budget = self.prearm_block_budget_ms if was_prearmed else None
+            seq, captured_ns, frame, capture_latency, capture_block, soft_skip = self._await_armed_capture(
+                cid,
+                baseline,
+                armed_at,
+                block_budget_ms=budget,
             )
             self.capture_latency_ms.append(capture_latency)
             self.capture_block_ms.append(capture_block)
-            # Preserve the existing metric name, but now it measures scheduler
-            # blocking rather than total arm->frame latency.
             self.capture_wait_ms.append(capture_block)
-            self.next_due[cid] = armed_at + self.target_period
+
             if frame is None:
+                if soft_skip:
+                    self.prearm_skips += 1
+                    # The camera is still due. Move on instead of letting one slow
+                    # substream stall all other cameras; the round-robin cursor will
+                    # retry it on a later pass.
+                    self.next_due[cid] = min(self.next_due[cid], time.monotonic())
+                else:
+                    # A genuine source timeout gets a short retry delay, not a full
+                    # target period, so recovery is prompt without a busy loop.
+                    self.next_due[cid] = time.monotonic() + 0.05
                 continue
 
-            # Arm exactly one next due camera before TensorRT. Its one requested
-            # frame can arrive while the current inference is running, removing
-            # the otherwise-serial 50-100 ms RTSP frame-period wait.
+            # Advance cadence only after a successful fresh capture.
+            self.next_due[cid] = max(self.next_due[cid] + self.target_period, armed_at + self.target_period)
+
             selected = self._select_due(cursor, self.prearm_horizon_ms)
             if selected is not None:
                 index, next_cid = selected
                 next_baseline, next_armed_at = self._arm_capture(next_cid)
-                pending_capture = (next_cid, next_baseline, next_armed_at)
+                pending_capture = (next_cid, next_baseline, next_armed_at, True)
                 cursor = (index + 1) % len(self.cameras)
                 self.prearm_count += 1
 
