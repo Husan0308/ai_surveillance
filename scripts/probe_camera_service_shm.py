@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
+
+# `python scripts/probe_camera_service_shm.py` puts scripts/ at sys.path[0], not
+# the repository root. Make this diagnostic executable directly from the repo
+# without requiring users to export PYTHONPATH or install the project package.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from services.camera_service.app.shm_frame import LatestFrameMmapReader
 
@@ -12,6 +20,8 @@ def main() -> int:
     parser.add_argument("--dir", default="/dev/shm/ai_surveillance")
     parser.add_argument("--seconds", type=float, default=20.0)
     parser.add_argument("--cameras", default="CAM-01,CAM-02,CAM-03,CAM-04,CAM-05,CAM-06")
+    parser.add_argument("--min-hz", type=float, default=1.50)
+    parser.add_argument("--max-age-ms", type=float, default=500.0)
     args = parser.parse_args()
 
     root = Path(args.dir)
@@ -60,9 +70,9 @@ def main() -> int:
             f"age_avg={age_avg:.1f}ms age_max={age_max:.1f}ms seq={last_seq[cid]}",
             flush=True,
         )
-        if counts[cid] < max(2, int(elapsed * 0.8)):
-            failures.append(f"{cid}: too few updates ({counts[cid]})")
-        if age_max > 500.0:
+        if hz < args.min_hz:
+            failures.append(f"{cid}: update rate {hz:.2f}Hz < {args.min_hz:.2f}Hz")
+        if age_max > args.max_age_ms:
             failures.append(f"{cid}: stale frame max_age={age_max:.1f}ms")
 
     if failures:
