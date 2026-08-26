@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -49,10 +50,16 @@ def _digest_opener(base_url: str, username: str, password: str) -> urllib.reques
     )
 
 
-def _request(opener: urllib.request.OpenerDirector, url: str, method: str, timeout: float, payload: bytes | None = None) -> bytes:
+def _request(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    method: str,
+    timeout: float,
+    payload: bytes | None = None,
+) -> bytes:
     headers = {
         "Accept": "application/xml",
-        "User-Agent": "ai-surveillance-hikvision-stream-config/1.0",
+        "User-Agent": "ai-surveillance-hikvision-stream-config/1.1",
     }
     if payload is not None:
         headers["Content-Type"] = "application/xml; charset=UTF-8"
@@ -71,6 +78,64 @@ def _register_default_namespace(root: ET.Element) -> None:
 def _fps(raw: str) -> float:
     value = float(raw)
     return value / 100.0 if value >= 100.0 else value
+
+
+def _response_status(payload: bytes) -> tuple[str, str, str, str, str]:
+    if not payload:
+        return "-", "-", "-", "-", "-"
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError:
+        return "-", "non-xml", "-", "-", "-"
+    return (
+        _find_text(root, "statusCode") or "-",
+        _find_text(root, "statusString") or "-",
+        _find_text(root, "subStatusCode") or "-",
+        _find_text(root, "errorCode") or "-",
+        _find_text(root, "errorMsg") or "-",
+    )
+
+
+def _write_http_error(channel: str, stamp: str, exc: urllib.error.HTTPError) -> int:
+    try:
+        body = exc.read()
+    except Exception:
+        body = b""
+
+    status_code, status_string, sub_status, error_code, error_msg = _response_status(body)
+    error_path = Path(f"/tmp/hikvision_{channel}_put_error_{stamp}.xml")
+    if body:
+        error_path.write_bytes(body)
+
+    print(
+        "HIKVISION_STREAM_SET_HTTP_ERROR "
+        f"http={exc.code} reason={exc.reason} status_code={status_code} "
+        f"status={status_string} sub_status={sub_status} error_code={error_code} "
+        f"error_msg={error_msg} body_bytes={len(body)} "
+        f"body_path={error_path if body else '-'}",
+        flush=True,
+    )
+
+    normalized = " ".join(
+        value.lower() for value in (status_string, sub_status, error_msg) if value and value != "-"
+    )
+    if exc.code == 403:
+        if "notsupport" in normalized or "not support" in normalized or "invalid operation" in normalized:
+            diagnosis = "endpoint-write-not-supported-or-proxied-channel"
+            next_step = "configure-the-underlying-ip-camera-directly-or-via-nvr-virtual-host"
+        elif "permission" in normalized or "forbidden" in normalized or "authorization" in normalized:
+            diagnosis = "authenticated-but-write-permission-denied"
+            next_step = "use-admin-or-enable-remote-parameters-settings"
+        else:
+            diagnosis = "authenticated-get-ok-but-put-forbidden"
+            next_step = "check-admin-remote-parameters-permission-and-response-body"
+        print(
+            "HIKVISION_STREAM_SET_DIAG "
+            f"diagnosis={diagnosis} next={next_step} "
+            "note=GET-succeeded-so-credentials-are-valid-for-read",
+            flush=True,
+        )
+    return 3
 
 
 def main() -> int:
@@ -143,19 +208,19 @@ def main() -> int:
     backup.write_bytes(before_bytes)
     print(f"HIKVISION_STREAM_SET_BACKUP path={backup}", flush=True)
 
-    response = _request(opener, url, "PUT", timeout, payload)
+    try:
+        response = _request(opener, url, "PUT", timeout, payload)
+    except urllib.error.HTTPError as exc:
+        return _write_http_error(channel, stamp, exc)
+
     if response:
-        try:
-            response_root = ET.fromstring(response)
-            status_code = _find_text(response_root, "statusCode") or "-"
-            status_string = _find_text(response_root, "statusString") or "-"
-            sub_status = _find_text(response_root, "subStatusCode") or "-"
-            print(
-                f"HIKVISION_STREAM_SET_PUT status_code={status_code} status={status_string} sub_status={sub_status}",
-                flush=True,
-            )
-        except ET.ParseError:
-            print(f"HIKVISION_STREAM_SET_PUT response_bytes={len(response)}", flush=True)
+        status_code, status_string, sub_status, error_code, error_msg = _response_status(response)
+        print(
+            "HIKVISION_STREAM_SET_PUT "
+            f"status_code={status_code} status={status_string} sub_status={sub_status} "
+            f"error_code={error_code} error_msg={error_msg}",
+            flush=True,
+        )
 
     verify_bytes = _request(opener, url, "GET", timeout)
     verify = ET.fromstring(verify_bytes)
