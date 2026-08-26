@@ -1,0 +1,35 @@
+name: Camera Service Boundary Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v1-20260826
+  pull_request:
+    paths:
+      - "services/camera_service/**"
+      - "scripts/run_camera_service.sh"
+      - ".github/workflows/camera-service-boundary-static.yml"
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: |
+          python3 -m py_compile \
+            services/camera_service/__init__.py \
+            services/camera_service/app/__init__.py \
+            services/camera_service/app/config.py \
+            services/camera_service/app/runtime.py
+          bash -n scripts/run_camera_service.sh
+      - name: Camera data-plane boundary
+        run: |
+          grep -q 'CAMERA_SERVICE_BOUNDARY ai=0 detector=0 tracker=0 reid=0 identity=0 api=0 frontend=0' scripts/run_camera_service.sh
+          grep -q 'path=RTSP/NVDEC->latest->mux->tiler->EGL' services/camera_service/app/runtime.py
+          ! grep -R -E 'camera_v2|tensorrt|nvtracker|nvinfer|reid|global_identity|api_service|frontend' services/camera_service/app/*.py
+          ! grep -R -E 'CAMERA_V2_|QWEN_' services/camera_service scripts/run_camera_service.sh
+          grep -q 'max-size-buffers", 1' services/camera_service/app/runtime.py
+          grep -q 'leaky", 2' services/camera_service/app/runtime.py
+          grep -q 'tcp-timestamp' services/camera_service/app/runtime.py
