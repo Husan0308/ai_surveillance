@@ -27,7 +27,7 @@ jobs:
           grep -q 'CAMERA_V2_WALL_WIDTH:-1920' scripts/run_camera_v2_clean_wall.sh
           grep -q 'CAMERA_V2_WALL_HEIGHT:-720' scripts/run_camera_v2_clean_wall.sh
           grep -q 'CAMERA_V2_TILER_COLUMNS:-3' scripts/run_camera_v2_clean_wall.sh
-          grep -q 'detector=1 tracker=1 appsink=1 shm=1 tensorrt=1 osd=1 global_id=1' scripts/run_camera_v2_clean_wall.sh
+          grep -q 'detector=off tracker=off appsink=off shm=off tensorrt=off osd=off global_id=off' scripts/run_camera_v2_clean_wall.sh
           grep -q 'class CleanCameraWallV2(SecureCameraWallV2)' services/camera_v2/clean_wall.py
           grep -q 'interpolation-method", 4' services/camera_v2/clean_wall.py
           grep -q 'CAMERA_CLEAN_PIPELINE_AUDIT status=OK' services/camera_v2/clean_wall.py
