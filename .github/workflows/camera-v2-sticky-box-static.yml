@@ -1,0 +1,34 @@
+name: Camera V2 Sticky Box Static
+
+on:
+  push:
+    branches:
+      - feature/ml-detection-lowlat-rescue-20260826
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/camera_v2/detection_lowlat_sticky.py \
+            services/camera_v2/detection_lowlat_nv12.py \
+            services/camera_v2/detection_lowlat.py
+      - name: Bash syntax
+        run: bash -n scripts/run_camera_v2_detection_sticky.sh
+      - name: Sticky architecture contract
+        run: |
+          grep -q 'DetectionLowLatencyNv12' services/camera_v2/detection_lowlat_sticky.py
+          grep -q 'CAMERA_STICKY_UPDATE' services/camera_v2/detection_lowlat_sticky.py
+          grep -q 'CAMERA_STICKY_STATS' services/camera_v2/detection_lowlat_sticky.py
+          grep -q 'CAMERA_V2_STICKY_DUP_IOU' services/camera_v2/detection_lowlat_sticky.py
+          grep -q 'CAMERA_V2_STICKY_MISS_LIMIT' services/camera_v2/detection_lowlat_sticky.py
+          grep -q 'CAMERA_V2_STICKY_HARD_TTL_SEC' services/camera_v2/detection_lowlat_sticky.py
+          grep -q 'temporal_duplicate_guard=1' scripts/run_camera_v2_detection_sticky.sh
+          grep -q 'nvdcf=0' scripts/run_camera_v2_detection_sticky.sh
+          grep -q 'CAMERA_V2_DISPLAY_BBOX_TTL_SEC:-8.0' scripts/run_camera_v2_detection_sticky.sh
+          ! grep -q 'person_nvdcf_tracker' services/camera_v2/detection_lowlat_sticky.py
+          ! grep -q 'external_nms=1' scripts/run_camera_v2_detection_sticky.sh
