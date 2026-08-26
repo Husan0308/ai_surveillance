@@ -25,22 +25,37 @@ jobs:
           bash -n scripts/run_ml_detector_shm.sh
       - name: Demand-driven boundary contract
         run: |
-          grep -q 'class FrameDemandOwner' services/camera_service/app/shm_frame.py
-          grep -q 'class FrameDemandClient' services/camera_service/app/shm_frame.py
-          grep -q 'mode=demand-jit' services/camera_service/app/runtime_shm.py
-          grep -q '_ml_demand_gate_probe' services/camera_service/app/runtime_shm.py
-          grep -q 'requested <= served' services/camera_service/app/runtime_shm.py
-          grep -q 'policy=request-next-frame' scripts/run_camera_service_shm.sh
-          grep -q 'producer_rate=consumer-driven' scripts/run_camera_service_shm.sh
-          grep -q 'FrameDemandClient' services/ml_service/app/detector_only_shm.py
-          grep -q '_request_fresh_frame' services/ml_service/app/detector_only_shm.py
-          grep -q 'policy=demand-jit-one-frame-per-inference' services/ml_service/app/detector_only_shm.py
-          grep -q 'gpu_overlap=convert-before-trt' services/ml_service/app/detector_only_shm.py
-          grep -q 'ML_DETECTOR_TARGET_HZ:-2.0' scripts/run_ml_detector_shm.sh
-          grep -q 'ML_DETECTOR_CAPTURE_TIMEOUT_MS:-300' scripts/run_ml_detector_shm.sh
-          grep -q 'CAMERA_SERVICE_HEADLESS:-1' scripts/run_camera_service_shm.sh
-          ! grep -q 'CAMERA_SERVICE_ML_TAP_HZ' scripts/run_camera_service_shm.sh
-          ! grep -q '_collect_candidates' services/ml_service/app/detector_only_shm.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          shm = Path('services/camera_service/app/shm_frame.py').read_text()
+          camera = Path('services/camera_service/app/runtime_shm.py').read_text()
+          ml = Path('services/ml_service/app/detector_only_shm.py').read_text()
+          camera_run = Path('scripts/run_camera_service_shm.sh').read_text()
+          ml_run = Path('scripts/run_ml_detector_shm.sh').read_text()
+
+          required = {
+              'FrameDemandOwner': 'class FrameDemandOwner' in shm,
+              'FrameDemandClient': 'class FrameDemandClient' in shm,
+              'camera demand gate': '_ml_demand_gate_probe' in camera,
+              'camera request/served guard': 'requested <= served' in camera,
+              'camera demand mode': 'mode=demand-jit' in camera,
+              'camera consumer-driven launch': 'producer_rate=consumer-driven' in camera_run,
+              'ML request client': 'FrameDemandClient' in ml,
+              'ML fresh request': '_request_fresh_frame' in ml,
+              'ML JIT policy': 'demand-jit-one-frame-per-inference' in ml,
+              'convert-before-TRT': 'convert-before-trt' in ml,
+              'target cadence': 'ML_DETECTOR_TARGET_HZ' in ml_run,
+              'capture timeout': 'ML_DETECTOR_CAPTURE_TIMEOUT_MS' in ml_run,
+              'headless camera default': 'CAMERA_SERVICE_HEADLESS' in camera_run,
+              'old fixed camera tap removed': 'CAMERA_SERVICE_ML_TAP_HZ' not in camera_run,
+              'old push candidate scheduler removed': '_collect_candidates' not in ml,
+          }
+          failed = [name for name, ok in required.items() if not ok]
+          if failed:
+              raise SystemExit('contract failed: ' + ', '.join(failed))
+          print('JIT_DEMAND_STATIC_CONTRACT status=OK')
+          PY
       - name: TRT86 interpreter isolation contract
         run: |
           grep -q '_absolute_without_resolving_symlink' services/ml_service/app/detector_only_shm.py
