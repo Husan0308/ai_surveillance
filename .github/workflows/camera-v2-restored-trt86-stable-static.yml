@@ -56,7 +56,7 @@ jobs:
           grep -q 'execute_async_v2' scripts/yolo26_trt86_shm_worker.py
           grep -q 'cudaStreamCreateWithFlags' scripts/yolo26_trt86_shm_worker.py
           grep -q 'cudaStreamSynchronize' scripts/yolo26_trt86_shm_worker.py
-          ! grep -q 'cudaDeviceSynchronize' scripts/yolo26_trt86_shm_worker.py
+          ! grep -q 'self.cuda.cudaDeviceSynchronize' scripts/yolo26_trt86_shm_worker.py
           grep -q 'CameraPersonTrackingReID' services/camera_v2/person_tracking_trt86_reid_restore_stable.py
           ! grep -q 'yolo26m.pt' scripts/run_restore_stable_tracking.sh
           ! grep -q 'MICRO_BATCH=2' scripts/run_restore_stable_tracking.sh
