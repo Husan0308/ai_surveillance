@@ -46,15 +46,17 @@ jobs:
           grep -q 'sync_state_with_parent' services/ml_service/app/detector_substream_live.py
           grep -q 'services.ml_service.app.detector_substream_live' scripts/run_ml_detector_substream.sh
           grep -q 'live_preroll_safe=1' scripts/run_ml_detector_substream.sh
-      - name: Pipelined capture scheduler contract
+      - name: Bounded pipelined capture scheduler contract
         run: |
           grep -q 'ML_SUBSTREAM_PREARM_HORIZON_MS' services/ml_service/app/detector_substream_live.py
+          grep -q 'ML_SUBSTREAM_PREARM_BLOCK_MS' services/ml_service/app/detector_substream_live.py
           grep -q 'def _arm_capture' services/ml_service/app/detector_substream_live.py
           grep -q 'def _await_armed_capture' services/ml_service/app/detector_substream_live.py
-          grep -q 'capture_prearm=1 queue_depth=1' services/ml_service/app/detector_substream_live.py
+          grep -q 'head_of_line_block=bounded' services/ml_service/app/detector_substream_live.py
+          grep -q 'block_budget=' services/ml_service/app/detector_substream_live.py
+          grep -q 'prearm_skips' services/ml_service/app/detector_substream_live.py
           grep -q 'ML_DETECTOR_PIPELINE_STATS' services/ml_service/app/detector_substream_live.py
-          grep -q 'capture_block_p95=' services/ml_service/app/detector_substream_live.py
-          grep -q 'pending_capture' services/ml_service/app/detector_substream_live.py
+          grep -q 'queue_depth=1' services/ml_service/app/detector_substream_live.py
       - name: Service config boundary
         run: |
           grep -q 'services.shared.camera_config' services/camera_service/app/config.py
