@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -53,12 +54,7 @@ def _fps(raw: str) -> str:
 
 
 class _SingleAttemptDigestAuthHandler(urllib.request.HTTPDigestAuthHandler):
-    """Allow one authenticated Digest attempt for each HTTP request.
-
-    urllib's digest handler keeps a retry counter on the handler instance. Reset it
-    after a successful response so a reused opener can authenticate the next URL,
-    while a bad credential still gets only one authenticated retry.
-    """
+    """Allow one authenticated Digest attempt for each HTTP request."""
 
     def http_error_401(self, req, fp, code, msg, hdrs):  # type: ignore[override]
         if getattr(self, "retried", 0) >= 1:
@@ -88,11 +84,33 @@ def _get_xml(opener: urllib.request.OpenerDirector, url: str, timeout: float) ->
     req = urllib.request.Request(
         url,
         method="GET",
-        headers={"Accept": "application/xml", "User-Agent": "ai-surveillance-stream-probe/1.2"},
+        headers={"Accept": "application/xml", "User-Agent": "ai-surveillance-stream-probe/1.3"},
     )
     with opener.open(req, timeout=timeout) as resp:
         payload = resp.read()
     return ET.fromstring(payload)
+
+
+def _http_error_details(exc: urllib.error.HTTPError) -> tuple[str, str, str, str, int]:
+    try:
+        body = exc.read()
+    except Exception:
+        body = b""
+    status_code = "-"
+    status_string = "-"
+    sub_status = "-"
+    if body:
+        try:
+            root = ET.fromstring(body)
+            status_code = _find_text(root, "statusCode") or "-"
+            status_string = _find_text(root, "statusString") or "-"
+            sub_status = _find_text(root, "subStatusCode") or "-"
+        except ET.ParseError:
+            pass
+    challenge = exc.headers.get("WWW-Authenticate", "") if exc.headers else ""
+    stale_match = re.search(r"stale\s*=\s*\"?([^,\"\s]+)", challenge, re.IGNORECASE)
+    stale = stale_match.group(1).lower() if stale_match else "-"
+    return status_code, status_string, sub_status, stale, len(body)
 
 
 def _cap_text(root: ET.Element | None, name: str) -> str:
@@ -146,9 +164,11 @@ def main() -> int:
         except urllib.error.HTTPError as exc:
             failures += 1
             if exc.code == 401:
+                status_code, status_string, sub_status, stale, body_bytes = _http_error_details(exc)
                 print(
                     f"HIKVISION_STREAM_PROBE_AUTH_ERROR camera={camera.camera_id} id={channel} "
-                    "http=401 attempts=1 action=abort reason=credential-rejected-or-illegal-login-lock",
+                    f"http=401 attempts=1 action=abort status_code={status_code} "
+                    f"status={status_string} sub_status={sub_status} stale={stale} body_bytes={body_bytes}",
                     flush=True,
                 )
                 return 4
@@ -170,9 +190,11 @@ def main() -> int:
             caps = _get_xml(opener, caps_url, timeout)
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
+                status_code, status_string, sub_status, stale, body_bytes = _http_error_details(exc)
                 print(
                     f"HIKVISION_STREAM_PROBE_AUTH_ERROR camera={camera.camera_id} id={channel} "
-                    "stage=capabilities http=401 attempts=1 action=abort",
+                    f"stage=capabilities http=401 attempts=1 action=abort status_code={status_code} "
+                    f"status={status_string} sub_status={sub_status} stale={stale} body_bytes={body_bytes}",
                     flush=True,
                 )
                 return 4
