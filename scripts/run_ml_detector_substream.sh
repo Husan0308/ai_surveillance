@@ -52,13 +52,13 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: F401
 import numpy, yaml, dotenv  # noqa: F401
-from services.ml_service.app.detector_substream import DetectorSubstreamService  # noqa: F401
-print("ML_SUBSTREAM_IMPORTS status=OK", flush=True)
+from services.ml_service.app.detector_substream_live import DetectorSubstreamLiveService  # noqa: F401
+print("ML_SUBSTREAM_IMPORTS status=OK live_preroll_safe=1", flush=True)
 PY
 
 printf '%s\n' \
   "ML_SUBSTREAM_PROFILE source=Hikvision-substream-direct rtsp=${ML_SUBSTREAM_RTSP_LATENCY_MS}ms extra_surfaces=${ML_SUBSTREAM_EXTRA_SURFACES}" \
   "ML_SUBSTREAM_PROFILE detector=TRT8.6/672x384 target=${ML_DETECTOR_TARGET_HZ}Hz/cam conf=${ML_DETECTOR_CONF} max_det=${ML_DETECTOR_MAX_DET}" \
-  "ML_SUBSTREAM_BOUNDARY main_stream=0 camera_service_shm=0 tracker=0 api=0 ui=0 JIT_convert=1 sequential_gpu_compute=1"
+  "ML_SUBSTREAM_BOUNDARY main_stream=0 camera_service_shm=0 tracker=0 api=0 ui=0 JIT_convert=1 sequential_gpu_compute=1 sink_async=0 live_preroll_safe=1"
 
-exec "$MAIN_PYTHON" -u -m services.ml_service.app.detector_substream
+exec "$MAIN_PYTHON" -u -m services.ml_service.app.detector_substream_live
