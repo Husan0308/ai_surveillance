@@ -11,7 +11,7 @@ export ML_SUBSTREAM_STARTUP_STAGGER_SEC="${ML_SUBSTREAM_STARTUP_STAGGER_SEC:-0.3
 export ML_SUBSTREAM_CAPTURE_TIMEOUT_MS="${ML_SUBSTREAM_CAPTURE_TIMEOUT_MS:-300}"
 export ML_SUBSTREAM_MAX_INPUT_AGE_MS="${ML_SUBSTREAM_MAX_INPUT_AGE_MS:-180}"
 export ML_SUBSTREAM_PENDING_DEPTH="${ML_SUBSTREAM_PENDING_DEPTH:-4}"
-export ML_SUBSTREAM_TOKEN_CAPACITY="${ML_SUBSTREAM_TOKEN_CAPACITY:-2}"
+export ML_SUBSTREAM_TOKEN_CAPACITY="${ML_SUBSTREAM_TOKEN_CAPACITY:-3}"
 export ML_DETECTOR_CONF="${ML_DETECTOR_CONF:-0.18}"
 export ML_DETECTOR_MAX_DET="${ML_DETECTOR_MAX_DET:-20}"
 export ML_DETECTOR_TARGET_HZ="${ML_DETECTOR_TARGET_HZ:-2.0}"
@@ -56,7 +56,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: F401
 import numpy, yaml, dotenv  # noqa: F401
 from services.ml_service.app.detector_substream_prequeue_token import DetectorSubstreamPrequeueTokenService  # noqa: F401
-print("ML_SUBSTREAM_IMPORTS status=OK prequeue_token_gate=1 wall_token_bucket=1 tcp_timestamp=0 pending_depth=4 live_preroll_safe=1", flush=True)
+print("ML_SUBSTREAM_IMPORTS status=OK prequeue_token_gate=1 wall_token_bucket=1 tcp_timestamp=0 pending_depth=4 token_capacity=3 live_preroll_safe=1", flush=True)
 PY
 
 printf '%s\n' \
