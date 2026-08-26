@@ -120,12 +120,18 @@ def _write_http_error(channel: str, stamp: str, exc: urllib.error.HTTPError) -> 
         value.lower() for value in (status_string, sub_status, error_msg) if value and value != "-"
     )
     if exc.code == 403:
-        if "notsupport" in normalized or "not support" in normalized or "invalid operation" in normalized:
+        if "lowprivilege" in normalized or "no permission" in normalized:
+            diagnosis = "authenticated-but-insufficient-remote-configuration-privilege"
+            next_step = "use-admin-or-enable-remote-parameters-settings-and-remote-camera-management"
+        elif "notsupport" in normalized or "not support" in normalized:
             diagnosis = "endpoint-write-not-supported-or-proxied-channel"
             next_step = "configure-the-underlying-ip-camera-directly-or-via-nvr-virtual-host"
         elif "permission" in normalized or "forbidden" in normalized or "authorization" in normalized:
             diagnosis = "authenticated-but-write-permission-denied"
             next_step = "use-admin-or-enable-remote-parameters-settings"
+        elif "invalid operation" in normalized:
+            diagnosis = "invalid-operation-without-specific-substatus"
+            next_step = "check-user-remote-configuration-permissions-then-device-endpoint-support"
         else:
             diagnosis = "authenticated-get-ok-but-put-forbidden"
             next_step = "check-admin-remote-parameters-permission-and-response-body"
