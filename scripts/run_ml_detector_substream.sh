@@ -10,7 +10,7 @@ export ML_SUBSTREAM_EXTRA_SURFACES="${ML_SUBSTREAM_EXTRA_SURFACES:-4}"
 export ML_SUBSTREAM_STARTUP_STAGGER_SEC="${ML_SUBSTREAM_STARTUP_STAGGER_SEC:-0.35}"
 export ML_SUBSTREAM_CAPTURE_TIMEOUT_MS="${ML_SUBSTREAM_CAPTURE_TIMEOUT_MS:-300}"
 export ML_SUBSTREAM_MAX_INPUT_AGE_MS="${ML_SUBSTREAM_MAX_INPUT_AGE_MS:-180}"
-export ML_SUBSTREAM_PENDING_DEPTH="${ML_SUBSTREAM_PENDING_DEPTH:-2}"
+export ML_SUBSTREAM_PENDING_DEPTH="${ML_SUBSTREAM_PENDING_DEPTH:-4}"
 export ML_DETECTOR_CONF="${ML_DETECTOR_CONF:-0.18}"
 export ML_DETECTOR_MAX_DET="${ML_DETECTOR_MAX_DET:-20}"
 export ML_DETECTOR_TARGET_HZ="${ML_DETECTOR_TARGET_HZ:-2.0}"
@@ -54,13 +54,13 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: F401
 import numpy, yaml, dotenv  # noqa: F401
-from services.ml_service.app.detector_substream_rtp_pts import DetectorSubstreamRtpPtsService  # noqa: F401
-print("ML_SUBSTREAM_IMPORTS status=OK rtp_pts_burst_ready_first=1 tcp_timestamp=0 pending_depth=2 live_preroll_safe=1", flush=True)
+from services.ml_service.app.detector_substream_prequeue_pts import DetectorSubstreamPrequeuePtsService  # noqa: F401
+print("ML_SUBSTREAM_IMPORTS status=OK prequeue_pts_gate=1 rtp_pts=1 tcp_timestamp=0 pending_depth=4 live_preroll_safe=1", flush=True)
 PY
 
 printf '%s\n' \
   "ML_SUBSTREAM_PROFILE source=Hikvision-substream-direct rtsp=${ML_SUBSTREAM_RTSP_LATENCY_MS}ms extra_surfaces=${ML_SUBSTREAM_EXTRA_SURFACES} tcp_timestamp=0" \
   "ML_SUBSTREAM_PROFILE detector=TRT8.6/672x384 target=${ML_DETECTOR_TARGET_HZ}Hz/cam conf=${ML_DETECTOR_CONF} max_det=${ML_DETECTOR_MAX_DET}" \
-  "ML_SUBSTREAM_BOUNDARY main_stream=0 camera_service_shm=0 tracker=0 api=0 ui=0 sparse_gate_before_convert=1 scheduler=rtp-pts-burst-ready-first pending_depth=${ML_SUBSTREAM_PENDING_DEPTH} blocking_capture_wait=0 pace_clock=rtp-interpolated-pts"
+  "ML_SUBSTREAM_BOUNDARY main_stream=0 camera_service_shm=0 tracker=0 api=0 ui=0 sparse_gate_before_convert=1 gate_position=input-q-sink-before-leaky scheduler=prequeue-rtp-pts-burst-ready-first pending_depth=${ML_SUBSTREAM_PENDING_DEPTH} blocking_capture_wait=0 pace_clock=rtp-interpolated-pts"
 
-exec "$MAIN_PYTHON" -u -m services.ml_service.app.detector_substream_rtp_pts
+exec "$MAIN_PYTHON" -u -m services.ml_service.app.detector_substream_prequeue_pts
