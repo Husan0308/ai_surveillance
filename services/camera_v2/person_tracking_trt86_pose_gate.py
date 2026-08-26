@@ -10,6 +10,12 @@ from .detection import INFER_HEIGHT, INFER_WIDTH
 from .person_tracking_pascal_trt86 import CameraPersonTrackingPascalTRT86
 from .pose_gate_v2 import PoseGateClient
 
+# The TRT86 v3 worker contract is a 16:9 672x378 image centered in the fixed
+# 672x384 engine surface. Keep every converter/scaler/tracker-reuse transform on
+# this exact geometry so bbox coordinates never drift vertically.
+LETTERBOX_CONTENT_HEIGHT = 378
+LETTERBOX_PAD_TOP = 3
+
 
 def _box_area(box) -> float:
     x1, y1, x2, y2 = [float(v) for v in box]
@@ -81,19 +87,19 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
         self._raw_dedup_iou = float(os.environ.get("CAMERA_V2_RAW_DEDUP_IOU", "0.72"))
         self._raw_dedup_containment = float(os.environ.get("CAMERA_V2_RAW_DEDUP_CONTAINMENT", "0.88"))
         self._track_reuse_max_age = max(0.10, float(os.environ.get("CAMERA_V2_POSE_TRACK_REUSE_MAX_AGE_SEC", "0.50")))
+        self._letterbox_logged: set[str] = set()
         super().__init__()
         self.pose_gate = PoseGateClient()
         print(
             "CAMERA_ML_ARCH "
             "primary=YOLO26s/TRT8.6 pose_gate=YOLO26s-pose/crop-only/CPU/cached "
-            "tracker=NvDCF pose_per_frame=0 tracker_reuse=1 global_id=off reid=off face=off",
+            "tracker=NvDCF pose_per_frame=0 tracker_reuse=1 letterbox=672x378+3+3 "
+            "global_id=off reid=off face=off",
             flush=True,
         )
 
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
-        # First retain the Pascal-safe sparse settings, then tighten only the
-        # duplicate-target policy for this ML branch. The golden wall is untouched.
         path = CameraPersonTrackingPascalTRT86._stabilize_tracker_config(path)
         lines = path.read_text(encoding="utf-8").splitlines()
         _replace_tracker_key(lines, "minIouDiff4NewTarget", "0.55", required=True)
@@ -110,13 +116,48 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
         )
         return path
 
-    def _dedup_raw_rows(self, rows):
-        """Remove near-identical raw detector boxes before pose or NvDCF.
+    def _add_camera(self, index, camera) -> None:
+        super()._add_camera(index, camera)
+        converter = self.pipeline.get_by_name(f"detect_convert_{index}")
+        if converter is None:
+            raise RuntimeError(f"{camera.camera_id}: detect converter missing")
+        # Scale the 16:9 camera into 672x378 and place it at y=3 inside the
+        # fixed 672x384 BGRx surface. The TRT worker paints the six outside rows
+        # to 114 before inference. This removes the previous DAR ambiguity.
+        self._set_if(converter, "dest-crop", "0:3:672:378")
+        if camera.camera_id not in self._letterbox_logged:
+            self._letterbox_logged.add(camera.camera_id)
+            print(
+                f"CAMERA_ML_LETTERBOX cid={camera.camera_id} dest_crop=0:3:672:378 output=672x384 pad=114(worker)",
+                flush=True,
+            )
 
-        This is intentionally stricter than generic NMS only for same-center,
-        near-identical/nested boxes. It avoids running pose twice on the same person
-        and prevents two detector metas from seeding two NvDCF IDs.
-        """
+    def _scaled_detections(self, rows):
+        """Map engine-space xyxy back through the exact 3+378+3 letterbox."""
+        sx = float(self.frame_width) / float(INFER_WIDTH)
+        sy = float(self.frame_height) / float(LETTERBOX_CONTENT_HEIGHT)
+        output = []
+        for coords, conf in rows:
+            x1, y1, x2, y2 = [float(v) for v in coords]
+            y1 = max(0.0, min(float(LETTERBOX_CONTENT_HEIGHT), y1 - LETTERBOX_PAD_TOP))
+            y2 = max(0.0, min(float(LETTERBOX_CONTENT_HEIGHT), y2 - LETTERBOX_PAD_TOP))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            output.append(
+                (
+                    (
+                        max(0.0, min(float(self.frame_width - 1), x1 * sx)),
+                        max(0.0, min(float(self.frame_height - 1), y1 * sy)),
+                        max(0.0, min(float(self.frame_width - 1), x2 * sx)),
+                        max(0.0, min(float(self.frame_height - 1), y2 * sy)),
+                    ),
+                    float(conf),
+                )
+            )
+        return output
+
+    def _dedup_raw_rows(self, rows):
+        """Remove near-identical raw boxes before pose or NvDCF."""
         ordered = sorted(rows, key=lambda row: float(row[1]), reverse=True)
         kept = []
         for coords, score in ordered:
@@ -137,11 +178,7 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
         return kept
 
     def _tracker_probe(self, pad, info):
-        """Snapshot live NvDCF geometry before display-only smoothing.
-
-        Snapshots are converted back to detector coordinates and used only to decide
-        whether pose is necessary. NvDCF remains the sole temporal tracking truth.
-        """
+        """Snapshot live NvDCF geometry before display-only smoothing."""
         buffer = info.get_buffer()
         if buffer is not None:
             try:
@@ -151,7 +188,7 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
                     cid: [] for cid in self.camera_index
                 }
                 sx = float(INFER_WIDTH) / max(1.0, float(self.frame_width))
-                sy = float(INFER_HEIGHT) / max(1.0, float(self.frame_height))
+                sy = float(LETTERBOX_CONTENT_HEIGHT) / max(1.0, float(self.frame_height))
                 for row in rows:
                     cid = source_to_cid.get(int(row.get("source_id", -1)))
                     if cid is None:
@@ -166,9 +203,9 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
                     by_camera[cid].append(
                         (
                             left * sx,
-                            top * sy,
+                            top * sy + LETTERBOX_PAD_TOP,
                             (left + width) * sx,
-                            (top + height) * sy,
+                            (top + height) * sy + LETTERBOX_PAD_TOP,
                         )
                     )
                 now = time.monotonic()
@@ -220,7 +257,7 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
 
         print(
             "CAMERA_ML_READY "
-            f"model={ready.get('model')} input={INFER_WIDTH}x{INFER_HEIGHT} micro_batch=1 "
+            f"model={ready.get('model')} input={INFER_WIDTH}x{INFER_HEIGHT} content=672x378+3+3 micro_batch=1 "
             f"raw_conf={os.environ.get('CAMERA_V2_DETECT_CONF')} target={self.detector_target_hz:.2f}Hz/cam "
             f"tracker={self.tracker_width}x{self.tracker_height} active={','.join(ids)} "
             f"backend={ready.get('backend')} flow=TRT86->raw-dedup->track-aware-pose-gate->NvDCF "
@@ -296,8 +333,6 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
                     trusted_boxes=trusted,
                 )
 
-                # A second conservative pass after pose protects the metadata
-                # boundary even if model geometry changes slightly after validation.
                 detections = self._dedup_and_expand(gated_rows)
                 prepared = self.latency_compensator.prepare(cid, captured_t, detections)
                 self._publish_prepared(cid, captured_t, prepared)
