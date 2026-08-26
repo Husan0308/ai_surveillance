@@ -8,7 +8,12 @@ ROOT="$PWD"
 export CAMERA_V2_RTSP_TRANSPORT="${CAMERA_V2_RTSP_TRANSPORT:-tcp}"
 export CAMERA_V2_RTSP_LATENCY_MS="${CAMERA_V2_RTSP_LATENCY_MS:-80}"
 export CAMERA_V2_SOURCE_FPS="${CAMERA_V2_SOURCE_FPS:-20}"
-export CAMERA_V2_EXTRA_SURFACES="${CAMERA_V2_EXTRA_SURFACES:-4}"
+# Full mode fans one decoded NVMM surface into display + tracker + detector.
+# Four extra decoder surfaces is marginal once two nvstreammux branches retain
+# input references. NVIDIA recommends increasing num-extra-surfaces when elements
+# are starved for decoder buffers. Use eight first; do not change analytics rates
+# until this starvation variable is isolated on the real hardware.
+export CAMERA_V2_EXTRA_SURFACES="${CAMERA_V2_EXTRA_SURFACES:-8}"
 
 export CAMERA_V2_DISPLAY_WIDTH="${CAMERA_V2_DISPLAY_WIDTH:-1280}"
 export CAMERA_V2_DISPLAY_HEIGHT="${CAMERA_V2_DISPLAY_HEIGHT:-720}"
@@ -101,7 +106,7 @@ done
 [[ -n "$MAIN_PYTHON" ]] || fail "no Python can import clean Camera V2 quality runtime"
 
 printf '%s\n' \
-  "CAMERA_CLEAN_PROFILE source=${CAMERA_V2_SOURCE_FPS}fps rtsp=${CAMERA_V2_RTSP_LATENCY_MS}ms display=${CAMERA_V2_DISPLAY_WIDTH}x${CAMERA_V2_DISPLAY_HEIGHT} wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT}" \
+  "CAMERA_CLEAN_PROFILE source=${CAMERA_V2_SOURCE_FPS}fps rtsp=${CAMERA_V2_RTSP_LATENCY_MS}ms extra_surfaces=${CAMERA_V2_EXTRA_SURFACES} display=${CAMERA_V2_DISPLAY_WIDTH}x${CAMERA_V2_DISPLAY_HEIGHT} wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT}" \
   "CAMERA_CLEAN_PROFILE tracker=${CAMERA_V2_TRACK_WIDTH}x${CAMERA_V2_TRACK_HEIGHT}@${CAMERA_V2_TRACK_FPS}Hz detector=672x384@${CAMERA_V2_DETECT_HZ}Hz/cam conf=${CAMERA_V2_DETECT_CONF} analytics=${CAMERA_V2_ANALYTICS_ENABLED} detector_enabled=${CAMERA_V2_DETECT_ENABLED}" \
   "CAMERA_CLEAN_PIPELINE decode-once->tee->{display/latest,tracker/latest+rate-gate,detector/latest+JIT-gate} display-never-waits-for-analytics=1" \
   "CAMERA_CLEAN_QUALITY detector_nms=1 nvdcf_ds71_duplicate_guard=1 track_cache_dedup=atomic detector_worker=v4-async" \
