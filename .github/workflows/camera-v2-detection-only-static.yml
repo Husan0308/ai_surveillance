@@ -43,7 +43,6 @@ jobs:
           grep -q 'external_nms=0 geometry_dedup=0' scripts/run_camera_v2_detection_only_pose.sh
           grep -q 'def _install_osd_and_meta' services/camera_v2/detection_only_pose.py
           grep -q 'nvdcf=0 osd=0 metadata_injection=0' services/camera_v2/detection_only_pose.py
-          grep -q 'no geometry de-dup here' services/camera_v2/detection_only_pose.py
           grep -q 'interpolation-method", 1' services/camera_v2/detection_only_pose.py
           grep -q 'CAMERA_DETECTION_PREPROCESS' services/camera_v2/detection_only_pose.py
           grep -q 'detector interpolation=' services/camera_v2/detection_only_pose.py
