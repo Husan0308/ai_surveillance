@@ -26,6 +26,10 @@ jobs:
           grep -q 'self._make("nvtracker", "native_nvdcf_tracker")' services/camera_v2/person_tracking_native_deepstream_v3.py
           grep -q 'src.unlink(dst)' services/camera_v2/person_tracking_native_deepstream_v3.py
           ! grep -Eq 'if[[:space:]]+not[[:space:]].*\.unlink\(' services/camera_v2/person_tracking_native_deepstream_v3.py
+          grep -q 'before_parent = element.get_parent()' services/camera_v2/person_tracking_native_deepstream_v3.py
+          grep -q 'after_parent = element.get_parent()' services/camera_v2/person_tracking_native_deepstream_v3.py
+          grep -q 'pipeline already contains another element named' services/camera_v2/person_tracking_native_deepstream_v3.py
+          grep -q 'CAMERA_NATIVE_ELEMENT_ADD' services/camera_v2/person_tracking_native_deepstream_v3.py
           grep -q 'CAMERA_NATIVE_GRAPH verified=1' services/camera_v2/person_tracking_native_deepstream_v3.py
           grep -q '_set_section_key(lines, "TargetManagement", "outputShadowTracks", "1")' services/camera_v2/person_tracking_native_deepstream_v2.py
           grep -q 'interval=19' services/camera_v2/person_tracking_native_deepstream.py
