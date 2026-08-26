@@ -6,7 +6,40 @@ from .person_tracking_pascal_trt86 import CameraPersonTrackingPascalTRT86
 
 
 class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
-    """Final Pascal entrypoint with race-safe nvurisrcbin -> tee linking."""
+    """Final GTX 1050 Ti runtime: smooth wall + Pascal-safe TRT8.6 analytics."""
+
+    def _configure_mux(self) -> None:
+        super()._configure_mux()
+        # Pascal has little spare GPU after TRT8.6 + NvDCF. Lanczos (4) was
+        # needlessly expensive for 6 live CCTV streams. Bilinear (1) keeps the
+        # wall clear while materially reducing the scaling workload.
+        self._set_if(self.mux, "interpolation-method", 1)
+        self._set_if(self.mux, "compute-hw", 1)
+        self._set_if(self.mux, "buffer-pool-size", 12)
+
+    def _configure_tiler(self) -> None:
+        super()._configure_tiler()
+        self._set_if(self.tiler, "interpolation-method", 1)
+        self._set_if(self.tiler, "compute-hw", 1)
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Text rendering is not required for the sticky-bbox baseline and costs
+        # extra OSD work. Keep the rectangle itself on the GPU OSD path.
+        self._set_if(self.osd, "display-text", False)
+        self._set_if(self.osd, "display-bbox", True)
+        mux_interp = self.mux.get_property("interpolation-method") if self.mux.find_property("interpolation-method") else "n/a"
+        tiler_interp = self.tiler.get_property("interpolation-method") if self.tiler.find_property("interpolation-method") else "n/a"
+        pool = self.mux.get_property("buffer-pool-size") if self.mux.find_property("buffer-pool-size") else "n/a"
+        print(
+            "CAMERA_PASCAL_SMOOTHNESS "
+            f"mux={self.frame_width}x{self.frame_height}/bilinear "
+            f"tiler={self.wall_width}x{self.wall_height}/bilinear "
+            f"tracker={self.tracker_width}x{self.tracker_height} "
+            f"mux_interp={mux_interp} tiler_interp={tiler_interp} pool={pool} "
+            "osd_text=0 latest_queues=1",
+            flush=True,
+        )
 
     def _source_to_tee(self, _source, pad, tee, cid: str) -> None:
         # pad-added can fire before fixed caps are available. Returning in that
