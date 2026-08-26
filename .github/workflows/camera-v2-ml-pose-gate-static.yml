@@ -14,7 +14,7 @@ jobs:
       - name: Python syntax
         run: |
           python3 -m py_compile \
-            services/camera_v2/pose_gate.py \
+            services/camera_v2/pose_gate_v2.py \
             services/camera_v2/person_tracking_trt86_pose_gate.py \
             services/camera_v2/person_tracking_pascal_trt86.py \
             services/camera_v2/person_tracking_trt86_audited.py \
@@ -29,17 +29,23 @@ jobs:
           grep -q 'CAMERA_V2_FRAME_HEIGHT:-720' scripts/run_camera_v2_trt86_pose_gate.sh
           grep -q 'CAMERA_V2_WALL_WIDTH:-1920' scripts/run_camera_v2_trt86_pose_gate.sh
           grep -q 'CAMERA_V2_WALL_HEIGHT:-720' scripts/run_camera_v2_trt86_pose_gate.sh
+          grep -q 'CAMERA_V2_RTSP_LATENCY_MS:-60' scripts/run_camera_v2_trt86_pose_gate.sh
+          grep -q 'CAMERA_V2_TRACKER_WIDTH:-448' scripts/run_camera_v2_trt86_pose_gate.sh
+          grep -q 'CAMERA_V2_TRACKER_HEIGHT:-256' scripts/run_camera_v2_trt86_pose_gate.sh
           grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.25' scripts/run_camera_v2_trt86_pose_gate.sh
           grep -q 'CAMERA_V2_DETECT_CONF:-0.08' scripts/run_camera_v2_trt86_pose_gate.sh
+          grep -q 'CAMERA_V2_POSE_GATE_MODEL:-yolo26s-pose.pt' scripts/run_camera_v2_trt86_pose_gate.sh
           grep -q 'CAMERA_V2_POSE_GATE_DEVICE:-cpu' scripts/run_camera_v2_trt86_pose_gate.sh
           grep -q 'CAMERA_V2_POSE_GATE_IMGSZ:-224' scripts/run_camera_v2_trt86_pose_gate.sh
-          grep -q 'CAMERA_V2_POSE_GATE_STRONG_CONF:-0.35' scripts/run_camera_v2_trt86_pose_gate.sh
-          grep -q 'CAMERA_V2_POSE_GATE_FALLBACK_CONF:-0.25' scripts/run_camera_v2_trt86_pose_gate.sh
-          grep -q 'CAMERA_V2_POSE_GATE_TIMEOUT_SEC:-0.35' scripts/run_camera_v2_trt86_pose_gate.sh
+          grep -q 'CAMERA_V2_POSE_GATE_MAX_CANDIDATES:-4' scripts/run_camera_v2_trt86_pose_gate.sh
+          grep -q 'CAMERA_V2_POSE_GATE_POSITIVE_TTL_SEC:-12' scripts/run_camera_v2_trt86_pose_gate.sh
+          grep -q 'CAMERA_V2_POSE_GATE_NEGATIVE_TTL_SEC:-6' scripts/run_camera_v2_trt86_pose_gate.sh
           grep -q 'global_id=off reid=off face=off nvinfer=off trt10=off' scripts/run_camera_v2_trt86_pose_gate.sh
-          grep -q 'class PoseGateClient' services/camera_v2/pose_gate.py
-          grep -q 'torso_indices = (5, 6, 11, 12)' services/camera_v2/pose_gate.py
-          grep -q 'pose_gate.filter' services/camera_v2/person_tracking_trt86_pose_gate.py
-          grep -q 'Freshness must include pose validation time' services/camera_v2/person_tracking_trt86_pose_gate.py
-          grep -q 'flow=TRT86->pose-gate->NvDCF' services/camera_v2/person_tracking_trt86_pose_gate.py
+          grep -q 'class PoseGateClient' services/camera_v2/pose_gate_v2.py
+          grep -q 'yolo26s-pose.pt' services/camera_v2/pose_gate_v2.py
+          grep -q 'tracker_reuse' services/camera_v2/pose_gate_v2.py
+          grep -q 'cache_accept' services/camera_v2/pose_gate_v2.py
+          grep -q '_dedup_raw_rows' services/camera_v2/person_tracking_trt86_pose_gate.py
+          grep -q 'minIouDiff4NewTarget", "0.55"' services/camera_v2/person_tracking_trt86_pose_gate.py
+          grep -q 'flow=TRT86->raw-dedup->track-aware-pose-gate->NvDCF' services/camera_v2/person_tracking_trt86_pose_gate.py
           ! grep -q 'person_tracking_native_deepstream' scripts/run_camera_v2_trt86_pose_gate.sh
