@@ -53,6 +53,13 @@ def _fps(raw: str) -> str:
 
 
 class _SingleAttemptDigestAuthHandler(urllib.request.HTTPDigestAuthHandler):
+    """Allow one authenticated Digest attempt for each HTTP request.
+
+    urllib's digest handler keeps a retry counter on the handler instance. Reset it
+    after a successful response so a reused opener can authenticate the next URL,
+    while a bad credential still gets only one authenticated retry.
+    """
+
     def http_error_401(self, req, fp, code, msg, hdrs):  # type: ignore[override]
         if getattr(self, "retried", 0) >= 1:
             raise urllib.error.HTTPError(
@@ -63,6 +70,12 @@ class _SingleAttemptDigestAuthHandler(urllib.request.HTTPDigestAuthHandler):
                 fp,
             )
         return super().http_error_401(req, fp, code, msg, hdrs)
+
+    def http_response(self, req, response):  # type: ignore[override]
+        self.retried = 0
+        return response
+
+    https_response = http_response
 
 
 def _digest_opener(base_url: str, username: str, password: str) -> urllib.request.OpenerDirector:
@@ -75,7 +88,7 @@ def _get_xml(opener: urllib.request.OpenerDirector, url: str, timeout: float) ->
     req = urllib.request.Request(
         url,
         method="GET",
-        headers={"Accept": "application/xml", "User-Agent": "ai-surveillance-stream-probe/1.1"},
+        headers={"Accept": "application/xml", "User-Agent": "ai-surveillance-stream-probe/1.2"},
     )
     with opener.open(req, timeout=timeout) as resp:
         payload = resp.read()
@@ -117,7 +130,7 @@ def main() -> int:
 
     opener = _digest_opener(base_url, username, password)
     print(
-        f"HIKVISION_STREAM_PROBE target={host}:{port} scheme={scheme} auth=digest-single-attempt "
+        f"HIKVISION_STREAM_PROBE target={host}:{port} scheme={scheme} auth=digest-single-attempt-per-request "
         f"cameras={len(settings.cameras)} password_logged=0",
         flush=True,
     )
@@ -135,8 +148,7 @@ def main() -> int:
             if exc.code == 401:
                 print(
                     f"HIKVISION_STREAM_PROBE_AUTH_ERROR camera={camera.camera_id} id={channel} "
-                    "http=401 attempts=1 action=abort reason=credential-rejected-or-illegal-login-lock "
-                    "note=do-not-repeat-until-lock-duration-has-expired",
+                    "http=401 attempts=1 action=abort reason=credential-rejected-or-illegal-login-lock",
                     flush=True,
                 )
                 return 4
