@@ -1,0 +1,45 @@
+name: Camera V2 Detection Only Static
+
+on:
+  push:
+    branches:
+      - feature/ml-detection-pose-gate-20260826
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/camera_v2/detection_only_pose.py \
+            services/camera_v2/detection_only_pose_v3.py \
+            services/camera_v2/pose_gate_v3.py \
+            services/camera_v2/pose_gate_v2.py \
+            services/camera_v2/yolo_trt86_fresh_bridge.py \
+            services/camera_v2/yolo_trt86_shm_bridge.py
+      - name: Bash syntax
+        run: bash -n scripts/run_camera_v2_detection_only_pose.sh
+      - name: Detection-only architecture contract
+        run: |
+          grep -q 'CAMERA_V2_FRAME_WIDTH:-1280' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'CAMERA_V2_FRAME_HEIGHT:-720' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'CAMERA_V2_WALL_WIDTH:-1920' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'CAMERA_V2_WALL_HEIGHT:-720' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.33' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'CAMERA_V2_DETECT_CONF:-0.08' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'CAMERA_V2_POSE_GATE_MODEL:-yolo26s-pose.pt' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'CAMERA_V2_POSE_GATE_MAX_CANDIDATES:-2' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'detection_only_pose_v3' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'external_nms=0 geometry_dedup=0' scripts/run_camera_v2_detection_only_pose.sh
+          grep -q 'def _install_osd_and_meta' services/camera_v2/detection_only_pose.py
+          grep -q 'nvdcf=0 osd=0 metadata_injection=0' services/camera_v2/detection_only_pose.py
+          grep -q 'no geometry de-dup here' services/camera_v2/detection_only_pose.py
+          grep -q 'def _source_to_tee' services/camera_v2/detection_only_pose_v3.py
+          grep -q 'display_inline_ml=0 nvdcf=0 osd=0 dedup=0' services/camera_v2/detection_only_pose_v3.py
+          ! grep -q '_dedup_raw_rows' services/camera_v2/detection_only_pose.py
+          ! grep -q '_dedup_and_expand' services/camera_v2/detection_only_pose.py
+          ! grep -q 'person_nvdcf_tracker' scripts/run_camera_v2_detection_only_pose.sh
+          ! grep -q 'nvdsosd' scripts/run_camera_v2_detection_only_pose.sh
