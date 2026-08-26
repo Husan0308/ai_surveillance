@@ -1,0 +1,56 @@
+name: Camera V2 LowLat Rescue Static
+
+on:
+  push:
+    branches:
+      - feature/ml-detection-lowlat-rescue-20260826
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/camera_v2/detection_lowlat.py \
+            services/camera_v2/detection_only_pose_v4.py \
+            services/camera_v2/yolo26m_trt86_rescue.py \
+            scripts/export_yolo26m_672_onnx.py \
+            scripts/build_yolo26m_672_trt86.py \
+            scripts/benchmark_yolo26m_672_trt86.py
+      - name: Bash syntax
+        run: |
+          bash -n scripts/prepare_yolo26m_672_trt86.sh
+          bash -n scripts/run_camera_v2_detection_lowlat.sh
+      - name: Low-latency architecture contract
+        run: |
+          grep -q 'CAMERA_V2_RTSP_LATENCY_MS:-100' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'CAMERA_V2_MUX_TIMEOUT_US:-50000' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.33' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'CAMERA_V2_PRIMARY_HZ_MAX:-0.40' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'CAMERA_V2_RESCUE_CAMERA:-CAM-05' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'yolo26m-672x384-b1-fp32-trt86.engine' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'same_frame=1' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'capture_after_gpu_slot=1' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'nvdcf=0 osd=0 nms=0 dedup=0' scripts/run_camera_v2_detection_lowlat.sh
+          grep -q 'trusted_boxes=None' services/camera_v2/detection_lowlat.py
+          grep -q 'with self._gpu_infer_lock' services/camera_v2/detection_lowlat.py
+          grep -q 'CAMERA_RESCUE_TRIGGER' services/camera_v2/detection_only_pose_v4.py
+          grep -q 'CAMERA_RESCUE_RESULT' services/camera_v2/detection_only_pose_v4.py
+          grep -q 'extra_gstreamer_branch=0' services/camera_v2/detection_only_pose_v4.py
+          grep -q 'CAMERA_V2_RESCUE_GPU_DUTY' services/camera_v2/detection_only_pose_v4.py
+          ! grep -q '896' services/camera_v2/detection_lowlat.py
+          ! grep -q '896' services/camera_v2/detection_only_pose_v4.py
+          ! grep -q '896' services/camera_v2/yolo26m_trt86_rescue.py
+          ! grep -q '896' scripts/run_camera_v2_detection_lowlat.sh
+      - name: TRT86 rescue build contract
+        run: |
+          grep -q 'TensorRT 8.6.1 required' scripts/build_yolo26m_672_trt86.py
+          grep -q 'EXPECTED_INPUT = (1, 3, 384, 672)' scripts/build_yolo26m_672_trt86.py
+          grep -q 'EXPECTED_OUTPUT = (1, 300, 6)' scripts/build_yolo26m_672_trt86.py
+          grep -q 'precision=fp32' scripts/build_yolo26m_672_trt86.py
+          grep -q 'end2end=True' scripts/export_yolo26m_672_onnx.py
+          grep -q 'imgsz=(384, 672)' scripts/export_yolo26m_672_onnx.py
+          grep -q 'YOLO26M_RESCUE_ENGINE_READY' scripts/prepare_yolo26m_672_trt86.sh
