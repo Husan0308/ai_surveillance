@@ -47,12 +47,16 @@ done
 mkdir -p "$CAMERA_SERVICE_SHM_DIR"
 rm -f "$CAMERA_SERVICE_SHM_DIR"/cam_*.frame
 
-MODE="debug-wall"
-[[ "$CAMERA_SERVICE_HEADLESS" != "0" ]] && MODE="headless"
+MODE="headless"
+RENDER=0
+if [[ "$CAMERA_SERVICE_HEADLESS" == "0" ]]; then
+  MODE="debug-wall"
+  RENDER=1
+fi
 printf '%s\n' \
   "CAMERA_SERVICE_SHM_PROFILE source=${CAMERA_SERVICE_SOURCE_FPS}fps rtsp=${CAMERA_SERVICE_RTSP_LATENCY_MS}ms mode=${MODE}" \
   "CAMERA_SERVICE_SHM_PROFILE tap=672x378x3@${CAMERA_SERVICE_ML_TAP_HZ}Hz dir=${CAMERA_SERVICE_SHM_DIR}" \
-  "CAMERA_SERVICE_BOUNDARY ai=0 detector=0 tracker=0 reid=0 identity=0 api=0 frontend=0 render=$([[ "$CAMERA_SERVICE_HEADLESS" == "0" ]] && echo 1 || echo 0)" \
+  "CAMERA_SERVICE_BOUNDARY ai=0 detector=0 tracker=0 reid=0 identity=0 api=0 frontend=0 render=${RENDER}" \
   "CAMERA_SERVICE_SHM_INVARIANT consumer_backpressure=0 latest_only=1 gate_before_convert=1 production_render=0"
 
 exec "$MAIN_PYTHON" -u -m services.camera_service.app.runtime_shm
