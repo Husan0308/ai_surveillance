@@ -21,6 +21,11 @@ class DetectorSubstreamPrequeuePtsService(DetectorSubstreamRtpPtsService):
     every incoming decoded frame, then the gate either drops it immediately or lets
     the selected sparse frame enter the queue. The leaky queue is retained as a
     safety boundary, but now only ~2 selected frames/s reach it and nvvideoconvert.
+
+    This override builds the camera branch directly, so it must also preserve the
+    live-safe appsink properties from DetectorSubstreamPacedService._add_camera().
+    In particular async=false is required so a sparse/dropped stream does not leave
+    the parent pipeline waiting for appsink preroll while sources are being armed.
     """
 
     def _add_camera(self, index, camera) -> None:
@@ -49,6 +54,15 @@ class DetectorSubstreamPrequeuePtsService(DetectorSubstreamRtpPtsService):
         self._set_if(sink, "drop", True)
         self._set_if(sink, "wait-on-eos", False)
         self._set_if(sink, "enable-last-sample", False)
+
+        # Preserve the live/preroll-safe sink contract from the paced base class.
+        # V12 overrides _add_camera instead of calling super(), so without these
+        # properties appsink falls back to async=true and a sparse prequeue gate can
+        # leave the pipeline waiting for preroll before any source data is observed.
+        self._set_if(sink, "async", False)
+        self._set_if(sink, "qos", False)
+        self._set_if(sink, "processing-deadline", 0)
+        self._set_if(sink, "max-lateness", -1)
         sink.connect("new-sample", self._on_sample, cid)
 
         source.connect("deep-element-added", self._configure_rtsp_child, camera)
@@ -83,7 +97,7 @@ class DetectorSubstreamPrequeuePtsService(DetectorSubstreamRtpPtsService):
         self.input_queues[cid] = input_q
         print(
             f"ML_SUBSTREAM_GATE_POSITION {cid} pad=input_q:sink before_leaky_queue=1 "
-            "source_stats_before_gate=1",
+            "source_stats_before_gate=1 sink_async=0",
             flush=True,
         )
 
