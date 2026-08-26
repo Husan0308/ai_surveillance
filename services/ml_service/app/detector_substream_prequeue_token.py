@@ -20,15 +20,15 @@ class DetectorSubstreamPrequeueTokenService(DetectorSubstreamPrequeueDemandServi
     bucket per camera instead. One token is generated per wall-clock detector
     deadline, and one arriving decoded frame consumes one token.
 
-    Capacity is deliberately small (default 2): it can recover one missed 500 ms
-    deadline from a short RTSP burst without allowing an unbounded catch-up storm.
-    The gate remains on input_q:sink, before the leaky queue and nvvideoconvert.
-    Only token-bearing frames enter the GPU conversion path.
+    Capacity is deliberately small (default 3): it can absorb short RTSP gaps and
+    recover up to two missed 500 ms deadlines without allowing an unbounded catch-up
+    storm. The gate remains on input_q:sink, before the leaky queue and
+    nvvideoconvert. Only token-bearing frames enter the GPU conversion path.
     """
 
     def __init__(self) -> None:
         self.token_capacity = max(
-            1, min(4, int(os.environ.get("ML_SUBSTREAM_TOKEN_CAPACITY", "2")))
+            1, min(4, int(os.environ.get("ML_SUBSTREAM_TOKEN_CAPACITY", "3")))
         )
         super().__init__()
         self.gate_tokens = {camera.camera_id: 0 for camera in self.cameras}
@@ -40,8 +40,8 @@ class DetectorSubstreamPrequeueTokenService(DetectorSubstreamPrequeueDemandServi
     def _add_camera(self, index, camera) -> None:
         super()._add_camera(index, camera)
 
-        # After the prequeue gate only sparse accepted frames remain. Allow a short
-        # two-frame catch-up burst to survive both queues instead of immediately
+        # After the prequeue gate only sparse accepted frames remain. Allow the
+        # bounded catch-up burst to survive both queues instead of immediately
         # collapsing back to a one-frame leaky queue.
         input_q = self.pipeline.get_by_name(f"ml_sub_input_q_{index}")
         output_q = self.pipeline.get_by_name(f"ml_sub_output_q_{index}")
