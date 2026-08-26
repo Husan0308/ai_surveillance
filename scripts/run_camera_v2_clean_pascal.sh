@@ -8,11 +8,8 @@ ROOT="$PWD"
 export CAMERA_V2_RTSP_TRANSPORT="${CAMERA_V2_RTSP_TRANSPORT:-tcp}"
 export CAMERA_V2_RTSP_LATENCY_MS="${CAMERA_V2_RTSP_LATENCY_MS:-80}"
 export CAMERA_V2_SOURCE_FPS="${CAMERA_V2_SOURCE_FPS:-20}"
-# Full mode fans one decoded NVMM surface into display + tracker + detector.
-# Four extra decoder surfaces is marginal once two nvstreammux branches retain
-# input references. NVIDIA recommends increasing num-extra-surfaces when elements
-# are starved for decoder buffers. Use eight first; do not change analytics rates
-# until this starvation variable is isolated on the real hardware.
+# Keep eight decoder surfaces as conservative headroom. Isolation testing proved
+# this was not the root cause: NvDCF-only and TRT-only both settle at 20 FPS.
 export CAMERA_V2_EXTRA_SURFACES="${CAMERA_V2_EXTRA_SURFACES:-8}"
 
 export CAMERA_V2_DISPLAY_WIDTH="${CAMERA_V2_DISPLAY_WIDTH:-1280}"
@@ -20,19 +17,17 @@ export CAMERA_V2_DISPLAY_HEIGHT="${CAMERA_V2_DISPLAY_HEIGHT:-720}"
 export CAMERA_V2_WALL_WIDTH="${CAMERA_V2_WALL_WIDTH:-1920}"
 export CAMERA_V2_WALL_HEIGHT="${CAMERA_V2_WALL_HEIGHT:-720}"
 
-# Real hardware showed 672x384@8 Hz NvDCF + TRT causes CAM-03..06 to settle
-# around 13-17 FPS even though display-only is a clean 20 FPS. 512x288@10 Hz
-# processes ~29% fewer tracker input pixels per second while improving the local
-# box update period from 125 ms to 100 ms. YOLO remains independent at 672x384.
+# Keep the already-tested local tracking geometry/cadence unchanged for the GPU
+# lane experiment. We are isolating concurrency, not hiding it by lowering Hz.
 export CAMERA_V2_TRACK_WIDTH="${CAMERA_V2_TRACK_WIDTH:-512}"
 export CAMERA_V2_TRACK_HEIGHT="${CAMERA_V2_TRACK_HEIGHT:-288}"
 export CAMERA_V2_TRACK_FPS="${CAMERA_V2_TRACK_FPS:-10}"
 export CAMERA_V2_MIN_DISPLAY_TRACK_CONF="${CAMERA_V2_MIN_DISPLAY_TRACK_CONF:-0.12}"
 export CAMERA_V2_DISPLAY_TRACK_MAX_AGE_MS="${CAMERA_V2_DISPLAY_TRACK_MAX_AGE_MS:-250}"
 
-# Hardware-proven TRT8.6 worker. 0.50 Hz/camera keeps the measured ~3 calls/sec
-# global detector budget; do not increase it until tracker/display headroom is
-# confirmed on the GTX 1050 Ti.
+# Keep detector cadence unchanged for this step. Detector-only hardware testing
+# measured roughly 15-25 ms TRT compute; the 160-180 ms full-mode latency is the
+# NvDCF/TRT concurrent-context interaction we now serialize explicitly.
 export CAMERA_V2_DETECT_HZ="${CAMERA_V2_DETECT_HZ:-0.50}"
 export CAMERA_V2_DETECT_CONF="${CAMERA_V2_DETECT_CONF:-0.18}"
 export CAMERA_V2_MAX_DET="${CAMERA_V2_MAX_DET:-20}"
@@ -99,23 +94,23 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: F401
 import numpy, yaml, dotenv  # noqa: F401
-import services.camera_v2.runtime_quality  # noqa: F401
+import services.camera_v2.runtime_lane  # noqa: F401
 PY
   then MAIN_PYTHON="$candidate"; break; fi
 done
-[[ -n "$MAIN_PYTHON" ]] || fail "no Python can import clean Camera V2 quality runtime"
+[[ -n "$MAIN_PYTHON" ]] || fail "no Python can import serialized Camera V2 runtime"
 
 printf '%s\n' \
   "CAMERA_CLEAN_PROFILE source=${CAMERA_V2_SOURCE_FPS}fps rtsp=${CAMERA_V2_RTSP_LATENCY_MS}ms extra_surfaces=${CAMERA_V2_EXTRA_SURFACES} display=${CAMERA_V2_DISPLAY_WIDTH}x${CAMERA_V2_DISPLAY_HEIGHT} wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT}" \
   "CAMERA_CLEAN_PROFILE tracker=${CAMERA_V2_TRACK_WIDTH}x${CAMERA_V2_TRACK_HEIGHT}@${CAMERA_V2_TRACK_FPS}Hz detector=672x384@${CAMERA_V2_DETECT_HZ}Hz/cam conf=${CAMERA_V2_DETECT_CONF} analytics=${CAMERA_V2_ANALYTICS_ENABLED} detector_enabled=${CAMERA_V2_DETECT_ENABLED}" \
   "CAMERA_CLEAN_PIPELINE decode-once->tee->{display/latest,tracker/latest+rate-gate,detector/latest+JIT-gate} display-never-waits-for-analytics=1" \
-  "CAMERA_CLEAN_QUALITY detector_nms=1 nvdcf_ds71_duplicate_guard=1 track_cache_dedup=atomic detector_worker=v4-async" \
-  "CAMERA_CLEAN_MAIN executable=$MAIN_PYTHON module=services.camera_v2.runtime_quality"
+  "CAMERA_CLEAN_QUALITY detector_nms=1 nvdcf_ds71_duplicate_guard=1 track_cache_dedup=atomic detector_worker=v4-async gpu_lane=serialized" \
+  "CAMERA_CLEAN_MAIN executable=$MAIN_PYTHON module=services.camera_v2.runtime_lane"
 
 restart_count=0
 while true; do
   set +e
-  "$MAIN_PYTHON" -u -m services.camera_v2.runtime_quality
+  "$MAIN_PYTHON" -u -m services.camera_v2.runtime_lane
   rc=$?
   set -e
   [[ $rc -eq 75 ]] || exit "$rc"
