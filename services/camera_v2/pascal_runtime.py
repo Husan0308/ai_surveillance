@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
+import numpy as np
+
+from .detection import INFER_HEIGHT, INFER_WIDTH
 from .person_tracking_pascal_trt86 import CameraPersonTrackingPascalTRT86
+from .person_tracking_trt86_fresh import CameraPersonTrackingTRT86Fresh
 
 
 def _replace_yaml_key(lines: list[str], key: str, value: str) -> None:
@@ -21,15 +26,19 @@ def _replace_yaml_key(lines: list[str], key: str, value: str) -> None:
 
 
 class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
-    """Final GTX 1050 Ti runtime: smooth wall + Pascal-safe TRT8.6 analytics."""
+    """GTX 1050 Ti runtime with sharp display and isolated sparse TRT8.6 analytics.
+
+    The presentation and detector paths intentionally have different quality/
+    geometry policies. The live wall keeps enough pixels for a clear 3x2 view;
+    the detector branch only wakes for requested inference frames and therefore
+    can use cubic scaling without taxing every decoded frame.
+    """
 
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
-        # First apply the Pascal-safe base profile, then add the continuity tuning
-        # justified by the live 20 FPS measurements. With a guarded ~0.5 detector
-        # Hz, fresh detector observations arrive about every two seconds per camera.
-        # 140 shadow frames (~7 s at 20 FPS) then survives two missed refreshes
-        # without keeping stale targets alive indefinitely.
+        # At the guarded detector cadence fresh observations remain comfortably
+        # inside a seven-second NvDCF shadow lifetime. NvDCF owns per-frame motion;
+        # YOLO refreshes object evidence instead of being used as a video clock.
         path = CameraPersonTrackingPascalTRT86._stabilize_tracker_config(path)
         lines = path.read_text(encoding="utf-8").splitlines()
         _replace_yaml_key(lines, "minIouDiff4NewTarget", "0.45")
@@ -57,16 +66,19 @@ class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
 
     def _configure_mux(self) -> None:
         super()._configure_mux()
-        # Pascal has little spare GPU after TRT8.6 + NvDCF. Lanczos (4) was
-        # needlessly expensive for 6 live CCTV streams. Bilinear (1) keeps the
-        # wall clear while materially reducing the scaling workload.
-        self._set_if(self.mux, "interpolation-method", 1)
+        # NVIDIA dGPU interpolation method 2 is cubic. The previous latency patch
+        # changed this to bilinear and visibly softened the already-downscaled wall.
+        # Cubic is the quality/perf compromise for six input streams; the final
+        # presentation downscale below uses Lanczos.
+        self._set_if(self.mux, "interpolation-method", 2)
         self._set_if(self.mux, "compute-hw", 1)
         self._set_if(self.mux, "buffer-pool-size", 12)
 
     def _configure_tiler(self) -> None:
         super()._configure_tiler()
-        self._set_if(self.tiler, "interpolation-method", 1)
+        # The tiler is the last geometric downscale before OSD/EGL. Use dGPU
+        # Lanczos (method 4) here so 640x360 tiles do not look washed/soft.
+        self._set_if(self.tiler, "interpolation-method", 4)
         self._set_if(self.tiler, "compute-hw", 1)
 
     def _configure_rtsp_child(self, _bin, _sub_bin, element, camera) -> None:
@@ -76,9 +88,8 @@ class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
         if factory_name != "rtspsrc":
             return
         if self._transport() == "tcp":
-            # GStreamer documents that TCP RTP timestamps can drift against the
-            # client clock and make observed end-to-end latency grow over time.
-            # Timestamping each received TCP packet prevents that accumulation.
+            # Keep the useful latency fix: receive-time timestamping prevents TCP
+            # RTP clock drift from silently accumulating end-to-end delay.
             self._set_if(element, "tcp-timestamp", True)
             print(
                 f"CAMERA_PASCAL_RTSP {camera.camera_id} tcp_timestamp=1 "
@@ -86,44 +97,188 @@ class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
                 flush=True,
             )
 
+    def _add_camera(self, index, camera) -> None:
+        """Build a true 16:9 detector capture path without nvvideoconvert dest-crop.
+
+        The audited parent used dest-crop=0:3:672:378 while negotiating a 672x384
+        output surface. On the real 2560x1440 streams nvvideoconvert reports
+        `Cannot keep DAR`. Instead, ask GStreamer for an exact 672x378 16:9 BGRx
+        frame, then add the required 3+3 rows of value 114 in host memory. Only a
+        requested sparse frame reaches this converter because Fresh keeps the gate
+        directly in front of it.
+        """
+        # Skip CameraPersonTrackingTRT86Audited._add_camera because that is exactly
+        # where the dest-crop workaround is installed. Keep all Fresh JIT capture
+        # behavior and reproduce the Pascal source hardening below.
+        CameraPersonTrackingTRT86Fresh._add_camera(self, index, camera)
+        cid = camera.camera_id
+
+        source = self.pipeline.get_by_name(f"camera_v2_source_{index}")
+        converter = self.pipeline.get_by_name(f"detect_convert_{index}")
+        capsfilter = self.pipeline.get_by_name(f"detect_caps_{index}")
+        if source is None or converter is None or capsfilter is None:
+            raise RuntimeError(f"{cid}: Pascal detector branch incomplete")
+
+        transport = self._transport()
+        self._set_if(source, "select-rtp-protocol", 4 if transport == "tcp" else 0)
+        self._set_if(source, "rtsp-reconnect-interval", 2)
+        self._set_if(source, "rtsp-reconnect-attempts", 3)
+        self._set_if(source, "async-handling", True)
+
+        content_h = int(round(INFER_WIDTH * 9.0 / 16.0))
+        if content_h != 378 or INFER_HEIGHT != 384:
+            raise RuntimeError(
+                f"unexpected TRT geometry tensor={INFER_WIDTH}x{INFER_HEIGHT} "
+                f"content_h={content_h}"
+            )
+        capsfilter.set_property(
+            "caps",
+            self.Gst.Caps.from_string(
+                f"video/x-raw,format=BGRx,width={INFER_WIDTH},height={content_h},"
+                "pixel-aspect-ratio=1/1"
+            ),
+        )
+        self._set_if(converter, "interpolation-method", 2)
+        self._set_if(converter, "compute-hw", 1)
+        self._detector_letterbox = (0, 3, INFER_WIDTH, content_h)
+
+        if cid == "CAM-01":
+            print(
+                "CAM01_TRT86_SOURCE_HARDENED "
+                f"outer_transport={transport} async_handling=1",
+                flush=True,
+            )
+            print(
+                "CAM01_TRT86_PREPROCESS "
+                f"tensor={INFER_WIDTH}x{INFER_HEIGHT} "
+                f"content={INFER_WIDTH}x{content_h} pad=0,3 "
+                "mode=exact-16:9-caps+host-pad114 interpolation=cubic",
+                flush=True,
+            )
+
+    def _on_infer_sample(self, sink, cid: str):
+        """Pack an exact 672x378 capture into a 672x384 YOLO letterbox tensor."""
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            with self.capture_lock:
+                self.capture_requested[cid] = True
+            return self.Gst.FlowReturn.OK
+
+        try:
+            structure = sample.get_caps().get_structure(0)
+            width = int(structure.get_value("width"))
+            height = int(structure.get_value("height"))
+            expected_h = 378
+            if width != INFER_WIDTH or height != expected_h:
+                raise RuntimeError(
+                    f"{cid}: detector capture={width}x{height}, "
+                    f"expected={INFER_WIDTH}x{expected_h}"
+                )
+
+            buffer = sample.get_buffer()
+            ok, mapped = buffer.map(self.Gst.MapFlags.READ)
+            if not ok:
+                raise RuntimeError(f"{cid}: detector BGRx map failed")
+            try:
+                tight_stride = width * 4
+                mapped_size = int(getattr(mapped, "size", len(mapped.data)))
+                if mapped_size < tight_stride * height:
+                    raise RuntimeError(
+                        f"{cid}: BGRx buffer too small: "
+                        f"{mapped_size} < {tight_stride * height}"
+                    )
+                row_stride = (
+                    mapped_size // height
+                    if mapped_size % height == 0
+                    else tight_stride
+                )
+                if row_stride < tight_stride:
+                    raise RuntimeError(
+                        f"{cid}: invalid BGRx stride={row_stride}, tight={tight_stride}"
+                    )
+
+                needed = row_stride * height
+                raw = np.frombuffer(mapped.data, dtype=np.uint8, count=needed)
+                rows = raw.reshape((height, row_stride))
+                bgrx = rows[:, :tight_stride].reshape((height, width, 4))
+
+                # Fixed TensorRT B1 input. 672x378 is exact 16:9; only the 3-row
+                # bars are synthetic. There is no geometric crop or stretch.
+                frame = np.full(
+                    (INFER_HEIGHT, INFER_WIDTH, 3),
+                    114,
+                    dtype=np.uint8,
+                )
+                frame[3:381, :, :] = bgrx[..., :3]
+            finally:
+                buffer.unmap(mapped)
+
+            now = time.monotonic()
+            self.mailbox.put(cid, now, frame)
+
+            if cid not in self._infer_stride_logged:
+                self._infer_stride_logged.add(cid)
+                print(
+                    f"CAMERA_INFER_LAYOUT {cid} capture={width}x{height} "
+                    f"stride={row_stride} tensor={INFER_WIDTH}x{INFER_HEIGHT} "
+                    "letterbox=3+378+3 pad114",
+                    flush=True,
+                )
+            if cid not in self._capture_sample_logged:
+                self._capture_sample_logged.add(cid)
+                print(
+                    f"CAM01_TRT86_CAPTURE_SAMPLE camera={cid} first_sample=1",
+                    flush=True,
+                )
+            return self.Gst.FlowReturn.OK
+        except Exception as exc:
+            with self.capture_lock:
+                self.capture_requested[cid] = True
+            print(
+                f"CAMERA_PASCAL_INFER_CAPTURE {cid} "
+                f"warning={type(exc).__name__}:{exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return self.Gst.FlowReturn.OK
+
     def __init__(self) -> None:
         super().__init__()
-        # Text rendering is not required for the sticky-bbox baseline and costs
-        # extra OSD work. Keep the rectangle itself on the GPU OSD path.
+        # Rectangle-only OSD keeps the tracker display cheap. Text can be restored
+        # later without touching the camera geometry.
         self._set_if(self.osd, "display-text", False)
         self._set_if(self.osd, "display-bbox", True)
 
-        # The detector branch previously inherited cubic scaling from the generic
-        # runtime. On this GPU the detector result itself is the expensive path;
-        # bilinear scaling is sufficient for 672x384 person detection and leaves
-        # more GPU time for TensorRT + NvDCF.
-        for index in range(len(self.cameras)):
-            converter = self.pipeline.get_by_name(f"detect_convert_{index}")
-            if converter is not None:
-                self._set_if(converter, "interpolation-method", 1)
-                self._set_if(converter, "compute-hw", 1)
-
-        mux_interp = self.mux.get_property("interpolation-method") if self.mux.find_property("interpolation-method") else "n/a"
-        tiler_interp = self.tiler.get_property("interpolation-method") if self.tiler.find_property("interpolation-method") else "n/a"
-        pool = self.mux.get_property("buffer-pool-size") if self.mux.find_property("buffer-pool-size") else "n/a"
+        mux_interp = (
+            self.mux.get_property("interpolation-method")
+            if self.mux.find_property("interpolation-method")
+            else "n/a"
+        )
+        tiler_interp = (
+            self.tiler.get_property("interpolation-method")
+            if self.tiler.find_property("interpolation-method")
+            else "n/a"
+        )
+        pool = (
+            self.mux.get_property("buffer-pool-size")
+            if self.mux.find_property("buffer-pool-size")
+            else "n/a"
+        )
         print(
-            "CAMERA_PASCAL_SMOOTHNESS "
-            f"mux={self.frame_width}x{self.frame_height}/bilinear "
-            f"tiler={self.wall_width}x{self.wall_height}/bilinear "
+            "CAMERA_PASCAL_QUALITY "
+            f"mux={self.frame_width}x{self.frame_height}/cubic "
+            f"tiler={self.wall_width}x{self.wall_height}/lanczos "
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"mux_interp={mux_interp} tiler_interp={tiler_interp} pool={pool} "
-            "detector_scale=bilinear osd_text=0 latest_queues=1",
+            "detector=672x378/cubic+pad114 display_detector_independent=1 "
+            "osd_text=0 latest_queues=1",
             flush=True,
         )
 
     def _print_stats(self) -> bool:
-        # Critical latency guard. CameraPersonTrackingFinal historically used the
-        # tiled wall's frame-interval p95 as detector feedback. On this six-camera
-        # Pascal graph wall p95 can be ~90-115 ms even while every source remains
-        # healthy at ~20 FPS with q=0. That false signal repeatedly lowered the
-        # detector target until it reached ~0.1 Hz/camera (one fresh detection per
-        # ~10 seconds), which is longer than NvDCF's 7-second shadow lifetime.
-        # Freeze the configured detector cadence while parent stats are collected.
+        # Do not let a tiled-wall render metric throttle YOLO. NvDCF is per-frame;
+        # detector cadence is an explicit GPU-budget choice, not a presentation-FPS
+        # feedback loop.
         with self.det_lock:
             target_hz = float(self.detector_target_hz)
             saved_min_hz = float(self.detector_min_hz)
@@ -140,16 +295,14 @@ class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
         print(
             "CAMERA_PASCAL_RATE_GUARD "
             f"target_hz={target_hz:.2f}/cam wall_feedback=disabled "
-            "reason=source_fps_is_authoritative",
+            "reason=explicit_pascal_gpu_budget",
             flush=True,
         )
         return keep
 
     def _source_to_tee(self, _source, pad, tee, cid: str) -> None:
-        # pad-added can fire before fixed caps are available. Returning in that
-        # state is unsafe because the dynamic pad is not guaranteed to be emitted
-        # again when caps later become fixed. Audio is disabled on nvurisrcbin, so
-        # unknown caps may be linked; known non-video caps are still rejected.
+        # Dynamic pads can appear before fixed caps. Audio is disabled, so unknown
+        # caps may be linked; known non-video pads are rejected.
         caps = pad.get_current_caps()
         if caps is None or caps.get_size() == 0:
             try:
@@ -167,7 +320,11 @@ class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
 
         sink = tee.get_static_pad("sink")
         if sink is None:
-            print(f"CAMERA_PASCAL {cid} tee sink pad missing", file=sys.stderr, flush=True)
+            print(
+                f"CAMERA_PASCAL {cid} tee sink pad missing",
+                file=sys.stderr,
+                flush=True,
+            )
             return
         if sink.is_linked():
             return
@@ -175,13 +332,17 @@ class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
         if result != self.Gst.PadLinkReturn.OK:
             caps_text = caps.to_string() if caps is not None else "pending"
             print(
-                f"CAMERA_PASCAL {cid} source->tee link failed result={result} caps={caps_text}",
+                f"CAMERA_PASCAL {cid} source->tee link failed "
+                f"result={result} caps={caps_text}",
                 file=sys.stderr,
                 flush=True,
             )
             return
         caps_text = caps.to_string() if caps is not None else "pending"
-        print(f"CAMERA_PASCAL {cid} source->tee linked caps={caps_text}", flush=True)
+        print(
+            f"CAMERA_PASCAL {cid} source->tee linked caps={caps_text}",
+            flush=True,
+        )
 
 
 def main() -> int:
