@@ -46,7 +46,10 @@ jobs:
           grep -q 'decode-once->tee->{display,tracker,detector}' services/camera_v2/runtime.py
           grep -q 'display_mux' services/camera_v2/runtime.py
           grep -q 'tracker_mux' services/camera_v2/runtime.py
-          grep -q 'CAMERA_V2_TRACK_FPS:-8' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_TRACK_WIDTH:-512' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_TRACK_HEIGHT:-288' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_TRACK_FPS:-10' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_DISPLAY_TRACK_MAX_AGE_MS:-250' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_DETECT_HZ:-0.50' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_DETECT_CONF:-0.18' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_RTSP_LATENCY_MS:-80' scripts/run_camera_v2_clean_pascal.sh
@@ -55,8 +58,12 @@ jobs:
           grep -q 'yolo26_trt86_shm_worker_v4.py' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_CLEAN_TRT_PROBE status=OK' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'services.camera_v2.runtime_quality' scripts/run_camera_v2_clean_pascal.sh
-          grep -q 'minIouDiff4NewTarget", "0.30"' services/camera_v2/runtime_quality.py
-          grep -q 'minTrackerConfidence", "0.12"' services/camera_v2/runtime_quality.py
+          grep -q 'minDetectorConfidence", "0.18"' services/camera_v2/runtime_quality.py
+          grep -q 'minIouDiff4NewTarget", "0.22"' services/camera_v2/runtime_quality.py
+          grep -q 'probationAge", "1"' services/camera_v2/runtime_quality.py
+          grep -q 'outputShadowTracks", "0"' services/camera_v2/runtime_quality.py
+          grep -q 'publish=atomic' services/camera_v2/runtime_quality.py
+          grep -q 'x_scale = self.track_width / float(DETECT_W)' services/camera_v2/runtime_quality.py
           grep -q 'ds71_supported_only=1' services/camera_v2/runtime_quality.py
           ! grep -q 'minIou4TargetDuplicate' services/camera_v2/runtime_quality.py
           ! grep -q 'targetDuplicateRunInterval' services/camera_v2/runtime_quality.py
