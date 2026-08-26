@@ -13,10 +13,7 @@ export CAMERA_SERVICE_DISPLAY_HEIGHT="${CAMERA_SERVICE_DISPLAY_HEIGHT:-720}"
 export CAMERA_SERVICE_WALL_WIDTH="${CAMERA_SERVICE_WALL_WIDTH:-1920}"
 export CAMERA_SERVICE_WALL_HEIGHT="${CAMERA_SERVICE_WALL_HEIGHT:-720}"
 export CAMERA_SERVICE_STARTUP_STAGGER_SEC="${CAMERA_SERVICE_STARTUP_STAGGER_SEC:-0.50}"
-export CAMERA_SERVICE_ML_TAP_HZ="${CAMERA_SERVICE_ML_TAP_HZ:-2.0}"
 export CAMERA_SERVICE_SHM_DIR="${CAMERA_SERVICE_SHM_DIR:-/dev/shm/ai_surveillance}"
-# Production service boundary: Camera Service does not render a tiled wall.
-# UI/presentation is a separate consumer. Set 0 only for a local debug wall.
 export CAMERA_SERVICE_HEADLESS="${CAMERA_SERVICE_HEADLESS:-1}"
 
 fail() { printf 'CAMERA_SERVICE_SHM_PREFLIGHT ERROR: %s\n' "$*" >&2; exit 1; }
@@ -38,14 +35,15 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: F401
 import yaml, dotenv  # noqa: F401
+from services.camera_service.app.shm_frame import FrameDemandOwner  # noqa: F401
 import services.camera_service.app.runtime_shm  # noqa: F401
 PY
   then MAIN_PYTHON="$candidate"; break; fi
 done
-[[ -n "$MAIN_PYTHON" ]] || fail "no Python can import camera_service SHM runtime"
+[[ -n "$MAIN_PYTHON" ]] || fail "no Python can import camera_service demand SHM runtime"
 
 mkdir -p "$CAMERA_SERVICE_SHM_DIR"
-rm -f "$CAMERA_SERVICE_SHM_DIR"/cam_*.frame
+rm -f "$CAMERA_SERVICE_SHM_DIR"/cam_*.frame "$CAMERA_SERVICE_SHM_DIR"/cam_*.request
 
 MODE="headless"
 RENDER=0
@@ -55,8 +53,8 @@ if [[ "$CAMERA_SERVICE_HEADLESS" == "0" ]]; then
 fi
 printf '%s\n' \
   "CAMERA_SERVICE_SHM_PROFILE source=${CAMERA_SERVICE_SOURCE_FPS}fps rtsp=${CAMERA_SERVICE_RTSP_LATENCY_MS}ms mode=${MODE}" \
-  "CAMERA_SERVICE_SHM_PROFILE tap=672x378x3@${CAMERA_SERVICE_ML_TAP_HZ}Hz dir=${CAMERA_SERVICE_SHM_DIR}" \
+  "CAMERA_SERVICE_SHM_PROFILE tap=672x378x3 mode=demand-jit dir=${CAMERA_SERVICE_SHM_DIR}" \
   "CAMERA_SERVICE_BOUNDARY ai=0 detector=0 tracker=0 reid=0 identity=0 api=0 frontend=0 render=${RENDER}" \
-  "CAMERA_SERVICE_SHM_INVARIANT consumer_backpressure=0 latest_only=1 gate_before_convert=1 production_render=0"
+  "CAMERA_SERVICE_SHM_INVARIANT consumer_backpressure=0 latest_only=1 demand_before_convert=1 producer_rate=consumer-driven production_render=0"
 
 exec "$MAIN_PYTHON" -u -m services.camera_service.app.runtime_shm
