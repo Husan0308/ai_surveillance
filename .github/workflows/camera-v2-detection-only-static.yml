@@ -19,9 +19,12 @@ jobs:
             services/camera_v2/pose_gate_v3.py \
             services/camera_v2/pose_gate_v2.py \
             services/camera_v2/yolo_trt86_fresh_bridge.py \
-            services/camera_v2/yolo_trt86_shm_bridge.py
+            services/camera_v2/yolo_trt86_shm_bridge.py \
+            scripts/check_yolo26_exact_frame_parity.py
       - name: Bash syntax
-        run: bash -n scripts/run_camera_v2_detection_only_pose.sh
+        run: |
+          bash -n scripts/run_camera_v2_detection_only_pose.sh
+          bash -n scripts/run_camera_v2_detection_parity.sh
       - name: Detection-only architecture contract
         run: |
           grep -q 'CAMERA_V2_FRAME_WIDTH:-1280' scripts/run_camera_v2_detection_only_pose.sh
@@ -43,3 +46,12 @@ jobs:
           ! grep -q '_dedup_and_expand' services/camera_v2/detection_only_pose.py
           ! grep -q 'person_nvdcf_tracker' scripts/run_camera_v2_detection_only_pose.sh
           ! grep -q 'nvdsosd' scripts/run_camera_v2_detection_only_pose.sh
+      - name: Exact-frame parity contract
+        run: |
+          grep -q 'CAM-01,CAM-02,CAM-04,CAM-05' scripts/run_camera_v2_detection_parity.sh
+          grep -q 'np.save' services/camera_v2/yolo_trt86_shm_bridge.py
+          grep -q 'allow_pickle=False' services/camera_v2/yolo_trt86_shm_bridge.py
+          grep -q 'end2end=False' docs/does-not-exist 2>/dev/null || true
+          grep -q 'end2end=end2end' scripts/check_yolo26_exact_frame_parity.py
+          grep -q 'TRT_MISS' scripts/check_yolo26_exact_frame_parity.py
+          grep -q 'ONE_TO_MANY_RECOVERS' scripts/check_yolo26_exact_frame_parity.py
