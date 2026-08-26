@@ -7,11 +7,12 @@ export CAMERA_V2_RTSP_TRANSPORT="${CAMERA_V2_RTSP_TRANSPORT:-tcp}"
 export CAMERA_V2_RTSP_LATENCY_MS="${CAMERA_V2_RTSP_LATENCY_MS:-100}"
 export CAMERA_V2_SOURCE_FPS="${CAMERA_V2_SOURCE_FPS:-20}"
 export CAMERA_V2_MUX_TIMEOUT_US="${CAMERA_V2_MUX_TIMEOUT_US:-50000}"
-# 960x540 is the tracking/display working frame only. The detector branch leaves
-# the native decoded source before nvstreammux, so YOLO still receives 672x384
-# generated directly from the native CCTV image.
-export CAMERA_V2_FRAME_WIDTH="${CAMERA_V2_FRAME_WIDTH:-960}"
-export CAMERA_V2_FRAME_HEIGHT="${CAMERA_V2_FRAME_HEIGHT:-540}"
+# The visible 3x2 wall is 1920x720, exactly 640x360 per tile. Keep the continuous
+# mux/tracker working frame at that same tile size: no hidden high-resolution wall
+# work. The sparse detector branch splits before nvstreammux, so YOLO still gets a
+# 672x384 tensor generated directly from the native CCTV frame.
+export CAMERA_V2_FRAME_WIDTH="${CAMERA_V2_FRAME_WIDTH:-640}"
+export CAMERA_V2_FRAME_HEIGHT="${CAMERA_V2_FRAME_HEIGHT:-360}"
 export CAMERA_V2_WALL_WIDTH="${CAMERA_V2_WALL_WIDTH:-1920}"
 export CAMERA_V2_WALL_HEIGHT="${CAMERA_V2_WALL_HEIGHT:-720}"
 
@@ -52,6 +53,6 @@ printf '%s\n' \
   "RESTORE_STABLE_TRACKING detector=YOLO26s/TRT8.6/B1/672x384 conf=$CAMERA_V2_DETECT_CONF execution=async-v2/nonblocking-stream" \
   "RESTORE_STABLE_TRACKING capture=JIT/no-prefetch active=all6 target=${CAMERA_V2_DETECT_TARGET_HZ}Hz/cam range=${CAMERA_V2_DETECT_MIN_HZ}-${CAMERA_V2_DETECT_MAX_HZ}" \
   "RESTORE_STABLE_TRACKING bbox_owner=NvDCF tracker=${CAMERA_V2_TRACKER_WIDTH}x${CAMERA_V2_TRACKER_HEIGHT} profile=max-perf/colorNames-only smoother=native global_id=off" \
-  "RESTORE_STABLE_DISPLAY mux=${CAMERA_V2_FRAME_WIDTH}x${CAMERA_V2_FRAME_HEIGHT}/bilinear wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT} tiler=bilinear osd=GPU/NV12-direct rgba_convert=0"
+  "RESTORE_STABLE_DISPLAY mux=${CAMERA_V2_FRAME_WIDTH}x${CAMERA_V2_FRAME_HEIGHT}/bilinear wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT} tile=640x360 tiler=bilinear osd=GPU/NV12-direct rgba_convert=0"
 
 exec "$PYTHON" -u -m services.camera_v2.person_tracking_trt86_restore_stable
