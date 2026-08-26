@@ -15,23 +15,20 @@ ML_H = 378
 class CameraServiceShmRuntime(CameraServiceRuntime):
     """AI-free camera service plus a bounded latest-frame IPC tap.
 
-    Per camera:
+    Production/headless per camera:
         RTSP/NVDEC -> tee
-          -> latest-only display queue -> display mux/wall
+          -> latest-only drain queue -> fakesink
           -> latest-only ML queue -> rate gate -> GPU resize/color convert
              -> RAW BGR appsink -> double-buffered /dev/shm latest frame
 
-    There is no model, tracker, API or frontend code in this process. The ML tap
-    is deliberately lossy/latest-only and is gated before conversion so a slow or
-    dead consumer cannot create backpressure or consume per-frame conversion work.
+    Optional debug-wall mode keeps the previous display mux/tiler/EGL branch.
+    The ML tap is lossy/latest-only and gated before conversion so a slow or dead
+    consumer cannot create backpressure or per-frame conversion work.
     """
 
     def __init__(self) -> None:
         self.ml_tap_hz = max(0.25, min(10.0, float(os.environ.get("CAMERA_SERVICE_ML_TAP_HZ", "2.0"))))
         self.ml_period_sec = 1.0 / self.ml_tap_hz
-        # Store the next ideal deadline rather than the previous actual pass time.
-        # This prevents small scheduling delays from accumulating and turning a
-        # nominal 2.0 Hz tap into a persistent 1.6-1.8 Hz cadence.
         self.ml_next_due: dict[str, float] = {}
         self.ml_publish_counts: dict[str, int] = {}
         self.ml_publish_last: dict[str, int] = {}
@@ -45,6 +42,7 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
         print(
             "CAMERA_SERVICE_SHM "
             f"enabled=1 tap={ML_W}x{ML_H}x3 rate={self.ml_tap_hz:.2f}Hz "
+            f"headless={int(self.headless)} "
             "policy=latest-only gate-before-convert cadence=fixed-deadline consumer_backpressure=0",
             flush=True,
         )
@@ -73,6 +71,7 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
         ml_convert = self._make("nvvideoconvert", f"camera_service_ml_convert_{index}")
         ml_caps = self._make("capsfilter", f"camera_service_ml_caps_{index}")
         ml_sink = self._make("appsink", f"camera_service_ml_sink_{index}")
+        drain_sink = None
 
         self._latest_queue(display_q)
         self._latest_queue(ml_q)
@@ -108,20 +107,30 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
         self._set_if(ml_sink, "wait-on-eos", False)
         ml_sink.connect("new-sample", self._on_ml_sample, camera.camera_id)
 
-        for element in (source, tee, display_q, ml_q, ml_convert, ml_caps, ml_sink):
+        elements = [source, tee, display_q, ml_q, ml_convert, ml_caps, ml_sink]
+        if self.headless:
+            drain_sink = self._make("fakesink", f"camera_service_fakesink_{index}")
+            self._configure_fakesink(drain_sink)
+            elements.append(drain_sink)
+        for element in elements:
             self.pipeline.add(element)
 
-        mux_pad = self._request_mux_pad(index)
-        if display_q.get_static_pad("src").link(mux_pad) != self.Gst.PadLinkReturn.OK:
-            raise RuntimeError(f"{camera.camera_id}: display queue->mux failed")
+        if self.headless:
+            self._link(display_q, drain_sink, f"{camera.camera_id}:drain_q->fakesink")
+            self.headless_sinks[camera.camera_id] = drain_sink
+        else:
+            mux_pad = self._request_mux_pad(index)
+            if display_q.get_static_pad("src").link(mux_pad) != self.Gst.PadLinkReturn.OK:
+                raise RuntimeError(f"{camera.camera_id}: display queue->mux failed")
+
         self._link_tee_to_queue(tee, display_q, f"{camera.camera_id}:tee->display")
         self._link_tee_to_queue(tee, ml_q, f"{camera.camera_id}:tee->ml")
         self._link(ml_q, ml_convert, f"{camera.camera_id}:ml_q->convert")
         self._link(ml_convert, ml_caps, f"{camera.camera_id}:convert->caps")
         self._link(ml_caps, ml_sink, f"{camera.camera_id}:caps->appsink")
 
-        # This gate is before scaling + NVMM->host conversion. Dropped frames do
-        # not pay ML preprocessing cost.
+        # Gate before scaling + NVMM->host conversion. Dropped frames never pay
+        # ML preprocessing cost.
         ml_q.get_static_pad("src").add_probe(
             self.Gst.PadProbeType.BUFFER,
             self._ml_rate_gate_probe,
@@ -168,15 +177,11 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
         now = time.monotonic()
         due = self.ml_next_due.get(cid)
         if due is None:
-            # First available frame should be published immediately.
             self.ml_next_due[cid] = now + self.ml_period_sec
             return self.Gst.PadProbeReturn.OK
         if now < due:
             return self.Gst.PadProbeReturn.DROP
 
-        # Advance from the ideal schedule, not from `now`, so a late frame does
-        # not permanently shift all future deadlines. If the process was paused
-        # for several periods, skip missed slots instead of burst-publishing.
         missed = max(0, int((now - due) // self.ml_period_sec))
         self.ml_next_due[cid] = due + ((missed + 1) * self.ml_period_sec)
         return self.Gst.PadProbeReturn.OK
@@ -206,8 +211,6 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
                 if row_stride == tight:
                     payload = raw[: tight * height]
                 else:
-                    # GStreamer may pad RAW rows. Compact into the fixed shared
-                    # memory layout only at the sparse ML tap rate.
                     compact = bytearray(tight * height)
                     for row in range(height):
                         src = row * row_stride
