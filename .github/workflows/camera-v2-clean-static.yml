@@ -1,0 +1,106 @@
+name: Camera V2 Clean Pascal Static
+
+on:
+  push:
+    branches:
+      - rebuild/camera-v2-clean-pascal-20260826
+  pull_request:
+    paths:
+      - "services/camera_v2/**"
+      - "scripts/run_camera_v2_clean_pascal.sh"
+      - "scripts/yolo26_trt86_shm_worker.py"
+      - "scripts/yolo26_trt86_shm_worker_v4.py"
+      - ".github/workflows/camera-v2-clean-static.yml"
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/camera_v2/__init__.py \
+            services/camera_v2/__main__.py \
+            services/camera_v2/runtime.py \
+            services/camera_v2/runtime_quality.py \
+            services/camera_v2/runtime_lane.py \
+            services/camera_v2/native_bridge.py \
+            services/camera_v2/yolo_trt86_shm_bridge.py \
+            services/camera_v2/global_identity.py \
+            services/camera_v2/reid_quality.py \
+            services/camera_v2/reid_runtime.py \
+            services/camera_v2/reid_production.py \
+            services/camera_v2/reid_embedder.py \
+            services/camera_v2/reid_trt86_embedder.py \
+            scripts/yolo26_trt86_shm_worker.py \
+            scripts/yolo26_trt86_shm_worker_v4.py
+
+      - name: Bash syntax
+        run: bash -n scripts/run_camera_v2_clean_pascal.sh
+
+      - name: Clean architecture contract
+        run: |
+          grep -q 'display_bypasses_tracker=1 display_bypasses_detector=1' services/camera_v2/runtime.py
+          grep -q 'decode-once->tee->{display,tracker,detector}' services/camera_v2/runtime.py
+          grep -q 'display_mux' services/camera_v2/runtime.py
+          grep -q 'tracker_mux' services/camera_v2/runtime.py
+          grep -q 'CAMERA_V2_EXTRA_SURFACES:-8' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_TRACK_WIDTH:-512' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_TRACK_HEIGHT:-288' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_TRACK_FPS:-10' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_DISPLAY_TRACK_MAX_AGE_MS:-250' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_DETECT_HZ:-0.50' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_DETECT_CONF:-0.18' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_RTSP_LATENCY_MS:-80' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_DISPLAY_WIDTH:-1280' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_DISPLAY_HEIGHT:-720' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'yolo26_trt86_shm_worker_v4.py' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_CLEAN_TRT_PROBE status=OK' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'services.camera_v2.runtime_lane' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'module=services.camera_v2.runtime_lane' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'gpu_lane=serialized' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_GPU_LANE mode=serialized' services/camera_v2/runtime_lane.py
+          grep -q 'self.gpu_lane.acquire(blocking=False)' services/camera_v2/runtime_lane.py
+          grep -q 'Capture only after the detector owns the GPU lane' services/camera_v2/runtime_lane.py
+          grep -q 'CAMERA_GPU_LANE_STATS' services/camera_v2/runtime_lane.py
+          grep -q 'minDetectorConfidence", "0.18"' services/camera_v2/runtime_quality.py
+          grep -q 'minIouDiff4NewTarget", "0.22"' services/camera_v2/runtime_quality.py
+          grep -q 'probationAge", "1"' services/camera_v2/runtime_quality.py
+          grep -q 'outputShadowTracks", "0"' services/camera_v2/runtime_quality.py
+          grep -q 'publish=atomic' services/camera_v2/runtime_quality.py
+          grep -q 'x_scale = self.track_width / float(DETECT_W)' services/camera_v2/runtime_quality.py
+          grep -q 'ds71_supported_only=1' services/camera_v2/runtime_quality.py
+          ! grep -q 'minIou4TargetDuplicate' services/camera_v2/runtime_quality.py
+          ! grep -q 'targetDuplicateRunInterval' services/camera_v2/runtime_quality.py
+          test ! -e scripts/yolo26_trt86_shm_worker_v5.py
+          grep -q 'signal.signal(signal.SIGINT, signal.SIG_IGN)' services/camera_v2/yolo_trt86_shm_bridge.py
+          grep -q 'frame\[3:381' services/camera_v2/runtime.py
+          ! grep -q 'heatmap' services/camera_v2/native_bridge.py
+          ! grep -q 'smooth_display' services/camera_v2/native_bridge.py
+
+      - name: Legacy runtime removed
+        run: |
+          test ! -e services/camera_v2/detection.py
+          test ! -e services/camera_v2/dynamic_wall.py
+          test ! -e services/camera_v2/main.py
+          test ! -e services/camera_v2/pascal_runtime.py
+          test ! -e services/camera_v2/person_tracking.py
+          test ! -e services/camera_v2/person_tracking_final.py
+          test ! -e services/camera_v2/person_tracking_pascal_trt86.py
+          test ! -e services/camera_v2/person_tracking_trt86_audited.py
+          test ! -e services/camera_v2/person_tracking_trt86_fresh.py
+          test ! -e services/camera_v2/person_tracking_reid.py
+          test ! -e services/camera_v2/native_display_smoother.c
+          test ! -e services/camera_v2/native_heatmap.c
+          test ! -e scripts/run_camera_v2_pascal_trt86.sh
+          test ! -e scripts/run_cam01_trt86_audited.sh
+          test ! -e scripts/yolo26_trt86_shm_worker_v2.py
+          test ! -e scripts/yolo26_trt86_shm_worker_v3.py
+
+      - name: Global identity unit tests
+        run: |
+          python3 -m pip install --disable-pip-version-check numpy
+          python3 -m unittest discover -s tests -p 'test_camera_v2_global_identity.py' -v
