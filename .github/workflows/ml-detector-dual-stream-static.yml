@@ -6,6 +6,7 @@ on:
       - rebuild/service-architecture-v5-dual-stream-20260826
       - rebuild/service-architecture-v6-paced-substream-20260826
       - rebuild/service-architecture-v7-pts-paced-substream-20260826
+      - rebuild/service-architecture-v8-demand-latched-substream-20260826
   workflow_dispatch:
 
 jobs:
@@ -39,22 +40,25 @@ jobs:
           ! grep -q 'LatestFrameMmapReader' services/ml_service/app/detector_substream.py
           ! grep -q 'FrameDemandClient' services/ml_service/app/detector_substream.py
           ! grep -q 'runtime_shm' services/ml_service/app/detector_substream.py
-      - name: PTS paced nonblocking scheduler contract
+      - name: Demand-latched nonblocking scheduler contract
         run: |
           grep -q 'class DetectorSubstreamPacedService' services/ml_service/app/detector_substream_paced.py
           grep -q 'gate_before_convert=1' services/ml_service/app/detector_substream_paced.py
           grep -q 'blocking_capture_wait=0' services/ml_service/app/detector_substream_paced.py
-          grep -q 'pace_clock=buffer-pts' services/ml_service/app/detector_substream_paced.py
-          grep -q 'buffer.pts' services/ml_service/app/detector_substream_paced.py
-          grep -q 'gate_next_pts_ns' services/ml_service/app/detector_substream_paced.py
-          grep -q 'gate_pts_resets' services/ml_service/app/detector_substream_paced.py
+          grep -q 'pace_clock=wall-demand-latched' services/ml_service/app/detector_substream_paced.py
+          grep -q 'backlog=coalesce' services/ml_service/app/detector_substream_paced.py
+          grep -q 'def _demand_loop' services/ml_service/app/detector_substream_paced.py
+          grep -q 'capture_requested\[cid\] = True' services/ml_service/app/detector_substream_paced.py
+          grep -q 'unprocessed_slot' services/ml_service/app/detector_substream_paced.py
+          grep -q 'gate_coalesced' services/ml_service/app/detector_substream_paced.py
           grep -q 'def _capture_gate_probe' services/ml_service/app/detector_substream_paced.py
           grep -q 'def _take_oldest_ready' services/ml_service/app/detector_substream_paced.py
           grep -q 'ML_DETECTOR_PACED_GATE' services/ml_service/app/detector_substream_paced.py
           grep -q 'ML_DETECTOR_PACED_STATS' services/ml_service/app/detector_substream_paced.py
           grep -q 'phase_spacing=' services/ml_service/app/detector_substream_paced.py
           grep -q 'services.ml_service.app.detector_substream_paced' scripts/run_ml_detector_substream.sh
-          grep -q 'scheduler=pts-paced-ready-first' scripts/run_ml_detector_substream.sh
+          grep -q 'scheduler=demand-latched-ready-first' scripts/run_ml_detector_substream.sh
+          grep -q 'ML_SUBSTREAM_DEMAND_POLL_MS:-2.0' scripts/run_ml_detector_substream.sh
       - name: Live-source preroll contract
         run: |
           grep -q '"async", False' services/ml_service/app/detector_substream_paced.py
