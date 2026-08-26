@@ -26,6 +26,7 @@ jobs:
             services/camera_v2/__main__.py \
             services/camera_v2/runtime.py \
             services/camera_v2/runtime_quality.py \
+            services/camera_v2/runtime_lane.py \
             services/camera_v2/native_bridge.py \
             services/camera_v2/yolo_trt86_shm_bridge.py \
             services/camera_v2/global_identity.py \
@@ -46,6 +47,7 @@ jobs:
           grep -q 'decode-once->tee->{display,tracker,detector}' services/camera_v2/runtime.py
           grep -q 'display_mux' services/camera_v2/runtime.py
           grep -q 'tracker_mux' services/camera_v2/runtime.py
+          grep -q 'CAMERA_V2_EXTRA_SURFACES:-8' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_TRACK_WIDTH:-512' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_TRACK_HEIGHT:-288' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_TRACK_FPS:-10' scripts/run_camera_v2_clean_pascal.sh
@@ -57,7 +59,13 @@ jobs:
           grep -q 'CAMERA_V2_DISPLAY_HEIGHT:-720' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'yolo26_trt86_shm_worker_v4.py' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_CLEAN_TRT_PROBE status=OK' scripts/run_camera_v2_clean_pascal.sh
-          grep -q 'services.camera_v2.runtime_quality' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'services.camera_v2.runtime_lane' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'module=services.camera_v2.runtime_lane' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'gpu_lane=serialized' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_GPU_LANE mode=serialized' services/camera_v2/runtime_lane.py
+          grep -q 'self.gpu_lane.acquire(blocking=False)' services/camera_v2/runtime_lane.py
+          grep -q 'Capture only after the detector owns the GPU lane' services/camera_v2/runtime_lane.py
+          grep -q 'CAMERA_GPU_LANE_STATS' services/camera_v2/runtime_lane.py
           grep -q 'minDetectorConfidence", "0.18"' services/camera_v2/runtime_quality.py
           grep -q 'minIouDiff4NewTarget", "0.22"' services/camera_v2/runtime_quality.py
           grep -q 'probationAge", "1"' services/camera_v2/runtime_quality.py
