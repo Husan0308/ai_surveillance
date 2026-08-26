@@ -1,0 +1,38 @@
+name: Camera Service SHM Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v2-shm-20260826
+  pull_request:
+    paths:
+      - "services/camera_service/**"
+      - "scripts/run_camera_service_shm.sh"
+      - "scripts/probe_camera_service_shm.py"
+      - ".github/workflows/camera-service-shm-static.yml"
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/camera_service/app/runtime.py \
+            services/camera_service/app/runtime_shm.py \
+            services/camera_service/app/shm_frame.py \
+            scripts/probe_camera_service_shm.py
+      - name: Bash syntax
+        run: bash -n scripts/run_camera_service_shm.sh
+      - name: SHM architecture contract
+        run: |
+          grep -q 'gate-before-convert' services/camera_service/app/runtime_shm.py
+          grep -q 'max-size-buffers", 1' services/camera_service/app/runtime.py
+          grep -q 'CAMERA_SERVICE_ML_TAP_HZ:-2.0' scripts/run_camera_service_shm.sh
+          grep -q 'display_never_waits_for_consumer=1' scripts/run_camera_service_shm.sh
+          grep -q 'LatestFrameMmapWriter' services/camera_service/app/runtime_shm.py
+          grep -q 'double-buffered /dev/shm' services/camera_service/app/runtime_shm.py
+          ! grep -Eqi 'tensorrt|nvtracker|nvinfer|reid|global_identity' services/camera_service/app/runtime_shm.py
+          ! grep -Eqi 'api_service|frontend' services/camera_service/app/runtime_shm.py
