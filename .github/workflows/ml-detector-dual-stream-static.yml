@@ -18,6 +18,7 @@ jobs:
             services/camera_service/app/config.py \
             services/ml_service/app/trt86_detector.py \
             services/ml_service/app/detector_substream.py \
+            services/ml_service/app/detector_substream_live.py \
             scripts/probe_camera_substreams.py \
             scripts/yolo26_trt86_shm_worker_v4.py
       - name: Bash syntax
@@ -36,6 +37,15 @@ jobs:
           ! grep -q 'LatestFrameMmapReader' services/ml_service/app/detector_substream.py
           ! grep -q 'FrameDemandClient' services/ml_service/app/detector_substream.py
           ! grep -q 'runtime_shm' services/ml_service/app/detector_substream.py
+      - name: Live-source preroll contract
+        run: |
+          grep -q 'class DetectorSubstreamLiveService' services/ml_service/app/detector_substream_live.py
+          grep -q '"async", False' services/ml_service/app/detector_substream_live.py
+          grep -q 'processing-deadline", 0' services/ml_service/app/detector_substream_live.py
+          grep -q 'ML_SUBSTREAM_STATE' services/ml_service/app/detector_substream_live.py
+          grep -q 'sync_state_with_parent' services/ml_service/app/detector_substream_live.py
+          grep -q 'services.ml_service.app.detector_substream_live' scripts/run_ml_detector_substream.sh
+          grep -q 'live_preroll_safe=1' scripts/run_ml_detector_substream.sh
       - name: Service config boundary
         run: |
           grep -q 'services.shared.camera_config' services/camera_service/app/config.py
