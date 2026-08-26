@@ -1,0 +1,47 @@
+name: Camera V2 ML Pose Gate V2 Static
+
+on:
+  push:
+    branches:
+      - feature/ml-detection-pose-gate-20260826
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/camera_v2/pose_gate_v3.py \
+            services/camera_v2/person_tracking_trt86_pose_gate_v2.py \
+            services/camera_v2/person_tracking_trt86_pose_gate.py \
+            services/camera_v2/pose_gate_v2.py
+      - name: Bash syntax
+        run: bash -n scripts/run_camera_v2_trt86_pose_gate_v2.sh
+      - name: V2 architecture contract
+        run: |
+          grep -q 'CAMERA_V2_RTSP_LATENCY_MS:-100' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_FRAME_WIDTH:-1280' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_FRAME_HEIGHT:-720' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_WALL_WIDTH:-1920' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_WALL_HEIGHT:-720' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.35' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_DETECT_MIN_HZ:-0.30' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_DETECT_MAX_HZ:-0.40' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_DETECT_CONF:-0.06' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_TRACKER_WIDTH:-512' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_TRACKER_HEIGHT:-288' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_POSE_GATE_MODEL:-yolo26s-pose.pt' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_POSE_GATE_THREADS:-1' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_POSE_GATE_MAX_CANDIDATES:-2' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'CAMERA_V2_POSE_GATE_REJECT_HITS:-2' scripts/run_camera_v2_trt86_pose_gate_v2.sh
+          grep -q 'class PoseGateClient' services/camera_v2/pose_gate_v3.py
+          grep -q 'one failed pose crop' services/camera_v2/person_tracking_trt86_pose_gate_v2.py
+          grep -q 'minIouDiff4NewTarget", "0.35"' services/camera_v2/person_tracking_trt86_pose_gate_v2.py
+          grep -q 'useColorNames", "1"' services/camera_v2/person_tracking_trt86_pose_gate_v2.py
+          grep -q 'useHog", "0"' services/camera_v2/person_tracking_trt86_pose_gate_v2.py
+          grep -q 'tracker.set_property("sub-batches", "3:3")' services/camera_v2/person_tracking_trt86_pose_gate_v2.py
+          grep -q 'interpolation-method", 1' services/camera_v2/person_tracking_trt86_pose_gate_v2.py
+          ! grep -q 'person_tracking_native_deepstream' scripts/run_camera_v2_trt86_pose_gate_v2.sh
