@@ -10,7 +10,6 @@ on:
       - "scripts/run_camera_v2_clean_pascal.sh"
       - "scripts/yolo26_trt86_shm_worker.py"
       - "scripts/yolo26_trt86_shm_worker_v4.py"
-      - "scripts/yolo26_trt86_shm_worker_v5.py"
       - ".github/workflows/camera-v2-clean-static.yml"
   workflow_dispatch:
 
@@ -36,8 +35,7 @@ jobs:
             services/camera_v2/reid_embedder.py \
             services/camera_v2/reid_trt86_embedder.py \
             scripts/yolo26_trt86_shm_worker.py \
-            scripts/yolo26_trt86_shm_worker_v4.py \
-            scripts/yolo26_trt86_shm_worker_v5.py
+            scripts/yolo26_trt86_shm_worker_v4.py
 
       - name: Bash syntax
         run: bash -n scripts/run_camera_v2_clean_pascal.sh
@@ -54,12 +52,15 @@ jobs:
           grep -q 'CAMERA_V2_RTSP_LATENCY_MS:-80' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_DISPLAY_WIDTH:-1280' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_DISPLAY_HEIGHT:-720' scripts/run_camera_v2_clean_pascal.sh
-          grep -q 'yolo26_trt86_shm_worker_v5.py' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'yolo26_trt86_shm_worker_v4.py' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_CLEAN_TRT_PROBE status=OK' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'services.camera_v2.runtime_quality' scripts/run_camera_v2_clean_pascal.sh
-          grep -q 'minIouDiff4NewTarget", "0.22"' services/camera_v2/runtime_quality.py
-          grep -q 'minIou4TargetDuplicate", "0.72"' services/camera_v2/runtime_quality.py
-          grep -q 'targetDuplicateRunInterval", "1"' services/camera_v2/runtime_quality.py
-          grep -q 'cudaStreamCreateWithPriority' scripts/yolo26_trt86_shm_worker_v5.py
+          grep -q 'minIouDiff4NewTarget", "0.30"' services/camera_v2/runtime_quality.py
+          grep -q 'minTrackerConfidence", "0.12"' services/camera_v2/runtime_quality.py
+          grep -q 'ds71_supported_only=1' services/camera_v2/runtime_quality.py
+          ! grep -q 'minIou4TargetDuplicate' services/camera_v2/runtime_quality.py
+          ! grep -q 'targetDuplicateRunInterval' services/camera_v2/runtime_quality.py
+          test ! -e scripts/yolo26_trt86_shm_worker_v5.py
           grep -q 'signal.signal(signal.SIGINT, signal.SIG_IGN)' services/camera_v2/yolo_trt86_shm_bridge.py
           grep -q 'frame\[3:381' services/camera_v2/runtime.py
           ! grep -q 'heatmap' services/camera_v2/native_bridge.py
