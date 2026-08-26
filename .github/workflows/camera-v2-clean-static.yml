@@ -10,6 +10,7 @@ on:
       - "scripts/run_camera_v2_clean_pascal.sh"
       - "scripts/yolo26_trt86_shm_worker.py"
       - "scripts/yolo26_trt86_shm_worker_v4.py"
+      - "scripts/yolo26_trt86_shm_worker_v5.py"
       - ".github/workflows/camera-v2-clean-static.yml"
   workflow_dispatch:
 
@@ -25,6 +26,7 @@ jobs:
             services/camera_v2/__init__.py \
             services/camera_v2/__main__.py \
             services/camera_v2/runtime.py \
+            services/camera_v2/runtime_quality.py \
             services/camera_v2/native_bridge.py \
             services/camera_v2/yolo_trt86_shm_bridge.py \
             services/camera_v2/global_identity.py \
@@ -34,7 +36,8 @@ jobs:
             services/camera_v2/reid_embedder.py \
             services/camera_v2/reid_trt86_embedder.py \
             scripts/yolo26_trt86_shm_worker.py \
-            scripts/yolo26_trt86_shm_worker_v4.py
+            scripts/yolo26_trt86_shm_worker_v4.py \
+            scripts/yolo26_trt86_shm_worker_v5.py
 
       - name: Bash syntax
         run: bash -n scripts/run_camera_v2_clean_pascal.sh
@@ -45,17 +48,22 @@ jobs:
           grep -q 'decode-once->tee->{display,tracker,detector}' services/camera_v2/runtime.py
           grep -q 'display_mux' services/camera_v2/runtime.py
           grep -q 'tracker_mux' services/camera_v2/runtime.py
-          grep -q 'CAMERA_V2_TRACK_FPS:-10' scripts/run_camera_v2_clean_pascal.sh
-          grep -q 'CAMERA_V2_DETECT_HZ:-0.40' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_TRACK_FPS:-8' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_DETECT_HZ:-0.50' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'CAMERA_V2_DETECT_CONF:-0.18' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_RTSP_LATENCY_MS:-80' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_DISPLAY_WIDTH:-1280' scripts/run_camera_v2_clean_pascal.sh
           grep -q 'CAMERA_V2_DISPLAY_HEIGHT:-720' scripts/run_camera_v2_clean_pascal.sh
-          grep -q 'yolo26_trt86_shm_worker_v4.py' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'yolo26_trt86_shm_worker_v5.py' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'services.camera_v2.runtime_quality' scripts/run_camera_v2_clean_pascal.sh
+          grep -q 'minIouDiff4NewTarget", "0.22"' services/camera_v2/runtime_quality.py
+          grep -q 'minIou4TargetDuplicate", "0.72"' services/camera_v2/runtime_quality.py
+          grep -q 'targetDuplicateRunInterval", "1"' services/camera_v2/runtime_quality.py
+          grep -q 'cudaStreamCreateWithPriority' scripts/yolo26_trt86_shm_worker_v5.py
           grep -q 'signal.signal(signal.SIGINT, signal.SIG_IGN)' services/camera_v2/yolo_trt86_shm_bridge.py
           grep -q 'frame\[3:381' services/camera_v2/runtime.py
           ! grep -q 'heatmap' services/camera_v2/native_bridge.py
           ! grep -q 'smooth_display' services/camera_v2/native_bridge.py
-          grep -q 'from .runtime import main' services/camera_v2/__main__.py
 
       - name: Legacy runtime removed
         run: |
