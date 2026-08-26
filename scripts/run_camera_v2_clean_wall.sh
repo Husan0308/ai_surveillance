@@ -50,7 +50,7 @@ done
 printf '%s\n' \
   "CAMERA_CLEAN_PROFILE source=6xRTSP@${CAMERA_V2_SOURCE_FPS} mux=${CAMERA_V2_FRAME_WIDTH}x${CAMERA_V2_FRAME_HEIGHT} wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT}" \
   "CAMERA_CLEAN_PIPELINE RTSP->nvurisrcbin/NVDEC->queue1->nvstreammux->nvmultistreamtiler->queue1->EGL" \
-  "CAMERA_CLEAN_DISABLED detector=1 tracker=1 appsink=1 shm=1 tensorrt=1 osd=1 global_id=1" \
+  "CAMERA_CLEAN_ANALYTICS detector=off tracker=off appsink=off shm=off tensorrt=off osd=off global_id=off" \
   "CAMERA_CLEAN_DISPLAY tile=640x360 expected_fps=20 sync=0 qos=0 quality=lanczos" \
   "CAMERA_CLEAN_MAIN_PYTHON executable=$MAIN_PYTHON"
 
