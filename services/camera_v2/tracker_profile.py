@@ -8,26 +8,36 @@ SPARSE_CONFIG = RUNTIME_DIR / "config_tracker_NvDCF_sparse.yml"
 
 # Local NvDCF tuning only. ReID/re-association is forcibly disabled below.
 #
-# The detector is deliberately sparse. Once a person is confirmed, NvDCF must
-# remain the visual owner between YOLO observations. A short bend/turn/partial
-# occlusion may move a target from ACTIVE to SHADOW even while the person is still
-# plainly visible. We therefore keep that tracker state alive long enough and,
-# critically, allow its current-frame bbox metadata to continue downstream.
+# IMPORTANT PERFORMANCE CONTRACT
+# ------------------------------
+# This profile is generated from NVIDIA's config_tracker_NvDCF_max_perf.yml and
+# must stay a max-performance visual tracker.  An older Camera V2 patch silently
+# changed it to HOG-only + feature level 3.  HOG is 18 channels and level 3 uses
+# a larger feature image, so that override made the visual tracker substantially
+# more expensive on every frame of every camera.  On the GTX 1050 Ti this showed
+# up as 100-250 ms wall stalls once six streams + TRT were active.
+#
+# ColorNames-only + feature level 2 follows NVIDIA's lightweight NvDCF profile:
+# enough appearance information for local continuity, while YOLO remains the
+# authority that periodically corrects geometry/classification.
 _REQUIRED_PATCHES: dict[str, str] = {
     "minDetectorConfidence": "0.05",
     "enableBboxUnClipping": "0",
     "maxTargetsPerStream": "24",
     "minIouDiff4NewTarget": "0.72",
-    "minTrackerConfidence": "0.15",
+    "minTrackerConfidence": "0.10",
     "probationAge": "1",
-    "maxShadowTrackingAge": "40",
-    "earlyTerminationAge": "2",
+    "maxShadowTrackingAge": "100",
+    "earlyTerminationAge": "4",
 }
 
 _OPTIONAL_PATCHES: dict[str, str] = {
-    "useColorNames": "0",
-    "useHog": "1",
-    "featureImgSizeLevel": "3",
+    # NVIDIA max-perf style visual features. Do not turn HOG back on here unless
+    # a measured tracking-accuracy regression justifies the GPU cost.
+    "useColorNames": "1",
+    "useHog": "0",
+    "useHighPrecisionFeature": "0",
+    "featureImgSizeLevel": "2",
     "searchRegionPaddingScale": "1",
     "associationMatcherType": "1",
     "tentativeDetectorConfidence": "0.20",
@@ -37,9 +47,9 @@ _OPTIONAL_PATCHES: dict[str, str] = {
     "minMatchingScore4Iou": "0.03",
     "minMatchingScore4VisualSimilarity": "0.08",
     "usePrediction4Assoc": "1",
-    "minTrackingConfidenceDuringInactive": "0.12",
-    "minIou4TargetDuplicate": "0.94",
-    "targetDuplicateRunInterval": "5",
+    "minTrackingConfidenceDuringInactive": "0.08",
+    "minIou4TargetDuplicate": "0.90",
+    "targetDuplicateRunInterval": "1",
 }
 
 
@@ -116,7 +126,7 @@ def _disable_reid(lines: list[str]) -> None:
 
 
 def prepare_sparse_tracker_config(stock: Path) -> Path:
-    """Generate the low-memory local NvDCF profile used by the live wall."""
+    """Generate the low-memory camera-local NvDCF profile used by the live wall."""
     stock = Path(stock)
     if not stock.exists():
         raise RuntimeError(f"NvDCF stock config not found: {stock}")
@@ -146,6 +156,19 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
         _set_section_key(output, "TargetManagement", "maxTargetsPerStream", "24")
         patched.add("maxTargetsPerStream")
 
+    # Some stock versions may omit optional visual keys. Insert the performance
+    # contract into the correct sections rather than silently falling back.
+    visual_keys = {
+        "useColorNames": "1",
+        "useHog": "0",
+        "useHighPrecisionFeature": "0",
+        "featureImgSizeLevel": "2",
+    }
+    for key, value in visual_keys.items():
+        if key not in patched:
+            _set_section_key(output, "VisualTracker", key, value)
+            patched.add(key)
+
     missing = sorted(set(_REQUIRED_PATCHES) - patched)
     if missing:
         raise RuntimeError(
@@ -153,25 +176,35 @@ def prepare_sparse_tracker_config(stock: Path) -> Path:
             + ", ".join(missing)
         )
 
-    # This is the key continuity rule. A shadow target is not a synthetic UI box:
-    # it is NvDCF's own current-frame localization for an already-established ID
-    # while detector evidence is temporarily absent/weak. Keeping it downstream
-    # prevents the visible bbox from blinking off between sparse YOLO updates.
+    # Shadow output is real NvDCF current-frame localization. It lets the visual
+    # tracker bridge sparse detector observations without a Python sticky/ghost box.
     _set_section_key(output, "TargetManagement", "outputShadowTracks", "1")
     _disable_reid(output)
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    optional_applied = sorted(set(_OPTIONAL_PATCHES) & patched)
     header = [
         f"# Auto-generated from {stock.name}.",
-        "# Camera V2 local NvDCF profile; cross-camera ReID is intentionally absent.",
-        "# maxShadowTrackingAge=40; outputShadowTracks=1; continuity-first local tracking.",
-        "# Shadow output is real NvDCF current-frame metadata, not a fabricated hold box.",
+        "# Camera V2 local NvDCF MAX-PERF profile; cross-camera ReID is absent.",
+        "# VisualTracker: ColorNames=1 HOG=0 featureImgSizeLevel=2 highPrecision=0.",
+        "# maxShadowTrackingAge=100; outputShadowTracks=1; continuity-first tracking.",
+        "# Shadow output is real NvDCF metadata, not a fabricated hold box.",
         "# TrajectoryManagement.enableReAssoc=0; ReID.reidType=0; outputReidTensor=0.",
-        "# No ReID model, TensorRT engine, gallery, sidecar or room topology is loaded.",
-        "# Optional patches applied: "
-        + (", ".join(optional_applied) if optional_applied else "none"),
         "# Do not edit: regenerated at runtime.",
     ]
-    SPARSE_CONFIG.write_text("\n".join(header + output) + "\n", encoding="utf-8")
+    text = "\n".join(header + output) + "\n"
+    for required in (
+        "useColorNames: 1",
+        "useHog: 0",
+        "featureImgSizeLevel: 2",
+        "maxShadowTrackingAge: 100",
+        "outputShadowTracks: 1",
+    ):
+        if required not in text:
+            raise RuntimeError(f"NvDCF max-perf contract missing {required}")
+    SPARSE_CONFIG.write_text(text, encoding="utf-8")
+    print(
+        "CAMERA_NVDCF_MAX_PERF useColorNames=1 useHog=0 featureImgSizeLevel=2 "
+        "highPrecision=0 outputShadowTracks=1 verified=1",
+        flush=True,
+    )
     return SPARSE_CONFIG
