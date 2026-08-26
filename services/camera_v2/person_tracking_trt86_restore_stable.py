@@ -54,9 +54,23 @@ class CameraPersonTrackingTRT86RestoreStable(CameraPersonTrackingPascalTRT86):
         )
 
     def _dedup_and_expand(self, rows):
-        # YOLO26 one-to-one E2E already returns final [xyxy, conf, class] rows.
-        # The legacy dedup removed real close people, so map geometry only.
-        return self._scaled_detections(rows)
+        """Map YOLO26 E2E detections to the 5-scalar NvDCF seed contract.
+
+        YOLO26 one-to-one E2E already returns final detections, so no external
+        geometry dedup/NMS is applied here. ``_scaled_detections`` intentionally
+        returns ``((x1, y1, x2, y2), conf)`` for legacy callers, while the
+        DetectorLatencyCompensator consumes flat ``(x1, y1, x2, y2, conf)`` rows.
+        Keep this adapter explicit so the async scheduler cannot crash after the
+        first successful TensorRT result.
+        """
+        scaled = self._scaled_detections(rows)
+        output: list[tuple[float, float, float, float, float]] = []
+        for coords, conf in scaled:
+            x1, y1, x2, y2 = (float(v) for v in coords)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            output.append((x1, y1, x2, y2, float(conf)))
+        return output
 
     @staticmethod
     def _stabilize_tracker_config(path: Path) -> Path:
