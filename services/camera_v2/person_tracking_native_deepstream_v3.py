@@ -7,11 +7,11 @@ from .person_tracking_native_deepstream_v2 import _native_tracker_config_v2
 
 
 class CameraPersonTrackingNativeDeepStreamV3(native.CameraPersonTrackingNativeDeepStream):
-    """Native DeepStream graph with verified static-pad rewiring.
+    """Native DeepStream graph with verified object/pad rewiring.
 
-    Gst.Element.unlink() has no boolean return value.  The previous runtime treated
-    its Python return value as success/failure, so every valid unlink looked like a
-    failure.  This version verifies the actual pad peers before and after rewiring.
+    GStreamer graph mutations are verified through the actual object hierarchy and
+    pad peers instead of relying on Python binding return-value quirks.  Elements
+    must be parented by the top-level pipeline before any link is attempted.
     """
 
     def _static_pad(self, element, name: str, label: str):
@@ -29,6 +29,15 @@ class CameraPersonTrackingNativeDeepStreamV3(native.CameraPersonTrackingNativeDe
         parent = peer.get_parent_element()
         parent_name = parent.get_name() if parent is not None else "?"
         return f"{parent_name}.{peer.get_name()}"
+
+    def _parent_text(self, element) -> str:
+        parent = element.get_parent()
+        if parent is None:
+            return "none"
+        try:
+            return parent.get_name()
+        except Exception:
+            return str(parent)
 
     def _verify_direct_link(self, src, dst, label: str) -> None:
         src_pad = self._static_pad(src, "src", label)
@@ -66,18 +75,70 @@ class CameraPersonTrackingNativeDeepStreamV3(native.CameraPersonTrackingNativeDe
             )
 
     def _link_required(self, src, dst, label: str) -> None:
+        # GStreamer requires both elements to belong to the same bin before
+        # gst_element_link(). Verify that invariant explicitly.
+        src_parent = src.get_parent()
+        dst_parent = dst.get_parent()
+        if src_parent is None or dst_parent is None:
+            raise RuntimeError(
+                f"{label}: element not parented before link "
+                f"src_parent={self._parent_text(src)} dst_parent={self._parent_text(dst)}"
+            )
+        if src_parent.get_name() != self.pipeline.get_name() or dst_parent.get_name() != self.pipeline.get_name():
+            raise RuntimeError(
+                f"{label}: elements are not children of the top-level pipeline "
+                f"src_parent={self._parent_text(src)} dst_parent={self._parent_text(dst)}"
+            )
+
         if not src.link(dst):
             raise RuntimeError(
                 f"{label}: Gst.Element.link failed "
-                f"src={src.get_name()} dst={dst.get_name()}"
+                f"src={src.get_name()} dst={dst.get_name()} "
+                f"src_peer={self._peer_text(self._static_pad(src, 'src', label))} "
+                f"dst_peer={self._peer_text(self._static_pad(dst, 'sink', label))}"
             )
         self._verify_direct_link(src, dst, label)
 
     def _add_required(self, element, label: str) -> None:
-        if not self.pipeline.add(element):
+        name = element.get_name()
+        before_parent = element.get_parent()
+        if before_parent is not None:
             raise RuntimeError(
-                f"{label}: could not add {element.get_name()} to pipeline"
+                f"{label}: {name} already has parent={self._parent_text(element)} before add"
             )
+
+        existing = self.pipeline.get_by_name(name)
+        if existing is not None:
+            raise RuntimeError(
+                f"{label}: pipeline already contains another element named {name}"
+            )
+
+        # gst_bin_add() is documented to parent the element to the bin.  Some GI
+        # environments have produced misleading return values in this deployment,
+        # so the object hierarchy after the call is the authoritative check.
+        add_result = self.pipeline.add(element)
+        after_parent = element.get_parent()
+        if after_parent is None:
+            raise RuntimeError(
+                f"{label}: add failed for {name}; result={add_result!r} parent=none"
+            )
+        if after_parent.get_name() != self.pipeline.get_name():
+            raise RuntimeError(
+                f"{label}: {name} attached to unexpected parent={self._parent_text(element)} "
+                f"result={add_result!r}"
+            )
+
+        resolved = self.pipeline.get_by_name(name)
+        if resolved is None or resolved.get_name() != name:
+            raise RuntimeError(
+                f"{label}: {name} parented but not resolvable from pipeline"
+            )
+
+        print(
+            f"CAMERA_NATIVE_ELEMENT_ADD label={label.replace(' ', '_')} "
+            f"name={name} result={add_result!r} parent={after_parent.get_name()} verified=1",
+            flush=True,
+        )
 
     def _install_native_analytics(
         self, pgie_config: Path, tracker_lib: Path, tracker_config: Path
@@ -186,7 +247,7 @@ class CameraPersonTrackingNativeDeepStreamV3(native.CameraPersonTrackingNativeDe
 
 
 def main() -> int:
-    # Use the section-aware DS7.1 NvDCF generator and the pad-verified graph.
+    # Use the section-aware DS7.1 NvDCF generator and the object/pad-verified graph.
     native._native_tracker_config = _native_tracker_config_v2
     return CameraPersonTrackingNativeDeepStreamV3().run()
 
