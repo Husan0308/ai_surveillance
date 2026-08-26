@@ -35,9 +35,27 @@ jobs:
           grep -q 'yolo26s-672x384-b1-fp32-trt86.engine' scripts/run_restore_stable_tracking.sh
           grep -q 'person_tracking_trt86_restore_stable' scripts/run_restore_stable_tracking.sh
           grep -q 'interpolation-method", 1' services/camera_v2/person_tracking_trt86_restore_stable.py
-          grep -q 'return self._scaled_detections(rows)' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q 'scaled = self._scaled_detections(rows)' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q 'output.append((x1, y1, x2, y2, float(conf)))' services/camera_v2/person_tracking_trt86_restore_stable.py
+          ! grep -q 'return self._scaled_detections(rows)' services/camera_v2/person_tracking_trt86_restore_stable.py
           grep -q 'minIouDiff4NewTarget", "0.45"' services/camera_v2/person_tracking_trt86_restore_stable.py
           grep -q 'capture=JIT-no-prefetch' services/camera_v2/person_tracking_trt86_restore_stable.py
           grep -q 'CameraPersonTrackingReID' services/camera_v2/person_tracking_trt86_reid_restore_stable.py
           ! grep -q 'yolo26m.pt' scripts/run_restore_stable_tracking.sh
           ! grep -q 'MICRO_BATCH=2' scripts/run_restore_stable_tracking.sh
+      - name: Detector tuple contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+
+          p = Path('services/camera_v2/person_tracking_trt86_restore_stable.py')
+          tree = ast.parse(p.read_text())
+          cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'CameraPersonTrackingTRT86RestoreStable')
+          fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '_dedup_and_expand')
+          text = ast.get_source_segment(p.read_text(), fn) or ''
+          assert 'scaled = self._scaled_detections(rows)' in text
+          assert 'output.append((x1, y1, x2, y2, float(conf)))' in text
+          assert 'return self._scaled_detections(rows)' not in text
+          print('RESTORE_STABLE_TUPLE_CONTRACT status=OK shape=(x1,y1,x2,y2,conf)')
+          PY
