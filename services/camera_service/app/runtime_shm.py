@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import os
 import sys
 import time
 
 from .runtime import CameraServiceRuntime
-from .shm_frame import LatestFrameMmapWriter
+from .shm_frame import FrameDemandOwner, LatestFrameMmapWriter
 
 
 ML_W = 672
@@ -13,37 +12,38 @@ ML_H = 378
 
 
 class CameraServiceShmRuntime(CameraServiceRuntime):
-    """AI-free camera service plus a bounded latest-frame IPC tap.
+    """AI-free camera service with demand-driven latest-frame IPC.
 
-    Production/headless per camera:
+    Per camera:
         RTSP/NVDEC -> tee
-          -> latest-only drain queue -> fakesink
-          -> latest-only ML queue -> rate gate -> GPU resize/color convert
+          -> latest-only full-rate drain/display path
+          -> latest-only ML queue -> demand gate -> GPU resize/color convert
              -> RAW BGR appsink -> double-buffered /dev/shm latest frame
 
-    Optional debug-wall mode keeps the previous display mux/tiler/EGL branch.
-    The ML tap is lossy/latest-only and gated before conversion so a slow or dead
-    consumer cannot create backpressure or per-frame conversion work.
+    Expensive ML conversion only runs when the ML service requests a frame.
+    With one sequential ML scheduler, conversion and TensorRT do not intentionally
+    overlap on the GPU and no unused 2 Hz frames are produced.
     """
 
     def __init__(self) -> None:
-        self.ml_tap_hz = max(0.25, min(10.0, float(os.environ.get("CAMERA_SERVICE_ML_TAP_HZ", "2.0"))))
-        self.ml_period_sec = 1.0 / self.ml_tap_hz
-        self.ml_next_due: dict[str, float] = {}
         self.ml_publish_counts: dict[str, int] = {}
         self.ml_publish_last: dict[str, int] = {}
         self.ml_publish_stat_at = time.monotonic()
         self.ml_writers: dict[str, LatestFrameMmapWriter] = {}
+        self.ml_demands: dict[str, FrameDemandOwner] = {}
+        self.ml_served_request: dict[str, int] = {}
+        self.ml_reserved_request: dict[str, int] = {}
+        self.ml_capture_started_ns: dict[str, int] = {}
+        self.ml_inflight: dict[str, bool] = {}
         self.tees: dict[str, object] = {}
         self.ml_queues: dict[str, object] = {}
         self.ml_sinks: dict[str, object] = {}
         self.tee_request_pads: list[tuple[object, object]] = []
         super().__init__()
         print(
-            "CAMERA_SERVICE_SHM "
-            f"enabled=1 tap={ML_W}x{ML_H}x3 rate={self.ml_tap_hz:.2f}Hz "
-            f"headless={int(self.headless)} "
-            "policy=latest-only gate-before-convert cadence=fixed-deadline consumer_backpressure=0",
+            "CAMERA_SERVICE_SHM enabled=1 tap=672x378x3 mode=demand-jit "
+            f"headless={int(self.headless)} policy=request-next-frame "
+            "gate-before-convert consumer_backpressure=0",
             flush=True,
         )
 
@@ -129,11 +129,9 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
         self._link(ml_convert, ml_caps, f"{camera.camera_id}:convert->caps")
         self._link(ml_caps, ml_sink, f"{camera.camera_id}:caps->appsink")
 
-        # Gate before scaling + NVMM->host conversion. Dropped frames never pay
-        # ML preprocessing cost.
         ml_q.get_static_pad("src").add_probe(
             self.Gst.PadProbeType.BUFFER,
-            self._ml_rate_gate_probe,
+            self._ml_demand_gate_probe,
             camera.camera_id,
         )
         display_q.get_static_pad("sink").add_probe(
@@ -143,14 +141,20 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
         )
         source.connect("pad-added", self._source_pad_added_to_tee, tee, camera.camera_id)
 
-        self.sources[camera.camera_id] = source
-        self.queues[camera.camera_id] = display_q
-        self.tees[camera.camera_id] = tee
-        self.ml_queues[camera.camera_id] = ml_q
-        self.ml_sinks[camera.camera_id] = ml_sink
-        self.ml_publish_counts[camera.camera_id] = 0
-        self.ml_publish_last[camera.camera_id] = 0
-        self.ml_writers[camera.camera_id] = LatestFrameMmapWriter(camera.camera_id, ML_W, ML_H, 3)
+        cid = camera.camera_id
+        self.sources[cid] = source
+        self.queues[cid] = display_q
+        self.tees[cid] = tee
+        self.ml_queues[cid] = ml_q
+        self.ml_sinks[cid] = ml_sink
+        self.ml_publish_counts[cid] = 0
+        self.ml_publish_last[cid] = 0
+        self.ml_writers[cid] = LatestFrameMmapWriter(cid, ML_W, ML_H, 3)
+        self.ml_demands[cid] = FrameDemandOwner(cid)
+        self.ml_served_request[cid] = 0
+        self.ml_reserved_request[cid] = 0
+        self.ml_capture_started_ns[cid] = 0
+        self.ml_inflight[cid] = False
 
     def _source_pad_added_to_tee(self, _source, pad, tee, cid: str) -> None:
         caps = pad.get_current_caps()
@@ -171,24 +175,29 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
             return
         result = pad.link(sink)
         if result != self.Gst.PadLinkReturn.OK:
-            print(f"CAMERA_SERVICE {cid} source->tee failed result={result}", file=sys.stderr, flush=True)
+            print(
+                f"CAMERA_SERVICE {cid} source->tee failed result={result}",
+                file=sys.stderr,
+                flush=True,
+            )
 
-    def _ml_rate_gate_probe(self, _pad, _info, cid: str):
-        now = time.monotonic()
-        due = self.ml_next_due.get(cid)
-        if due is None:
-            self.ml_next_due[cid] = now + self.ml_period_sec
-            return self.Gst.PadProbeReturn.OK
-        if now < due:
+    def _ml_demand_gate_probe(self, _pad, _info, cid: str):
+        if self.ml_inflight.get(cid, False):
+            return self.Gst.PadProbeReturn.DROP
+        requested = self.ml_demands[cid].requested_seq()
+        served = self.ml_served_request.get(cid, 0)
+        if requested <= served:
             return self.Gst.PadProbeReturn.DROP
 
-        missed = max(0, int((now - due) // self.ml_period_sec))
-        self.ml_next_due[cid] = due + ((missed + 1) * self.ml_period_sec)
+        self.ml_inflight[cid] = True
+        self.ml_reserved_request[cid] = requested
+        self.ml_capture_started_ns[cid] = time.monotonic_ns()
         return self.Gst.PadProbeReturn.OK
 
     def _on_ml_sample(self, sink, cid: str):
         sample = sink.emit("pull-sample")
         if sample is None:
+            self.ml_inflight[cid] = False
             return self.Gst.FlowReturn.OK
         try:
             caps = sample.get_caps()
@@ -196,7 +205,9 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
             width = int(structure.get_value("width"))
             height = int(structure.get_value("height"))
             if width != ML_W or height != ML_H:
-                raise RuntimeError(f"{cid}: ML tap geometry={width}x{height}, expected={ML_W}x{ML_H}")
+                raise RuntimeError(
+                    f"{cid}: ML tap geometry={width}x{height}, expected={ML_W}x{ML_H}"
+                )
             buffer = sample.get_buffer()
             ok, mapped = buffer.map(self.Gst.MapFlags.READ)
             if not ok:
@@ -217,12 +228,20 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
                         dst = row * tight
                         compact[dst : dst + tight] = raw[src : src + tight]
                     payload = compact
-                self.ml_writers[cid].publish(payload, time.monotonic_ns())
+                captured_ns = self.ml_capture_started_ns.get(cid, time.monotonic_ns())
+                self.ml_writers[cid].publish(payload, captured_ns)
                 self.ml_publish_counts[cid] += 1
+                self.ml_served_request[cid] = self.ml_reserved_request[cid]
             finally:
                 buffer.unmap(mapped)
         except Exception as exc:
-            print(f"CAMERA_SERVICE_SHM_WARNING {cid} {type(exc).__name__}:{exc}", file=sys.stderr, flush=True)
+            print(
+                f"CAMERA_SERVICE_SHM_WARNING {cid} {type(exc).__name__}:{exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+        finally:
+            self.ml_inflight[cid] = False
         return self.Gst.FlowReturn.OK
 
     def _print_stats(self) -> bool:
@@ -236,7 +255,12 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
             previous = self.ml_publish_last.get(cid, 0)
             hz = (total - previous) / elapsed
             self.ml_publish_last[cid] = total
-            parts.append(f"{cid}:{hz:.2f}Hz seq={self.ml_writers[cid].seq}")
+            requested = self.ml_demands[cid].requested_seq()
+            served = self.ml_served_request.get(cid, 0)
+            parts.append(
+                f"{cid}:{hz:.2f}Hz frame_seq={self.ml_writers[cid].seq} "
+                f"req={requested}/{served} inflight={int(self.ml_inflight.get(cid, False))}"
+            )
         self.ml_publish_stat_at = now
         print("CAMERA_SERVICE_SHM_STATS " + " | ".join(parts), flush=True)
         return keep
@@ -248,6 +272,11 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
             for writer in self.ml_writers.values():
                 try:
                     writer.close()
+                except Exception:
+                    pass
+            for demand in self.ml_demands.values():
+                try:
+                    demand.close()
                 except Exception:
                     pass
             for owner, pad in self.tee_request_pads:
