@@ -1,0 +1,31 @@
+name: ML Detector SHM Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v3-ml-detector-20260826
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/ml_service/app/detector_only_shm.py \
+            services/camera_service/app/shm_frame.py \
+            scripts/yolo26_trt86_shm_worker_v4.py
+      - name: Bash syntax
+        run: bash -n scripts/run_ml_detector_shm.sh
+      - name: Detector service boundary contract
+        run: |
+          grep -q 'ML_DETECTOR_BOUNDARY rtsp=0 nvdec=0 deepstream=0 tracker=0 api=0 ui=0' services/ml_service/app/detector_only_shm.py
+          grep -q 'policy=latest-only-no-backlog' services/ml_service/app/detector_only_shm.py
+          grep -q '672x378+3px/3px-pad114' services/ml_service/app/detector_only_shm.py
+          grep -q 'self.frame\[3:381' services/ml_service/app/detector_only_shm.py
+          grep -q 'ML_DETECTOR_MAX_INPUT_AGE_MS:-300' scripts/run_ml_detector_shm.sh
+          grep -q 'yolo26_trt86_shm_worker_v4.py' scripts/run_ml_detector_shm.sh
+          ! grep -Eqi '^(from|import) .*?(cv2|pyds|deepstream|nvtracker|bytetrack|reid|global_identity|api_service|frontend)' services/ml_service/app/detector_only_shm.py
+          ! grep -Eqi 'rtsp://|nvurisrcbin|nvv4l2decoder|nvstreammux' services/ml_service/app/detector_only_shm.py
