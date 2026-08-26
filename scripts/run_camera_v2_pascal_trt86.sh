@@ -23,8 +23,7 @@ export CAMERA_V2_DETECT_CONF="${CAMERA_V2_DETECT_CONF:-0.05}"
 export CAMERA_V2_DETECT_IOU="${CAMERA_V2_DETECT_IOU:-0.70}"
 export CAMERA_V2_MAX_DET="${CAMERA_V2_MAX_DET:-40}"
 # B1 FP32 YOLO26s on GTX 1050 Ti was measured around 160-190 ms. 0.50 Hz/cam
-# across six cameras keeps detector GPU occupancy around half instead of saturating
-# the GPU and starving NVDEC/NvDCF/display.
+# across six cameras leaves roughly half the GPU budget for NVDEC/NvDCF/display.
 export CAMERA_V2_DETECT_TARGET_HZ="${CAMERA_V2_DETECT_TARGET_HZ:-0.50}"
 export CAMERA_V2_DETECT_MIN_HZ="${CAMERA_V2_DETECT_MIN_HZ:-0.45}"
 export CAMERA_V2_DETECT_MAX_HZ="${CAMERA_V2_DETECT_MAX_HZ:-0.60}"
@@ -76,7 +75,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: F401
 import numpy, yaml, dotenv  # noqa: F401
-import services.camera_v2.person_tracking_pascal_trt86  # noqa: F401
+import services.camera_v2.pascal_runtime  # noqa: F401
 PY
   then MAIN_PYTHON="$candidate"; break; fi
 done
@@ -91,7 +90,7 @@ printf '%s\n' \
 restart_count=0
 while true; do
   set +e
-  "$MAIN_PYTHON" -u -m services.camera_v2.person_tracking_pascal_trt86
+  "$MAIN_PYTHON" -u -m services.camera_v2.pascal_runtime
   rc=$?
   set -e
   [[ $rc -eq 75 ]] || exit "$rc"
