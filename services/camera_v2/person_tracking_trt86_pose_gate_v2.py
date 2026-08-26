@@ -90,6 +90,14 @@ class CameraPersonTrackingTRT86PoseGateV2(base.CameraPersonTrackingTRT86PoseGate
         base.PoseGateClient = PoseGateClient
         super().__init__()
 
+        # Preserve the clear 1280x720 -> 1920x720 presentation. Only the expensive
+        # source-to-mux scaler changes from Lanczos to bilinear. The final tiler
+        # remains Lanczos, so the visible 640x360 tiles keep the sharp presentation
+        # that was proven by the camera-only baseline.
+        self._set_if(self.mux, "interpolation-method", 1)
+        self._set_if(self.mux, "buffer-pool-size", 12)
+        self._set_if(self.tiler, "interpolation-method", 4)
+
         tracker = getattr(self, "tracker", None)
         subbatch = "unsupported"
         if tracker is not None and tracker.find_property("sub-batches") is not None:
@@ -112,7 +120,7 @@ class CameraPersonTrackingTRT86PoseGateV2(base.CameraPersonTrackingTRT86PoseGate
             "CAMERA_ML_V2_RUNTIME "
             f"tracker={self.tracker_width}x{self.tracker_height} "
             f"sub_batches={subbatch} pose_gate=v3-two-hit-reject "
-            "display_geometry=preserved",
+            "mux_scale=bilinear tiler_scale=lanczos display=1280x720->1920x720",
             flush=True,
         )
 
