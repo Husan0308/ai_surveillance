@@ -26,16 +26,17 @@ export CAMERA_V2_DETECT_ACTIVE_CAMERAS="${CAMERA_V2_DETECT_ACTIVE_CAMERAS:-CAM-0
 export CAMERA_V2_DETECT_CONF="${CAMERA_V2_DETECT_CONF:-0.05}"
 export CAMERA_V2_DETECT_IOU="${CAMERA_V2_DETECT_IOU:-0.70}"
 export CAMERA_V2_MAX_DET="${CAMERA_V2_MAX_DET:-40}"
-# Measured TRT8.6 B1 FP32 inference is ~160-190 ms. 0.33 Hz/cam means roughly
-# two TRT calls/sec total (~32-38% detector GPU occupancy) rather than ~54% at
-# 0.50 Hz/cam, leaving enough headroom for NVDEC, NvDCF, tiler and EGL.
+# Measured TRT8.6 B1 FP32 inference is ~160-190 ms in the worst observed run.
+# Keep the detector budget conservative; the scheduler may climb toward 0.40 Hz
+# when the engine is warm and GPU headroom is available.
 export CAMERA_V2_DETECT_TARGET_HZ="${CAMERA_V2_DETECT_TARGET_HZ:-0.33}"
 export CAMERA_V2_DETECT_MIN_HZ="${CAMERA_V2_DETECT_MIN_HZ:-0.30}"
 export CAMERA_V2_DETECT_MAX_HZ="${CAMERA_V2_DETECT_MAX_HZ:-0.40}"
 export CAMERA_V2_MAX_DETECT_RESULT_AGE_MS="${CAMERA_V2_MAX_DETECT_RESULT_AGE_MS:-350}"
-# Preserve 16:9-ish tracker geometry while reducing tracker pixels ~22%.
-export CAMERA_V2_TRACKER_WIDTH="${CAMERA_V2_TRACKER_WIDTH:-448}"
-export CAMERA_V2_TRACKER_HEIGHT="${CAMERA_V2_TRACKER_HEIGHT:-256}"
+# NvDCF accuracy depends strongly on tracker-frame resolution. 640x384 is close
+# to the 672x384 detector geometry while still well below the 960x540 mux frame.
+export CAMERA_V2_TRACKER_WIDTH="${CAMERA_V2_TRACKER_WIDTH:-640}"
+export CAMERA_V2_TRACKER_HEIGHT="${CAMERA_V2_TRACKER_HEIGHT:-384}"
 export CAMERA_V2_MIN_DISPLAY_TRACK_CONF="${CAMERA_V2_MIN_DISPLAY_TRACK_CONF:-0.00}"
 
 export CAMERA_V2_TRT86_PYTHON="${CAMERA_V2_TRT86_PYTHON:-$ROOT/.venv-trt86/bin/python}"
@@ -88,7 +89,7 @@ done
 [[ -n "$MAIN_PYTHON" ]] || fail "no Python can import Pascal Camera V2 runtime"
 
 printf '%s\n' \
-  "CAMERA_PASCAL_PROFILE display=6xRTSP/${CAMERA_V2_FRAME_WIDTH}x${CAMERA_V2_FRAME_HEIGHT}@20 wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT} detector=TRT8.6/B1/FP32/672x384 active=${CAMERA_V2_DETECT_ACTIVE_CAMERAS} target=${CAMERA_V2_DETECT_TARGET_HZ}Hz/cam" \
+  "CAMERA_PASCAL_PROFILE display=6xRTSP/${CAMERA_V2_FRAME_WIDTH}x${CAMERA_V2_FRAME_HEIGHT}@20 wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT} detector=TRT8.6/B1/FP32/672x384 active=${CAMERA_V2_DETECT_ACTIVE_CAMERAS} target=${CAMERA_V2_DETECT_TARGET_HZ}Hz/cam tracker=${CAMERA_V2_TRACKER_WIDTH}x${CAMERA_V2_TRACKER_HEIGHT}" \
   "CAMERA_PASCAL_PIPELINE DeepStream=RTSP/NVDEC->tee->mux->detector-meta->NvDCF->tiler->OSD->EGL detector=separate-process/SHM nvinfer=0 trt10=0 scaling=bilinear" \
   "CAMERA_PASCAL_RECOVERY internal-retries=3 process-watchdog=${CAMERA_V2_PASCAL_STALL_SEC}s stagger=${CAMERA_V2_STARTUP_STAGGER_SEC}s per-source-recycle=0" \
   "CAMERA_PASCAL_MAIN_PYTHON executable=$MAIN_PYTHON"
