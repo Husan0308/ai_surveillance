@@ -12,9 +12,9 @@ export CAMERA_V2_DETECT_CONF="${CAMERA_V2_DETECT_CONF:-0.08}"
 export CAMERA_V2_DETECT_IOU=0.70
 export CAMERA_V2_MAX_DET=40
 export CAMERA_V2_DETECT_ACTIVE_CAMERAS="CAM-01,CAM-02,CAM-03,CAM-04,CAM-05,CAM-06"
-export CAMERA_V2_DETECT_TARGET_HZ="${CAMERA_V2_DETECT_TARGET_HZ:-0.55}"
-export CAMERA_V2_DETECT_MIN_HZ="${CAMERA_V2_DETECT_MIN_HZ:-0.35}"
-export CAMERA_V2_DETECT_MAX_HZ="${CAMERA_V2_DETECT_MAX_HZ:-0.75}"
+export CAMERA_V2_DETECT_TARGET_HZ="${CAMERA_V2_DETECT_TARGET_HZ:-0.30}"
+export CAMERA_V2_DETECT_MIN_HZ="${CAMERA_V2_DETECT_MIN_HZ:-0.20}"
+export CAMERA_V2_DETECT_MAX_HZ="${CAMERA_V2_DETECT_MAX_HZ:-0.45}"
 export CAMERA_V2_MAX_DETECT_RESULT_AGE_MS="${CAMERA_V2_MAX_DETECT_RESULT_AGE_MS:-350}"
 export CAMERA_V2_TRACKER_WIDTH=512
 export CAMERA_V2_TRACKER_HEIGHT=288
@@ -37,7 +37,8 @@ PYTHON="${CAMERA_V2_MAIN_PYTHON:-$ROOT/.venv/bin/python}"
 
 printf '%s\n' \
   "RESTORE_STABLE_TRACKING detector=YOLO26s/TRT8.6/B1/672x384 conf=$CAMERA_V2_DETECT_CONF" \
-  "RESTORE_STABLE_TRACKING capture=JIT/no-prefetch active=all6 target=${CAMERA_V2_DETECT_TARGET_HZ}Hz/cam" \
-  "RESTORE_STABLE_TRACKING bbox_owner=NvDCF tracker=512x288 smoother=native global_id=off external_nms=off"
+  "RESTORE_STABLE_TRACKING capture=JIT/no-prefetch active=all6 target=${CAMERA_V2_DETECT_TARGET_HZ}Hz/cam range=${CAMERA_V2_DETECT_MIN_HZ}-${CAMERA_V2_DETECT_MAX_HZ}" \
+  "RESTORE_STABLE_TRACKING bbox_owner=NvDCF tracker=512x288 smoother=native global_id=off external_nms=off" \
+  "RESTORE_STABLE_DISPLAY mux_scale=bilinear tiler_scale=quality osd=GPU/NV12-direct rgba_convert=0"
 
 exec "$PYTHON" -u -m services.camera_v2.person_tracking_trt86_restore_stable
