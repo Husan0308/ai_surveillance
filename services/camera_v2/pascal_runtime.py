@@ -1,12 +1,61 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from .person_tracking_pascal_trt86 import CameraPersonTrackingPascalTRT86
 
 
+def _replace_yaml_key(lines: list[str], key: str, value: str) -> None:
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped.startswith(key + ":"):
+            continue
+        indent = line[: len(line) - len(stripped)]
+        comment = ""
+        if "#" in stripped:
+            comment = "  #" + stripped.split("#", 1)[1]
+        lines[index] = f"{indent}{key}: {value}{comment}"
+        return
+    raise RuntimeError(f"Pascal continuity config missing required NvDCF key: {key}")
+
+
 class CameraPascalRuntime(CameraPersonTrackingPascalTRT86):
     """Final GTX 1050 Ti runtime: smooth wall + Pascal-safe TRT8.6 analytics."""
+
+    @staticmethod
+    def _stabilize_tracker_config(path: Path) -> Path:
+        # First apply the Pascal-safe base profile, then add the continuity tuning
+        # justified by the live 20 FPS measurements. At ~0.4 detector Hz, one
+        # missed detector refresh can leave ~5 seconds between matching boxes, so
+        # 80 shadow frames (4 s) is too short. Keep the visual target alive for
+        # seven seconds and lower the active-confidence floor modestly. Lowering
+        # minIouDiff4NewTarget suppresses duplicate IDs from slightly shifted YOLO
+        # boxes instead of spawning a second target for the same person.
+        path = CameraPersonTrackingPascalTRT86._stabilize_tracker_config(path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        _replace_yaml_key(lines, "minIouDiff4NewTarget", "0.45")
+        _replace_yaml_key(lines, "minTrackerConfidence", "0.05")
+        _replace_yaml_key(lines, "maxShadowTrackingAge", "140")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        final = path.read_text(encoding="utf-8")
+        required = (
+            "minIouDiff4NewTarget: 0.45",
+            "minTrackerConfidence: 0.05",
+            "probationAge: 0",
+            "maxShadowTrackingAge: 140",
+            "outputShadowTracks: 1",
+        )
+        missing = [item for item in required if item not in final]
+        if missing:
+            raise RuntimeError("Pascal continuity verification failed: " + ", ".join(missing))
+        print(
+            "CAMERA_PASCAL_CONTINUITY "
+            "minIouDiff4NewTarget=0.45 minTrackerConfidence=0.05 "
+            "probationAge=0 maxShadowTrackingAge=140 outputShadowTracks=1 verified=1",
+            flush=True,
+        )
+        return path
 
     def _configure_mux(self) -> None:
         super()._configure_mux()
