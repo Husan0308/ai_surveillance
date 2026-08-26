@@ -11,6 +11,11 @@ export CAMERA_V2_FRAME_WIDTH=2560
 export CAMERA_V2_FRAME_HEIGHT=1440
 export CAMERA_V2_WALL_WIDTH=1920
 export CAMERA_V2_WALL_HEIGHT=720
+export CAMERA_V2_RTSP_RECONNECT_ATTEMPTS=3
+export CAMERA_V2_SOURCE_WATCHDOG_STALL_SEC=6
+export CAMERA_V2_SOURCE_WATCHDOG_GRACE_SEC=6
+export CAMERA_V2_SOURCE_RECYCLE_PAUSE_MS=750
+export CAMERA_V2_SOURCE_MAX_RECYCLES=2
 
 # Pose gets the larger analysis frame; Ultralytics letterboxes internally to 832.
 export CAMERA_V2_DETECT_WIDTH=1280
@@ -31,9 +36,7 @@ else
   unset CAMERA_V2_POSE_MODEL || true
 fi
 
-# The current hardware log shows pose inference around 37-52 ms, so 2 Hz on one
-# active camera is cheap enough while materially reducing the refresh gap.
-# NvDCF owns every video frame between those fresh pose observations.
+# Sparse pose refresh; NvDCF owns every display frame between observations.
 export CAMERA_V2_DETECT_TARGET_HZ=2.0
 export CAMERA_V2_DETECT_MIN_HZ=2.0
 export CAMERA_V2_DETECT_MAX_HZ=2.0
@@ -80,6 +83,25 @@ done
 printf '%s\n' \
   "CAM01_POSE_V2_PROFILE capture=1280x720 imgsz=832 conf=0.03 active=CAM-01 target=2.0Hz" \
   "CAM01_POSE_V2_TRACKER NvDCF=512x288 shadow=100frames empty-confirm=5 final-yaml-verified=1 display_conf=0.00" \
-  "CAM01_POSE_V2_PIPELINE rtsp=tcp/100ms staggered=1 one-shot=1 no-prefetch=1 global-id=off"
+  "CAM01_POSE_V2_PIPELINE rtsp=tcp/100ms staggered=1 watchdog=6s/recycle2 process-restart=1 one-shot=1 no-prefetch=1 global-id=off"
 
-exec "$MAIN_PYTHON" -u -m services.camera_v2.person_tracking_pose_sticky_v2
+# Exit code 75 means the Python watchdog saw an nvurisrcbin that remained wedged
+# after bounded per-source recycle attempts. Restart the whole pipeline cleanly;
+# source stagger prevents a reconnect storm against the NVR.
+restart_count=0
+while true; do
+  set +e
+  "$MAIN_PYTHON" -u -m services.camera_v2.person_tracking_pose_sticky_v2
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 75 ]]; then
+    exit "$rc"
+  fi
+
+  restart_count=$((restart_count + 1))
+  delay=$restart_count
+  (( delay > 10 )) && delay=10
+  echo "CAM01_POSE_V2_SUPERVISOR restart=${restart_count} reason=rtsp-watchdog delay=${delay}s" >&2
+  sleep "$delay"
+done
