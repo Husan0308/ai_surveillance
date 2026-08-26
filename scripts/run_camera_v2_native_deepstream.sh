@@ -39,9 +39,55 @@ done
   exit 1
 }
 
-if [[ ! -f "$PARSER_SO" || "$PARSER_DIR/nvdsparsebbox_yolo26_e2e.cpp" -nt "$PARSER_SO" ]]; then
-  echo "CAMERA_NATIVE_BUILD parser=YOLO26-E2E ds_root=$DS_ROOT"
-  make -C "$PARSER_DIR" clean all DS_ROOT="$DS_ROOT"
+# DeepStream 7.1 dGPU is documented against CUDA 12.6. Prefer that toolkit when
+# installed, but support the /usr/local/cuda alternative or an nvcc-derived root.
+CUDA_HOME_RESOLVED="${CUDA_HOME:-}"
+if [[ -z "$CUDA_HOME_RESOLVED" || ! -f "$CUDA_HOME_RESOLVED/include/cuda_runtime_api.h" ]]; then
+  CUDA_HOME_RESOLVED=""
+  for candidate in /usr/local/cuda-12.6 /usr/local/cuda; do
+    [[ -f "$candidate/include/cuda_runtime_api.h" ]] || continue
+    CUDA_HOME_RESOLVED="$(readlink -f "$candidate")"
+    break
+  done
+fi
+if [[ -z "$CUDA_HOME_RESOLVED" ]]; then
+  NVCC_BIN="$(command -v nvcc 2>/dev/null || true)"
+  if [[ -n "$NVCC_BIN" ]]; then
+    candidate="$(cd "$(dirname "$NVCC_BIN")/.." && pwd -P)"
+    if [[ -f "$candidate/include/cuda_runtime_api.h" ]]; then
+      CUDA_HOME_RESOLVED="$candidate"
+    fi
+  fi
+fi
+if [[ -z "$CUDA_HOME_RESOLVED" ]]; then
+  for candidate in /usr/local/cuda-*; do
+    [[ -f "$candidate/include/cuda_runtime_api.h" ]] || continue
+    CUDA_HOME_RESOLVED="$candidate"
+    break
+  done
+fi
+[[ -n "$CUDA_HOME_RESOLVED" ]] || {
+  cat >&2 <<'EOF'
+CAMERA_NATIVE_PREFLIGHT ERROR: CUDA Toolkit headers were not found.
+Expected cuda_runtime_api.h under one of:
+  /usr/local/cuda-12.6/include
+  /usr/local/cuda/include
+  <nvcc-root>/include
+
+DeepStream 7.1 dGPU officially uses CUDA Toolkit 12.6.
+EOF
+  exit 1
+}
+export CUDA_HOME="$CUDA_HOME_RESOLVED"
+CUDA_VERSION_TEXT="unknown"
+if [[ -x "$CUDA_HOME/bin/nvcc" ]]; then
+  CUDA_VERSION_TEXT="$($CUDA_HOME/bin/nvcc --version | tail -n 1 | sed 's/^[[:space:]]*//')"
+fi
+echo "CAMERA_NATIVE_CUDA home=$CUDA_HOME version=$CUDA_VERSION_TEXT"
+
+if [[ ! -f "$PARSER_SO" || "$PARSER_DIR/nvdsparsebbox_yolo26_e2e.cpp" -nt "$PARSER_SO" || "$PARSER_DIR/Makefile" -nt "$PARSER_SO" ]]; then
+  echo "CAMERA_NATIVE_BUILD parser=YOLO26-E2E ds_root=$DS_ROOT cuda_home=$CUDA_HOME"
+  make -C "$PARSER_DIR" clean all DS_ROOT="$DS_ROOT" CUDA_HOME="$CUDA_HOME"
 fi
 
 if [[ ! -f "$ONNX" ]]; then
