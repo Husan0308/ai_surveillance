@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - rebuild/service-architecture-v5-dual-stream-20260826
+      - rebuild/service-architecture-v6-paced-substream-20260826
   workflow_dispatch:
 
 jobs:
@@ -19,6 +20,7 @@ jobs:
             services/ml_service/app/trt86_detector.py \
             services/ml_service/app/detector_substream.py \
             services/ml_service/app/detector_substream_live.py \
+            services/ml_service/app/detector_substream_paced.py \
             scripts/probe_camera_substreams.py \
             scripts/yolo26_trt86_shm_worker_v4.py
       - name: Bash syntax
@@ -28,7 +30,6 @@ jobs:
           grep -q 'source=Hikvision-substream-direct' services/ml_service/app/detector_substream.py
           grep -q 'substream_uri' services/ml_service/app/detector_substream.py
           grep -q 'camera_shm=0' services/ml_service/app/detector_substream.py
-          grep -q '_capture_gate_probe' services/ml_service/app/detector_substream.py
           grep -q 'interpolation-method", 2' services/ml_service/app/detector_substream.py
           grep -q 'video/x-raw,format=BGRx,width=' services/ml_service/app/detector_substream.py
           grep -q 'TRT86DetectorClient' services/ml_service/app/detector_substream.py
@@ -37,26 +38,24 @@ jobs:
           ! grep -q 'LatestFrameMmapReader' services/ml_service/app/detector_substream.py
           ! grep -q 'FrameDemandClient' services/ml_service/app/detector_substream.py
           ! grep -q 'runtime_shm' services/ml_service/app/detector_substream.py
+      - name: Paced nonblocking scheduler contract
+        run: |
+          grep -q 'class DetectorSubstreamPacedService' services/ml_service/app/detector_substream_paced.py
+          grep -q 'gate_before_convert=1' services/ml_service/app/detector_substream_paced.py
+          grep -q 'blocking_capture_wait=0' services/ml_service/app/detector_substream_paced.py
+          grep -q 'def _capture_gate_probe' services/ml_service/app/detector_substream_paced.py
+          grep -q 'def _take_oldest_ready' services/ml_service/app/detector_substream_paced.py
+          grep -q 'ML_DETECTOR_PACED_GATE' services/ml_service/app/detector_substream_paced.py
+          grep -q 'ML_DETECTOR_PACED_STATS' services/ml_service/app/detector_substream_paced.py
+          grep -q 'phase_spacing=' services/ml_service/app/detector_substream_paced.py
+          grep -q 'services.ml_service.app.detector_substream_paced' scripts/run_ml_detector_substream.sh
+          grep -q 'scheduler=paced-ready-first' scripts/run_ml_detector_substream.sh
       - name: Live-source preroll contract
         run: |
-          grep -q 'class DetectorSubstreamLiveService' services/ml_service/app/detector_substream_live.py
-          grep -q '"async", False' services/ml_service/app/detector_substream_live.py
-          grep -q 'processing-deadline", 0' services/ml_service/app/detector_substream_live.py
-          grep -q 'ML_SUBSTREAM_STATE' services/ml_service/app/detector_substream_live.py
-          grep -q 'sync_state_with_parent' services/ml_service/app/detector_substream_live.py
-          grep -q 'services.ml_service.app.detector_substream_live' scripts/run_ml_detector_substream.sh
-          grep -q 'live_preroll_safe=1' scripts/run_ml_detector_substream.sh
-      - name: Bounded pipelined capture scheduler contract
-        run: |
-          grep -q 'ML_SUBSTREAM_PREARM_HORIZON_MS' services/ml_service/app/detector_substream_live.py
-          grep -q 'ML_SUBSTREAM_PREARM_BLOCK_MS' services/ml_service/app/detector_substream_live.py
-          grep -q 'def _arm_capture' services/ml_service/app/detector_substream_live.py
-          grep -q 'def _await_armed_capture' services/ml_service/app/detector_substream_live.py
-          grep -q 'head_of_line_block=bounded' services/ml_service/app/detector_substream_live.py
-          grep -q 'block_budget=' services/ml_service/app/detector_substream_live.py
-          grep -q 'prearm_skips' services/ml_service/app/detector_substream_live.py
-          grep -q 'ML_DETECTOR_PIPELINE_STATS' services/ml_service/app/detector_substream_live.py
-          grep -q 'queue_depth=1' services/ml_service/app/detector_substream_live.py
+          grep -q '"async", False' services/ml_service/app/detector_substream_paced.py
+          grep -q 'processing-deadline", 0' services/ml_service/app/detector_substream_paced.py
+          grep -q 'ML_SUBSTREAM_STATE' services/ml_service/app/detector_substream_paced.py
+          grep -q 'sync_state_with_parent' services/ml_service/app/detector_substream_paced.py
       - name: Service config boundary
         run: |
           grep -q 'services.shared.camera_config' services/camera_service/app/config.py
