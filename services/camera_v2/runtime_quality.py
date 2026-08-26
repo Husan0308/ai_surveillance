@@ -17,6 +17,9 @@ class QualityCameraRuntime(CleanCameraRuntime):
         return inter / union if union > 0.0 else 0.0
 
     def _map_detector_rows(self, rows):
+        # Detector-side de-dup before NvDCF sees the metadata. This is deliberately
+        # stricter than the base runtime because the exported TensorRT output can
+        # contain highly-overlapping person rows at the low operating threshold.
         mapped = super()._map_detector_rows(rows)
         ordered = sorted(mapped, key=lambda row: float(row[4]), reverse=True)
         kept = []
@@ -35,26 +38,28 @@ class QualityCameraRuntime(CleanCameraRuntime):
                 kept.append(row)
         return kept
 
-    def _set_or_insert_target_key(self, lines, key: str, value: str) -> None:
-        if not self._replace_yaml_key(lines, key, value, required=False):
-            self._insert_target_management_key(lines, key, value)
-
     def _prepare_tracker_files(self):
         lib, generated = super()._prepare_tracker_files()
         lines = generated.read_text(encoding="utf-8").splitlines()
-        self._replace_yaml_key(lines, "minIouDiff4NewTarget", "0.22")
-        self._set_or_insert_target_key(lines, "minIou4TargetDuplicate", "0.72")
-        self._set_or_insert_target_key(lines, "targetDuplicateRunInterval", "1")
+
+        # DeepStream 7.1 supported TargetManagement knobs only. NVIDIA documents
+        # minIouDiff4NewTarget as the duplicate-new-target guard: lowering it makes
+        # an overlapping fresh detector box less likely to spawn a second track.
+        # Do NOT add newer/foreign keys such as minIou4TargetDuplicate or
+        # targetDuplicateRunInterval; DS 7.1 reports them as unknown parameters.
+        self._replace_yaml_key(lines, "minIouDiff4NewTarget", "0.30")
         self._replace_yaml_key(lines, "minTrackerConfidence", "0.12")
         self._replace_yaml_key(lines, "probationAge", "0")
+        self._replace_yaml_key(lines, "earlyTerminationAge", "2")
         shadow_frames = max(20, int(round(self.track_fps * 5.0)))
         self._replace_yaml_key(lines, "maxShadowTrackingAge", str(shadow_frames))
-        self._set_or_insert_target_key(lines, "outputShadowTracks", "1")
+        self._insert_target_management_key(lines, "outputShadowTracks", "1")
         generated.write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(
             "CAMERA_QUALITY_NVDCF "
-            f"new_target_iou=0.22 duplicate_iou=0.72 duplicate_interval=1 "
-            f"min_tracker_conf=0.12 shadow_frames={shadow_frames} probation=0",
+            f"new_target_iou=0.30 min_tracker_conf=0.12 "
+            f"shadow_frames={shadow_frames} early_termination=2 probation=0 "
+            "ds71_supported_only=1",
             flush=True,
         )
         return lib, generated
