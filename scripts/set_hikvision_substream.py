@@ -41,13 +41,31 @@ def _substream_id(uri: str) -> str:
     return f"{token[:-1]}2"
 
 
+class _SingleAttemptDigestAuthHandler(urllib.request.HTTPDigestAuthHandler):
+    """Allow one authenticated Digest attempt, then fail immediately.
+
+    Hikvision Illegal Login Lock can block an IP after only a handful of bad
+    attempts. CPython's stock digest handler may retry a rejected credential
+    several times, so a single CLI invocation can consume the whole budget.
+    """
+
+    def http_error_401(self, req, fp, code, msg, hdrs):  # type: ignore[override]
+        if getattr(self, "retried", 0) >= 1:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "digest auth failed after one credential attempt",
+                hdrs,
+                fp,
+            )
+        return super().http_error_401(req, fp, code, msg, hdrs)
+
+
 def _digest_opener(base_url: str, username: str, password: str) -> urllib.request.OpenerDirector:
     mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     mgr.add_password(None, base_url, username, password)
-    return urllib.request.build_opener(
-        urllib.request.HTTPDigestAuthHandler(mgr),
-        urllib.request.HTTPBasicAuthHandler(mgr),
-    )
+    # Digest only: do not fall through to Basic after a rejected Digest login.
+    return urllib.request.build_opener(_SingleAttemptDigestAuthHandler(mgr))
 
 
 def _request(
@@ -59,7 +77,7 @@ def _request(
 ) -> bytes:
     headers = {
         "Accept": "application/xml",
-        "User-Agent": "ai-surveillance-hikvision-stream-config/1.1",
+        "User-Agent": "ai-surveillance-hikvision-stream-config/1.2",
     }
     if payload is not None:
         headers["Content-Type"] = "application/xml; charset=UTF-8"
@@ -144,6 +162,19 @@ def _write_http_error(channel: str, stamp: str, exc: urllib.error.HTTPError) -> 
     return 3
 
 
+def _write_get_auth_error(exc: urllib.error.HTTPError) -> int:
+    if exc.code != 401:
+        raise exc
+    print(
+        "HIKVISION_STREAM_SET_AUTH_ERROR http=401 "
+        "stage=initial-get attempts=1 action=abort "
+        "reason=credential-rejected-or-illegal-login-lock "
+        "note=do-not-retry-repeatedly; Hikvision lock timers may restart on another login attempt",
+        flush=True,
+    )
+    return 4
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Safely inspect or update one Hikvision substream. Dry-run is the default."
@@ -172,7 +203,11 @@ def main() -> int:
         raise SystemExit("HIKVISION_STREAM_SET_FAIL reason=missing-username")
 
     opener = _digest_opener(base_url, camera.username, camera.password)
-    before_bytes = _request(opener, url, "GET", timeout)
+    try:
+        before_bytes = _request(opener, url, "GET", timeout)
+    except urllib.error.HTTPError as exc:
+        return _write_get_auth_error(exc)
+
     root = ET.fromstring(before_bytes)
     _register_default_namespace(root)
 
@@ -193,7 +228,7 @@ def main() -> int:
         f"size={_find_text(root, 'videoResolutionWidth') or '-'}x{_find_text(root, 'videoResolutionHeight') or '-'} "
         f"fps={before_fps:.2f}->{args.fps:.2f} raw={before_fps_raw}->{requested_fps_raw} "
         f"gov={before_gov}->{args.gov if args.gov is not None else before_gov} "
-        f"apply={int(args.apply)} password_logged=0",
+        f"apply={int(args.apply)} password_logged=0 auth=digest-single-attempt",
         flush=True,
     )
 
@@ -217,6 +252,8 @@ def main() -> int:
     try:
         response = _request(opener, url, "PUT", timeout, payload)
     except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return _write_get_auth_error(exc)
         return _write_http_error(channel, stamp, exc)
 
     if response:
@@ -228,7 +265,10 @@ def main() -> int:
             flush=True,
         )
 
-    verify_bytes = _request(opener, url, "GET", timeout)
+    try:
+        verify_bytes = _request(opener, url, "GET", timeout)
+    except urllib.error.HTTPError as exc:
+        return _write_get_auth_error(exc)
     verify = ET.fromstring(verify_bytes)
     after_fps_raw = _find_text(verify, "maxFrameRate") or "-"
     after_gov = _find_text(verify, "GovLength") or "-"
