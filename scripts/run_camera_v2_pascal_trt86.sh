@@ -5,7 +5,10 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
 export CAMERA_V2_RTSP_TRANSPORT="${CAMERA_V2_RTSP_TRANSPORT:-tcp}"
-export CAMERA_V2_RTSP_LATENCY_MS="${CAMERA_V2_RTSP_LATENCY_MS:-100}"
+# LAN NVR profile: 100 ms was stable but unnecessarily added presentation lag.
+# rtspsrc still drops on latency, and Pascal runtime enables tcp-timestamp to stop
+# long-running TCP clock drift from accumulating additional delay.
+export CAMERA_V2_RTSP_LATENCY_MS="${CAMERA_V2_RTSP_LATENCY_MS:-50}"
 export CAMERA_V2_SOURCE_FPS="${CAMERA_V2_SOURCE_FPS:-20}"
 export CAMERA_V2_EXTRA_SURFACES="${CAMERA_V2_EXTRA_SURFACES:-6}"
 # GTX 1050 Ti smoothness profile. 960x540 remains 16:9 and cuts mux/tracker
@@ -15,6 +18,7 @@ export CAMERA_V2_FRAME_WIDTH="${CAMERA_V2_FRAME_WIDTH:-960}"
 export CAMERA_V2_FRAME_HEIGHT="${CAMERA_V2_FRAME_HEIGHT:-540}"
 export CAMERA_V2_WALL_WIDTH="${CAMERA_V2_WALL_WIDTH:-1440}"
 export CAMERA_V2_WALL_HEIGHT="${CAMERA_V2_WALL_HEIGHT:-540}"
+# 20 FPS => 50 ms. NVIDIA recommends roughly 1/max_fps for live streammux.
 export CAMERA_V2_MUX_TIMEOUT_US="${CAMERA_V2_MUX_TIMEOUT_US:-50000}"
 export CAMERA_V2_STARTUP_STAGGER_SEC="${CAMERA_V2_STARTUP_STAGGER_SEC:-0.50}"
 export CAMERA_V2_PASCAL_STALL_SEC="${CAMERA_V2_PASCAL_STALL_SEC:-12}"
@@ -26,12 +30,13 @@ export CAMERA_V2_DETECT_ACTIVE_CAMERAS="${CAMERA_V2_DETECT_ACTIVE_CAMERAS:-CAM-0
 export CAMERA_V2_DETECT_CONF="${CAMERA_V2_DETECT_CONF:-0.05}"
 export CAMERA_V2_DETECT_IOU="${CAMERA_V2_DETECT_IOU:-0.70}"
 export CAMERA_V2_MAX_DET="${CAMERA_V2_MAX_DET:-40}"
-# Measured TRT8.6 B1 FP32 inference is ~160-190 ms in the worst observed run.
-# Keep the detector budget conservative; the scheduler may climb toward 0.40 Hz
-# when the engine is warm and GPU headroom is available.
-export CAMERA_V2_DETECT_TARGET_HZ="${CAMERA_V2_DETECT_TARGET_HZ:-0.33}"
-export CAMERA_V2_DETECT_MIN_HZ="${CAMERA_V2_DETECT_MIN_HZ:-0.30}"
-export CAMERA_V2_DETECT_MAX_HZ="${CAMERA_V2_DETECT_MAX_HZ:-0.40}"
+# Live measurements put B1 FP32 TRT8.6 at ~150-180 ms after warm-up. 0.50 Hz
+# per camera means ~3 detector calls/s for six cameras, about a 45-55% detector
+# compute budget. More importantly, a fresh observation arrives every ~2 s,
+# comfortably inside the NvDCF 140-frame (~7 s) shadow lifetime.
+export CAMERA_V2_DETECT_TARGET_HZ="${CAMERA_V2_DETECT_TARGET_HZ:-0.50}"
+export CAMERA_V2_DETECT_MIN_HZ="${CAMERA_V2_DETECT_MIN_HZ:-0.45}"
+export CAMERA_V2_DETECT_MAX_HZ="${CAMERA_V2_DETECT_MAX_HZ:-0.60}"
 export CAMERA_V2_MAX_DETECT_RESULT_AGE_MS="${CAMERA_V2_MAX_DETECT_RESULT_AGE_MS:-350}"
 # NvDCF accuracy depends strongly on tracker-frame resolution. 640x384 is close
 # to the 672x384 detector geometry while still well below the 960x540 mux frame.
@@ -41,7 +46,8 @@ export CAMERA_V2_MIN_DISPLAY_TRACK_CONF="${CAMERA_V2_MIN_DISPLAY_TRACK_CONF:-0.0
 
 export CAMERA_V2_TRT86_PYTHON="${CAMERA_V2_TRT86_PYTHON:-$ROOT/.venv-trt86/bin/python}"
 export CAMERA_V2_TRT86_ENGINE="${CAMERA_V2_TRT86_ENGINE:-$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b1-fp32-trt86.engine}"
-export CAMERA_V2_TRT86_SHM_WORKER="${CAMERA_V2_TRT86_SHM_WORKER:-$ROOT/scripts/yolo26_trt86_shm_worker_v3.py}"
+# v4 removes diagnostic hot-path work and uses a non-default async CUDA stream.
+export CAMERA_V2_TRT86_SHM_WORKER="${CAMERA_V2_TRT86_SHM_WORKER:-$ROOT/scripts/yolo26_trt86_shm_worker_v4.py}"
 RESTORE_HELPER="$ROOT/scripts/restore_cam01_trt86_engine.sh"
 
 export QWEN_REID_ENABLED=0
@@ -89,8 +95,8 @@ done
 [[ -n "$MAIN_PYTHON" ]] || fail "no Python can import Pascal Camera V2 runtime"
 
 printf '%s\n' \
-  "CAMERA_PASCAL_PROFILE display=6xRTSP/${CAMERA_V2_FRAME_WIDTH}x${CAMERA_V2_FRAME_HEIGHT}@20 wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT} detector=TRT8.6/B1/FP32/672x384 active=${CAMERA_V2_DETECT_ACTIVE_CAMERAS} target=${CAMERA_V2_DETECT_TARGET_HZ}Hz/cam tracker=${CAMERA_V2_TRACKER_WIDTH}x${CAMERA_V2_TRACKER_HEIGHT}" \
-  "CAMERA_PASCAL_PIPELINE DeepStream=RTSP/NVDEC->tee->mux->detector-meta->NvDCF->tiler->OSD->EGL detector=separate-process/SHM nvinfer=0 trt10=0 scaling=bilinear" \
+  "CAMERA_PASCAL_PROFILE display=6xRTSP/${CAMERA_V2_FRAME_WIDTH}x${CAMERA_V2_FRAME_HEIGHT}@20 wall=${CAMERA_V2_WALL_WIDTH}x${CAMERA_V2_WALL_HEIGHT} detector=TRT8.6/B1/FP32/672x384 active=${CAMERA_V2_DETECT_ACTIVE_CAMERAS} target=${CAMERA_V2_DETECT_TARGET_HZ}Hz/cam tracker=${CAMERA_V2_TRACKER_WIDTH}x${CAMERA_V2_TRACKER_HEIGHT} rtsp=${CAMERA_V2_RTSP_LATENCY_MS}ms" \
+  "CAMERA_PASCAL_PIPELINE DeepStream=RTSP/NVDEC->tee->mux->detector-meta->NvDCF->tiler->OSD->EGL detector=separate-process/SHM-v4 nvinfer=0 trt10=0 scaling=bilinear" \
   "CAMERA_PASCAL_RECOVERY internal-retries=3 process-watchdog=${CAMERA_V2_PASCAL_STALL_SEC}s stagger=${CAMERA_V2_STARTUP_STAGGER_SEC}s per-source-recycle=0" \
   "CAMERA_PASCAL_MAIN_PYTHON executable=$MAIN_PYTHON"
 
