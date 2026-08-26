@@ -29,3 +29,13 @@ jobs:
           grep -q 'yolo26_trt86_shm_worker_v4.py' scripts/run_ml_detector_shm.sh
           ! grep -Eqi '^(from|import) .*?(cv2|pyds|deepstream|nvtracker|bytetrack|reid|global_identity|api_service|frontend)' services/ml_service/app/detector_only_shm.py
           ! grep -Eqi 'rtsp://|nvurisrcbin|nvv4l2decoder|nvstreammux' services/ml_service/app/detector_only_shm.py
+      - name: TRT86 interpreter isolation contract
+        run: |
+          grep -q '_absolute_without_resolving_symlink' services/ml_service/app/detector_only_shm.py
+          grep -q '\[str(self.python), "-I", str(self.worker)' services/ml_service/app/detector_only_shm.py
+          grep -q 'child_env.pop("PYTHONHOME"' services/ml_service/app/detector_only_shm.py
+          grep -q 'child_env.pop("PYTHONPATH"' services/ml_service/app/detector_only_shm.py
+          grep -q 'Allocate the bridge SHM only after the worker handshake succeeds' services/ml_service/app/detector_only_shm.py
+          grep -q 'sys.prefix == sys.base_prefix' scripts/run_ml_detector_shm.sh
+          grep -q 'numpy_file=' scripts/run_ml_detector_shm.sh
+          ! grep -Eq 'self\.python = Path\([^\n]*\)\.resolve\(\)' services/ml_service/app/detector_only_shm.py
