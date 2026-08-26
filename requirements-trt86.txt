@@ -1,14 +1,7 @@
-# Isolated TensorRT 8.6 environment for Pascal (GTX 1050 Ti / SM 6.1).
-# Create this with Python 3.10. Do not install into the DeepStream/project venv.
-# TensorRT 8.6.1 is intentionally pinned because newer TensorRT releases drop Pascal.
-# Keep the CUDA/cuDNN runtime aligned with the TensorRT 8.6 support matrix instead
-# of inheriting the host DeepStream/TensorRT 10/11 runtime.
+# Isolated TensorRT 8.6 runtime for Pascal (GTX 1050 Ti / SM 6.1).
+# Create with Python 3.10. Keep separate from the main DeepStream/project venv.
+# Only packages required by the canonical SHM TensorRT inference runtime live here.
 numpy>=1.24,<2
-onnx>=1.17,<2
-onnxruntime>=1.20,<2
-Pillow>=10,<12
-PyYAML>=6,<7
-python-dotenv>=1,<2
 nvidia-cuda-runtime-cu12==12.1.105
 nvidia-cublas-cu12==12.1.3.1
 nvidia-cudnn-cu12==8.9.1.23
