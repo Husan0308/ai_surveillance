@@ -24,6 +24,19 @@ FRAME_BYTES = INPUT_W * INPUT_H * 3
 DEFAULT_CAMERAS = "CAM-01,CAM-02,CAM-03,CAM-04,CAM-05,CAM-06"
 
 
+def _absolute_without_resolving_symlink(value: str | os.PathLike[str]) -> Path:
+    """Return an absolute path while preserving the final symlink.
+
+    A Python venv commonly implements bin/python as a symlink to the base
+    interpreter. Path.resolve() would dereference that link and bypass the venv's
+    pyvenv.cfg/site-packages when the resolved /usr/bin/python is launched.
+    """
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.absolute()
+
+
 def _percentile(values: deque[float], q: float) -> float:
     if not values:
         return 0.0
@@ -60,9 +73,12 @@ class TRT86DetectorClient:
     """Own one TRT8.6 worker and one fixed BGR letterbox SHM segment."""
 
     def __init__(self) -> None:
-        self.python = Path(
+        # IMPORTANT: never .resolve() the venv Python path. On Linux it is usually
+        # a symlink; dereferencing it launches /usr/bin/python directly and loses
+        # the TRT8.6 venv site-packages.
+        self.python = _absolute_without_resolving_symlink(
             os.environ.get("ML_DETECTOR_TRT86_PYTHON", ROOT / ".venv-trt86/bin/python")
-        ).resolve()
+        )
         self.worker = Path(
             os.environ.get(
                 "ML_DETECTOR_TRT86_WORKER",
@@ -83,45 +99,95 @@ class TRT86DetectorClient:
             if not path.is_file():
                 raise FileNotFoundError(f"TRT86 {label} missing: {path}")
 
-        self.shm = shared_memory.SharedMemory(create=True, size=FRAME_BYTES)
-        self.frame = np.ndarray(
-            (INPUT_H, INPUT_W, 3), dtype=np.uint8, buffer=self.shm.buf
-        )
-        self.frame.fill(114)
         self.request_id = 0
-        self.proc = subprocess.Popen(
-            [str(self.python), str(self.worker), "--engine", str(self.engine)],
-            cwd=ROOT,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            text=True,
-            bufsize=1,
-        )
-        ready = _read_json(self.proc, 30.0)
-        if ready.get("type") != "ready":
-            raise RuntimeError(f"bad TRT86 handshake: {ready}")
-        if not str(ready.get("tensorrt", "")).startswith("8.6.1"):
-            raise RuntimeError(f"TensorRT 8.6.1 required: {ready}")
-        if tuple(ready.get("input_shape", ())) != (1, 3, INPUT_H, INPUT_W):
-            raise RuntimeError(f"unexpected TRT86 input shape: {ready}")
-        if tuple(ready.get("output_shape", ())) != (1, 300, 6):
-            raise RuntimeError(f"unexpected TRT86 output shape: {ready}")
+        self.proc: subprocess.Popen[str] | None = None
+        self.shm: shared_memory.SharedMemory | None = None
+        self.frame: np.ndarray | None = None
+
+        # -I isolates the TRT8.6 worker from PYTHONPATH/user-site contamination.
+        # The worker explicitly inserts the repository root before importing the
+        # local scripts package, so isolated mode does not break local imports.
+        child_env = os.environ.copy()
+        child_env.pop("PYTHONHOME", None)
+        child_env.pop("PYTHONPATH", None)
+        child_env["PYTHONNOUSERSITE"] = "1"
+
+        try:
+            self.proc = subprocess.Popen(
+                [str(self.python), "-I", str(self.worker), "--engine", str(self.engine)],
+                cwd=ROOT,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                text=True,
+                bufsize=1,
+                env=child_env,
+            )
+            ready = _read_json(self.proc, 30.0)
+            if ready.get("type") != "ready":
+                raise RuntimeError(f"bad TRT86 handshake: {ready}")
+            if not str(ready.get("tensorrt", "")).startswith("8.6.1"):
+                raise RuntimeError(f"TensorRT 8.6.1 required: {ready}")
+            if tuple(ready.get("input_shape", ())) != (1, 3, INPUT_H, INPUT_W):
+                raise RuntimeError(f"unexpected TRT86 input shape: {ready}")
+            if tuple(ready.get("output_shape", ())) != (1, 300, 6):
+                raise RuntimeError(f"unexpected TRT86 output shape: {ready}")
+
+            # Allocate the bridge SHM only after the worker handshake succeeds.
+            # A broken interpreter can no longer leave a resource_tracker leak.
+            self.shm = shared_memory.SharedMemory(create=True, size=FRAME_BYTES)
+            self.frame = np.ndarray(
+                (INPUT_H, INPUT_W, 3), dtype=np.uint8, buffer=self.shm.buf
+            )
+            self.frame.fill(114)
+        except BaseException:
+            self._stop_proc()
+            if self.shm is not None:
+                try:
+                    self.shm.close()
+                finally:
+                    try:
+                        self.shm.unlink()
+                    except FileNotFoundError:
+                        pass
+                self.shm = None
+            raise
+
         print(
             "ML_DETECTOR_READY "
-            f"engine={self.engine} worker={self.worker.name} "
-            "backend=trt86-sidecar-shm-v4 input=672x378+3px/3px-pad114",
+            f"engine={self.engine} worker={self.worker.name} python={self.python} "
+            f"python_real={self.python.resolve()} "
+            "backend=trt86-sidecar-shm-v4 input=672x378+3px/3px-pad114 isolated=1",
             flush=True,
         )
+
+    def _stop_proc(self) -> None:
+        proc = self.proc
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None and proc.stdin is not None:
+                proc.stdin.write('{"cmd":"stop"}\n')
+                proc.stdin.flush()
+                proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
     def infer(self, frame378: np.ndarray, conf: float, max_det: int) -> DetectionResult:
         if frame378.shape != (CONTENT_H, INPUT_W, 3):
             raise RuntimeError(f"bad camera SHM shape={frame378.shape}")
         if frame378.dtype != np.uint8:
             raise RuntimeError(f"bad camera SHM dtype={frame378.dtype}")
+        if self.frame is None or self.shm is None or self.proc is None:
+            raise RuntimeError("TRT86 detector client is not ready")
 
-        # Camera Service exports exact 16:9 672x378 BGR. Form the TensorRT export
-        # geometry without resize/crop: 3 rows of 114 + content + 3 rows of 114.
         self.frame[:3, :, :] = 114
         self.frame[3:381, :, :] = frame378
         self.frame[381:, :, :] = 114
@@ -159,27 +225,18 @@ class TRT86DetectorClient:
         )
 
     def close(self) -> None:
-        try:
-            if self.proc.poll() is None and self.proc.stdin is not None:
-                self.proc.stdin.write('{"cmd":"stop"}\n')
-                self.proc.stdin.flush()
-                self.proc.wait(timeout=1.0)
-        except Exception:
+        self._stop_proc()
+        self.proc = None
+        if self.shm is not None:
             try:
-                self.proc.terminate()
-                self.proc.wait(timeout=1.0)
-            except Exception:
+                self.shm.close()
+            finally:
                 try:
-                    self.proc.kill()
-                except Exception:
+                    self.shm.unlink()
+                except FileNotFoundError:
                     pass
-        try:
-            self.shm.close()
-        finally:
-            try:
-                self.shm.unlink()
-            except FileNotFoundError:
-                pass
+            self.shm = None
+        self.frame = None
 
 
 class DetectorOnlyShmService:
@@ -232,14 +289,16 @@ class DetectorOnlyShmService:
                 path = self._path(cid)
                 if not path.exists():
                     continue
+                reader = None
                 try:
                     reader = LatestFrameMmapReader(path)
                     snap = reader.latest()
                 except Exception:
-                    try:
-                        reader.close()
-                    except Exception:
-                        pass
+                    if reader is not None:
+                        try:
+                            reader.close()
+                        except Exception:
+                            pass
                     continue
                 self.readers[cid] = reader
                 self.last_seq[cid] = int(snap.seq) if snap is not None else 0
@@ -254,8 +313,6 @@ class DetectorOnlyShmService:
             raise RuntimeError("camera SHM attach timeout: " + ",".join(sorted(pending)))
 
     def _peek_seq(self, cid: str) -> int:
-        # `_header()` reads only the 128-byte mmap header; unlike `latest()` it
-        # avoids copying ~762 KiB when no new camera frame exists.
         return int(self.readers[cid]._header()[0])
 
     def _collect_candidates(self):
@@ -263,7 +320,6 @@ class DetectorOnlyShmService:
         for cid in self.camera_ids:
             seq = self._peek_seq(cid)
             if seq < self.last_seq[cid]:
-                # Camera Service restarted and reset its per-file sequence.
                 self.last_seq[cid] = seq
                 print(f"ML_DETECTOR_SOURCE_RESET camera={cid} seq={seq}", flush=True)
                 continue
@@ -277,8 +333,6 @@ class DetectorOnlyShmService:
         return rows
 
     def _latest_for_infer(self, cid: str, candidate):
-        # A candidate may wait behind another camera's inference. Refresh it right
-        # before use so the ML service consumes the newest slot, never a backlog.
         newest_seq = self._peek_seq(cid)
         if newest_seq > candidate.seq:
             newest = self.readers[cid].latest()
@@ -336,7 +390,6 @@ class DetectorOnlyShmService:
                 if self.stop_requested:
                     break
                 snap = self._latest_for_infer(cid, candidate)
-                # Advancing now intentionally drops all older sequences.
                 self.last_seq[cid] = int(snap.seq)
                 input_age = max(
                     0.0, (time.monotonic_ns() - snap.captured_ns) / 1_000_000.0
