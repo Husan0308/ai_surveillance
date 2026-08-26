@@ -45,6 +45,10 @@ jobs:
           grep -q 'yolo26s-pose.pt' services/camera_v2/pose_gate_v2.py
           grep -q 'tracker_reuse' services/camera_v2/pose_gate_v2.py
           grep -q 'cache_accept' services/camera_v2/pose_gate_v2.py
+          grep -q 'LETTERBOX_CONTENT_HEIGHT = 378' services/camera_v2/person_tracking_trt86_pose_gate.py
+          grep -q 'LETTERBOX_PAD_TOP = 3' services/camera_v2/person_tracking_trt86_pose_gate.py
+          grep -q 'dest-crop", "0:3:672:378"' services/camera_v2/person_tracking_trt86_pose_gate.py
+          grep -q 'def _scaled_detections' services/camera_v2/person_tracking_trt86_pose_gate.py
           grep -q '_dedup_raw_rows' services/camera_v2/person_tracking_trt86_pose_gate.py
           grep -q 'minIouDiff4NewTarget", "0.55"' services/camera_v2/person_tracking_trt86_pose_gate.py
           grep -q 'flow=TRT86->raw-dedup->track-aware-pose-gate->NvDCF' services/camera_v2/person_tracking_trt86_pose_gate.py
