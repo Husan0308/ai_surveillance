@@ -125,7 +125,6 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
             if result.get("type") != "result":
                 continue
 
-            completed_t = time.monotonic()
             counts: dict[str, int] = {}
             ages_ms: list[float] = []
 
@@ -143,6 +142,11 @@ class CameraPersonTrackingTRT86PoseGate(CameraPersonTrackingPascalTRT86):
                 prepared = self.latency_compensator.prepare(cid, captured_t, detections)
                 self._publish_prepared(cid, captured_t, prepared)
                 counts[cid] = len(detections)
+
+                # Freshness must include pose validation time, not only TensorRT.
+                # Otherwise an expensive pose crop can be reported as fresh and
+                # then be discarded later by the metadata-injection age check.
+                completed_t = time.monotonic()
                 age_ms = max(0.0, (completed_t - captured_t) * 1000.0)
                 ages_ms.append(age_ms)
                 self.detector_times[cid].append(completed_t)
