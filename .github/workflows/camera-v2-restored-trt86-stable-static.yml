@@ -22,6 +22,7 @@ jobs:
             services/camera_v2/person_tracking_trt86_fresh.py \
             services/camera_v2/person_tracking_trt86_audited.py \
             services/camera_v2/person_tracking_pascal_trt86.py \
+            services/camera_v2/tracker_profile.py \
             services/camera_v2/yolo_trt86_shm_bridge.py \
             services/camera_v2/yolo_trt86_fresh_bridge.py \
             scripts/yolo26_trt86_shm_worker.py
@@ -32,11 +33,13 @@ jobs:
       - name: Architecture contract
         run: |
           grep -q 'CAMERA_V2_MICRO_BATCH=1' scripts/run_restore_stable_tracking.sh
-          grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.30' scripts/run_restore_stable_tracking.sh
-          grep -q 'CAMERA_V2_DETECT_MIN_HZ:-0.20' scripts/run_restore_stable_tracking.sh
+          grep -q 'CAMERA_V2_FRAME_WIDTH:-960' scripts/run_restore_stable_tracking.sh
+          grep -q 'CAMERA_V2_FRAME_HEIGHT:-540' scripts/run_restore_stable_tracking.sh
+          grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.24' scripts/run_restore_stable_tracking.sh
+          grep -q 'CAMERA_V2_DETECT_MIN_HZ:-0.12' scripts/run_restore_stable_tracking.sh
+          grep -q 'CAMERA_V2_TRACKER_WIDTH:-480' scripts/run_restore_stable_tracking.sh
           grep -q 'yolo26s-672x384-b1-fp32-trt86.engine' scripts/run_restore_stable_tracking.sh
           grep -q 'person_tracking_trt86_restore_stable' scripts/run_restore_stable_tracking.sh
-          grep -q 'interpolation-method", 1' services/camera_v2/person_tracking_trt86_restore_stable.py
           grep -q 'RESTORE_STABLE_OSD path=wall_queue->nvdsosd->EGL' services/camera_v2/person_tracking_trt86_restore_stable.py
           grep -q 'rgba_wall_convert=0' services/camera_v2/person_tracking_trt86_restore_stable.py
           grep -q 'scaled = self._scaled_detections(rows)' services/camera_v2/person_tracking_trt86_restore_stable.py
@@ -45,7 +48,15 @@ jobs:
           grep -q 'minIouDiff4NewTarget", "0.72"' services/camera_v2/person_tracking_trt86_restore_stable.py
           grep -q 'maxShadowTrackingAge", "100"' services/camera_v2/person_tracking_trt86_restore_stable.py
           grep -q 'minIou4TargetDuplicate", "0.90"' services/camera_v2/person_tracking_trt86_restore_stable.py
-          grep -q 'capture=JIT-no-prefetch' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q 'useHog", "0"' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q 'featureImgSizeLevel", "2"' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q '"useHog": "0"' services/camera_v2/tracker_profile.py
+          grep -q '"useColorNames": "1"' services/camera_v2/tracker_profile.py
+          grep -q '"featureImgSizeLevel": "2"' services/camera_v2/tracker_profile.py
+          grep -q 'execute_async_v2' scripts/yolo26_trt86_shm_worker.py
+          grep -q 'cudaStreamCreateWithFlags' scripts/yolo26_trt86_shm_worker.py
+          grep -q 'cudaStreamSynchronize' scripts/yolo26_trt86_shm_worker.py
+          ! grep -q 'cudaDeviceSynchronize' scripts/yolo26_trt86_shm_worker.py
           grep -q 'CameraPersonTrackingReID' services/camera_v2/person_tracking_trt86_reid_restore_stable.py
           ! grep -q 'yolo26m.pt' scripts/run_restore_stable_tracking.sh
           ! grep -q 'MICRO_BATCH=2' scripts/run_restore_stable_tracking.sh
