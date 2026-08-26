@@ -16,16 +16,19 @@ jobs:
           python3 -m py_compile \
             services/camera_v2/detection_only_pose.py \
             services/camera_v2/detection_only_pose_v3.py \
+            services/camera_v2/detection_resolution_capture.py \
             services/camera_v2/pose_gate_v3.py \
             services/camera_v2/pose_gate_v2.py \
             services/camera_v2/yolo_trt86_fresh_bridge.py \
             services/camera_v2/yolo_trt86_shm_bridge.py \
             scripts/check_yolo26_exact_frame_parity.py \
-            scripts/sweep_yolo26_exact_frame_models.py
+            scripts/sweep_yolo26_exact_frame_models.py \
+            scripts/sweep_yolo26_source_resolution.py
       - name: Bash syntax
         run: |
           bash -n scripts/run_camera_v2_detection_only_pose.sh
           bash -n scripts/run_camera_v2_detection_parity.sh
+          bash -n scripts/run_camera_v2_resolution_capture.sh
       - name: Detection-only architecture contract
         run: |
           grep -q 'CAMERA_V2_FRAME_WIDTH:-1280' scripts/run_camera_v2_detection_only_pose.sh
@@ -58,3 +61,13 @@ jobs:
           grep -q 'yolo26s.pt,yolo26m.pt' scripts/sweep_yolo26_exact_frame_models.py
           grep -q 'YOLO26_MODEL_SWEEP_CAMERA' scripts/sweep_yolo26_exact_frame_models.py
           grep -q 'upscaling these saved 672x384 frames cannot restore lost detail' scripts/sweep_yolo26_exact_frame_models.py
+      - name: High-resolution recall contract
+        run: |
+          grep -q 'CAM-01,CAM-02,CAM-04,CAM-05' scripts/run_camera_v2_resolution_capture.sh
+          grep -q 'CAMERA_V2_RES_CAPTURE_WIDTH:-1920' scripts/run_camera_v2_resolution_capture.sh
+          grep -q 'CAMERA_V2_RES_CAPTURE_HEIGHT:-1080' scripts/run_camera_v2_resolution_capture.sh
+          grep -q 'gate=preconvert' services/camera_v2/detection_resolution_capture.py
+          grep -q 'CAMERA_RES_CAPTURE_SAVED' services/camera_v2/detection_resolution_capture.py
+          grep -q '672x384,896x512,1024x576' scripts/sweep_yolo26_source_resolution.py
+          grep -q 'rect=False' scripts/sweep_yolo26_source_resolution.py
+          grep -q 'YOLO26_RES_SWEEP_CAMERA' scripts/sweep_yolo26_source_resolution.py
