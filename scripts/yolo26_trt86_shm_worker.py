@@ -18,6 +18,7 @@ INPUT_W = 672
 INPUT_H = 384
 EXPECTED_INPUT = (1, 3, INPUT_H, INPUT_W)
 EXPECTED_OUTPUT = (1, 300, 6)
+CUDA_STREAM_NON_BLOCKING = 1
 
 
 def emit(obj) -> None:
@@ -45,8 +46,15 @@ def load_cudart():
         ctypes.c_int,
     ]
     lib.cudaMemcpy.restype = ctypes.c_int
-    lib.cudaDeviceSynchronize.argtypes = []
-    lib.cudaDeviceSynchronize.restype = ctypes.c_int
+    lib.cudaStreamCreateWithFlags.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_uint,
+    ]
+    lib.cudaStreamCreateWithFlags.restype = ctypes.c_int
+    lib.cudaStreamSynchronize.argtypes = [ctypes.c_void_p]
+    lib.cudaStreamSynchronize.restype = ctypes.c_int
+    lib.cudaStreamDestroy.argtypes = [ctypes.c_void_p]
+    lib.cudaStreamDestroy.restype = ctypes.c_int
     return lib
 
 
@@ -106,6 +114,7 @@ class Runner:
         self.y = np.empty(self.output_shape, dtype=np.float32)
         self.in_dev = ctypes.c_void_p()
         self.out_dev = ctypes.c_void_p()
+        self.stream = ctypes.c_void_p()
         cuda_check(
             self.cuda.cudaMalloc(ctypes.byref(self.in_dev), self.x.nbytes),
             "cudaMalloc input",
@@ -114,6 +123,15 @@ class Runner:
             self.cuda.cudaMalloc(ctypes.byref(self.out_dev), self.y.nbytes),
             "cudaMalloc output",
         )
+        cuda_check(
+            self.cuda.cudaStreamCreateWithFlags(
+                ctypes.byref(self.stream), CUDA_STREAM_NON_BLOCKING
+            ),
+            "cudaStreamCreateWithFlags",
+        )
+        if not self.stream.value:
+            raise RuntimeError("CUDA nonblocking stream creation returned null")
+
         self.bindings = [0] * self.engine.num_bindings
         self.bindings[self.input_index] = int(self.in_dev.value)
         self.bindings[self.output_index] = int(self.out_dev.value)
@@ -138,8 +156,6 @@ class Runner:
         if frame.dtype != np.uint8:
             raise RuntimeError(f"unexpected frame dtype={frame.dtype}")
 
-        # GStreamer supplies BGR. Ultralytics exports consume RGB NCHW float32
-        # in [0,1] when the export graph has no embedded preprocessing.
         rgb = np.ascontiguousarray(frame[..., ::-1])
         chw = rgb.transpose(2, 0, 1)
         np.multiply(chw, 1.0 / 255.0, out=self.x[0], casting="unsafe")
@@ -160,6 +176,10 @@ class Runner:
         input_health = self.preprocess_bgr(frame)
         prep_ms = (time.perf_counter() - started_prep) * 1000.0
 
+        # Input is only ~3 MiB and there is no preceding work on our sidecar stream,
+        # so a synchronous H2D copy is predictable and avoids pageable-host async
+        # staging complexity.  The expensive network execution itself is queued on
+        # a dedicated non-default stream below.
         cuda_check(
             self.cuda.cudaMemcpy(
                 self.in_dev,
@@ -171,9 +191,18 @@ class Runner:
         )
 
         started_trt = time.perf_counter()
-        if not self.context.execute_v2(self.bindings):
-            raise RuntimeError("execute_v2=false")
-        cuda_check(self.cuda.cudaDeviceSynchronize(), "infer sync")
+        if not self.context.execute_async_v2(
+            self.bindings,
+            int(self.stream.value),
+        ):
+            raise RuntimeError("execute_async_v2=false")
+        # Synchronize only this TRT stream.  Do not cudaDeviceSynchronize(): that
+        # introduces a context-wide barrier and is unnecessary for a single
+        # serialized sidecar request.
+        cuda_check(
+            self.cuda.cudaStreamSynchronize(self.stream),
+            "TRT stream sync",
+        )
         trt_ms = (time.perf_counter() - started_trt) * 1000.0
 
         cuda_check(
@@ -241,6 +270,8 @@ class Runner:
             "raw_person_above_conf": raw_person_above_conf,
             "raw_box_max": raw_box_max,
             "nonfinite_rows": nonfinite,
+            "execution": "execute_async_v2",
+            "stream": "nonblocking",
         }
         return rows, prep_ms, trt_ms, total_ms, health
 
@@ -260,6 +291,11 @@ class Runner:
         if self._shm is not None:
             self._shm.close()
             self._shm = None
+        if self.stream.value:
+            try:
+                self.cuda.cudaStreamDestroy(self.stream)
+            finally:
+                self.stream = ctypes.c_void_p()
         if self.in_dev.value:
             self.cuda.cudaFree(self.in_dev)
         if self.out_dev.value:
@@ -280,6 +316,8 @@ def main() -> None:
             "input_shape": runner.input_shape,
             "output_shape": runner.output_shape,
             "transport": "shm-bgr",
+            "execution": "execute_async_v2",
+            "stream": "nonblocking",
         }
     )
 
