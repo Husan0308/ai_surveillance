@@ -1,0 +1,43 @@
+name: Camera V2 Restored TRT86 Stable Static
+
+on:
+  push:
+    branches:
+      - restore/stable-nvdcf-globalid-20260826
+  pull_request:
+
+jobs:
+  static-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v2/person_tracking_trt86_restore_stable.py \
+            services/camera_v2/person_tracking_trt86_reid_restore_stable.py \
+            services/camera_v2/person_tracking_trt86_fresh.py \
+            services/camera_v2/person_tracking_trt86_audited.py \
+            services/camera_v2/person_tracking_pascal_trt86.py \
+            services/camera_v2/yolo_trt86_shm_bridge.py \
+            services/camera_v2/yolo_trt86_fresh_bridge.py \
+            scripts/yolo26_trt86_shm_worker.py
+      - name: Shell syntax
+        run: |
+          bash -n scripts/run_restore_stable_tracking.sh
+          bash -n scripts/run_restore_stable_globalid.sh
+      - name: Architecture contract
+        run: |
+          grep -q 'CAMERA_V2_MICRO_BATCH=1' scripts/run_restore_stable_tracking.sh
+          grep -q 'yolo26s-672x384-b1-fp32-trt86.engine' scripts/run_restore_stable_tracking.sh
+          grep -q 'person_tracking_trt86_restore_stable' scripts/run_restore_stable_tracking.sh
+          grep -q 'interpolation-method", 1' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q 'return self._scaled_detections(rows)' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q 'minIouDiff4NewTarget", "0.45"' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q 'capture=JIT-no-prefetch' services/camera_v2/person_tracking_trt86_restore_stable.py
+          grep -q 'CameraPersonTrackingReID' services/camera_v2/person_tracking_trt86_reid_restore_stable.py
+          ! grep -q 'yolo26m.pt' scripts/run_restore_stable_tracking.sh
+          ! grep -q 'MICRO_BATCH=2' scripts/run_restore_stable_tracking.sh
