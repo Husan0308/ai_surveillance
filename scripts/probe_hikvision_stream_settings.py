@@ -47,25 +47,35 @@ def _fps(raw: str) -> str:
         value = float(raw)
     except (TypeError, ValueError):
         return "-"
-    # Hikvision ISAPI StreamingChannel maxFrameRate is commonly fps x 100.
     if value >= 100.0:
         value /= 100.0
     return f"{value:.2f}"
 
 
+class _SingleAttemptDigestAuthHandler(urllib.request.HTTPDigestAuthHandler):
+    def http_error_401(self, req, fp, code, msg, hdrs):  # type: ignore[override]
+        if getattr(self, "retried", 0) >= 1:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "digest auth failed after one credential attempt",
+                hdrs,
+                fp,
+            )
+        return super().http_error_401(req, fp, code, msg, hdrs)
+
+
 def _digest_opener(base_url: str, username: str, password: str) -> urllib.request.OpenerDirector:
     mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     mgr.add_password(None, base_url, username, password)
-    digest = urllib.request.HTTPDigestAuthHandler(mgr)
-    basic = urllib.request.HTTPBasicAuthHandler(mgr)
-    return urllib.request.build_opener(digest, basic)
+    return urllib.request.build_opener(_SingleAttemptDigestAuthHandler(mgr))
 
 
 def _get_xml(opener: urllib.request.OpenerDirector, url: str, timeout: float) -> ET.Element:
     req = urllib.request.Request(
         url,
         method="GET",
-        headers={"Accept": "application/xml", "User-Agent": "ai-surveillance-stream-probe/1.0"},
+        headers={"Accept": "application/xml", "User-Agent": "ai-surveillance-stream-probe/1.1"},
     )
     with opener.open(req, timeout=timeout) as resp:
         payload = resp.read()
@@ -107,7 +117,7 @@ def main() -> int:
 
     opener = _digest_opener(base_url, username, password)
     print(
-        f"HIKVISION_STREAM_PROBE target={host}:{port} scheme={scheme} auth=digest/basic "
+        f"HIKVISION_STREAM_PROBE target={host}:{port} scheme={scheme} auth=digest-single-attempt "
         f"cameras={len(settings.cameras)} password_logged=0",
         flush=True,
     )
@@ -122,6 +132,14 @@ def main() -> int:
             cfg = _get_xml(opener, config_url, timeout)
         except urllib.error.HTTPError as exc:
             failures += 1
+            if exc.code == 401:
+                print(
+                    f"HIKVISION_STREAM_PROBE_AUTH_ERROR camera={camera.camera_id} id={channel} "
+                    "http=401 attempts=1 action=abort reason=credential-rejected-or-illegal-login-lock "
+                    "note=do-not-repeat-until-lock-duration-has-expired",
+                    flush=True,
+                )
+                return 4
             print(
                 f"HIKVISION_STREAM {camera.camera_id} id={channel} status=HTTP_{exc.code}",
                 flush=True,
@@ -138,6 +156,15 @@ def main() -> int:
 
         try:
             caps = _get_xml(opener, caps_url, timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                print(
+                    f"HIKVISION_STREAM_PROBE_AUTH_ERROR camera={camera.camera_id} id={channel} "
+                    "stage=capabilities http=401 attempts=1 action=abort",
+                    flush=True,
+                )
+                return 4
+            caps = None
         except Exception:
             caps = None
 
