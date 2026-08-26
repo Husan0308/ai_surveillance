@@ -78,4 +78,5 @@ jobs:
 
       - name: Global identity unit tests
         run: |
+          python3 -m pip install --disable-pip-version-check numpy
           python3 -m unittest discover -s tests -p 'test_camera_v2_global_identity.py' -v
