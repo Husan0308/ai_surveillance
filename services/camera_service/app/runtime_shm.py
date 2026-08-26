@@ -28,7 +28,11 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
 
     def __init__(self) -> None:
         self.ml_tap_hz = max(0.25, min(10.0, float(os.environ.get("CAMERA_SERVICE_ML_TAP_HZ", "2.0"))))
-        self.ml_last_pass: dict[str, float] = {}
+        self.ml_period_sec = 1.0 / self.ml_tap_hz
+        # Store the next ideal deadline rather than the previous actual pass time.
+        # This prevents small scheduling delays from accumulating and turning a
+        # nominal 2.0 Hz tap into a persistent 1.6-1.8 Hz cadence.
+        self.ml_next_due: dict[str, float] = {}
         self.ml_publish_counts: dict[str, int] = {}
         self.ml_publish_last: dict[str, int] = {}
         self.ml_publish_stat_at = time.monotonic()
@@ -41,7 +45,7 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
         print(
             "CAMERA_SERVICE_SHM "
             f"enabled=1 tap={ML_W}x{ML_H}x3 rate={self.ml_tap_hz:.2f}Hz "
-            "policy=latest-only gate-before-convert consumer_backpressure=0",
+            "policy=latest-only gate-before-convert cadence=fixed-deadline consumer_backpressure=0",
             flush=True,
         )
 
@@ -101,6 +105,7 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
         self._set_if(ml_sink, "max-buffers", 1)
         self._set_if(ml_sink, "drop", True)
         self._set_if(ml_sink, "enable-last-sample", False)
+        self._set_if(ml_sink, "wait-on-eos", False)
         ml_sink.connect("new-sample", self._on_ml_sample, camera.camera_id)
 
         for element in (source, tee, display_q, ml_q, ml_convert, ml_caps, ml_sink):
@@ -161,10 +166,19 @@ class CameraServiceShmRuntime(CameraServiceRuntime):
 
     def _ml_rate_gate_probe(self, _pad, _info, cid: str):
         now = time.monotonic()
-        previous = self.ml_last_pass.get(cid, 0.0)
-        if now - previous < (1.0 / self.ml_tap_hz):
+        due = self.ml_next_due.get(cid)
+        if due is None:
+            # First available frame should be published immediately.
+            self.ml_next_due[cid] = now + self.ml_period_sec
+            return self.Gst.PadProbeReturn.OK
+        if now < due:
             return self.Gst.PadProbeReturn.DROP
-        self.ml_last_pass[cid] = now
+
+        # Advance from the ideal schedule, not from `now`, so a late frame does
+        # not permanently shift all future deadlines. If the process was paused
+        # for several periods, skip missed slots instead of burst-publishing.
+        missed = max(0, int((now - due) // self.ml_period_sec))
+        self.ml_next_due[cid] = due + ((missed + 1) * self.ml_period_sec)
         return self.Gst.PadProbeReturn.OK
 
     def _on_ml_sample(self, sink, cid: str):
