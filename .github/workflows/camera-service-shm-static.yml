@@ -24,15 +24,20 @@ jobs:
             services/camera_service/app/runtime_shm.py \
             services/camera_service/app/shm_frame.py \
             scripts/probe_camera_service_shm.py
+      - name: Direct probe import
+        run: python3 scripts/probe_camera_service_shm.py --help >/dev/null
       - name: Bash syntax
         run: bash -n scripts/run_camera_service_shm.sh
       - name: SHM architecture contract
         run: |
           grep -q 'gate-before-convert' services/camera_service/app/runtime_shm.py
+          grep -q 'cadence=fixed-deadline' services/camera_service/app/runtime_shm.py
+          grep -q 'ml_next_due' services/camera_service/app/runtime_shm.py
           grep -q 'max-size-buffers", 1' services/camera_service/app/runtime.py
           grep -q 'CAMERA_SERVICE_ML_TAP_HZ:-2.0' scripts/run_camera_service_shm.sh
           grep -q 'display_never_waits_for_consumer=1' scripts/run_camera_service_shm.sh
           grep -q 'LatestFrameMmapWriter' services/camera_service/app/runtime_shm.py
           grep -q 'double-buffered /dev/shm' services/camera_service/app/runtime_shm.py
+          grep -q 'PROJECT_ROOT = Path(__file__).resolve().parents\[1\]' scripts/probe_camera_service_shm.py
           ! grep -Eqi '^(from|import) .*?(tensorrt|nvtracker|nvinfer|reid|global_identity)' services/camera_service/app/runtime_shm.py
           ! grep -Eqi '^(from|import) .*?(api_service|frontend)' services/camera_service/app/runtime_shm.py
