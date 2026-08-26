@@ -31,12 +31,14 @@ jobs:
           grep -q 'CAMERA_V2_FRAME_WIDTH:-960' scripts/run_camera_v2_pascal_trt86.sh
           grep -q 'CAMERA_V2_FRAME_HEIGHT:-540' scripts/run_camera_v2_pascal_trt86.sh
           grep -q 'CAMERA_V2_WALL_WIDTH:-1440' scripts/run_camera_v2_pascal_trt86.sh
-          grep -q 'CAMERA_V2_TRACKER_WIDTH:-448' scripts/run_camera_v2_pascal_trt86.sh
-          grep -q 'CAMERA_V2_TRACKER_HEIGHT:-256' scripts/run_camera_v2_pascal_trt86.sh
+          grep -q 'CAMERA_V2_TRACKER_WIDTH:-640' scripts/run_camera_v2_pascal_trt86.sh
+          grep -q 'CAMERA_V2_TRACKER_HEIGHT:-384' scripts/run_camera_v2_pascal_trt86.sh
           grep -q 'interpolation-method", 1' services/camera_v2/pascal_runtime.py
           grep -q 'display-text", False' services/camera_v2/pascal_runtime.py
+          grep -q 'minIouDiff4NewTarget", "0.45"' services/camera_v2/pascal_runtime.py
+          grep -q 'minTrackerConfidence", "0.05"' services/camera_v2/pascal_runtime.py
+          grep -q 'maxShadowTrackingAge", "140"' services/camera_v2/pascal_runtime.py
           grep -q 'probationAge", "0"' services/camera_v2/person_tracking_pascal_trt86.py
-          grep -q 'maxShadowTrackingAge", "80"' services/camera_v2/person_tracking_pascal_trt86.py
           grep -q 'rtsp-reconnect-attempts", 3' services/camera_v2/person_tracking_pascal_trt86.py
           grep -q 'PASCAL_PIPELINE_AUDIT' services/camera_v2/person_tracking_pascal_trt86.py
           grep -q 'source->tee linked' services/camera_v2/pascal_runtime.py
