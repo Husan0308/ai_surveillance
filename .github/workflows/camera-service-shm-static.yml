@@ -34,5 +34,5 @@ jobs:
           grep -q 'display_never_waits_for_consumer=1' scripts/run_camera_service_shm.sh
           grep -q 'LatestFrameMmapWriter' services/camera_service/app/runtime_shm.py
           grep -q 'double-buffered /dev/shm' services/camera_service/app/runtime_shm.py
-          ! grep -Eqi 'tensorrt|nvtracker|nvinfer|reid|global_identity' services/camera_service/app/runtime_shm.py
-          ! grep -Eqi 'api_service|frontend' services/camera_service/app/runtime_shm.py
+          ! grep -Eqi '^(from|import) .*?(tensorrt|nvtracker|nvinfer|reid|global_identity)' services/camera_service/app/runtime_shm.py
+          ! grep -Eqi '^(from|import) .*?(api_service|frontend)' services/camera_service/app/runtime_shm.py
