@@ -1,0 +1,48 @@
+name: ML Detector Dual Stream Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v5-dual-stream-20260826
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            services/shared/camera_config.py \
+            services/camera_service/app/config.py \
+            services/ml_service/app/trt86_detector.py \
+            services/ml_service/app/detector_substream.py \
+            scripts/probe_camera_substreams.py \
+            scripts/yolo26_trt86_shm_worker_v4.py
+      - name: Bash syntax
+        run: bash -n scripts/run_ml_detector_substream.sh
+      - name: Dual-stream boundary contract
+        run: |
+          grep -q 'source=Hikvision-substream-direct' services/ml_service/app/detector_substream.py
+          grep -q 'substream_uri' services/ml_service/app/detector_substream.py
+          grep -q 'camera_shm=0' services/ml_service/app/detector_substream.py
+          grep -q '_capture_gate_probe' services/ml_service/app/detector_substream.py
+          grep -q 'interpolation-method", 2' services/ml_service/app/detector_substream.py
+          grep -q 'video/x-raw,format=BGRx,width=' services/ml_service/app/detector_substream.py
+          grep -q 'TRT86DetectorClient' services/ml_service/app/detector_substream.py
+          grep -q 'ML_DETECTOR_TARGET_HZ:-2.0' scripts/run_ml_detector_substream.sh
+          grep -q 'ML_SUBSTREAM_RTSP_LATENCY_MS:-80' scripts/run_ml_detector_substream.sh
+          ! grep -q 'LatestFrameMmapReader' services/ml_service/app/detector_substream.py
+          ! grep -q 'FrameDemandClient' services/ml_service/app/detector_substream.py
+          ! grep -q 'runtime_shm' services/ml_service/app/detector_substream.py
+      - name: Service config boundary
+        run: |
+          grep -q 'services.shared.camera_config' services/camera_service/app/config.py
+          grep -q 'services.shared.camera_config' services/ml_service/app/detector_substream.py
+      - name: TRT86 isolation contract
+        run: |
+          grep -q '_absolute_without_resolving_symlink' services/ml_service/app/trt86_detector.py
+          grep -q '\[str(self.python), "-I", str(self.worker)' services/ml_service/app/trt86_detector.py
+          grep -q 'child_env.pop("PYTHONHOME"' services/ml_service/app/trt86_detector.py
+          grep -q 'child_env.pop("PYTHONPATH"' services/ml_service/app/trt86_detector.py
