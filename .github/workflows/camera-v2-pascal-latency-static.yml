@@ -22,16 +22,23 @@ jobs:
             scripts/yolo26_trt86_shm_worker_v4.py
       - name: Bash syntax
         run: bash -n scripts/run_camera_v2_pascal_trt86.sh
-      - name: Low-latency contract
+      - name: Sharp low-latency contract
         run: |
           grep -q 'CAMERA_V2_RTSP_LATENCY_MS:-50' scripts/run_camera_v2_pascal_trt86.sh
-          grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.50' scripts/run_camera_v2_pascal_trt86.sh
+          grep -q 'CAMERA_V2_FRAME_WIDTH:-1280' scripts/run_camera_v2_pascal_trt86.sh
+          grep -q 'CAMERA_V2_FRAME_HEIGHT:-720' scripts/run_camera_v2_pascal_trt86.sh
+          grep -q 'CAMERA_V2_WALL_WIDTH:-1920' scripts/run_camera_v2_pascal_trt86.sh
+          grep -q 'CAMERA_V2_WALL_HEIGHT:-720' scripts/run_camera_v2_pascal_trt86.sh
+          grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.40' scripts/run_camera_v2_pascal_trt86.sh
           grep -q 'yolo26_trt86_shm_worker_v4.py' scripts/run_camera_v2_pascal_trt86.sh
           grep -q 'CAMERA_PASCAL_RATE_GUARD' services/camera_v2/pascal_runtime.py
           grep -q 'tcp-timestamp' services/camera_v2/pascal_runtime.py
-          grep -q 'detector_scale=bilinear' services/camera_v2/pascal_runtime.py
+          grep -q 'interpolation-method", 2' services/camera_v2/pascal_runtime.py
+          grep -q 'interpolation-method", 4' services/camera_v2/pascal_runtime.py
+          grep -q 'detector=672x378/cubic+pad114' services/camera_v2/pascal_runtime.py
+          grep -q 'exact-16:9-caps+host-pad114' services/camera_v2/pascal_runtime.py
+          grep -q 'frame\[3:381' services/camera_v2/pascal_runtime.py
+          ! grep -q 'dest-crop' services/camera_v2/pascal_runtime.py
           grep -q 'execute_async_v2' scripts/yolo26_trt86_shm_worker_v4.py
           grep -q 'cudaStreamCreateWithFlags' scripts/yolo26_trt86_shm_worker_v4.py
-          grep -q 'frame\[:3' scripts/yolo26_trt86_shm_worker_v4.py
-          grep -q 'frame\[381:' scripts/yolo26_trt86_shm_worker_v4.py
           ! grep -q 'channel_spread' scripts/yolo26_trt86_shm_worker_v4.py
