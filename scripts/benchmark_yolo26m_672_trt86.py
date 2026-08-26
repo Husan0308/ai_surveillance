@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import sys
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from scripts.yolo26_trt86_shm_worker_v3 import Runner  # noqa: E402
 
@@ -47,7 +50,9 @@ def main() -> int:
         boxes = []
         max_person = None
         for _ in range(max(1, args.runs)):
-            rows, _prep, trt_ms, _total, health = runner.infer(frame.copy(), args.conf, 40)
+            rows, _prep, trt_ms, _total, health = runner.infer(
+                frame.copy(), args.conf, 40
+            )
             values.append(float(trt_ms))
             boxes = rows
             max_person = health.get("raw_person_max_conf")
