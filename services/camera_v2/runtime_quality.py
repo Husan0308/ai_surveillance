@@ -35,17 +35,21 @@ class QualityCameraRuntime(CleanCameraRuntime):
                 kept.append(row)
         return kept
 
+    def _set_or_insert_target_key(self, lines, key: str, value: str) -> None:
+        if not self._replace_yaml_key(lines, key, value, required=False):
+            self._insert_target_management_key(lines, key, value)
+
     def _prepare_tracker_files(self):
         lib, generated = super()._prepare_tracker_files()
         lines = generated.read_text(encoding="utf-8").splitlines()
         self._replace_yaml_key(lines, "minIouDiff4NewTarget", "0.22")
-        self._replace_yaml_key(lines, "minIou4TargetDuplicate", "0.72", required=False)
-        self._replace_yaml_key(lines, "targetDuplicateRunInterval", "1", required=False)
+        self._set_or_insert_target_key(lines, "minIou4TargetDuplicate", "0.72")
+        self._set_or_insert_target_key(lines, "targetDuplicateRunInterval", "1")
         self._replace_yaml_key(lines, "minTrackerConfidence", "0.12")
         self._replace_yaml_key(lines, "probationAge", "0")
         shadow_frames = max(20, int(round(self.track_fps * 5.0)))
         self._replace_yaml_key(lines, "maxShadowTrackingAge", str(shadow_frames))
-        self._insert_target_management_key(lines, "outputShadowTracks", "1")
+        self._set_or_insert_target_key(lines, "outputShadowTracks", "1")
         generated.write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(
             "CAMERA_QUALITY_NVDCF "
