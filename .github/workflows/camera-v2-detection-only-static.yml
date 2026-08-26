@@ -20,7 +20,8 @@ jobs:
             services/camera_v2/pose_gate_v2.py \
             services/camera_v2/yolo_trt86_fresh_bridge.py \
             services/camera_v2/yolo_trt86_shm_bridge.py \
-            scripts/check_yolo26_exact_frame_parity.py
+            scripts/check_yolo26_exact_frame_parity.py \
+            scripts/sweep_yolo26_exact_frame_models.py
       - name: Bash syntax
         run: |
           bash -n scripts/run_camera_v2_detection_only_pose.sh
@@ -51,7 +52,9 @@ jobs:
           grep -q 'CAM-01,CAM-02,CAM-04,CAM-05' scripts/run_camera_v2_detection_parity.sh
           grep -q 'np.save' services/camera_v2/yolo_trt86_shm_bridge.py
           grep -q 'allow_pickle=False' services/camera_v2/yolo_trt86_shm_bridge.py
-          grep -q 'end2end=False' docs/does-not-exist 2>/dev/null || true
           grep -q 'end2end=end2end' scripts/check_yolo26_exact_frame_parity.py
           grep -q 'TRT_MISS' scripts/check_yolo26_exact_frame_parity.py
           grep -q 'ONE_TO_MANY_RECOVERS' scripts/check_yolo26_exact_frame_parity.py
+          grep -q 'yolo26s.pt,yolo26m.pt' scripts/sweep_yolo26_exact_frame_models.py
+          grep -q 'YOLO26_MODEL_SWEEP_CAMERA' scripts/sweep_yolo26_exact_frame_models.py
+          grep -q 'upscaling these saved 672x384 frames cannot restore lost detail' scripts/sweep_yolo26_exact_frame_models.py
