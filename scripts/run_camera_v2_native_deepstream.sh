@@ -120,7 +120,7 @@ from gi.repository import Gst  # noqa: F401
 import numpy  # noqa: F401
 import yaml  # noqa: F401
 import dotenv  # noqa: F401
-import services.camera_v2.person_tracking_native_deepstream  # noqa: F401
+import services.camera_v2.person_tracking_native_deepstream_v2  # noqa: F401
 PY
   then
     MAIN_PYTHON="$candidate"
@@ -141,7 +141,7 @@ printf '%s\n' \
 restart_count=0
 while true; do
   set +e
-  "$MAIN_PYTHON" -u -m services.camera_v2.person_tracking_native_deepstream
+  "$MAIN_PYTHON" -u -m services.camera_v2.person_tracking_native_deepstream_v2
   rc=$?
   set -e
 
