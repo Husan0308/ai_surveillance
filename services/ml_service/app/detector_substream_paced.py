@@ -4,23 +4,33 @@ import os
 import signal
 import time
 
-from services.ml_service.app.detector_substream import DetectorSubstreamService, _percentile
+from services.ml_service.app.detector_substream import DetectorSubstreamService
 from services.ml_service.app.trt86_detector import CONTENT_H, INPUT_W, TRT86DetectorClient
 
 
 class DetectorSubstreamPacedService(DetectorSubstreamService):
     """Sparse paced substream producer + nonblocking TensorRT consumer.
 
-    Each camera passes only target_hz frames through nvvideoconvert. Camera phases
-    are evenly staggered across the target period so six conversions do not burst
-    together. Appsinks publish one latest frame per camera; the detector consumes
-    whichever fresh slot is ready and never waits on a particular camera.
+    Each camera passes only target_hz frames through nvvideoconvert. The initial
+    camera phases are staggered in wall time, then cadence is driven by the live
+    buffer PTS/media timeline rather than by Python callback arrival time. That
+    avoids under-sampling a bursty TCP substream when streaming-thread callbacks
+    arrive irregularly. Appsinks publish one latest frame per camera; the detector
+    consumes whichever fresh slot is ready and never waits on a particular camera.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.gate_enabled = False
-        self.gate_next = {camera.camera_id: 0.0 for camera in self.cameras}
+        self.gate_start_wall = {camera.camera_id: 0.0 for camera in self.cameras}
+        self.gate_next_wall = {camera.camera_id: 0.0 for camera in self.cameras}
+        self.gate_next_pts_ns: dict[str, int | None] = {
+            camera.camera_id: None for camera in self.cameras
+        }
+        self.gate_last_pts_ns: dict[str, int | None] = {
+            camera.camera_id: None for camera in self.cameras
+        }
+        self.gate_period_ns = max(1, int(round(self.target_period * 1_000_000_000.0)))
         self.gate_passed = {camera.camera_id: 0 for camera in self.cameras}
         self.gate_passed_last = {camera.camera_id: 0 for camera in self.cameras}
         self.processed_seq = {camera.camera_id: 0 for camera in self.cameras}
@@ -28,6 +38,9 @@ class DetectorSubstreamPacedService(DetectorSubstreamService):
             50.0, min(500.0, float(os.environ.get("ML_SUBSTREAM_MAX_INPUT_AGE_MS", "180")))
         )
         self.stale_drops = 0
+        self.gate_pts_passes = 0
+        self.gate_wall_fallback_passes = 0
+        self.gate_pts_resets = 0
         self.phase_spacing_ms = 1000.0 * self.target_period / max(1, len(self.cameras))
 
     @staticmethod
@@ -76,35 +89,80 @@ class DetectorSubstreamPacedService(DetectorSubstreamService):
             time.sleep(self.startup_stagger_sec)
 
     def _enable_paced_gate(self) -> None:
-        # Start slightly in the future, then distribute the six camera phases over
-        # one target period. At 2 Hz/camera this is ~83.3 ms between conversions.
+        # Initial phase staggering is wall-clock based so six sparse conversions do
+        # not burst together. After the first accepted frame, each camera advances
+        # by buffer PTS/media time, which is robust to bursty TCP delivery/callbacks.
         base = time.monotonic() + 0.05
         phase = self.target_period / max(1, len(self.cameras))
         for index, camera in enumerate(self.cameras):
-            self.gate_next[camera.camera_id] = base + index * phase
+            cid = camera.camera_id
+            start = base + index * phase
+            self.gate_start_wall[cid] = start
+            self.gate_next_wall[cid] = start
+            self.gate_next_pts_ns[cid] = None
+            self.gate_last_pts_ns[cid] = None
         self.gate_enabled = True
         print(
             "ML_DETECTOR_PACED_GATE "
             f"target={self.target_hz:.2f}Hz/cam phase_spacing={phase * 1000.0:.1f}ms "
-            "gate_before_convert=1 latest_slot=1 blocking_capture_wait=0",
+            "gate_before_convert=1 latest_slot=1 blocking_capture_wait=0 "
+            "pace_clock=buffer-pts fallback=monotonic",
             flush=True,
         )
 
-    def _capture_gate_probe(self, _pad, _info, cid: str):
+    def _wall_fallback_gate(self, cid: str, now: float):
+        due = self.gate_next_wall[cid]
+        if now + 1e-9 < due:
+            return self.Gst.PadProbeReturn.DROP
+        late = max(0.0, now - due)
+        steps = max(1, int(late // self.target_period) + 1)
+        self.gate_next_wall[cid] = due + steps * self.target_period
+        self.gate_passed[cid] += 1
+        self.gate_wall_fallback_passes += 1
+        return self.Gst.PadProbeReturn.OK
+
+    def _capture_gate_probe(self, _pad, info, cid: str):
         if not self.gate_enabled:
             return self.Gst.PadProbeReturn.DROP
 
         now = time.monotonic()
-        due = self.gate_next[cid]
-        if now + 1e-9 < due:
+        if now + 1e-9 < self.gate_start_wall[cid]:
             return self.Gst.PadProbeReturn.DROP
 
-        # Fixed-deadline cadence: late source frames do not shift future deadlines
-        # and no catch-up burst is emitted. Exactly this buffer is allowed through.
-        late = max(0.0, now - due)
-        steps = max(1, int(late // self.target_period) + 1)
-        self.gate_next[cid] = due + steps * self.target_period
+        buffer = info.get_buffer()
+        pts_ns: int | None = None
+        if buffer is not None and buffer.pts != self.Gst.CLOCK_TIME_NONE:
+            pts_ns = int(buffer.pts)
+
+        if pts_ns is None:
+            return self._wall_fallback_gate(cid, now)
+
+        last_pts = self.gate_last_pts_ns[cid]
+        # Reconnect/discontinuity guard: if the media timeline jumps backwards,
+        # rebase this camera on the first post-reset frame instead of suppressing
+        # it until the old deadline is reached again.
+        if last_pts is not None and pts_ns < last_pts:
+            self.gate_next_pts_ns[cid] = None
+            self.gate_pts_resets += 1
+        self.gate_last_pts_ns[cid] = pts_ns
+
+        due_pts = self.gate_next_pts_ns[cid]
+        if due_pts is None:
+            self.gate_next_pts_ns[cid] = pts_ns + self.gate_period_ns
+            self.gate_passed[cid] += 1
+            self.gate_pts_passes += 1
+            return self.Gst.PadProbeReturn.OK
+
+        if pts_ns < due_pts:
+            return self.Gst.PadProbeReturn.DROP
+
+        # Fixed media-time cadence: a late/bursty delivery does not shift future
+        # deadlines and we still emit only this one buffer (no catch-up burst).
+        late_ns = max(0, pts_ns - due_pts)
+        steps = max(1, int(late_ns // self.gate_period_ns) + 1)
+        self.gate_next_pts_ns[cid] = due_pts + steps * self.gate_period_ns
         self.gate_passed[cid] += 1
+        self.gate_pts_passes += 1
         return self.Gst.PadProbeReturn.OK
 
     def _take_oldest_ready(self):
@@ -139,6 +197,8 @@ class DetectorSubstreamPacedService(DetectorSubstreamService):
             "ML_DETECTOR_PACED_STATS "
             f"gate=[{' '.join(gate_rows)}] phase_spacing={self.phase_spacing_ms:.1f}ms "
             f"stale_drops={self.stale_drops} max_input_age={self.max_input_age_ms:.0f}ms "
+            f"pts_passes={self.gate_pts_passes} wall_fallback={self.gate_wall_fallback_passes} "
+            f"pts_resets={self.gate_pts_resets} pace_clock=buffer-pts "
             "capture_block_p95=0.0ms queue_depth=latest-per-camera",
             flush=True,
         )
@@ -155,7 +215,7 @@ class DetectorSubstreamPacedService(DetectorSubstreamService):
         print(
             "ML_DETECTOR_BOUNDARY camera_service=independent main_stream=0 camera_shm=0 "
             "tracker=0 api=0 ui=0 substream_nvdec=1 sparse_convert=1 "
-            "scheduler=paced-ready-first blocking_capture_wait=0",
+            "scheduler=pts-paced-ready-first blocking_capture_wait=0",
             flush=True,
         )
 
