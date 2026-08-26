@@ -15,10 +15,14 @@ jobs:
         run: |
           python3 -m py_compile \
             services/ml_service/app/detector_only_shm.py \
+            services/camera_service/app/runtime.py \
+            services/camera_service/app/runtime_shm.py \
             services/camera_service/app/shm_frame.py \
             scripts/yolo26_trt86_shm_worker_v4.py
       - name: Bash syntax
-        run: bash -n scripts/run_ml_detector_shm.sh
+        run: |
+          bash -n scripts/run_ml_detector_shm.sh
+          bash -n scripts/run_camera_service_shm.sh
       - name: Detector service boundary contract
         run: |
           grep -q 'ML_DETECTOR_BOUNDARY rtsp=0 nvdec=0 deepstream=0 tracker=0 api=0 ui=0' services/ml_service/app/detector_only_shm.py
@@ -39,3 +43,11 @@ jobs:
           grep -q 'sys.prefix == sys.base_prefix' scripts/run_ml_detector_shm.sh
           grep -q 'numpy_file=' scripts/run_ml_detector_shm.sh
           ! grep -Eq 'self\.python = Path\([^\n]*\)\.resolve\(\)' services/ml_service/app/detector_only_shm.py
+      - name: Production camera is headless
+        run: |
+          grep -q 'CAMERA_SERVICE_HEADLESS:-1' scripts/run_camera_service_shm.sh
+          grep -q 'production_render=0' scripts/run_camera_service_shm.sh
+          grep -q 'RTSP/NVDEC->latest->fakesink' services/camera_service/app/runtime.py
+          grep -q 'headless render=0 tiler=0 egl=0' services/camera_service/app/runtime.py
+          grep -q 'drain_q->fakesink' services/camera_service/app/runtime_shm.py
+          grep -q 'gate-before-convert' services/camera_service/app/runtime_shm.py
