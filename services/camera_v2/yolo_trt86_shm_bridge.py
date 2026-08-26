@@ -37,6 +37,65 @@ def _read_json(proc, timeout: float):
         raise RuntimeError(f"TRT86 SHM worker emitted non-JSON stdout: {line[:200]!r}") from exc
 
 
+def _parity_settings():
+    cameras = {
+        item.strip()
+        for item in os.environ.get("CAMERA_V2_PARITY_CAPTURE_CAMERAS", "").split(",")
+        if item.strip()
+    }
+    max_samples = max(
+        0,
+        min(20, int(os.environ.get("CAMERA_V2_PARITY_SAMPLES_PER_CAMERA", "2"))),
+    )
+    directory = _resolve(
+        os.environ.get("CAMERA_V2_PARITY_DIR", ".runtime/yolo26_parity")
+    )
+    return cameras, max_samples, directory
+
+
+def _save_parity_sample(
+    directory: Path,
+    cid: str,
+    sample_index: int,
+    frame: np.ndarray,
+    response: dict,
+    engine_path: Path,
+    detector_conf: float,
+) -> None:
+    """Persist the exact BGR tensor sent to TRT plus its TRT response.
+
+    NPY is intentional: no image codec, colorspace conversion, JPEG loss or
+    resize is allowed between the production detector input and the parity test.
+    The companion checker feeds this exact 672x384 BGR array to Ultralytics.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = f"{cid}_sample{sample_index:02d}"
+    npy_path = directory / f"{stem}.npy"
+    json_path = directory / f"{stem}.json"
+
+    tmp_npy = directory / f".{stem}.npy.tmp"
+    with tmp_npy.open("wb") as handle:
+        np.save(handle, np.ascontiguousarray(frame), allow_pickle=False)
+    tmp_npy.replace(npy_path)
+
+    payload = {
+        "camera": cid,
+        "sample": sample_index,
+        "frame_shape": list(frame.shape),
+        "frame_dtype": str(frame.dtype),
+        "engine": str(engine_path),
+        "detector_conf": detector_conf,
+        "trt_boxes": response.get("boxes", []),
+        "trt_health": response.get("health") or {},
+        "trt_ms": float(response.get("trt_ms", 0.0)),
+        "prep_ms": float(response.get("prep_ms", 0.0)),
+        "total_ms": float(response.get("total_ms", 0.0)),
+    }
+    tmp_json = directory / f".{stem}.json.tmp"
+    tmp_json.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_json.replace(json_path)
+
+
 def yolo_trt86_shm_worker(job_q, result_q) -> None:
     proc = None
     shm = None
@@ -64,6 +123,17 @@ def yolo_trt86_shm_worker(job_q, result_q) -> None:
         ):
             if not path.is_file():
                 raise FileNotFoundError(f"TRT86 {name} missing: {path}")
+
+        parity_cameras, parity_max_samples, parity_dir = _parity_settings()
+        parity_counts = {cid: 0 for cid in parity_cameras}
+        parity_completed_logged = False
+        if parity_cameras and parity_max_samples:
+            print(
+                "CAMERA_TRT_PARITY_CAPTURE "
+                f"enabled=1 cameras={','.join(sorted(parity_cameras))} "
+                f"samples_per_camera={parity_max_samples} dir={parity_dir}",
+                flush=True,
+            )
 
         shm = shared_memory.SharedMemory(create=True, size=FRAME_BYTES)
         shm_frame = np.ndarray(
@@ -133,12 +203,11 @@ def yolo_trt86_shm_worker(job_q, result_q) -> None:
                 shm_copy_ms = (time.perf_counter() - started) * 1000.0
 
                 request_id += 1
+                detector_conf = float(os.environ.get("CAMERA_V2_DETECT_CONF", "0.05"))
                 req = {
                     "id": request_id,
                     "shm_name": shm.name,
-                    "conf": float(
-                        os.environ.get("CAMERA_V2_DETECT_CONF", "0.05")
-                    ),
+                    "conf": detector_conf,
                     "max_det": max(
                         1,
                         min(
@@ -161,6 +230,39 @@ def yolo_trt86_shm_worker(job_q, result_q) -> None:
                     raise RuntimeError(
                         response.get("error", "TRT86 SHM inference failed")
                     )
+
+                if cid in parity_counts and parity_counts[cid] < parity_max_samples:
+                    parity_counts[cid] += 1
+                    sample_index = parity_counts[cid]
+                    _save_parity_sample(
+                        parity_dir,
+                        cid,
+                        sample_index,
+                        frame,
+                        response,
+                        engine_path,
+                        detector_conf,
+                    )
+                    health = response.get("health") or {}
+                    print(
+                        "CAMERA_TRT_PARITY_SAVED "
+                        f"cid={cid} sample={sample_index}/{parity_max_samples} "
+                        f"trt_person={len(response.get('boxes', []))} "
+                        f"person_max={health.get('raw_person_max_conf')} "
+                        f"path={parity_dir / f'{cid}_sample{sample_index:02d}.npy'}",
+                        flush=True,
+                    )
+                    if (
+                        not parity_completed_logged
+                        and parity_counts
+                        and all(v >= parity_max_samples for v in parity_counts.values())
+                    ):
+                        parity_completed_logged = True
+                        print(
+                            "CAMERA_TRT_PARITY_CAPTURE complete=1 "
+                            f"dir={parity_dir}",
+                            flush=True,
+                        )
 
                 rows = []
                 for row in response.get("boxes", []):
