@@ -23,8 +23,15 @@ jobs:
           grep -q 'self._make("nvinfer", "native_yolo26_pgie")' services/camera_v2/person_tracking_native_deepstream.py
           grep -q 'self._make("nvtracker", "native_nvdcf_tracker")' services/camera_v2/person_tracking_native_deepstream.py
           grep -q 'interval=19' services/camera_v2/person_tracking_native_deepstream.py
+          grep -q 'maintain-aspect-ratio=1' services/camera_v2/person_tracking_native_deepstream.py
+          grep -q 'symmetric-padding=1' services/camera_v2/person_tracking_native_deepstream.py
+          grep -q 'cluster-mode=4' services/camera_v2/person_tracking_native_deepstream.py
           grep -q 'appsink=0 numpy=0 pytorch=0' services/camera_v2/person_tracking_native_deepstream.py
           grep -q 'Do NOT NULL->PLAYING an existing nvurisrcbin' services/camera_v2/person_tracking_native_deepstream.py
           grep -q 'CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYolo26E2E)' services/camera_v2/native_yolo26/nvdsparsebbox_yolo26_e2e.cpp
+          grep -q 'CUDA_HOME ?= /usr/local/cuda' services/camera_v2/native_yolo26/Makefile
+          grep -q '$(CUDA_HOME)/include' services/camera_v2/native_yolo26/Makefile
+          grep -q '/usr/local/cuda-12.6' scripts/run_camera_v2_native_deepstream.sh
+          grep -q 'CUDA_HOME="$CUDA_HOME"' scripts/run_camera_v2_native_deepstream.sh
           grep -q 'CAMERA_V2_FRAME_WIDTH=1280' scripts/run_camera_v2_native_deepstream.sh
           grep -q 'CAMERA_V2_FRAME_HEIGHT=720' scripts/run_camera_v2_native_deepstream.sh
