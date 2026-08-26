@@ -33,8 +33,8 @@ jobs:
       - name: Architecture contract
         run: |
           grep -q 'CAMERA_V2_MICRO_BATCH=1' scripts/run_restore_stable_tracking.sh
-          grep -q 'CAMERA_V2_FRAME_WIDTH:-960' scripts/run_restore_stable_tracking.sh
-          grep -q 'CAMERA_V2_FRAME_HEIGHT:-540' scripts/run_restore_stable_tracking.sh
+          grep -q 'CAMERA_V2_FRAME_WIDTH:-640' scripts/run_restore_stable_tracking.sh
+          grep -q 'CAMERA_V2_FRAME_HEIGHT:-360' scripts/run_restore_stable_tracking.sh
           grep -q 'CAMERA_V2_DETECT_TARGET_HZ:-0.24' scripts/run_restore_stable_tracking.sh
           grep -q 'CAMERA_V2_DETECT_MIN_HZ:-0.12' scripts/run_restore_stable_tracking.sh
           grep -q 'CAMERA_V2_TRACKER_WIDTH:-480' scripts/run_restore_stable_tracking.sh
