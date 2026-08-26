@@ -10,8 +10,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("native_meta_bridge.c")
 LABEL_SOURCE = Path(__file__).with_name("native_label_style.c")
-SMOOTHER_SOURCE = Path(__file__).with_name("native_display_smoother.c")
-HEATMAP_SOURCE = Path(__file__).with_name("native_heatmap.c")
 BUILD_DIR = ROOT / ".runtime" / "camera_v2"
 LIB_PATH = BUILD_DIR / "libcamera_v2_meta.so"
 
@@ -47,7 +45,9 @@ def _deepstream_root() -> Path:
             return path
 
     candidates = [Path("/opt/nvidia/deepstream/deepstream")]
-    candidates.extend(sorted(Path("/opt/nvidia/deepstream").glob("deepstream-*"), reverse=True))
+    candidates.extend(
+        sorted(Path("/opt/nvidia/deepstream").glob("deepstream-*"), reverse=True)
+    )
     for path in candidates:
         if (path / "sources/includes/gstnvdsmeta.h").exists() and (path / "lib").exists():
             return path
@@ -55,27 +55,25 @@ def _deepstream_root() -> Path:
 
 
 def ensure_bridge() -> Path:
-    """Build active metadata helpers for detector/tracker labels and heatmap."""
-    sources = (SOURCE, LABEL_SOURCE, SMOOTHER_SOURCE, HEATMAP_SOURCE)
-    for src in sources:
-        if not src.exists():
-            raise RuntimeError(f"metadata bridge source missing: {src}")
+    """Build only metadata/label helpers used by clean tracking and Global ID."""
+    sources = (SOURCE, LABEL_SOURCE)
+    for source in sources:
+        if not source.exists():
+            raise RuntimeError(f"metadata bridge source missing: {source}")
 
     ds = _deepstream_root()
     include_dir = ds / "sources/includes"
     lib_dir = ds / "lib"
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
-    newest_source_mtime = max(src.stat().st_mtime for src in sources)
-    rebuild = not LIB_PATH.exists() or LIB_PATH.stat().st_mtime < newest_source_mtime
-    if not rebuild:
+    newest = max(source.stat().st_mtime for source in sources)
+    if LIB_PATH.exists() and LIB_PATH.stat().st_mtime >= newest:
         return LIB_PATH
 
     gcc = shutil.which("gcc")
     pkg = shutil.which("pkg-config")
     if not gcc or not pkg:
-        raise RuntimeError("gcc and pkg-config are required to build the DeepStream metadata bridge")
-
+        raise RuntimeError("gcc and pkg-config are required for metadata bridge")
     pkg_flags = shlex.split(
         subprocess.check_output(
             [pkg, "--cflags", "--libs", "gstreamer-1.0", "glib-2.0"],
@@ -90,8 +88,6 @@ def ensure_bridge() -> Path:
         "-std=c11",
         str(SOURCE),
         str(LABEL_SOURCE),
-        str(SMOOTHER_SOURCE),
-        str(HEATMAP_SOURCE),
         "-o",
         str(LIB_PATH),
         f"-I{include_dir}",
@@ -99,26 +95,28 @@ def ensure_bridge() -> Path:
         f"-Wl,-rpath,{lib_dir}",
         *pkg_flags,
     ]
-
-    attempts = [
+    errors: list[str] = []
+    for libs in (
         ["-lnvds_meta", "-lnvdsgst_meta"],
         ["-lnvds_meta"],
         ["-lnvdsgst_meta", "-lnvds_meta"],
-    ]
-    errors: list[str] = []
-    for libs in attempts:
-        result = subprocess.run([*common, *libs], capture_output=True, text=True, check=False)
+    ):
+        result = subprocess.run(
+            [*common, *libs],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if result.returncode == 0 and LIB_PATH.exists():
             return LIB_PATH
-        errors.append((result.stderr or result.stdout or "unknown compiler error").strip())
-
+        errors.append((result.stderr or result.stdout or "compiler error").strip())
     raise RuntimeError("metadata bridge compile failed: " + " | ".join(errors[-2:]))
 
 
 class NativeMetaBridge:
     def __init__(self) -> None:
-        path = ensure_bridge()
-        self.lib = ctypes.CDLL(str(path))
+        self.path = ensure_bridge()
+        self.lib = ctypes.CDLL(str(self.path))
 
         self.lib.camera_v2_add_boxes.argtypes = [
             ctypes.c_uint64,
@@ -127,7 +125,6 @@ class NativeMetaBridge:
             ctypes.c_int,
         ]
         self.lib.camera_v2_add_boxes.restype = ctypes.c_int
-
         self.lib.camera_v2_add_tracked_boxes.argtypes = [
             ctypes.c_uint64,
             ctypes.c_uint,
@@ -135,7 +132,6 @@ class NativeMetaBridge:
             ctypes.c_int,
         ]
         self.lib.camera_v2_add_tracked_boxes.restype = ctypes.c_int
-
         self.lib.camera_v2_apply_detector_result.argtypes = [
             ctypes.c_uint64,
             ctypes.c_uint,
@@ -143,11 +139,8 @@ class NativeMetaBridge:
             ctypes.c_int,
         ]
         self.lib.camera_v2_apply_detector_result.restype = ctypes.c_int
-
         self.lib.camera_v2_style_and_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_style_and_count_tracked.restype = ctypes.c_int
-        self.lib.camera_v2_smooth_display_boxes.argtypes = [ctypes.c_uint64]
-        self.lib.camera_v2_smooth_display_boxes.restype = ctypes.c_int
         self.lib.camera_v2_apply_local_track_style.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_apply_local_track_style.restype = ctypes.c_int
         self.lib.camera_v2_copy_tracks.argtypes = [
@@ -169,68 +162,38 @@ class NativeMetaBridge:
             ctypes.c_float,
         ]
         self.lib.camera_v2_expand_display_boxes.restype = ctypes.c_int
-
         self.lib.camera_v2_add_wall_rects.argtypes = [
             ctypes.c_uint64,
             ctypes.POINTER(ctypes.c_float),
             ctypes.c_int,
         ]
         self.lib.camera_v2_add_wall_rects.restype = ctypes.c_int
-
         self.lib.camera_v2_add_wall_tracks.argtypes = [
             ctypes.c_uint64,
             ctypes.POINTER(ctypes.c_float),
             ctypes.c_int,
         ]
         self.lib.camera_v2_add_wall_tracks.restype = ctypes.c_int
-
         self.lib.camera_v2_count_tracked.argtypes = [ctypes.c_uint64]
         self.lib.camera_v2_count_tracked.restype = ctypes.c_int
         self.lib.camera_v2_shadow_promoted_total.argtypes = []
         self.lib.camera_v2_shadow_promoted_total.restype = ctypes.c_uint64
 
-        self.lib.camera_v2_heatmap_configure.argtypes = [
-            ctypes.c_float,
-            ctypes.c_float,
-            ctypes.c_float,
-            ctypes.c_float,
-            ctypes.c_float,
-            ctypes.c_uint,
-        ]
-        self.lib.camera_v2_heatmap_configure.restype = None
-        self.lib.camera_v2_heatmap_reset.argtypes = []
-        self.lib.camera_v2_heatmap_reset.restype = None
-        self.lib.camera_v2_heatmap_update.argtypes = [ctypes.c_uint64]
-        self.lib.camera_v2_heatmap_update.restype = ctypes.c_int
-        self.lib.camera_v2_heatmap_render.argtypes = [
-            ctypes.c_uint64,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-        ]
-        self.lib.camera_v2_heatmap_render.restype = ctypes.c_int
-        self.lib.camera_v2_heatmap_rendered_points_total.argtypes = []
-        self.lib.camera_v2_heatmap_rendered_points_total.restype = ctypes.c_uint64
-        self.path = path
-
     @staticmethod
-    def _payload(boxes: list[tuple[float, float, float, float, float]]):
+    def _payload(boxes):
         if not boxes:
             return None, None
         flat: list[float] = []
         for x1, y1, x2, y2, conf in boxes:
             flat.extend((float(x1), float(y1), float(x2), float(y2), float(conf)))
-        array_type = ctypes.c_float * len(flat)
-        payload = array_type(*flat)
+        payload = (ctypes.c_float * len(flat))(*flat)
         return payload, ctypes.cast(payload, ctypes.POINTER(ctypes.c_float))
 
-    def add_boxes(self, gst_buffer, source_id: int, boxes: list[tuple[float, float, float, float, float]]) -> int:
-        if not boxes:
-            return 0
+    def add_boxes(self, gst_buffer, source_id: int, boxes) -> int:
         payload, pointer = self._payload(boxes)
         _ = payload
+        if pointer is None:
+            return 0
         return int(
             self.lib.camera_v2_add_boxes(
                 ctypes.c_uint64(hash(gst_buffer)),
@@ -240,22 +203,14 @@ class NativeMetaBridge:
             )
         )
 
-    def add_tracked_boxes(
-        self,
-        gst_buffer,
-        source_id: int,
-        boxes: list[tuple[int, float, float, float, float, float]],
-    ) -> int:
-        """Add motion-predictor boxes while preserving camera-local track IDs."""
+    def add_tracked_boxes(self, gst_buffer, source_id: int, boxes) -> int:
         if not boxes:
             return 0
-
         flat: list[float] = []
-
+        valid = 0
         for track_id, x1, y1, x2, y2, conf in boxes:
             if int(track_id) < 0:
                 continue
-
             flat.extend(
                 (
                     float(track_id),
@@ -266,87 +221,21 @@ class NativeMetaBridge:
                     float(conf),
                 )
             )
-
+            valid += 1
         if not flat:
             return 0
-
-        array_type = ctypes.c_float * len(flat)
-        payload = array_type(*flat)
-        pointer = ctypes.cast(
-            payload,
-            ctypes.POINTER(ctypes.c_float),
-        )
-
+        payload = (ctypes.c_float * len(flat))(*flat)
+        pointer = ctypes.cast(payload, ctypes.POINTER(ctypes.c_float))
         return int(
             self.lib.camera_v2_add_tracked_boxes(
                 ctypes.c_uint64(hash(gst_buffer)),
                 ctypes.c_uint(int(source_id)),
                 pointer,
-                ctypes.c_int(len(flat) // 6),
+                ctypes.c_int(valid),
             )
         )
 
-    def add_wall_rects(
-        self,
-        gst_buffer,
-        boxes: list[tuple[float, float, float, float, float]],
-    ) -> int:
-        if not boxes:
-            return 0
-
-        payload, pointer = self._payload(boxes)
-        _ = payload
-
-        return int(
-            self.lib.camera_v2_add_wall_rects(
-                ctypes.c_uint64(hash(gst_buffer)),
-                pointer,
-                ctypes.c_int(len(boxes)),
-            )
-        )
-
-    def add_wall_tracks(
-        self,
-        gst_buffer,
-        tracks: list[
-            tuple[int, float, float, float, float, float]
-        ],
-    ) -> int:
-        """Draw post-tiler motion boxes with camera-local IDs."""
-        if not tracks:
-            return 0
-
-        flat: list[float] = []
-
-        for track_id, x1, y1, x2, y2, conf in tracks:
-            flat.extend(
-                (
-                    float(track_id),
-                    float(x1),
-                    float(y1),
-                    float(x2),
-                    float(y2),
-                    float(conf),
-                )
-            )
-
-        array_type = ctypes.c_float * len(flat)
-        payload = array_type(*flat)
-
-        pointer = ctypes.cast(
-            payload,
-            ctypes.POINTER(ctypes.c_float),
-        )
-
-        return int(
-            self.lib.camera_v2_add_wall_tracks(
-                ctypes.c_uint64(hash(gst_buffer)),
-                pointer,
-                ctypes.c_int(len(tracks)),
-            )
-        )
-
-    def apply_detector_result(self, gst_buffer, source_id: int, boxes: list[tuple[float, float, float, float, float]]) -> int:
+    def apply_detector_result(self, gst_buffer, source_id: int, boxes) -> int:
         payload, pointer = self._payload(boxes)
         _ = payload
         if pointer is None:
@@ -361,11 +250,11 @@ class NativeMetaBridge:
         )
 
     def style_and_count_tracked(self, gst_buffer) -> int:
-        buffer_ptr = ctypes.c_uint64(hash(gst_buffer))
-        count = int(self.lib.camera_v2_style_and_count_tracked(buffer_ptr))
-        if count >= 0:
-            self.lib.camera_v2_smooth_display_boxes(buffer_ptr)
-        return count
+        return int(
+            self.lib.camera_v2_style_and_count_tracked(
+                ctypes.c_uint64(hash(gst_buffer))
+            )
+        )
 
     def apply_local_track_style(self, gst_buffer) -> int:
         return int(
@@ -374,28 +263,9 @@ class NativeMetaBridge:
             )
         )
 
-    def expand_display_boxes(
-        self,
-        gst_buffer,
-        *,
-        side_margin: float = 0.08,
-        top_margin: float = 0.04,
-        bottom_margin: float = 0.10,
-    ) -> int:
-        """Pad only OSD rectangles; tracker/count/heatmap truth is sampled first."""
-        return int(
-            self.lib.camera_v2_expand_display_boxes(
-                ctypes.c_uint64(hash(gst_buffer)),
-                ctypes.c_float(float(side_margin)),
-                ctypes.c_float(float(top_margin)),
-                ctypes.c_float(float(bottom_margin)),
-            )
-        )
-
     def copy_tracks(self, gst_buffer, max_rows: int = 128) -> list[dict]:
         max_rows = max(1, min(512, int(max_rows)))
-        array_type = _TrackRow * max_rows
-        payload = array_type()
+        payload = (_TrackRow * max_rows)()
         count = int(
             self.lib.camera_v2_copy_tracks(
                 ctypes.c_uint64(hash(gst_buffer)),
@@ -405,22 +275,20 @@ class NativeMetaBridge:
         )
         if count <= 0:
             return []
-        output: list[dict] = []
-        for row in payload[: min(count, max_rows)]:
-            output.append(
-                {
-                    "object_id": int(row.object_id),
-                    "frame_num": int(row.frame_num),
-                    "source_id": int(row.source_id),
-                    "left": float(row.left),
-                    "top": float(row.top),
-                    "width": float(row.width),
-                    "height": float(row.height),
-                    "confidence": float(row.confidence),
-                    "tracker_confidence": float(row.tracker_confidence),
-                }
-            )
-        return output
+        return [
+            {
+                "object_id": int(row.object_id),
+                "frame_num": int(row.frame_num),
+                "source_id": int(row.source_id),
+                "left": float(row.left),
+                "top": float(row.top),
+                "width": float(row.width),
+                "height": float(row.height),
+                "confidence": float(row.confidence),
+                "tracker_confidence": float(row.tracker_confidence),
+            }
+            for row in payload[: min(count, max_rows)]
+        ]
 
     @staticmethod
     def _state_code(state: str) -> int:
@@ -432,8 +300,6 @@ class NativeMetaBridge:
         return 1
 
     def apply_global_track_style(self, gst_buffer, mappings: list[dict]) -> int:
-        if not mappings:
-            return 0
         rows = []
         for mapping in mappings:
             gid = int(mapping.get("global_id") or 0)
@@ -449,8 +315,7 @@ class NativeMetaBridge:
             )
         if not rows:
             return 0
-        array_type = _GlobalLabel * len(rows)
-        payload = array_type(*rows)
+        payload = (_GlobalLabel * len(rows))(*rows)
         return int(
             self.lib.camera_v2_apply_global_track_style(
                 ctypes.c_uint64(hash(gst_buffer)),
@@ -459,61 +324,65 @@ class NativeMetaBridge:
             )
         )
 
-    def configure_heatmap(
-        self,
-        *,
-        deposit: float = 0.008,
-        decay: float = 0.99990,
-        low_threshold: float = 0.015,
-        yellow_threshold: float = 0.28,
-        red_threshold: float = 0.62,
-        max_points_per_source: int = 24,
-    ) -> None:
-        self.lib.camera_v2_heatmap_configure(
-            ctypes.c_float(float(deposit)),
-            ctypes.c_float(float(decay)),
-            ctypes.c_float(float(low_threshold)),
-            ctypes.c_float(float(yellow_threshold)),
-            ctypes.c_float(float(red_threshold)),
-            ctypes.c_uint(int(max_points_per_source)),
-        )
-
-    def reset_heatmap(self) -> None:
-        self.lib.camera_v2_heatmap_reset()
-
-    def heatmap_update(self, gst_buffer) -> int:
-        return int(
-            self.lib.camera_v2_heatmap_update(ctypes.c_uint64(hash(gst_buffer)))
-        )
-
-    def heatmap_render(
+    def expand_display_boxes(
         self,
         gst_buffer,
         *,
-        wall_width: int,
-        wall_height: int,
-        rows: int = 2,
-        columns: int = 3,
-        source_count: int = 6,
+        side_margin: float = 0.08,
+        top_margin: float = 0.04,
+        bottom_margin: float = 0.10,
     ) -> int:
         return int(
-            self.lib.camera_v2_heatmap_render(
+            self.lib.camera_v2_expand_display_boxes(
                 ctypes.c_uint64(hash(gst_buffer)),
-                ctypes.c_uint(int(wall_width)),
-                ctypes.c_uint(int(wall_height)),
-                ctypes.c_uint(int(rows)),
-                ctypes.c_uint(int(columns)),
-                ctypes.c_uint(int(source_count)),
+                ctypes.c_float(float(side_margin)),
+                ctypes.c_float(float(top_margin)),
+                ctypes.c_float(float(bottom_margin)),
             )
         )
 
-    def heatmap_rendered_points_total(self) -> int:
-        return int(self.lib.camera_v2_heatmap_rendered_points_total())
+    def add_wall_rects(self, gst_buffer, boxes) -> int:
+        payload, pointer = self._payload(boxes)
+        _ = payload
+        if pointer is None:
+            return 0
+        return int(
+            self.lib.camera_v2_add_wall_rects(
+                ctypes.c_uint64(hash(gst_buffer)),
+                pointer,
+                ctypes.c_int(len(boxes)),
+            )
+        )
 
-    def shadow_promoted_total(self) -> int:
-        return int(self.lib.camera_v2_shadow_promoted_total())
+    def add_wall_tracks(self, gst_buffer, tracks) -> int:
+        if not tracks:
+            return 0
+        flat: list[float] = []
+        for track_id, x1, y1, x2, y2, conf in tracks:
+            flat.extend(
+                (
+                    float(track_id),
+                    float(x1),
+                    float(y1),
+                    float(x2),
+                    float(y2),
+                    float(conf),
+                )
+            )
+        payload = (ctypes.c_float * len(flat))(*flat)
+        pointer = ctypes.cast(payload, ctypes.POINTER(ctypes.c_float))
+        return int(
+            self.lib.camera_v2_add_wall_tracks(
+                ctypes.c_uint64(hash(gst_buffer)),
+                pointer,
+                ctypes.c_int(len(tracks)),
+            )
+        )
 
     def count_tracked(self, gst_buffer) -> int:
         return int(
             self.lib.camera_v2_count_tracked(ctypes.c_uint64(hash(gst_buffer)))
         )
+
+    def shadow_promoted_total(self) -> int:
+        return int(self.lib.camera_v2_shadow_promoted_total())
