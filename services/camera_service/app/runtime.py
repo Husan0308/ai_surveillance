@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import signal
 import sys
 import time
@@ -21,13 +22,17 @@ class CameraStats:
 
 
 class CameraServiceRuntime:
-    """AI-free six-camera data-plane baseline.
+    """AI-free six-camera data plane.
 
-    RTSP/NVDEC -> latest-only queue -> nvstreammux -> tiler -> EGL.
+    Production/headless mode:
+        RTSP/NVDEC -> latest-only queue -> fakesink
 
-    This service deliberately imports no detector, TensorRT, tracker, ReID,
-    identity or API/frontend code. ML failure must therefore be unable to stall
-    the camera decode/presentation graph.
+    Optional debug-wall mode:
+        RTSP/NVDEC -> latest-only queue -> nvstreammux -> tiler -> EGL
+
+    The production camera service must not spend GPU compute on presentation.
+    UI/video presentation is a separate service boundary. This process imports no
+    detector, TensorRT, tracker, ReID, identity, API or frontend code.
     """
 
     def __init__(self) -> None:
@@ -41,21 +46,32 @@ class CameraServiceRuntime:
         self.GLib = GLib
         self.settings = load_settings()
         self.cameras = list(self.settings.cameras)
+        self.headless = os.environ.get("CAMERA_SERVICE_HEADLESS", "0").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
         self.stats = {camera.camera_id: CameraStats() for camera in self.cameras}
         self.sources: dict[str, object] = {}
         self.queues: dict[str, object] = {}
+        self.headless_sinks: dict[str, object] = {}
         self.request_pads: list[tuple[object, object]] = []
         self.stopping = False
 
-        required = (
-            "nvurisrcbin",
-            "queue",
-            "nvstreammux",
-            "nvmultistreamtiler",
-            "nvvideoconvert",
-            "capsfilter",
-            "nveglglessink",
-        )
+        required = ["nvurisrcbin", "queue"]
+        if self.headless:
+            required.append("fakesink")
+        else:
+            required.extend(
+                [
+                    "nvstreammux",
+                    "nvmultistreamtiler",
+                    "nvvideoconvert",
+                    "capsfilter",
+                    "nveglglessink",
+                ]
+            )
         missing = [name for name in required if Gst.ElementFactory.find(name) is None]
         if missing:
             raise RuntimeError("camera_service missing plugins: " + ", ".join(missing))
@@ -64,21 +80,36 @@ class CameraServiceRuntime:
         if self.pipeline is None:
             raise RuntimeError("could not create camera-service pipeline")
 
-        self.mux = self._make("nvstreammux", "camera_service_mux")
-        self.tiler = self._make("nvmultistreamtiler", "camera_service_tiler")
-        self.wall_queue = self._make("queue", "camera_service_wall_queue")
-        self.convert = self._make("nvvideoconvert", "camera_service_convert")
-        self.caps = self._make("capsfilter", "camera_service_rgba")
-        self.sink = self._make("nveglglessink", "camera_service_sink")
+        self.mux = None
+        self.tiler = None
+        self.wall_queue = None
+        self.convert = None
+        self.caps = None
+        self.sink = None
 
-        self._configure_graph()
-        for element in (self.mux, self.tiler, self.wall_queue, self.convert, self.caps, self.sink):
-            self.pipeline.add(element)
-        self._link(self.mux, self.tiler, "mux->tiler")
-        self._link(self.tiler, self.wall_queue, "tiler->wall_queue")
-        self._link(self.wall_queue, self.convert, "wall_queue->convert")
-        self._link(self.convert, self.caps, "convert->rgba")
-        self._link(self.caps, self.sink, "rgba->egl")
+        if not self.headless:
+            self.mux = self._make("nvstreammux", "camera_service_mux")
+            self.tiler = self._make("nvmultistreamtiler", "camera_service_tiler")
+            self.wall_queue = self._make("queue", "camera_service_wall_queue")
+            self.convert = self._make("nvvideoconvert", "camera_service_convert")
+            self.caps = self._make("capsfilter", "camera_service_rgba")
+            self.sink = self._make("nveglglessink", "camera_service_sink")
+
+            self._configure_graph()
+            for element in (
+                self.mux,
+                self.tiler,
+                self.wall_queue,
+                self.convert,
+                self.caps,
+                self.sink,
+            ):
+                self.pipeline.add(element)
+            self._link(self.mux, self.tiler, "mux->tiler")
+            self._link(self.tiler, self.wall_queue, "tiler->wall_queue")
+            self._link(self.wall_queue, self.convert, "wall_queue->convert")
+            self._link(self.convert, self.caps, "convert->rgba")
+            self._link(self.caps, self.sink, "rgba->egl")
 
         for index, camera in enumerate(self.cameras):
             self._add_camera(index, camera)
@@ -88,13 +119,19 @@ class CameraServiceRuntime:
         self.bus.connect("message", self._on_bus_message)
         self.loop = GLib.MainLoop()
 
+        if self.headless:
+            path = "RTSP/NVDEC->latest->fakesink"
+            mode = "headless render=0 tiler=0 egl=0"
+        else:
+            path = "RTSP/NVDEC->latest->mux->tiler->EGL"
+            mode = (
+                f"debug-wall render=1 display={self.settings.display_width}x{self.settings.display_height} "
+                f"wall={self.settings.wall_width}x{self.settings.wall_height}"
+            )
         print(
             "CAMERA_SERVICE_ARCH "
             f"sources={len(self.cameras)} ai=0 tracker=0 detector=0 reid=0 "
-            f"source_target={self.settings.source_fps}fps "
-            f"display={self.settings.display_width}x{self.settings.display_height} "
-            f"wall={self.settings.wall_width}x{self.settings.wall_height} "
-            "path=RTSP/NVDEC->latest->mux->tiler->EGL",
+            f"source_target={self.settings.source_fps}fps mode={mode} path={path}",
             flush=True,
         )
 
@@ -123,7 +160,15 @@ class CameraServiceRuntime:
         self._set_if(queue, "leaky", 2)
         self._set_if(queue, "silent", True)
 
+    def _configure_fakesink(self, sink) -> None:
+        self._set_if(sink, "sync", False)
+        self._set_if(sink, "async", False)
+        self._set_if(sink, "qos", False)
+        self._set_if(sink, "enable-last-sample", False)
+
     def _configure_graph(self) -> None:
+        if self.headless:
+            return
         s = self.settings
         self._set_if(self.mux, "batch-size", len(self.cameras))
         self._set_if(self.mux, "live-source", True)
@@ -168,6 +213,8 @@ class CameraServiceRuntime:
         self._set_if(self.sink, "gpu-id", s.gpu_id)
 
     def _request_mux_pad(self, index: int):
+        if self.mux is None:
+            raise RuntimeError("mux pad requested in headless camera mode")
         name = f"sink_{index}"
         request_simple = getattr(self.mux, "request_pad_simple", None)
         pad = request_simple(name) if request_simple else None
@@ -216,9 +263,17 @@ class CameraServiceRuntime:
 
         self.pipeline.add(source)
         self.pipeline.add(queue)
-        mux_pad = self._request_mux_pad(index)
-        if queue.get_static_pad("src").link(mux_pad) != self.Gst.PadLinkReturn.OK:
-            raise RuntimeError(f"{camera.camera_id}: queue->mux failed")
+        if self.headless:
+            sink = self._make("fakesink", f"camera_service_fakesink_{index}")
+            self._configure_fakesink(sink)
+            self.pipeline.add(sink)
+            self._link(queue, sink, f"{camera.camera_id}:queue->fakesink")
+            self.headless_sinks[camera.camera_id] = sink
+        else:
+            mux_pad = self._request_mux_pad(index)
+            if queue.get_static_pad("src").link(mux_pad) != self.Gst.PadLinkReturn.OK:
+                raise RuntimeError(f"{camera.camera_id}: queue->mux failed")
+
         queue.get_static_pad("sink").add_probe(
             self.Gst.PadProbeType.BUFFER,
             self._source_probe,
