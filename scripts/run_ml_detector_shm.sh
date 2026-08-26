@@ -20,12 +20,26 @@ fail() { printf 'ML_DETECTOR_PREFLIGHT ERROR: %s\n' "$*" >&2; exit 1; }
 [[ -s "$ML_DETECTOR_TRT86_ENGINE" ]] || fail "TRT8.6 engine missing: $ML_DETECTOR_TRT86_ENGINE"
 [[ -f "$ML_DETECTOR_TRT86_WORKER" ]] || fail "TRT8.6 worker missing: $ML_DETECTOR_TRT86_WORKER"
 
-"$ML_DETECTOR_TRT86_PYTHON" - <<'PY'
+# Run the exact same venv path that the detector child will use. Do not replace
+# this path with readlink -f: venv/bin/python is commonly a symlink and the venv
+# identity is carried by invoking that symlink path, not the base interpreter.
+"$ML_DETECTOR_TRT86_PYTHON" -I - <<'PY'
+import sys
 import numpy as np
 import tensorrt as trt
 if not str(trt.__version__).startswith("8.6.1"):
     raise SystemExit(f"ML_DETECTOR_PREFLIGHT ERROR: TensorRT 8.6.1 required, got {trt.__version__}")
-print(f"ML_DETECTOR_TRT_ENV trt={trt.__version__} numpy={np.__version__}", flush=True)
+if sys.prefix == sys.base_prefix:
+    raise SystemExit(
+        "ML_DETECTOR_PREFLIGHT ERROR: TRT86 interpreter is not running inside a virtual environment: "
+        f"executable={sys.executable} prefix={sys.prefix} base_prefix={sys.base_prefix}"
+    )
+print(
+    "ML_DETECTOR_TRT_ENV "
+    f"python={sys.executable} prefix={sys.prefix} base_prefix={sys.base_prefix} "
+    f"trt={trt.__version__} numpy={np.__version__} numpy_file={np.__file__}",
+    flush=True,
+)
 PY
 
 MAIN_PYTHON="${ML_DETECTOR_MAIN_PYTHON:-$ROOT/.venv/bin/python}"
