@@ -1,0 +1,28 @@
+name: Step4 Visual Acceptance Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-visual-acceptance-v1-20260827
+  pull_request:
+
+jobs:
+  visual-viewer-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile visual viewer
+        run: |
+          python -m py_compile scripts/step4_visual_debug_viewer.py
+      - name: Guard visual-only boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'production_camera_service_modified=0' scripts/step4_visual_debug_viewer.py
+          grep -q 'ML_TRACK_FRAME ' scripts/step4_visual_debug_viewer.py
+          grep -q 'ML_TRACK_OBJECT ' scripts/step4_visual_debug_viewer.py
+          grep -q 'overlay=viewer-only' scripts/run_step4_visual_debug.sh
+          grep -q 'detector=unchanged tracker=unchanged camera_service=unchanged' scripts/run_step4_visual_debug.sh
