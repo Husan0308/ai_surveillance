@@ -92,7 +92,8 @@ def main() -> int:
     args = ap.parse_args()
 
     work = resolve(args.work_dir)
-    calib = resolve(args.calibration_dir)
+    calib_root = resolve(args.calibration_dir)
+    calib = calib_root / "CAM-COCO"
     quality = resolve(args.quality_dir)
     val_zip = work / "val2017.zip"
     ann_zip = work / "annotations_trainval2017.zip"
@@ -133,7 +134,7 @@ def main() -> int:
         raise SystemExit(f"V11_COCO_PREP FAIL quality_person_images={len(quality_ids)} expected>=100")
 
     if args.reset:
-        shutil.rmtree(calib, ignore_errors=True)
+        shutil.rmtree(calib_root, ignore_errors=True)
         shutil.rmtree(quality, ignore_errors=True)
     calib.mkdir(parents=True, exist_ok=True)
     quality.mkdir(parents=True, exist_ok=True)
@@ -141,7 +142,7 @@ def main() -> int:
     print(
         "V11_COCO_PREP_START "
         f"val_images={len(images)} calibration={len(calib_ids)} quality_person={len(quality_ids)} "
-        f"geometry={TARGET_W}x{TARGET_H} letterbox114=1 seed={args.seed}",
+        f"geometry={TARGET_W}x{TARGET_H} letterbox114=1 seed={args.seed} calibration_shard=CAM-COCO",
         flush=True,
     )
 
@@ -184,7 +185,7 @@ def main() -> int:
     print(
         "V11_COCO_PREP_RESULT "
         f"status=PASS calibration={len(calib_ids)} quality_images={len(quality_ids)} "
-        f"quality_person_instances={gt_instances} calibration_dir={calib} quality_dir={quality} manifest={manifest}",
+        f"quality_person_instances={gt_instances} calibration_dir={calib_root} quality_dir={quality} manifest={manifest}",
         flush=True,
     )
     return 0
