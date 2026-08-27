@@ -175,7 +175,7 @@ def main() -> int:
 
     if not onnx_path.is_file():
         raise SystemExit(f"V11_INT8_BUILD FAIL ONNX missing: {onnx_path}")
-    images = sorted(calib_dir.glob("CAM-*/*.ppm"))
+    images = sorted(calib_dir.rglob("*.ppm"))
     if len(images) < 500:
         raise SystemExit(f"V11_INT8_BUILD FAIL calibration_images={len(images)} expected>=500")
 
