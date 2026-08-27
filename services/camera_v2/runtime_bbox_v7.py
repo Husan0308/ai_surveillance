@@ -4,59 +4,10 @@ import math
 import os
 import sys
 import time
-from dataclasses import dataclass
 
+from .bbox_policy_v7 import DisplaySizeState, expand_box, stable_size
 from .runtime import CleanCameraRuntime, DETECT_W
 from .runtime_lane import SerializedGpuLaneRuntime
-
-
-@dataclass
-class _DisplaySizeState:
-    width: float
-    height: float
-    width_expanded_at: float
-    height_expanded_at: float
-    seen_at: float
-
-
-def _stable_size(
-    previous: float,
-    current: float,
-    last_expand_at: float,
-    now: float,
-    *,
-    hold_sec: float,
-    shrink_alpha: float,
-) -> tuple[float, float]:
-    """Open immediately around a larger NvDCF box; close slowly after a short hold."""
-    previous = max(1.0, float(previous))
-    current = max(1.0, float(current))
-    if current >= previous:
-        return current, float(now)
-    if float(now) - float(last_expand_at) <= float(hold_sec):
-        return previous, float(last_expand_at)
-    value = previous + float(shrink_alpha) * (current - previous)
-    return max(current, value), float(last_expand_at)
-
-
-def _expand_box(
-    box: tuple[float, float, float, float],
-    frame_width: float,
-    frame_height: float,
-    *,
-    side_margin: float,
-    top_margin: float,
-    bottom_margin: float,
-) -> tuple[float, float, float, float]:
-    x1, y1, x2, y2 = (float(v) for v in box)
-    width = max(2.0, x2 - x1)
-    height = max(2.0, y2 - y1)
-    return (
-        max(0.0, x1 - width * side_margin),
-        max(0.0, y1 - height * top_margin),
-        min(float(frame_width - 1), x2 + width * side_margin),
-        min(float(frame_height - 1), y2 + height * bottom_margin),
-    )
 
 
 class NvDCFStickyBBoxRuntime(SerializedGpuLaneRuntime):
@@ -97,7 +48,7 @@ class NvDCFStickyBBoxRuntime(SerializedGpuLaneRuntime):
         self.jump_diag_limit = float(
             os.environ.get("CAMERA_V2_TRACK_JUMP_DIAG_LIMIT", "1.00")
         )
-        self._display_sizes: dict[tuple[int, int], _DisplaySizeState] = {}
+        self._display_sizes: dict[tuple[int, int], DisplaySizeState] = {}
         self._last_raw_boxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self.v7_low_conf_filtered = 0
         self.v7_duplicates_suppressed = 0
@@ -215,7 +166,7 @@ class NvDCFStickyBBoxRuntime(SerializedGpuLaneRuntime):
             width_expanded_at = now
             height_expanded_at = now
         else:
-            stable_w, width_expanded_at = _stable_size(
+            stable_w, width_expanded_at = stable_size(
                 previous.width,
                 width,
                 previous.width_expanded_at,
@@ -223,7 +174,7 @@ class NvDCFStickyBBoxRuntime(SerializedGpuLaneRuntime):
                 hold_sec=self.display_size_hold_sec,
                 shrink_alpha=self.display_shrink_alpha,
             )
-            stable_h, height_expanded_at = _stable_size(
+            stable_h, height_expanded_at = stable_size(
                 previous.height,
                 height,
                 previous.height_expanded_at,
@@ -231,7 +182,7 @@ class NvDCFStickyBBoxRuntime(SerializedGpuLaneRuntime):
                 hold_sec=self.display_size_hold_sec,
                 shrink_alpha=self.display_shrink_alpha,
             )
-        self._display_sizes[key] = _DisplaySizeState(
+        self._display_sizes[key] = DisplaySizeState(
             stable_w,
             stable_h,
             width_expanded_at,
@@ -244,7 +195,7 @@ class NvDCFStickyBBoxRuntime(SerializedGpuLaneRuntime):
             cx + 0.5 * stable_w,
             cy + 0.5 * stable_h,
         )
-        return _expand_box(
+        return expand_box(
             base,
             self.display_width,
             self.display_height,
