@@ -1,0 +1,48 @@
+name: camera-v11-step2-detector-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-detector-only-20260827
+    paths:
+      - 'services/camera_v11/batch6_trt86.py'
+      - 'services/camera_v11/step2_detector_only.py'
+      - 'scripts/run_camera_v11_step2_detector_only.sh'
+      - 'scripts/check_camera_v11_step2_detector_log.py'
+      - '.github/workflows/camera-v11-step2-detector-static.yml'
+  pull_request:
+    paths:
+      - 'services/camera_v11/batch6_trt86.py'
+      - 'services/camera_v11/step2_detector_only.py'
+      - 'scripts/run_camera_v11_step2_detector_only.sh'
+      - 'scripts/check_camera_v11_step2_detector_log.py'
+      - '.github/workflows/camera-v11-step2-detector-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v11/batch6_trt86.py \
+            services/camera_v11/step2_detector_only.py \
+            scripts/check_camera_v11_step2_detector_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step2_detector_only.sh
+      - name: Architecture invariants
+        run: |
+          grep -F 'V11Step1Cam02LowLatV7' services/camera_v11/step2_detector_only.py
+          grep -F 'detector_prefetch_batches=1' services/camera_v11/step2_detector_only.py
+          grep -F 'check_camera_v11_step1_v7_log.py' scripts/check_camera_v11_step2_detector_log.py
+          grep -F 'V11_RTSP_LATENCY_MS=100' scripts/run_camera_v11_step2_detector_only.sh
+          grep -F 'V11_LOWLAT_CAMERAS=CAM-02' scripts/run_camera_v11_step2_detector_only.sh
+          if grep -E '_make\("(nvtracker|nvdsosd|nvstreammux|nvmultistreamtiler|nvinfer)"' services/camera_v11/step2_detector_only.py; then
+            echo 'forbidden Step2 analytics element found' >&2
+            exit 1
+          fi
+          if grep -F 'grep -q' scripts/run_camera_v11_step2_detector_only.sh; then
+            echo 'pipefail-unsafe grep -q found in runner' >&2
+            exit 1
+          fi
