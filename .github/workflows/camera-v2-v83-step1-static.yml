@@ -23,7 +23,11 @@ jobs:
             scripts/check_trt86_batch6_cleanroom_v83.py
 
       - name: Shell syntax
-        run: bash -n scripts/run_camera_v2_v83_step1_detector.sh
+        run: |
+          bash -n scripts/run_camera_v2_v83_step1_detector.sh
+          bash -n scripts/cleanup_camera_v2_gpu_workers.sh
+          bash -n scripts/check_pascal_clock_policy_v84.sh
+          bash -n scripts/compare_trt86_batch1_batch6_v84.sh
 
       - name: Guard exact V8 A-B baseline
         shell: bash
@@ -54,6 +58,16 @@ jobs:
           grep -q 'engine-fast-without-deepstream' scripts/check_trt86_batch6_cleanroom_v83.py
           grep -q 'engine-or-gpu-slow-even-without-deepstream' scripts/check_trt86_batch6_cleanroom_v83.py
           grep -q 'sha256=' scripts/check_trt86_batch6_cleanroom_v83.py
+
+      - name: Guard Pascal diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'memory-clock lock capability' scripts/check_pascal_clock_policy_v84.sh
+          grep -q 'GPUPowerMizerMode' scripts/check_pascal_clock_policy_v84.sh
+          grep -q 'V84_BATCH_COMPARE start=batch1' scripts/compare_trt86_batch1_batch6_v84.sh
+          grep -q 'V84_BATCH_COMPARE start=batch6' scripts/compare_trt86_batch1_batch6_v84.sh
+          grep -q 'clocks.mem' scripts/compare_trt86_batch1_batch6_v84.sh
 
       - name: Guard causal acceptance
         shell: bash
