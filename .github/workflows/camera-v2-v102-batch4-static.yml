@@ -1,0 +1,34 @@
+name: Camera V2 V10.2 Tracker Batch4 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v100-tracker-timeout40-20260827
+    paths:
+      - services/camera_v2/runtime_v102_tracker_batch4.py
+      - scripts/run_camera_v2_bbox_v102.sh
+      - scripts/check_camera_v2_bbox_v102_log.py
+      - .github/workflows/camera-v2-v102-batch4-static.yml
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Compile Python
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v102_tracker_batch4.py \
+            scripts/check_camera_v2_bbox_v102_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v102.sh
+      - name: Guard single runtime change
+        run: |
+          grep -q 'batch-size", self.TARGET_BATCH' services/camera_v2/runtime_v102_tracker_batch4.py
+          grep -q 'TARGET_BATCH = 4' services/camera_v2/runtime_v102_tracker_batch4.py
+          grep -q 'batched-push-timeout=40000' scripts/run_camera_v2_bbox_v102.sh
+          grep -q 'only_change=tracker-mux-batch-size-6-to-4' services/camera_v2/runtime_v102_tracker_batch4.py
