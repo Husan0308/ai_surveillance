@@ -12,7 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Shell syntax
-        run: bash -n scripts/probe_v90_py310_sameprocess.sh
+        run: |
+          bash -n scripts/probe_v90_py310_sameprocess.sh
+          bash -n scripts/setup_v90_py310_gi.sh
       - name: Guard Python 3.10 ownership
         run: |
           grep -q '.venv-trt86/bin/python' scripts/probe_v90_py310_sameprocess.sh
@@ -20,3 +22,10 @@ jobs:
           grep -q "import tensorrt as trt" scripts/probe_v90_py310_sameprocess.sh
           grep -q "Gst.ElementFactory.make('nvtracker'" scripts/probe_v90_py310_sameprocess.sh
           grep -q 'multiple_major_versions' scripts/probe_v90_py310_sameprocess.sh
+      - name: Guard GI setup
+        run: |
+          grep -q 'libgirepository-2.0-dev' scripts/setup_v90_py310_gi.sh
+          grep -q 'libgirepository1.0-dev' scripts/setup_v90_py310_gi.sh
+          grep -q 'PyGObject==3.48.2' scripts/setup_v90_py310_gi.sh
+          grep -q 'Python.h' scripts/setup_v90_py310_gi.sh
+          grep -q 'python3-dev' scripts/setup_v90_py310_gi.sh
