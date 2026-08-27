@@ -13,6 +13,10 @@ LATENCY_MS="${ML_TRACK_VISUAL_LATENCY_MS:-120}"
 
 [[ -x "$PYTHON" ]] || { echo "STEP4_V6_VISUAL_PREFLIGHT ERROR: python missing: $PYTHON" >&2; exit 1; }
 
+# Make repository packages importable even when a viewer is executed by file path.
+# Keep any caller-provided PYTHONPATH entries after the project root.
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
 "$PYTHON" - <<'PY'
 import gi
 gi.require_version("Gst", "1.0")
@@ -22,7 +26,10 @@ Gst.init(None)
 missing = [name for name in ("nvurisrcbin", "queue", "nvvideoconvert", "capsfilter", "appsink") if Gst.ElementFactory.find(name) is None]
 if missing:
     raise SystemExit("STEP4_V6_VISUAL_PREFLIGHT ERROR: missing plugins: " + ",".join(missing))
-print("STEP4_V6_VISUAL_PREFLIGHT status=OK pyside6=1 gstreamer=1 deepstream=1", flush=True)
+# Import the actual viewer entry point during preflight so package/bootstrap errors are
+# caught before we print a successful runtime profile.
+from scripts.step4_visual_active_viewer_v6 import ActiveOnlyTracks  # noqa: F401
+print("STEP4_V6_VISUAL_PREFLIGHT status=OK pyside6=1 gstreamer=1 deepstream=1 viewer_import=1", flush=True)
 PY
 
 printf '%s\n' \
@@ -39,7 +46,7 @@ COMMON=(
 )
 
 if [[ "$SHOW_SHADOW" == "1" ]]; then
-  exec "$PYTHON" scripts/step4_visual_debug_viewer_v6.py "${COMMON[@]}"
+  exec "$PYTHON" -m scripts.step4_visual_debug_viewer_v6 "${COMMON[@]}"
 fi
 
-exec "$PYTHON" scripts/step4_visual_active_viewer_v6.py "${COMMON[@]}"
+exec "$PYTHON" -m scripts.step4_visual_active_viewer_v6 "${COMMON[@]}"
