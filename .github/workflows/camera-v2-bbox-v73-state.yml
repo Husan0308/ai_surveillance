@@ -1,0 +1,34 @@
+name: Camera V2 BBox V7.3 State Guards
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v7-3-single-owner-20260827
+  pull_request:
+
+jobs:
+  state-guards:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile isolation probe
+        run: python -m py_compile scripts/check_trt86_isolation_v73.py
+
+      - name: Shell syntax
+        run: |
+          bash -n scripts/camera_v2_gpu_audit.sh
+          bash -n scripts/cleanup_camera_v2_gpu_workers.sh
+          bash -n scripts/run_camera_v2_bbox_v73.sh
+
+      - name: Guard single-owner policy
+        run: |
+          grep -q 'flock -n 9' scripts/run_camera_v2_bbox_v73.sh
+          grep -q 'stale_repo_gpu=0' scripts/run_camera_v2_bbox_v73.sh
+          grep -q 'cleanup_camera_v2_gpu_workers.sh' scripts/run_camera_v2_bbox_v73.sh
+          grep -q 'algorithm=v7.2-unchanged' scripts/run_camera_v2_bbox_v73.sh
+          grep -q 'TRT86_ISO' scripts/check_trt86_isolation_v73.py
+          grep -q 'Only touch this repo' scripts/cleanup_camera_v2_gpu_workers.sh
