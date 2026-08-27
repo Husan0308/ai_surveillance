@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 
 from services.ml_service.app.detector_substream_tracking import DetectorSubstreamTrackingService
 from services.ml_service.app.local_tracker_sparse_v2 import MultiCameraSparseRecoveryTracker
@@ -60,6 +61,12 @@ class DetectorSubstreamTrackingV2Service(DetectorSubstreamTrackingService):
 
 def main() -> int:
     service = DetectorSubstreamTrackingV2Service()
+
+    def stop(_signum, _frame) -> None:
+        service.stop_requested = True
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
     try:
         return service.run()
     finally:
