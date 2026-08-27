@@ -73,13 +73,16 @@ GPU_LINE="$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev
 [[ -n "$GPU_LINE" ]] || GPU_LINE="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || true)"
 echo "CAMERA_V8_GPU ${GPU_LINE:-unknown}"
 
-# A batch-6 engine cannot be derived from the old fixed-batch-1 plan. Prepare it from
-# a batch-capable ONNX or the original yolo26s.pt when needed.
+[[ -x "$CAMERA_V8_TRT86_PYTHON" ]] || fail "TRT8.6 python missing: $CAMERA_V8_TRT86_PYTHON"
+
+# Engine building is an offline operation. Never hide a multi-minute TensorRT tactic
+# search inside production camera startup: that looked like a frozen runtime and made
+# recovery ambiguous. Build once with prepare_yolo26_batch6_v8.sh, then startup is fast.
 if [[ "$CAMERA_V2_DETECT_ENABLED" == "1" ]]; then
-  bash "$ROOT/scripts/prepare_yolo26_batch6_v8.sh"
+  [[ -s "$CAMERA_V8_TRT86_ENGINE" ]] || fail "batch-6 engine missing: $CAMERA_V8_TRT86_ENGINE ; run: bash scripts/prepare_yolo26_batch6_v8.sh"
+  CAMERA_V8_TRT86_ENGINE="$CAMERA_V8_TRT86_ENGINE" bash "$ROOT/scripts/prepare_yolo26_batch6_v8.sh"
 fi
 
-[[ -x "$CAMERA_V8_TRT86_PYTHON" ]] || fail "TRT8.6 python missing: $CAMERA_V8_TRT86_PYTHON"
 "$CAMERA_V8_TRT86_PYTHON" - <<'PY'
 import tensorrt as trt
 if not str(trt.__version__).startswith("8.6.1"):
@@ -104,7 +107,7 @@ done
 
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 printf '%s\n' \
-  "CAMERA_V8_PREFLIGHT status=OK python=$MAIN_PYTHON single_owner=1" \
+  "CAMERA_V8_PREFLIGHT status=OK python=$MAIN_PYTHON single_owner=1 engine_prebuilt=1" \
   "CAMERA_V8_PROFILE source=${CAMERA_V2_SOURCE_FPS}fps rtsp_latency=${CAMERA_V2_RTSP_LATENCY_MS}ms display=${CAMERA_V2_DISPLAY_WIDTH}x${CAMERA_V2_DISPLAY_HEIGHT} tracker=${CAMERA_V2_TRACK_WIDTH}x${CAMERA_V2_TRACK_HEIGHT}@${CAMERA_V2_TRACK_FPS}Hz detector=batch6@${CAMERA_V8_DETECT_INITIAL_HZ}Hz adaptive=${CAMERA_V8_DETECT_MIN_HZ}-${CAMERA_V8_DETECT_MAX_HZ}Hz budget=${CAMERA_V8_DETECT_GPU_BUDGET}" \
   "CAMERA_V8_POLICY pascal_trt86=1 native_nvinfer=0 gpu_lane=0 tracker_drop_for_detector=0 latest_only_queues=1 predictor=0 bbox_hold=${CAMERA_V2_DISPLAY_EMPTY_HOLD_MS}ms" \
   "CAMERA_V8_PIPELINE decode-once->tee->{display-independent,tracker/NvDCF,detector-coalesced-batch6}"
