@@ -17,10 +17,11 @@ for plugin in nvurisrcbin nvv4l2decoder queue nvvideoconvert capsfilter nveglgle
   gst-inspect-1.0 "$plugin" >/dev/null 2>&1 || fail "missing plugin: $plugin"
 done
 
-# On this DeepStream 7.1 build nvurisrcbin does not expose low-latency-mode,
-# but its internal nvv4l2decoder does. Validate the actual decoder property.
-gst-inspect-1.0 nvv4l2decoder 2>/dev/null | grep -q 'low-latency-mode' || \
+# Do not use grep -q here with pipefail: grep may exit at the first match and
+# SIGPIPE gst-inspect, which makes a successful property check look like failure.
+if ! gst-inspect-1.0 nvv4l2decoder 2>/dev/null | grep 'low-latency-mode' >/dev/null; then
   fail "nvv4l2decoder low-latency-mode property missing"
+fi
 
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
