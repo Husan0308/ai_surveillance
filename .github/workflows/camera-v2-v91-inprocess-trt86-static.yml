@@ -1,0 +1,39 @@
+name: Camera V2 V9.1 InProcess TRT86 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v91-inprocess-trt86-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile services/camera_v2/runtime_v91_inprocess_trt86.py
+          python -m py_compile scripts/check_camera_v2_bbox_v91_log.py
+      - name: Shell syntax
+        run: |
+          bash -n scripts/run_camera_v2_bbox_v91.sh
+          bash -n scripts/setup_v91_py310_runtime_deps.sh
+      - name: Guard same-process architecture
+        run: |
+          grep -q 'multiprocessing=0 shm=0 subprocess=0' services/camera_v2/runtime_v91_inprocess_trt86.py
+          grep -q 'cuDevicePrimaryCtxRetain' services/camera_v2/runtime_v91_inprocess_trt86.py
+          grep -q 'cuCtxSetCurrent(primary)' services/camera_v2/runtime_v91_inprocess_trt86.py
+          grep -q 'from scripts.yolo26_trt86_shm_worker_v4 import Runner' services/camera_v2/runtime_v91_inprocess_trt86.py
+          grep -q 'self.v91_ready.wait' services/camera_v2/runtime_v91_inprocess_trt86.py
+          ! grep -q 'get_context("spawn")' services/camera_v2/runtime_v91_inprocess_trt86.py
+          ! grep -q 'shared_memory' services/camera_v2/runtime_v91_inprocess_trt86.py
+          ! grep -q 'subprocess' services/camera_v2/runtime_v91_inprocess_trt86.py
+      - name: Guard production baseline
+        run: |
+          grep -q 'CAMERA_V2_TRACK_WIDTH.*512' scripts/run_camera_v2_bbox_v91.sh
+          grep -q 'CAMERA_V2_TRACK_HEIGHT.*288' scripts/run_camera_v2_bbox_v91.sh
+          grep -q 'CAMERA_V2_TRACK_FPS.*8' scripts/run_camera_v2_bbox_v91.sh
+          grep -q 'CAMERA_V85_NVDCF_FEATURE_LEVEL.*1' scripts/run_camera_v2_bbox_v91.sh
+          grep -q '.venv-trt86/bin/python' scripts/run_camera_v2_bbox_v91.sh
+          grep -q 'tensorrt.*8.6.1' scripts/run_camera_v2_bbox_v91.sh
