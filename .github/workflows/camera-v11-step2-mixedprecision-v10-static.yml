@@ -6,10 +6,12 @@ on:
       - rebuild/service-architecture-v11-clean-step2-mixedprecision-v10-20260828
     paths:
       - 'scripts/inspect_yolo26s_trt86_layers.py'
+      - 'scripts/build_yolo26s_b1_mixed_trt86.py'
       - '.github/workflows/camera-v11-step2-mixedprecision-v10-static.yml'
   pull_request:
     paths:
       - 'scripts/inspect_yolo26s_trt86_layers.py'
+      - 'scripts/build_yolo26s_b1_mixed_trt86.py'
 
 jobs:
   static:
@@ -17,9 +19,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Python syntax
-        run: python -m py_compile scripts/inspect_yolo26s_trt86_layers.py
-      - name: Mixed precision inspector invariants
+        run: |
+          python -m py_compile \
+            scripts/inspect_yolo26s_trt86_layers.py \
+            scripts/build_yolo26s_b1_mixed_trt86.py
+      - name: Mixed precision invariants
         run: |
           grep -F 'V11_LAYER_INSPECT_RESULT status=PASS' scripts/inspect_yolo26s_trt86_layers.py >/dev/null
-          grep -F 'trt.LayerType.TOPK' scripts/inspect_yolo26s_trt86_layers.py >/dev/null
-          grep -F 'trt.LayerType.GATHER' scripts/inspect_yolo26s_trt86_layers.py >/dev/null
+          grep -F 'HEAD_START_DEFAULT = 308' scripts/build_yolo26s_b1_mixed_trt86.py >/dev/null
+          grep -F 'BuilderFlag.INT8' scripts/build_yolo26s_b1_mixed_trt86.py >/dev/null
+          grep -F 'BuilderFlag.OBEY_PRECISION_CONSTRAINTS' scripts/build_yolo26s_b1_mixed_trt86.py >/dev/null
+          grep -F 'layer.precision = trt.float32' scripts/build_yolo26s_b1_mixed_trt86.py >/dev/null
+          grep -F 'layer.set_output_type(out_idx, trt.float32)' scripts/build_yolo26s_b1_mixed_trt86.py >/dev/null
+          grep -F 'V11_MIXED_BUILD_RESULT' scripts/build_yolo26s_b1_mixed_trt86.py >/dev/null
