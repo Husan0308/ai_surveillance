@@ -21,6 +21,7 @@ jobs:
       - name: Compile V7
         run: |
           python -m py_compile \
+            services/camera_v2/bbox_policy_v7.py \
             services/camera_v2/runtime_bbox_v7.py \
             scripts/test_camera_v2_bbox_v7.py \
             scripts/check_camera_v2_bbox_v7_log.py
@@ -49,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           grep -q 'DISPLAY_SIZE_HOLD_SEC' scripts/run_camera_v2_bbox_v7.sh
-          grep -q '_stable_size' services/camera_v2/runtime_bbox_v7.py
-          grep -q '_expand_box' services/camera_v2/runtime_bbox_v7.py
+          grep -q 'def stable_size' services/camera_v2/bbox_policy_v7.py
+          grep -q 'def expand_box' services/camera_v2/bbox_policy_v7.py
           grep -q 'current_nvdcf_only=1' services/camera_v2/runtime_bbox_v7.py
           grep -q 'shadow_render=0' services/camera_v2/runtime_bbox_v7.py
