@@ -1,0 +1,26 @@
+name: Camera V2 V10.0 Tracker Timeout Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v100-tracker-timeout40-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Compile V10.0 files
+        run: |
+          python -m py_compile services/camera_v2/runtime_v100_tracker_timeout40.py
+          python -m py_compile scripts/check_camera_v2_bbox_v100_log.py
+          bash -n scripts/run_camera_v2_bbox_v100.sh
+      - name: Guard one-variable fix
+        run: |
+          grep -q 'batched-push-timeout", 40_000' services/camera_v2/runtime_v100_tracker_timeout40.py
+          grep -q 'runtime_v99_tracker_latency_audit' services/camera_v2/runtime_v100_tracker_timeout40.py
+          grep -q 'only_change=tracker-mux-batched-push-timeout' services/camera_v2/runtime_v100_tracker_timeout40.py
