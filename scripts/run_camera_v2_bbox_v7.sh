@@ -33,14 +33,20 @@ export CAMERA_V2_DISPLAY_SIZE_HOLD_SEC="${CAMERA_V2_DISPLAY_SIZE_HOLD_SEC:-0.22}
 export CAMERA_V2_DISPLAY_SHRINK_ALPHA="${CAMERA_V2_DISPLAY_SHRINK_ALPHA:-0.42}"
 export CAMERA_V2_TRACK_JUMP_DIAG_LIMIT="${CAMERA_V2_TRACK_JUMP_DIAG_LIMIT:-1.00}"
 
-# 1.5 Hz/camera is deliberate for the GTX 1050 Ti: NvDCF owns skipped-frame motion.
-# Raise to 2.0 only after the V7 acceptance log proves tracker_rate/display FPS remain healthy.
-export CAMERA_V2_DETECT_HZ="${CAMERA_V2_DETECT_HZ:-1.50}"
-export CAMERA_V2_DETECT_CONF="${CAMERA_V2_DETECT_CONF:-0.08}"
+# Spend the Pascal GPU budget on visual tracking first. Recent live TRT logs were around
+# 80 ms/inference; 1.25 Hz x 6 cameras leaves materially more serialized GPU-lane time
+# for 20 Hz NvDCF than 1.5-2.0 Hz, while correction still arrives about every 0.8 s/cam.
+export CAMERA_V2_DETECT_HZ="${CAMERA_V2_DETECT_HZ:-1.25}"
+export CAMERA_V2_DETECT_CONF="${CAMERA_V2_DETECT_CONF:-0.18}"
 export CAMERA_V2_MAX_DET="${CAMERA_V2_MAX_DET:-20}"
 export CAMERA_V2_MAX_DETECT_RESULT_AGE_MS="${CAMERA_V2_MAX_DETECT_RESULT_AGE_MS:-260}"
 export CAMERA_V2_DETECT_ENABLED="${CAMERA_V2_DETECT_ENABLED:-1}"
 export CAMERA_V2_ANALYTICS_ENABLED="${CAMERA_V2_ANALYTICS_ENABLED:-1}"
+
+# Current DeepStream semantics: lower minIouDiff4NewTarget suppresses duplicate new
+# targets. Keep weak detector noise from minting NvDCF objects in the first place.
+export CAMERA_V2_NVDCF_MIN_DETECTOR_CONF="${CAMERA_V2_NVDCF_MIN_DETECTOR_CONF:-0.18}"
+export CAMERA_V2_NVDCF_MIN_IOU_DIFF_NEW_TARGET="${CAMERA_V2_NVDCF_MIN_IOU_DIFF_NEW_TARGET:-0.22}"
 
 export CAMERA_V2_STARTUP_STAGGER_SEC="${CAMERA_V2_STARTUP_STAGGER_SEC:-0.50}"
 export CAMERA_V2_SOURCE_STALL_SEC="${CAMERA_V2_SOURCE_STALL_SEC:-12}"
@@ -91,7 +97,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 Gst.init(None)
 import numpy, yaml, dotenv  # noqa: F401
-from services.camera_v2.runtime_bbox_v7 import NvDCFStickyBBoxRuntime  # noqa: F401
+from services.camera_v2.runtime_bbox_v7_prod import NvDCFProductionBBoxRuntime  # noqa: F401
 PY
   then MAIN_PYTHON="$candidate"; break; fi
 done
@@ -101,13 +107,13 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 printf '%s\n' \
   "CAMERA_BBOX_V7_PREFLIGHT status=OK python=$MAIN_PYTHON" \
   "CAMERA_BBOX_V7_PROFILE source=${CAMERA_V2_SOURCE_FPS}fps display=${CAMERA_V2_DISPLAY_WIDTH}x${CAMERA_V2_DISPLAY_HEIGHT} tracker=${CAMERA_V2_TRACK_WIDTH}x${CAMERA_V2_TRACK_HEIGHT}@${CAMERA_V2_TRACK_FPS}Hz detector=672x384@${CAMERA_V2_DETECT_HZ}Hz/cam conf=${CAMERA_V2_DETECT_CONF}" \
-  "CAMERA_BBOX_V7_POLICY nvdcf_current_frame=1 cpu_velocity_predictor=0 shadow_render=0 min_conf=${CAMERA_V2_MIN_DISPLAY_TRACK_CONF} margin=${CAMERA_V2_DISPLAY_BOX_SIDE_MARGIN}/${CAMERA_V2_DISPLAY_BOX_TOP_MARGIN}/${CAMERA_V2_DISPLAY_BOX_BOTTOM_MARGIN} fast_open=1 shrink_hold=${CAMERA_V2_DISPLAY_SIZE_HOLD_SEC}s" \
+  "CAMERA_BBOX_V7_POLICY nvdcf_current_frame=1 cpu_velocity_predictor=0 shadow_render=0 min_conf=${CAMERA_V2_MIN_DISPLAY_TRACK_CONF} new_target_iou=${CAMERA_V2_NVDCF_MIN_IOU_DIFF_NEW_TARGET} margin=${CAMERA_V2_DISPLAY_BOX_SIDE_MARGIN}/${CAMERA_V2_DISPLAY_BOX_TOP_MARGIN}/${CAMERA_V2_DISPLAY_BOX_BOTTOM_MARGIN} fast_open=1 shrink_hold=${CAMERA_V2_DISPLAY_SIZE_HOLD_SEC}s" \
   "CAMERA_BBOX_V7_PIPELINE decode-once->tee->{display,tracker/NvDCF,detector/TRT86} display_never_waits_for_analytics=1 gpu_lane=serialized"
 
 restart_count=0
 while true; do
   set +e
-  "$MAIN_PYTHON" -u -m services.camera_v2.runtime_bbox_v7
+  "$MAIN_PYTHON" -u -m services.camera_v2.runtime_bbox_v7_prod
   rc=$?
   set -e
   [[ $rc -eq 75 ]] || exit "$rc"
