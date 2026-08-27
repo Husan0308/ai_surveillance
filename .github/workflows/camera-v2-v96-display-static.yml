@@ -1,0 +1,26 @@
+name: Camera V2 V9.6 Display Freshness Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v96-display-freshness-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v96_display_freshness.py \
+            scripts/check_camera_v2_bbox_v96_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v96.sh
+      - name: Guard one-behavior topology
+        run: |
+          grep -q 'display_mux, self.wall_queue' services/camera_v2/runtime_v96_display_freshness.py
+          grep -q 'self.wall_queue, self.tiler' services/camera_v2/runtime_v96_display_freshness.py
+          grep -q 'only_change=display-queue-position' services/camera_v2/runtime_v96_display_freshness.py
+          grep -q 'pts_audit=v95' scripts/run_camera_v2_bbox_v96.sh
