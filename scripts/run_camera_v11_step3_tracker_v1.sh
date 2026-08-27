@@ -12,6 +12,14 @@ exec 8>"$LOCK_FILE"; flock -n 8 || fail "another Step3 launcher holds $LOCK_FILE
 [[ -n "${DISPLAY:-}" ]] || fail "DISPLAY is empty"
 [[ -s "$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b1-fp32-trt86.engine" ]] || fail "FP32 engine missing"
 
+# A stale camera runtime or TensorRT builder can consume extra RTSP/NVDEC/GPU
+# resources and make an otherwise-good Step1/Step2 baseline look regressed.
+# Fail closed and show the operator exactly what is still alive; never kill
+# unrelated processes automatically from a production acceptance launcher.
+CONFLICT_PATTERN='services\.camera_v11\.(step1_cam02_lowlat_v7|step2_production_fp32(_v[0-9]+)?|step3_tracking_v1)|yolo26_trt86_step2_worker\.py|build_yolo26s_b1_.*trt86\.py'
+conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
+[[ -z "$conflicts" ]] || fail $'conflicting camera/TRT process already running:\n'"$conflicts"
+
 git cat-file -e "${FROZEN_STEP2_SHA}^{commit}" 2>/dev/null || \
   fail "frozen Step2 commit $FROZEN_STEP2_SHA is missing locally"
 git merge-base --is-ancestor "$FROZEN_STEP2_SHA" HEAD || \
