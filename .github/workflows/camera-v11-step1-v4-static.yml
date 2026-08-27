@@ -1,0 +1,33 @@
+name: camera-v11-step1-v4-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step1-independent-egl-v4-20260827
+  pull_request:
+    paths:
+      - 'services/camera_v11/step1_independent_egl_v4.py'
+      - 'scripts/run_camera_v11_step1_v4.sh'
+      - 'scripts/check_camera_v11_step1_v4_log.py'
+      - '.github/workflows/camera-v11-step1-v4-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile services/camera_v11/step1_independent_egl_v4.py
+          python -m py_compile scripts/check_camera_v11_step1_v4_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step1_v4.sh
+      - name: Independent display architecture guards
+        run: |
+          grep -q 'independent_pipelines=6 mux=0 tiler=0' services/camera_v11/step1_independent_egl_v4.py
+          grep -q 'sink=nveglglessink videooverlay=1' services/camera_v11/step1_independent_egl_v4.py
+          grep -q 'max-size-buffers", 1' services/camera_v11/step1_independent_egl_v4.py
+          grep -q 'leaky", 2' services/camera_v11/step1_independent_egl_v4.py
+          grep -q 'V11_SCALE_INTERPOLATION.*4' scripts/run_camera_v11_step1_v4.sh
+          grep -q 'display_age_p95' scripts/check_camera_v11_step1_v4_log.py
+          grep -q 'mux != 0 or tiler != 0' scripts/check_camera_v11_step1_v4_log.py
