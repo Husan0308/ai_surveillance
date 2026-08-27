@@ -29,4 +29,7 @@ jobs:
           grep -q 'max-size-buffers", 1' services/camera_v11/step0_ingest.py
           grep -q 'leaky", 2' services/camera_v11/step0_ingest.py
           grep -q 'tcp_timestamp=default-not-forced' services/camera_v11/step0_ingest.py
+          grep -q 'source.connect("pad-added"' services/camera_v11/step0_ingest.py
+          grep -q 'nvurisrcbin_link=dynamic-pad' services/camera_v11/step0_ingest.py
+          ! grep -q 'source.link(queue)' services/camera_v11/step0_ingest.py
           grep -q 'no_mux=1 no_tracker=1 no_detector=1 no_display=1' scripts/run_camera_v11_step0.sh
