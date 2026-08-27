@@ -28,9 +28,7 @@ jobs:
             services/ml_service/app/local_tracker.py \
             services/ml_service/app/detector_substream_tracking.py \
             scripts/test_step4_local_tracker.py
-      - name: Synthetic crossing, low-score and recovery smoke test
-        env:
-          PYTHONPATH: .
+      - name: Direct script crossing, low-score and recovery smoke test
         run: python scripts/test_step4_local_tracker.py
       - name: Guard frozen detector boundary
         run: |
