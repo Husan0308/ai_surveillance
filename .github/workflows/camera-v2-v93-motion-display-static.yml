@@ -1,0 +1,28 @@
+name: Camera V2 V9.3 Motion Display Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v92-current-frame-bbox-20260827
+      - rebuild/service-architecture-step4-v93-motion-display-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile services/camera_v2/runtime_v93_motion_display.py
+          python -m py_compile scripts/check_camera_v2_bbox_v93_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v93.sh
+      - name: Guard bounded display-only compensation
+        run: |
+          grep -q 'center-only extrapolation' services/camera_v2/runtime_v93_motion_display.py
+          grep -q 'size_prediction=0 tracker_state_mutation=0' services/camera_v2/runtime_v93_motion_display.py
+          grep -q 'CAMERA_V93_DISPLAY_COMP_MS' scripts/run_camera_v2_bbox_v93.sh
+          grep -q 'CAMERA_V2_TRACK_FPS.*10' scripts/run_camera_v2_bbox_v93.sh
+          grep -q 'CAMERA_V84_DETECT_GPU_BUDGET.*0.26' scripts/run_camera_v2_bbox_v93.sh
+          grep -q 'runtime_v93_motion_display' scripts/run_camera_v2_bbox_v93.sh
