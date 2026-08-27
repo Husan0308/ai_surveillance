@@ -1,0 +1,25 @@
+name: camera-v11-step2-mixedprecision-v10-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-mixedprecision-v10-20260828
+    paths:
+      - 'scripts/inspect_yolo26s_trt86_layers.py'
+      - '.github/workflows/camera-v11-step2-mixedprecision-v10-static.yml'
+  pull_request:
+    paths:
+      - 'scripts/inspect_yolo26s_trt86_layers.py'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python -m py_compile scripts/inspect_yolo26s_trt86_layers.py
+      - name: Mixed precision inspector invariants
+        run: |
+          grep -F 'V11_LAYER_INSPECT_RESULT status=PASS' scripts/inspect_yolo26s_trt86_layers.py >/dev/null
+          grep -F 'trt.LayerType.TOPK' scripts/inspect_yolo26s_trt86_layers.py >/dev/null
+          grep -F 'trt.LayerType.GATHER' scripts/inspect_yolo26s_trt86_layers.py >/dev/null
