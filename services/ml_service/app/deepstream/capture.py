@@ -125,6 +125,7 @@ class DeepStreamCapture:
                 f"max-size-buffers={queue_buffers}",
                 "max-size-bytes=0", "max-size-time=0", "leaky=downstream", "silent=true",
                 "!", "nvvideoconvert", "name=converter", f"gpu-id={c.gpu_id}",
+                "interpolation-method=2",
                 "!", f"video/x-raw,width={c.display_width},height={c.display_height},format=BGRx",
                 "!", "appsink", "name=sink", "drop=true", "max-buffers=1", "sync=false",
                 "wait-on-eos=false", "enable-last-sample=false",
