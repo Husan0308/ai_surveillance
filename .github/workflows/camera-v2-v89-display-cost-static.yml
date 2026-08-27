@@ -1,0 +1,39 @@
+name: Camera V2 V8.9 Display Cost Static
+
+on:
+  push:
+    paths:
+      - 'services/camera_v2/runtime_v89_display_cost.py'
+      - 'scripts/run_camera_v2_bbox_v89.sh'
+      - 'scripts/check_camera_v2_bbox_v89_log.py'
+      - '.github/workflows/camera-v2-v89-display-cost-static.yml'
+  pull_request:
+    paths:
+      - 'services/camera_v2/runtime_v89_display_cost.py'
+      - 'scripts/run_camera_v2_bbox_v89.sh'
+      - 'scripts/check_camera_v2_bbox_v89_log.py'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python compile
+        run: |
+          python -m py_compile services/camera_v2/runtime_v89_display_cost.py scripts/check_camera_v2_bbox_v89_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v89.sh
+      - name: Guard one-change diagnostic scope
+        run: |
+          grep -q 'display mux -> V89 fakesink' services/camera_v2/runtime_v89_display_cost.py
+          grep -q 'tiler=0 osd=0 egl=0' services/camera_v2/runtime_v89_display_cost.py
+          grep -q 'CAMERA_V2_TRACK_WIDTH.*512' scripts/run_camera_v2_bbox_v89.sh
+          grep -q 'CAMERA_V2_TRACK_HEIGHT.*288' scripts/run_camera_v2_bbox_v89.sh
+          grep -q 'CAMERA_V2_TRACK_FPS.*8' scripts/run_camera_v2_bbox_v89.sh
+          grep -q 'CAMERA_V85_NVDCF_FEATURE_LEVEL.*1' scripts/run_camera_v2_bbox_v89.sh
+          grep -q 'CAMERA_V84_DETECT_GPU_BUDGET.*0.30' scripts/run_camera_v2_bbox_v89.sh
+          grep -q 'unset NVDS_DISABLE_CUDADEV_BLOCKINGSYNC' scripts/run_camera_v2_bbox_v89.sh
+          grep -q 'production_ui=0' scripts/run_camera_v2_bbox_v89.sh
