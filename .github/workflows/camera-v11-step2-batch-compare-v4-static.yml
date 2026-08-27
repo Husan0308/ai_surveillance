@@ -1,0 +1,27 @@
+name: camera-v11-step2-batch-compare-v4-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-batch-compare-v4-20260827
+    paths:
+      - 'scripts/probe_camera_v11_trt86_batch_compare.py'
+      - '.github/workflows/camera-v11-step2-batch-compare-v4-static.yml'
+  pull_request:
+    paths:
+      - 'scripts/probe_camera_v11_trt86_batch_compare.py'
+      - '.github/workflows/camera-v11-step2-batch-compare-v4-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python -m py_compile scripts/probe_camera_v11_trt86_batch_compare.py
+      - name: Benchmark invariants
+        run: |
+          grep -F 'yolo26s-672x384-b1-fp32-trt86.engine' scripts/probe_camera_v11_trt86_batch_compare.py
+          grep -F 'yolo26s-672x384-b6-fp32-trt86.engine' scripts/probe_camera_v11_trt86_batch_compare.py
+          grep -F 'V11_TRT86_BATCH_COMPARE_RESULT' scripts/probe_camera_v11_trt86_batch_compare.py
+          grep -F 'img_s_p50' scripts/probe_camera_v11_trt86_batch_compare.py
