@@ -1,0 +1,34 @@
+name: Camera V2 V10.5 Mux Arrival Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v100-tracker-timeout40-20260827
+    paths:
+      - services/camera_v2/runtime_v105_mux_arrival_audit.py
+      - scripts/run_camera_v2_bbox_v105.sh
+      - scripts/check_camera_v2_bbox_v105_log.py
+      - .github/workflows/camera-v2-v105-mux-arrival-static.yml
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Compile Python
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v105_mux_arrival_audit.py \
+            scripts/check_camera_v2_bbox_v105_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v105.sh
+      - name: Guard diagnostic-only policy
+        run: |
+          grep -q 'PascalTrackerPostMuxGateRuntime' services/camera_v2/runtime_v105_mux_arrival_audit.py
+          grep -q 'behavior_change=0' services/camera_v2/runtime_v105_mux_arrival_audit.py
+          grep -q 'cross-source-pts=never' services/camera_v2/runtime_v105_mux_arrival_audit.py
+          grep -q 'batch_size=6 timeout_us=60000' scripts/run_camera_v2_bbox_v105.sh
