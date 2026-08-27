@@ -1,0 +1,46 @@
+name: Camera V2 BBox V7.2 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v7-2-stable-bbox-20260827
+  pull_request:
+
+jobs:
+  bbox-v72-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile V7.2
+        run: |
+          python -m py_compile \
+            services/camera_v2/visibility_policy_v72.py \
+            services/camera_v2/runtime_bbox_v72.py \
+            scripts/test_camera_v2_bbox_v72.py \
+            scripts/check_camera_v2_bbox_v72_log.py
+
+      - name: Visibility policy tests
+        run: python scripts/test_camera_v2_bbox_v72.py
+
+      - name: Guard V7 scheduling regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'CAMERA_V2_DETECT_HZ=.*1.25' scripts/run_camera_v2_bbox_v72.sh
+          grep -q 'CAMERA_V2_TRACK_FPS=.*20' scripts/run_camera_v2_bbox_v72.sh
+          grep -q 'CAMERA_V2_DISPLAY_EMPTY_HOLD_MS=.*300' scripts/run_camera_v2_bbox_v72.sh
+          grep -q 'detector_scheduler=v7-serialized-proven' services/camera_v2/runtime_bbox_v72.py
+          grep -q 'capture_before_lane=0' services/camera_v2/runtime_bbox_v72.py
+          ! grep -q 'def _detector_scheduler' services/camera_v2/runtime_bbox_v72.py
+
+      - name: Guard bounded no-flicker policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'should_hold_last_good' services/camera_v2/runtime_bbox_v72.py
+          grep -q 'original timestamp' services/camera_v2/runtime_bbox_v72.py
+          grep -q 'prediction=0' services/camera_v2/runtime_bbox_v72.py
