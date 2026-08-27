@@ -1,0 +1,54 @@
+name: Step4 V6 Body Envelope Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v6-body-envelope-20260827
+  pull_request:
+
+jobs:
+  step4-v6-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tracker test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy
+
+      - name: Compile V6
+        run: |
+          python -m py_compile \
+            services/ml_service/app/local_tracker_sparse_v6.py \
+            services/ml_service/app/detector_substream_tracking_v6.py \
+            scripts/step4_visual_debug_viewer_v6.py \
+            scripts/step4_visual_active_viewer_v6.py \
+            scripts/test_step4_body_envelope_v6.py
+
+      - name: Previous tracker regressions
+        run: |
+          python scripts/test_step4_observation_recovery_v3.py
+          python scripts/test_step4_box_stability_v4.py
+
+      - name: V6 body-envelope and no-teleport regression
+        run: python scripts/test_step4_body_envelope_v6.py
+
+      - name: Guard V6 runtime policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'ML_DETECTOR_TARGET_HZ=.*2.0' scripts/run_ml_tracking_step4_v6.sh
+          grep -q 'ML_TRACK_LOW_RECOVERY_SEC=.*1.8' scripts/run_ml_tracking_step4_v6.sh
+          grep -q 'ML_TRACK_RENDER_EXPAND_ALPHA=.*0.82' scripts/run_ml_tracking_step4_v6.sh
+          grep -q 'ML_TRACK_RENDER_CONTRACT_ALPHA=.*0.14' scripts/run_ml_tracking_step4_v6.sh
+          grep -q 'ML_TRACK_ENVELOPE_PAD_X=.*0.07' scripts/run_ml_tracking_step4_v6.sh
+          grep -q 'min(float(box\[0\]), float(raw\[0\]))' services/ml_service/app/local_tracker_sparse_v6.py
+          grep -q 'lost_low_jump_diag' services/ml_service/app/local_tracker_sparse_v6.py
+          grep -q 'ML_TRACK_OBJECT_V6' services/ml_service/app/detector_substream_tracking_v6.py
+          grep -q 'metadata_lag_ms' services/ml_service/app/detector_substream_tracking_v6.py
+          grep -q 'metadata_lag_comp=1' scripts/run_step4_visual_v6.sh
+          grep -q 'size_prediction=0' scripts/run_step4_visual_v6.sh
