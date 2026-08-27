@@ -13,12 +13,14 @@ flock -n 9 || fail "another V11 Step1 V7 runtime holds $LOCK_FILE; stop it first
 [[ -x "$PY" ]] || fail "Python 3.10 environment missing: $PY"
 [[ -n "${DISPLAY:-}" ]] || fail "DISPLAY is empty; independent EGL wall requires X11/XWayland"
 
-for plugin in nvurisrcbin queue nvvideoconvert capsfilter nveglglessink rtspsrc; do
+for plugin in nvurisrcbin nvv4l2decoder queue nvvideoconvert capsfilter nveglglessink rtspsrc; do
   gst-inspect-1.0 "$plugin" >/dev/null 2>&1 || fail "missing plugin: $plugin"
 done
 
-gst-inspect-1.0 nvurisrcbin 2>/dev/null | grep -q 'low-latency-mode' || \
-  fail "nvurisrcbin low-latency-mode property missing"
+# On this DeepStream 7.1 build nvurisrcbin does not expose low-latency-mode,
+# but its internal nvv4l2decoder does. Validate the actual decoder property.
+gst-inspect-1.0 nvv4l2decoder 2>/dev/null | grep -q 'low-latency-mode' || \
+  fail "nvv4l2decoder low-latency-mode property missing"
 
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -46,12 +48,18 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 Gst.init(None)
+factory = Gst.ElementFactory.find("nvv4l2decoder")
+if factory is None:
+    raise SystemExit("nvv4l2decoder factory missing")
+probe = factory.create("v11_lowlat_probe")
+if probe is None or probe.find_property("low-latency-mode") is None:
+    raise SystemExit("nvv4l2decoder low-latency-mode runtime property missing")
 from services.camera_v11.step1_cam02_lowlat_v7 import V11Step1Cam02LowLatV7  # noqa: F401
-print(f"CAMERA_V11_STEP1V7_IMPORT python={sys.version.split()[0]} gst={Gst.version_string()} runtime=OK")
+print(f"CAMERA_V11_STEP1V7_IMPORT python={sys.version.split()[0]} gst={Gst.version_string()} decoder_lowlat_property=OK runtime=OK")
 PY
 
 printf '%s\n' \
-  "CAMERA_V11_STEP1V7_PREFLIGHT status=OK python=$PY display=${DISPLAY}" \
+  "CAMERA_V11_STEP1V7_PREFLIGHT status=OK python=$PY display=${DISPLAY} lowlat_target=nvv4l2decoder" \
   "CAMERA_V11_STEP1V7_INVARIANT base=v4-ds100 mux=0 tiler=0 detector=0 tracker=0 latest_only=1 transport=tcp latency_ms=${V11_RTSP_LATENCY_MS}" \
   "CAMERA_V11_STEP1V7_AB lowlat_cameras=${V11_LOWLAT_CAMERAS} bframes_cam02=0"
 
