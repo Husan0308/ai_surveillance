@@ -1,0 +1,47 @@
+name: camera-v11-step2-b1-v5-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-b1-roundrobin-v5-20260827
+    paths:
+      - 'services/camera_v11/batch1_trt86.py'
+      - 'services/camera_v11/step2_detector_b1_v5.py'
+      - 'scripts/run_camera_v11_step2_detector_b1_v5.sh'
+      - 'scripts/check_camera_v11_step2_detector_b1_v5_log.py'
+      - '.github/workflows/camera-v11-step2-b1-v5-static.yml'
+  pull_request:
+    paths:
+      - 'services/camera_v11/batch1_trt86.py'
+      - 'services/camera_v11/step2_detector_b1_v5.py'
+      - 'scripts/run_camera_v11_step2_detector_b1_v5.sh'
+      - 'scripts/check_camera_v11_step2_detector_b1_v5_log.py'
+      - '.github/workflows/camera-v11-step2-b1-v5-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v11/batch1_trt86.py \
+            services/camera_v11/step2_detector_b1_v5.py \
+            scripts/check_camera_v11_step2_detector_b1_v5_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step2_detector_b1_v5.sh
+      - name: Architecture invariants
+        run: |
+          grep -F 'Batch1TRT86Client' services/camera_v11/step2_detector_b1_v5.py
+          grep -F 'batch=1 prefetch=0' services/camera_v11/step2_detector_b1_v5.py
+          grep -F 'V11_DETECT_B1_HZ_PER_CAMERA' scripts/run_camera_v11_step2_detector_b1_v5.sh
+          grep -F 'check_camera_v11_step1_v7_log.py' scripts/check_camera_v11_step2_detector_b1_v5_log.py
+          if grep -E '_make\("(nvtracker|nvdsosd|nvstreammux|nvmultistreamtiler|nvinfer)"' services/camera_v11/step2_detector_b1_v5.py; then
+            echo 'forbidden analytics element found in Step2 V5' >&2
+            exit 1
+          fi
+          if grep -E '\|[[:space:]]*grep[[:space:]]+-q([[:space:]]|$)' scripts/run_camera_v11_step2_detector_b1_v5.sh; then
+            echo 'pipefail-unsafe piped grep -q found' >&2
+            exit 1
+          fi
