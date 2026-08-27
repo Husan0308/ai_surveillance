@@ -1,0 +1,29 @@
+name: Camera V2 V9.5 PTS Audit Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v95-pts-audit-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v2/pts_bridge.py \
+            services/camera_v2/runtime_v95_pts_audit.py \
+            scripts/check_camera_v2_bbox_v95_log.py
+      - name: PTS bridge contract
+        run: |
+          grep -q 'camera_v95_copy_frame_pts' services/camera_v2/native_pts_bridge.c
+          grep -q 'buf_pts' services/camera_v2/native_pts_bridge.c
+          grep -q 'behavior_change=0' services/camera_v2/runtime_v95_pts_audit.py
+          grep -q 'bbox_behavior_change=0' scripts/run_camera_v2_bbox_v95.sh
+          grep -q 'display_minus_tracker_p95' services/camera_v2/runtime_v95_pts_audit.py
