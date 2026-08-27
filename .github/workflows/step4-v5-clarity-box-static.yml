@@ -1,0 +1,56 @@
+name: Step4 V5 Clarity Box Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v5-clarity-box-fix-20260827
+  pull_request:
+
+jobs:
+  step4-v5-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tracker test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy
+
+      - name: Compile V5 Python
+        run: |
+          python -m py_compile \
+            services/ml_service/app/detector_substream_tracking_v5.py \
+            services/ml_service/app/visual_box_policy.py \
+            scripts/step4_visual_debug_viewer_v5.py \
+            scripts/step4_visual_active_viewer_v5.py \
+            scripts/test_step4_visual_policy_v5.py
+
+      - name: V4 tracker regressions stay green
+        run: |
+          python scripts/test_step4_observation_recovery_v3.py
+          python scripts/test_step4_box_stability_v4.py
+
+      - name: V5 visual policy test
+        run: python scripts/test_step4_visual_policy_v5.py
+
+      - name: Guard V5 recall and display policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'ML_DETECTOR_CONF=.*0.08' scripts/run_ml_tracking_step4_v5.sh
+          grep -q 'ML_TRACK_LOW_THRESH=.*0.08' scripts/run_ml_tracking_step4_v5.sh
+          grep -q 'ML_TRACK_HIGH_THRESH=.*0.25' scripts/run_ml_tracking_step4_v5.sh
+          grep -q 'ML_TRACK_NEW_THRESH=.*0.30' scripts/run_ml_tracking_step4_v5.sh
+          grep -q 'ML_DETECTOR_TARGET_HZ=.*2.0' scripts/run_ml_tracking_step4_v5.sh
+          grep -q 'weak_detection_can_recover=1' services/ml_service/app/detector_substream_tracking_v5.py
+          grep -q 'default=1280' scripts/step4_visual_active_viewer_v5.py
+          grep -q 'default=720' scripts/step4_visual_active_viewer_v5.py
+          grep -q 'interpolation-method.*, 2' scripts/step4_visual_debug_viewer_v5.py
+          grep -q 'drop-on-latency.*, False' scripts/step4_visual_debug_viewer_v5.py
+          grep -q 'max_predict_sec=0.20' scripts/step4_visual_debug_viewer_v5.py
+          grep -q 'size_prediction=0' scripts/step4_visual_debug_viewer_v5.py
+          grep -q 'stale_box_max=1.20s' scripts/run_step4_visual_v5.sh
