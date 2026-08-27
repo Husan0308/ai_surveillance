@@ -1,0 +1,35 @@
+name: camera-v11-step2-scorepathfp32-v11-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-scorepathfp32-v11-20260828
+    paths:
+      - 'scripts/build_yolo26s_b1_scorepath_mixed_trt86.py'
+      - 'scripts/trace_yolo26s_trt86_score_sources.py'
+      - '.github/workflows/camera-v11-step2-scorepathfp32-v11-static.yml'
+  pull_request:
+    paths:
+      - 'scripts/build_yolo26s_b1_scorepath_mixed_trt86.py'
+      - 'scripts/trace_yolo26s_trt86_score_sources.py'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            scripts/build_yolo26s_b1_scorepath_mixed_trt86.py \
+            scripts/trace_yolo26s_trt86_score_sources.py
+      - name: Score-path precision invariants
+        run: |
+          grep -F 'DEFAULT_FP32_MODULES = ("/model.16", "/model.19", "/model.22", "/model.23")' scripts/build_yolo26s_b1_scorepath_mixed_trt86.py >/dev/null
+          grep -F 'BuilderFlag.INT8' scripts/build_yolo26s_b1_scorepath_mixed_trt86.py >/dev/null
+          grep -F 'BuilderFlag.OBEY_PRECISION_CONSTRAINTS' scripts/build_yolo26s_b1_scorepath_mixed_trt86.py >/dev/null
+          grep -F 'layer.precision = trt.float32' scripts/build_yolo26s_b1_scorepath_mixed_trt86.py >/dev/null
+          grep -F 'layer.set_output_type(out_idx, trt.float32)' scripts/build_yolo26s_b1_scorepath_mixed_trt86.py >/dev/null
+          grep -F 'V11_SCOREPATH_BUILD_RESULT' scripts/build_yolo26s_b1_scorepath_mixed_trt86.py >/dev/null
+          grep -F 'discovery=graph_edges' scripts/trace_yolo26s_trt86_score_sources.py >/dev/null
+          grep -F 'V11_SCORE_PATH_RESULT status=PASS' scripts/trace_yolo26s_trt86_score_sources.py >/dev/null
