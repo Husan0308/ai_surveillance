@@ -25,15 +25,20 @@ class CameraStats:
     errors: int = 0
     warnings: int = 0
     caps_logged: bool = False
+    source_linked: bool = False
 
 
 class V11Step0Ingest:
     """Clean RTSP/NVDEC baseline: one independent pipeline per camera.
 
     There is deliberately no mux, tracker, detector, tiler, OSD or display.
-    A bad camera must not create backpressure in any other camera.  Each source
+    A bad camera must not create backpressure in any other camera. Each source
     decodes into a one-buffer downstream-leaky queue and a non-synchronizing
-    fakesink.  Step 0 measures only source/decode health and RTP jitter.
+    fakesink. Step 0 measures only source/decode health and RTP jitter.
+
+    Important: nvurisrcbin is decodebin-backed and its output pad is created
+    dynamically. We therefore link its pad when it appears instead of calling
+    Gst.Element.link() during graph construction.
     """
 
     def __init__(self) -> None:
@@ -55,8 +60,8 @@ class V11Step0Ingest:
         self.transport = os.environ.get("V11_RTSP_TRANSPORT", "tcp").strip().lower()
         if self.transport not in {"tcp", "udp", "auto"}:
             raise RuntimeError("V11_RTSP_TRANSPORT must be tcp, udp, or auto")
-        # Keep the proven V10.9 TCP/60ms baseline.  Step0 measures it cleanly;
-        # no per-camera tuning is allowed here.
+
+        # Keep the proven V10.9 TCP/60 ms baseline. No per-camera tuning in Step0.
         self.latency_ms = max(20, int(os.environ.get("V11_RTSP_LATENCY_MS", "60")))
         self.drop_on_latency = self._env_bool("V11_DROP_ON_LATENCY", True)
         self.extra_surfaces = max(1, min(12, int(os.environ.get("V11_EXTRA_SURFACES", "4"))))
@@ -65,7 +70,10 @@ class V11Step0Ingest:
             int(os.environ.get("V11_UDP_BUFFER_SIZE", str(max(ds.udp_buffer_size, 8 * 1024 * 1024)))),
         )
         self.reconnect_sec = max(2, int(os.environ.get("V11_RECONNECT_SEC", "5")))
-        self.startup_stagger = max(0.1, min(2.0, float(os.environ.get("V11_STARTUP_STAGGER_SEC", "0.40"))))
+        self.startup_stagger = max(
+            0.1,
+            min(2.0, float(os.environ.get("V11_STARTUP_STAGGER_SEC", "0.40"))),
+        )
         self.stats_interval = max(2, int(os.environ.get("V11_STATS_INTERVAL_SEC", "5")))
 
         self.lock = threading.RLock()
@@ -85,7 +93,8 @@ class V11Step0Ingest:
         print(
             "CAMERA_V11_STEP0_ARCH "
             f"cameras={len(self.cameras)} independent_pipelines=1 decode_only=1 "
-            "mux=0 tracker=0 detector=0 display=0 queue=latest1/leaky-downstream",
+            "mux=0 tracker=0 detector=0 display=0 queue=latest1/leaky-downstream "
+            "nvurisrcbin_link=dynamic-pad",
             flush=True,
         )
         print(
@@ -142,8 +151,6 @@ class V11Step0Ingest:
         self._set_if(element, "do-rtsp-keep-alive", True)
 
         tcp_timestamp_available = int(element.find_property("tcp-timestamp") is not None)
-        # Do not force tcp-timestamp.  V10.6 showed this property is version
-        # dependent and receive-time stamping can itself distort bursty servers.
         print(
             "CAMERA_V11_STEP0_RTSP "
             f"camera={camera.camera_id} latency_ms={self.latency_ms} "
@@ -155,7 +162,8 @@ class V11Step0Ingest:
             element.connect("new-manager", self._on_new_manager, camera.camera_id)
         except Exception as exc:
             print(
-                f"CAMERA_V11_STEP0_RTP_HOOK camera={camera.camera_id} manager_hook=0 error={type(exc).__name__}",
+                f"CAMERA_V11_STEP0_RTP_HOOK camera={camera.camera_id} manager_hook=0 "
+                f"error={type(exc).__name__}",
                 flush=True,
             )
 
@@ -181,6 +189,46 @@ class V11Step0Ingest:
             flush=True,
         )
 
+    def _link_source_pad(self, pad, cid: str) -> bool:
+        queue = self.queues.get(cid)
+        if queue is None:
+            return False
+        sink_pad = queue.get_static_pad("sink")
+        if sink_pad is None:
+            with self.lock:
+                self.stats[cid].errors += 1
+            print(f"CAMERA_V11_STEP0_LINK camera={cid} status=error reason=queue-sink-pad-missing", flush=True)
+            return False
+
+        if sink_pad.is_linked():
+            return True
+
+        result = pad.link(sink_pad)
+        if result != self.Gst.PadLinkReturn.OK:
+            with self.lock:
+                self.stats[cid].errors += 1
+            result_name = result.value_nick if hasattr(result, "value_nick") else str(result)
+            print(
+                f"CAMERA_V11_STEP0_LINK camera={cid} status=error result={result_name} pad={pad.get_name()}",
+                flush=True,
+            )
+            return False
+
+        pad.add_probe(self.Gst.PadProbeType.BUFFER, self._decode_probe, cid)
+        with self.lock:
+            self.stats[cid].source_linked = True
+        caps = pad.get_current_caps()
+        print(
+            "CAMERA_V11_STEP0_LINK "
+            f"camera={cid} status=OK mode=dynamic-pad pad={pad.get_name()} "
+            f"caps={caps.to_string() if caps is not None else 'pending'}",
+            flush=True,
+        )
+        return True
+
+    def _on_source_pad_added(self, _source, pad, cid: str) -> None:
+        self._link_source_pad(pad, cid)
+
     def _build_camera(self, camera: CameraConfig) -> None:
         cid = camera.camera_id
         safe = cid.lower().replace("-", "_")
@@ -190,6 +238,7 @@ class V11Step0Ingest:
         sink = self._make("fakesink", f"sink_{safe}")
 
         source.connect("deep-element-added", self._configure_rtsp_child, camera)
+        source.connect("pad-added", self._on_source_pad_added, cid)
         source.set_property("uri", camera.uri)
         self._set_if(source, "disable-audio", True)
         self._set_if(source, "gpu-id", self.gpu_id)
@@ -203,8 +252,8 @@ class V11Step0Ingest:
         self._set_if(source, "rtsp-reconnect-attempts", -1)
         self._set_if(source, "message-forward", True)
         self._set_if(source, "async-handling", True)
-        # Keep decoder low-latency-mode at its default for Step0.  We do not yet
-        # know whether every NVR channel is IPPP-only or uses B-frames.
+        # Keep decoder low-latency-mode at default. We have not proven that all
+        # NVR channels are IPPP-only; B-frame streams can require reorder delay.
 
         self._set_if(queue, "max-size-buffers", 1)
         self._set_if(queue, "max-size-bytes", 0)
@@ -219,15 +268,12 @@ class V11Step0Ingest:
 
         for element in (source, queue, sink):
             pipeline.add(element)
-        if not source.link(queue):
-            raise RuntimeError(f"{cid}: source -> queue link failed")
+
+        # queue/fakesink have static pads and can be linked immediately. The
+        # nvurisrcbin output pad is decodebin-backed and is linked in pad-added.
         if not queue.link(sink):
             raise RuntimeError(f"{cid}: queue -> fakesink link failed")
 
-        src_pad = source.get_static_pad("src")
-        if src_pad is None:
-            raise RuntimeError(f"{cid}: nvurisrcbin src pad missing")
-        src_pad.add_probe(self.Gst.PadProbeType.BUFFER, self._decode_probe, cid)
         qsrc = queue.get_static_pad("src")
         if qsrc is None:
             raise RuntimeError(f"{cid}: queue src pad missing")
@@ -242,6 +288,12 @@ class V11Step0Ingest:
         self.queues[cid] = queue
         self.sinks[cid] = sink
 
+        # Some builds may expose the src pad immediately. Handle that too,
+        # while keeping pad-added as the canonical path for delayed pads.
+        src_pad = source.get_static_pad("src")
+        if src_pad is not None:
+            self._link_source_pad(src_pad, cid)
+
     def _decode_probe(self, pad, info, cid: str):
         buffer = info.get_buffer()
         if buffer is None:
@@ -252,20 +304,21 @@ class V11Step0Ingest:
             st = self.stats[cid]
             st.decoded += 1
             if st.last_arrival_mono is not None:
-                dt = (now - st.last_arrival_mono) * 1000.0
-                if 0.0 <= dt <= 5000.0:
-                    st.wall_dt_ms.append(dt)
+                dt_ms = (now - st.last_arrival_mono) * 1000.0
+                if 0.0 <= dt_ms <= 5000.0:
+                    st.wall_dt_ms.append(dt_ms)
             st.last_arrival_mono = now
             if pts is not None and st.last_pts_ns is not None and pts >= st.last_pts_ns:
-                dt = (pts - st.last_pts_ns) / 1_000_000.0
-                if 0.0 <= dt <= 5000.0:
-                    st.pts_dt_ms.append(dt)
+                dt_ms = (pts - st.last_pts_ns) / 1_000_000.0
+                if 0.0 <= dt_ms <= 5000.0:
+                    st.pts_dt_ms.append(dt_ms)
             if pts is not None:
                 st.last_pts_ns = pts
             if not st.caps_logged:
                 caps = pad.get_current_caps()
                 print(
-                    f"CAMERA_V11_STEP0_CAPS camera={cid} caps={caps.to_string() if caps is not None else 'unknown'}",
+                    f"CAMERA_V11_STEP0_CAPS camera={cid} "
+                    f"caps={caps.to_string() if caps is not None else 'unknown'}",
                     flush=True,
                 )
                 st.caps_logged = True
@@ -285,7 +338,6 @@ class V11Step0Ingest:
                 f"CAMERA_V11_STEP0_ERROR camera={cid} error={err} debug={debug}",
                 flush=True,
             )
-            # Do not stop other camera pipelines.  nvurisrcbin owns reconnects.
         elif message.type == self.Gst.MessageType.WARNING:
             err, debug = message.parse_warning()
             with self.lock:
@@ -360,11 +412,14 @@ class V11Step0Ingest:
                         st.errors,
                         st.warnings,
                         st.decoded,
+                        st.source_linked,
                     )
                 )
 
-        for cid, decode_fps, sink_fps, wall, pts, qlevel, qmax, errors, warnings, decoded in snapshot:
+        for cid, decode_fps, sink_fps, wall, pts, qlevel, qmax, errors, warnings, decoded, linked in snapshot:
             pushed, lost, late, dup, jitter_ms = self._primary_rtp(cid)
+            # Keep the checker-compatible STATS line stable; LINK is emitted as
+            # its own event and link failures increment errors.
             print(
                 "CAMERA_V11_STEP0_STATS "
                 f"camera={cid} decoded_total={decoded} decode_fps={decode_fps:.2f} sink_fps={sink_fps:.2f} "
@@ -375,6 +430,8 @@ class V11Step0Ingest:
                 f"rtp_jitter_ms={jitter_ms:.3f} errors={errors} warnings={warnings}",
                 flush=True,
             )
+            if not linked:
+                print(f"CAMERA_V11_STEP0_LINK_WAIT camera={cid} linked=0", flush=True)
         return True
 
     def _start_all(self) -> None:
@@ -387,7 +444,8 @@ class V11Step0Ingest:
                     return False
                 result = self.pipelines[camera_id].set_state(self.Gst.State.PLAYING)
                 print(
-                    f"CAMERA_V11_STEP0_START camera={camera_id} state={result.value_nick if hasattr(result, 'value_nick') else result}",
+                    f"CAMERA_V11_STEP0_START camera={camera_id} "
+                    f"state={result.value_nick if hasattr(result, 'value_nick') else result}",
                     flush=True,
                 )
                 return False
