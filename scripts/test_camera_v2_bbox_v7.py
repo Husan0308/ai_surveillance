@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.camera_v2.runtime_bbox_v7 import _expand_box, _stable_size
+from services.camera_v2.bbox_policy_v7 import expand_box, stable_size
 
 
 def close(a: float, b: float, eps: float = 1e-6) -> None:
@@ -18,7 +18,7 @@ def close(a: float, b: float, eps: float = 1e-6) -> None:
 
 
 def test_fast_open() -> None:
-    size, expanded_at = _stable_size(
+    size, expanded_at = stable_size(
         80.0,
         150.0,
         1.0,
@@ -31,7 +31,7 @@ def test_fast_open() -> None:
 
 
 def test_short_hold_prevents_limb_snap() -> None:
-    size, expanded_at = _stable_size(
+    size, expanded_at = stable_size(
         150.0,
         90.0,
         2.0,
@@ -44,7 +44,7 @@ def test_short_hold_prevents_limb_snap() -> None:
 
 
 def test_slow_close_after_hold() -> None:
-    size, _ = _stable_size(
+    size, _ = stable_size(
         150.0,
         90.0,
         2.0,
@@ -60,7 +60,7 @@ def test_slow_close_after_hold() -> None:
 
 def test_full_body_margin_contains_tracker_box() -> None:
     raw = (200.0, 100.0, 400.0, 500.0)
-    expanded = _expand_box(
+    expanded = expand_box(
         raw,
         1280.0,
         720.0,
@@ -82,7 +82,7 @@ def test_full_body_margin_contains_tracker_box() -> None:
 
 
 def test_margin_clamps_at_frame_edges() -> None:
-    expanded = _expand_box(
+    expanded = expand_box(
         (2.0, 3.0, 1278.0, 719.0),
         1280.0,
         720.0,
@@ -100,7 +100,7 @@ def test_center_is_not_predicted() -> None:
     # The policy functions only alter size/margin; there is intentionally no velocity
     # input. Verify symmetric side expansion keeps the current horizontal center.
     raw = (300.0, 160.0, 500.0, 560.0)
-    expanded = _expand_box(
+    expanded = expand_box(
         raw,
         1280.0,
         720.0,
