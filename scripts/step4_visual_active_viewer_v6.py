@@ -2,6 +2,14 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+# This file is launched both as `python scripts/...py` and as a module. When Python
+# executes a file path, sys.path[0] is the scripts/ directory, not the repository root,
+# so absolute imports such as `from scripts...` fail unless ROOT is added explicitly.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from PySide6.QtWidgets import QApplication
 
