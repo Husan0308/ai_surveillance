@@ -42,7 +42,7 @@ jobs:
             echo 'forbidden Step2 analytics element found' >&2
             exit 1
           fi
-          if grep -F 'grep -q' scripts/run_camera_v11_step2_detector_only.sh; then
-            echo 'pipefail-unsafe grep -q found in runner' >&2
+          if grep -E '\|[[:space:]]*grep[[:space:]]+-q([[:space:]]|$)' scripts/run_camera_v11_step2_detector_only.sh; then
+            echo 'pipefail-unsafe piped grep -q found in runner' >&2
             exit 1
           fi
