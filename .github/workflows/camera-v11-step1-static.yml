@@ -1,0 +1,41 @@
+name: Camera V11 Step1 Display Static
+
+on:
+  push:
+    paths:
+      - 'services/camera_v11/step1_display.py'
+      - 'services/camera_v11/pts_bridge.py'
+      - 'services/camera_v11/native_pts_bridge.c'
+      - 'scripts/run_camera_v11_step1.sh'
+      - 'scripts/check_camera_v11_step1_log.py'
+      - '.github/workflows/camera-v11-step1-static.yml'
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v11/pts_bridge.py \
+            services/camera_v11/step1_display.py \
+            scripts/check_camera_v11_step1_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step1.sh
+      - name: Guard clean Step1 architecture
+        run: |
+          ! grep -q 'services.camera_v2.runtime_v' services/camera_v11/step1_display.py
+          ! grep -q 'nvtracker\|nvinfer\|nvdsosd\|TensorRT\|tensorrt' services/camera_v11/step1_display.py
+          grep -q 'step0_ingest=frozen display_only=1' services/camera_v11/step1_display.py
+          grep -q 'max-size-buffers", 1' services/camera_v11/step1_display.py
+          grep -q 'leaky", 2' services/camera_v11/step1_display.py
+          grep -q 'buffer-pool-size", 4' services/camera_v11/step1_display.py
+          grep -q 'self.batch_timeout_us = 50_000' services/camera_v11/step1_display.py
+          grep -q 'self.tile_width = 640' services/camera_v11/step1_display.py
+          grep -q 'self.tile_height = 360' services/camera_v11/step1_display.py
+          grep -q 'self.wall_width = 1920' services/camera_v11/step1_display.py
+          grep -q 'self.wall_height = 720' services/camera_v11/step1_display.py
+          grep -q 'source.connect("pad-added"' services/camera_v11/step1_display.py
+          grep -q 'tracker=0 detector=0 osd=0 latest_only=1' scripts/run_camera_v11_step1.sh
