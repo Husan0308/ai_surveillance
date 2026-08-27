@@ -1,0 +1,28 @@
+name: Camera V2 V10.6 CAM02 TCP Timestamp Static
+
+on:
+  push:
+    paths:
+      - 'services/camera_v2/runtime_v106_cam02_tcp_timestamp.py'
+      - 'scripts/run_camera_v2_bbox_v106.sh'
+      - 'scripts/check_camera_v2_bbox_v106_log.py'
+      - '.github/workflows/camera-v2-v106-cam02-tcp-ts-static.yml'
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v106_cam02_tcp_timestamp.py \
+            scripts/check_camera_v2_bbox_v106_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v106.sh
+      - name: Guard one-variable policy
+        run: |
+          grep -q 'TARGET_CAMERA = "CAM-02"' services/camera_v2/runtime_v106_cam02_tcp_timestamp.py
+          grep -q 'tcp-timestamp", False' services/camera_v2/runtime_v106_cam02_tcp_timestamp.py
+          grep -q 'only_change=CAM-02-tcp-timestamp-off' scripts/run_camera_v2_bbox_v106.sh
