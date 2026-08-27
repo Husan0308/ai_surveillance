@@ -6,14 +6,18 @@ on:
       - rebuild/service-architecture-v11-clean-step2-int8-calibration-v8-20260828
     paths:
       - 'scripts/collect_camera_v11_int8_calibration.py'
+      - 'scripts/prepare_coco_v11_int8_calibration.py'
       - 'scripts/build_yolo26s_b1_int8_trt86.py'
       - 'scripts/probe_camera_v11_trt86_b1_precision.py'
+      - 'scripts/evaluate_camera_v11_trt86_person_quality.py'
       - '.github/workflows/camera-v11-step2-int8-v8-static.yml'
   pull_request:
     paths:
       - 'scripts/collect_camera_v11_int8_calibration.py'
+      - 'scripts/prepare_coco_v11_int8_calibration.py'
       - 'scripts/build_yolo26s_b1_int8_trt86.py'
       - 'scripts/probe_camera_v11_trt86_b1_precision.py'
+      - 'scripts/evaluate_camera_v11_trt86_person_quality.py'
 
 jobs:
   static:
@@ -24,13 +28,16 @@ jobs:
         run: |
           python -m py_compile \
             scripts/collect_camera_v11_int8_calibration.py \
+            scripts/prepare_coco_v11_int8_calibration.py \
             scripts/build_yolo26s_b1_int8_trt86.py \
-            scripts/probe_camera_v11_trt86_b1_precision.py
+            scripts/probe_camera_v11_trt86_b1_precision.py \
+            scripts/evaluate_camera_v11_trt86_person_quality.py
       - name: INT8 invariants
         run: |
           grep -F 'IInt8EntropyCalibrator2' scripts/build_yolo26s_b1_int8_trt86.py >/dev/null
           grep -F 'BuilderFlag.INT8' scripts/build_yolo26s_b1_int8_trt86.py >/dev/null
           grep -F 'expected>=500' scripts/build_yolo26s_b1_int8_trt86.py >/dev/null
-          grep -F 'sequential=1' scripts/collect_camera_v11_int8_calibration.py >/dev/null
-          grep -F 'pad114=1' scripts/collect_camera_v11_int8_calibration.py >/dev/null
+          grep -F 'calibration_shard=CAM-COCO' scripts/prepare_coco_v11_int8_calibration.py >/dev/null
+          grep -F 'quality_person_instances=' scripts/prepare_coco_v11_int8_calibration.py >/dev/null
           grep -F 'V11_TRT86_B1_PRECISION_RESULT' scripts/probe_camera_v11_trt86_b1_precision.py >/dev/null
+          grep -F 'V11_PERSON_QUALITY_GATE status=PASS' scripts/evaluate_camera_v11_trt86_person_quality.py >/dev/null
