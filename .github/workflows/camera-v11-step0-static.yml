@@ -1,0 +1,32 @@
+name: Camera V11 Step0 Clean Ingest Static
+
+on:
+  push:
+    paths:
+      - 'services/camera_v11/**'
+      - 'scripts/run_camera_v11_step0.sh'
+      - 'scripts/check_camera_v11_step0_log.py'
+      - '.github/workflows/camera-v11-step0-static.yml'
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v11/__init__.py \
+            services/camera_v11/step0_ingest.py \
+            scripts/check_camera_v11_step0_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step0.sh
+      - name: Guard clean Step0 architecture
+        run: |
+          ! grep -R 'services.camera_v2.runtime_v' services/camera_v11
+          grep -q 'independent_pipelines=1 decode_only=1' services/camera_v11/step0_ingest.py
+          grep -q 'max-size-buffers", 1' services/camera_v11/step0_ingest.py
+          grep -q 'leaky", 2' services/camera_v11/step0_ingest.py
+          grep -q 'tcp_timestamp=default-not-forced' services/camera_v11/step0_ingest.py
+          grep -q 'no_mux=1 no_tracker=1 no_detector=1 no_display=1' scripts/run_camera_v11_step0.sh
