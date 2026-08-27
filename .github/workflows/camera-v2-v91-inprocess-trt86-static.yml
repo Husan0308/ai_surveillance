@@ -37,4 +37,5 @@ jobs:
           grep -q 'CAMERA_V2_TRACK_FPS.*8' scripts/run_camera_v2_bbox_v91.sh
           grep -q 'CAMERA_V85_NVDCF_FEATURE_LEVEL.*1' scripts/run_camera_v2_bbox_v91.sh
           grep -q '.venv-trt86/bin/python' scripts/run_camera_v2_bbox_v91.sh
-          grep -q 'tensorrt.*8.6.1' scripts/run_camera_v2_bbox_v91.sh
+          grep -q 'import tensorrt as trt' scripts/run_camera_v2_bbox_v91.sh
+          grep -q 'startswith("8.6.1")' scripts/run_camera_v2_bbox_v91.sh
