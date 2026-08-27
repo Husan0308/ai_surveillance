@@ -20,6 +20,7 @@ ANN_SHA256 = "e8c7f7908f1d7278341fae127d0da654f102f11bd7b21d8aeefa635b8c810b6f"
 TARGET_W = 672
 TARGET_H = 384
 PERSON_CATEGORY_ID = 1
+VAL_SENTINEL = "000000000139.jpg"
 
 
 def resolve(path: str) -> Path:
@@ -79,10 +80,28 @@ def download_verified(url: str, dst: Path, expected_sha256: str) -> None:
     )
 
 
-def extract_if_needed(archive: Path, dst: Path, sentinel: Path) -> None:
-    if sentinel.exists():
-        print(f"V11_COCO_EXTRACT status=HIT sentinel={sentinel}", flush=True)
-        return
+def discover_val_dir(root: Path) -> Path | None:
+    matches = list(root.rglob(VAL_SENTINEL)) if root.exists() else []
+    if not matches:
+        return None
+    parents = sorted({p.parent for p in matches}, key=lambda p: str(p))
+    if len(parents) == 1:
+        return parents[0]
+    # Defensive mirror handling: choose the candidate containing the most jpg files.
+    ranked = sorted(
+        ((sum(1 for _ in parent.glob("*.jpg")), parent) for parent in parents),
+        key=lambda row: row[0],
+        reverse=True,
+    )
+    return ranked[0][1]
+
+
+def ensure_extracted_val_dir(archive: Path, dst: Path) -> Path:
+    existing = discover_val_dir(dst)
+    if existing is not None:
+        print(f"V11_COCO_EXTRACT status=HIT image_root={existing}", flush=True)
+        return existing
+
     print(f"V11_COCO_EXTRACT status=START archive={archive}", flush=True)
     dst.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as zf:
@@ -91,6 +110,16 @@ def extract_if_needed(archive: Path, dst: Path, sentinel: Path) -> None:
             raise RuntimeError(f"V11_COCO_EXTRACT corrupt_member={bad}")
         zf.extractall(dst)
     print(f"V11_COCO_EXTRACT status=DONE archive={archive}", flush=True)
+
+    discovered = discover_val_dir(dst)
+    if discovered is None:
+        sample_roots = sorted({str(p.parent) for p in dst.rglob("*.jpg")})[:10]
+        raise RuntimeError(
+            "V11_COCO_EXTRACT could not discover COCO val image root "
+            f"sentinel={VAL_SENTINEL} sample_roots={sample_roots}"
+        )
+    print(f"V11_COCO_EXTRACT status=DISCOVERED image_root={discovered}", flush=True)
+    return discovered
 
 
 def letterbox_rgb(img: Image.Image) -> tuple[Image.Image, float, int, int]:
@@ -142,12 +171,11 @@ def main() -> int:
     val_zip = work / "coco_val2017.zip"
     ann_download = work / "instances_val2017.json"
     data_root = work / "data"
-    val_dir = data_root / "val2017"
     ann_path = data_root / "annotations" / "instances_val2017.json"
 
     download_verified(VAL_URL, val_zip, VAL_SHA256)
     download_verified(ANN_URL, ann_download, ANN_SHA256)
-    extract_if_needed(val_zip, data_root, val_dir / "000000000139.jpg")
+    val_dir = ensure_extracted_val_dir(val_zip, data_root)
     ann_path.parent.mkdir(parents=True, exist_ok=True)
     if not ann_path.is_file() or sha256_file(ann_path) != ANN_SHA256:
         shutil.copy2(ann_download, ann_path)
@@ -190,13 +218,16 @@ def main() -> int:
     print(
         "V11_COCO_PREP_START "
         f"val_images={len(images)} calibration={len(calib_ids)} quality_person={len(quality_ids)} "
-        f"geometry={TARGET_W}x{TARGET_H} letterbox114=1 seed={args.seed} calibration_shard=CAM-COCO source=hf-verified",
+        f"geometry={TARGET_W}x{TARGET_H} letterbox114=1 seed={args.seed} calibration_shard=CAM-COCO "
+        f"source=hf-verified image_root={val_dir}",
         flush=True,
     )
 
     for idx, image_id in enumerate(calib_ids, 1):
         row = images[image_id]
         src = val_dir / row["file_name"]
+        if not src.is_file():
+            raise RuntimeError(f"V11_COCO_PREP missing_image={src}")
         dst = calib / f"{image_id:012d}.ppm"
         save_ppm(src, dst)
         if idx <= 5 or idx % 100 == 0 or idx == len(calib_ids):
@@ -207,6 +238,8 @@ def main() -> int:
     for idx, image_id in enumerate(quality_ids, 1):
         row = images[image_id]
         src = val_dir / row["file_name"]
+        if not src.is_file():
+            raise RuntimeError(f"V11_COCO_PREP missing_quality_image={src}")
         dst = quality / f"{image_id:012d}.ppm"
         scale, left, top = save_ppm(src, dst)
         boxes = [transform_box(box, scale, left, top) for box in person_boxes[image_id]]
