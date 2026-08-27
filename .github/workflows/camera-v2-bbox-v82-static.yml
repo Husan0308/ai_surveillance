@@ -1,0 +1,57 @@
+name: Camera V2 BBox V8.2 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v82-lowlatency-overlay-20260827
+  pull_request:
+    paths:
+      - services/camera_v2/runtime_v82_lowlatency.py
+      - scripts/run_camera_v2_bbox_v82.sh
+      - scripts/check_camera_v2_bbox_v82_log.py
+      - .github/workflows/camera-v2-bbox-v82-static.yml
+
+jobs:
+  v82-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile V8.2 Python
+        run: |
+          python -m py_compile services/camera_v2/runtime_v82_lowlatency.py
+          python -m py_compile scripts/check_camera_v2_bbox_v82_log.py
+
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v82.sh
+
+      - name: Guard restored Pascal GPU budget
+        run: |
+          grep -q 'CAMERA_V2_TRACK_FPS.*:-8' scripts/run_camera_v2_bbox_v82.sh
+          grep -q 'CAMERA_V8_DETECT_INITIAL_HZ.*:-1.00' scripts/run_camera_v2_bbox_v82.sh
+          grep -q 'CAMERA_V8_DETECT_MAX_HZ.*:-2.00' scripts/run_camera_v2_bbox_v82.sh
+          grep -q 'CAMERA_V2_RTSP_LATENCY_MS.*:-60' scripts/run_camera_v2_bbox_v82.sh
+
+      - name: Guard V8.1 temporal correctness remains
+        run: |
+          grep -q 'PascalStickySyncRuntime' services/camera_v2/runtime_v82_lowlatency.py
+          grep -q 'CAMERA_V81_CURRENTIZE_AFTER_MS' scripts/run_camera_v2_bbox_v82.sh
+          grep -q 'CAMERA_V81_RAW_TRACK_MAX_AGE_MS' scripts/run_camera_v2_bbox_v82.sh
+
+      - name: Guard display-only bounded compensation
+        run: |
+          grep -q 'CAMERA_V82_DISPLAY_COMP_MAX_MS.*:-85' scripts/run_camera_v2_bbox_v82.sh
+          grep -q 'CAMERA_V82_DISPLAY_COMP_GAIN.*:-0.82' scripts/run_camera_v2_bbox_v82.sh
+          grep -q 'CAMERA_V82_DISPLAY_COMP_MAX_DIAG.*:-0.30' scripts/run_camera_v2_bbox_v82.sh
+          grep -q 'Translation only' services/camera_v2/runtime_v82_lowlatency.py
+          grep -q 'association_prediction=0 detector_prediction=0' services/camera_v2/runtime_v82_lowlatency.py
+
+      - name: Guard acceptance catches detector starvation
+        run: |
+          grep -q 'max-gpu-ema-ms.*default=180.0' scripts/check_camera_v2_bbox_v82_log.py
+          grep -q 'real_updates=0' scripts/check_camera_v2_bbox_v82_log.py
+          grep -q 'track_conf_p50=0' scripts/check_camera_v2_bbox_v82_log.py
