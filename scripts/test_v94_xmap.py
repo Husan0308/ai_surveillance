@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# When Python executes `scripts/test_v94_xmap.py` directly, sys.path[0] is the
+# scripts/ directory, not the repository root.  Add the repo root explicitly so
+# the top-level `services` package resolves regardless of the caller's PYTHONPATH.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from services.camera_v2.runtime_v94_xmap import PascalXMapRuntime
 
 
