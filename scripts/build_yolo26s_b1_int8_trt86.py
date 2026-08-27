@@ -5,7 +5,6 @@ import argparse
 import ctypes
 import ctypes.util
 import random
-import sys
 import time
 from pathlib import Path
 
@@ -15,6 +14,11 @@ import tensorrt as trt
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_INPUT = (1, 3, 384, 672)
 EXPECTED_OUTPUT = (1, 300, 6)
+
+
+def resolve_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
 
 
 def cuda_check(code, name: str) -> None:
@@ -164,21 +168,10 @@ def main() -> int:
     if not str(trt.__version__).startswith("8.6.1"):
         raise SystemExit(f"V11_INT8_BUILD FAIL TensorRT 8.6.1 required, got {trt.__version__}")
 
-    onnx_path = Path(args.onnx)
-    calib_dir = Path(args.calibration_dir)
-    engine_path = Path(args.engine)
-    cache_path = Path(args.cache)
-    for p in (onnx_path, calib_dir, engine_path, cache_path):
-        if not p.is_absolute():
-            p = ROOT / p
-        if p is onnx_path:
-            onnx_path = p
-        elif p is calib_dir:
-            calib_dir = p
-        elif p is engine_path:
-            engine_path = p
-        else:
-            cache_path = p
+    onnx_path = resolve_path(args.onnx)
+    calib_dir = resolve_path(args.calibration_dir)
+    engine_path = resolve_path(args.engine)
+    cache_path = resolve_path(args.cache)
 
     if not onnx_path.is_file():
         raise SystemExit(f"V11_INT8_BUILD FAIL ONNX missing: {onnx_path}")
