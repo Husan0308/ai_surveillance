@@ -1,0 +1,42 @@
+name: Step4 V4 Box Stability Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-local-tracking-v4-box-stability-20260827
+  pull_request:
+
+jobs:
+  step4-v4-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tracker test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy
+      - name: Compile Step 4 v4
+        run: |
+          python -m py_compile \
+            services/ml_service/app/local_tracker_sparse_v4.py \
+            services/ml_service/app/detector_substream_tracking_v4.py \
+            scripts/test_step4_box_stability_v4.py
+      - name: V3 observation-recovery regression
+        run: python scripts/test_step4_observation_recovery_v3.py
+      - name: V4 nested duplicate and arm box stability
+        run: python scripts/test_step4_box_stability_v4.py
+      - name: Guard frozen detector and CPU-only boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'ML_SUBSTREAM_TOKEN_CAPACITY=.*3' scripts/run_ml_tracking_step4_v4.sh
+          grep -q 'ML_DETECTOR_TARGET_HZ=.*2.0' scripts/run_ml_tracking_step4_v4.sh
+          grep -q 'ML_DETECTOR_CONF=.*0.18' scripts/run_ml_tracking_step4_v4.sh
+          grep -q 'pose=0' scripts/run_ml_tracking_step4_v4.sh
+          grep -q 'gpu_tracker=0' scripts/run_ml_tracking_step4_v4.sh
+          grep -q 'association_box=raw render_box=smoothed' services/ml_service/app/detector_substream_tracking_v4.py
+          grep -q 'intersection_over_smaller' services/ml_service/app/local_tracker_sparse_v4.py
+          grep -q 'bottom edge' services/ml_service/app/local_tracker_sparse_v4.py
