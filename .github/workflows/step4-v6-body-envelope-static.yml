@@ -52,3 +52,11 @@ jobs:
           grep -q 'metadata_lag_ms' services/ml_service/app/detector_substream_tracking_v6.py
           grep -q 'metadata_lag_comp=1' scripts/run_step4_visual_v6.sh
           grep -q 'size_prediction=0' scripts/run_step4_visual_v6.sh
+
+          # Import/bootstrap regression guard: direct file execution must add repo root,
+          # and the launcher must execute viewers as modules with an explicit project path.
+          grep -q 'ROOT = Path(__file__).resolve().parents\[1\]' scripts/step4_visual_active_viewer_v6.py
+          grep -q 'sys.path.insert(0, str(ROOT))' scripts/step4_visual_active_viewer_v6.py
+          grep -q 'export PYTHONPATH=' scripts/run_step4_visual_v6.sh
+          grep -q -- '-m scripts.step4_visual_active_viewer_v6' scripts/run_step4_visual_v6.sh
+          grep -q 'viewer_import=1' scripts/run_step4_visual_v6.sh
