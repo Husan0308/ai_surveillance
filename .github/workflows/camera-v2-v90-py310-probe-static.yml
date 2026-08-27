@@ -1,0 +1,22 @@
+name: Camera V2 V9.0 Python310 Probe Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v90-py310-sameprocess-probe-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: bash -n scripts/probe_v90_py310_sameprocess.sh
+      - name: Guard Python 3.10 ownership
+        run: |
+          grep -q '.venv-trt86/bin/python' scripts/probe_v90_py310_sameprocess.sh
+          grep -q "sys.version_info\[:2\] != (3, 10)" scripts/probe_v90_py310_sameprocess.sh
+          grep -q "import tensorrt as trt" scripts/probe_v90_py310_sameprocess.sh
+          grep -q "Gst.ElementFactory.make('nvtracker'" scripts/probe_v90_py310_sameprocess.sh
+          grep -q 'multiple_major_versions' scripts/probe_v90_py310_sameprocess.sh
