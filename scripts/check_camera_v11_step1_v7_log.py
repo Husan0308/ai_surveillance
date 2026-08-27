@@ -15,6 +15,10 @@ WINDOW = re.compile(
     r"CAMERA_V11_STEP1V7_WINDOW camera=(\S+) transport=(\S+) low_latency=(\d+) "
     r"xid=(\d+) overlay=(\d+) tile=(\d+)x(\d+)"
 )
+DECODER = re.compile(
+    r"CAMERA_V11_STEP1V7_DECODER camera=(\S+) low_latency=(-?\d+) property=(\S+) "
+    r"element=(\S+) expected=(\d+)"
+)
 QUALITY = re.compile(
     r"CAMERA_V11_STEP1V4_QUALITY interpolation=(\d+) gpu_scaling=(\d+) single_resize=(\d+) "
     r"jpeg=(\d+) main_streams=(\d+) tile=(\d+)x(\d+) mux=(\d+) tiler=(\d+) "
@@ -44,12 +48,13 @@ def main() -> int:
     for m in CAM.finditer(text):
         latest[m.group(1)] = m
     windows = {m.group(1): m for m in WINDOW.finditer(text)}
+    decoders = {m.group(1): m for m in DECODER.finditer(text)}
     qualities = list(QUALITY.finditer(text))
 
-    if len(latest) != 6 or len(windows) != 6 or not qualities:
+    if len(latest) != 6 or len(windows) != 6 or len(decoders) != 6 or not qualities:
         print(
             f"V11_STEP1V7 FAIL cameras={len(latest)} windows={len(windows)} "
-            f"quality_samples={len(qualities)}"
+            f"decoders={len(decoders)} quality_samples={len(qualities)}"
         )
         return 2
 
@@ -96,19 +101,30 @@ def main() -> int:
 
         w = windows[cid]
         transport = w.group(2)
-        lowlat = int(w.group(3))
+        requested_lowlat = int(w.group(3))
         overlay = int(w.group(5))
         expected_lowlat = 1 if cid == "CAM-02" else 0
         if transport != "tcp":
             reasons.append(f"{cid}:transport={transport}")
-        if lowlat != expected_lowlat:
-            reasons.append(f"{cid}:low_latency={lowlat}/expected={expected_lowlat}")
+        if requested_lowlat != expected_lowlat:
+            reasons.append(f"{cid}:requested_low_latency={requested_lowlat}/expected={expected_lowlat}")
         if overlay != 1:
             reasons.append(f"{cid}:overlay={overlay}")
 
+        d = decoders[cid]
+        actual_lowlat = int(d.group(2))
+        prop = d.group(3)
+        decoder_expected = int(d.group(5))
+        if prop != "low-latency-mode":
+            reasons.append(f"{cid}:decoder_property={prop}")
+        if decoder_expected != expected_lowlat or actual_lowlat != expected_lowlat:
+            reasons.append(
+                f"{cid}:decoder_low_latency={actual_lowlat}/expected={expected_lowlat}"
+            )
+
         print(
             "V11_STEP1V7_CAMERA "
-            f"camera={cid} low_latency={lowlat} source_fps={source_fps:.2f} "
+            f"camera={cid} low_latency={actual_lowlat} source_fps={source_fps:.2f} "
             f"render_fps={render_fps:.2f} source_ratio={source_ratio:.1f}% "
             f"render_ratio={render_ratio:.1f}% wall_p95={wall95:.0f}ms "
             f"display_age_p95={display95:.0f}ms render_gap_p95={render_gap95:.0f}ms "
