@@ -1,0 +1,40 @@
+name: camera-v11-step2-b1-v6-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-b1-2hz-v6-20260827
+    paths:
+      - services/camera_v11/step2_detector_b1_v6.py
+      - scripts/run_camera_v11_step2_detector_b1_v6.sh
+      - scripts/check_camera_v11_step2_detector_b1_v6_log.py
+      - .github/workflows/camera-v11-step2-b1-v6-static.yml
+  pull_request:
+    paths:
+      - services/camera_v11/step2_detector_b1_v6.py
+      - scripts/run_camera_v11_step2_detector_b1_v6.sh
+      - scripts/check_camera_v11_step2_detector_b1_v6_log.py
+      - .github/workflows/camera-v11-step2-b1-v6-static.yml
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v11/step2_detector_b1_v6.py \
+            scripts/check_camera_v11_step2_detector_b1_v6_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step2_detector_b1_v6.sh
+      - name: V6 invariants
+        run: |
+          grep -F 'V11_DETECT_B1_HZ_PER_CAMERA=2.0' scripts/run_camera_v11_step2_detector_b1_v6.sh
+          grep -F 'change=detector-duty-only' scripts/run_camera_v11_step2_detector_b1_v6.sh
+          grep -F 'display_changed=0 conversion_changed=0 engine_changed=0' services/camera_v11/step2_detector_b1_v6.py
+          grep -F 'PASS_B1_2HZ_DISPLAY_PROTECTED' scripts/check_camera_v11_step2_detector_b1_v6_log.py
+          if grep -E 'tracker=[^0]|osd=[^0]|reid=[^0]|face=[^0]' scripts/run_camera_v11_step2_detector_b1_v6.sh; then
+            echo 'forbidden Step2 analytics stage enabled' >&2
+            exit 1
+          fi
