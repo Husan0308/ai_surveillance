@@ -1,0 +1,36 @@
+name: camera-v11-step2-int8-v8-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-int8-calibration-v8-20260828
+    paths:
+      - 'scripts/collect_camera_v11_int8_calibration.py'
+      - 'scripts/build_yolo26s_b1_int8_trt86.py'
+      - 'scripts/probe_camera_v11_trt86_b1_precision.py'
+      - '.github/workflows/camera-v11-step2-int8-v8-static.yml'
+  pull_request:
+    paths:
+      - 'scripts/collect_camera_v11_int8_calibration.py'
+      - 'scripts/build_yolo26s_b1_int8_trt86.py'
+      - 'scripts/probe_camera_v11_trt86_b1_precision.py'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            scripts/collect_camera_v11_int8_calibration.py \
+            scripts/build_yolo26s_b1_int8_trt86.py \
+            scripts/probe_camera_v11_trt86_b1_precision.py
+      - name: INT8 invariants
+        run: |
+          grep -F 'IInt8EntropyCalibrator2' scripts/build_yolo26s_b1_int8_trt86.py >/dev/null
+          grep -F 'BuilderFlag.INT8' scripts/build_yolo26s_b1_int8_trt86.py >/dev/null
+          grep -F 'expected>=500' scripts/build_yolo26s_b1_int8_trt86.py >/dev/null
+          grep -F 'sequential=1' scripts/collect_camera_v11_int8_calibration.py >/dev/null
+          grep -F 'pad114=1' scripts/collect_camera_v11_int8_calibration.py >/dev/null
+          grep -F 'V11_TRT86_B1_PRECISION_RESULT' scripts/probe_camera_v11_trt86_b1_precision.py >/dev/null
