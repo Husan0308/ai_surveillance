@@ -7,6 +7,8 @@ TRT_PY="${CAMERA_V8_TRT86_PYTHON:-$ROOT/.venv-trt86/bin/python}"
 EXPORT_PY="${CAMERA_V8_EXPORT_PYTHON:-$ROOT/.venv/bin/python}"
 ONNX_OUT="${CAMERA_V8_YOLO_ONNX_OUT:-$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b6.onnx}"
 ENGINE_OUT="${CAMERA_V8_TRT86_ENGINE:-$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b6-fp32-trt86.engine}"
+CACHE_OUT="${CAMERA_V8_TRT_TIMING_CACHE:-$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b6-trt86.timing.cache}"
+OPT_LEVEL="${CAMERA_V8_TRT_BUILD_OPT_LEVEL:-2}"
 
 fail() { printf 'V8_MODEL_PREP FAIL %s\n' "$*" >&2; exit 1; }
 [[ -x "$TRT_PY" ]] || fail "TRT8.6 python missing: $TRT_PY"
@@ -47,8 +49,6 @@ if [[ -s "$ENGINE_OUT" ]]; then
 fi
 
 # Only trust an explicitly supplied ONNX or the V8-specific batch-6 export path.
-# Older generic yolo26s ONNX files may be fixed batch=1; silently selecting one would
-# recreate the exact six-sequential-inference architecture V8 is removing.
 ONNX=""
 for candidate in "${CAMERA_V8_YOLO_ONNX:-}" "$ONNX_OUT"; do
   [[ -n "$candidate" && -s "$candidate" ]] || continue
@@ -79,8 +79,6 @@ if [[ -z "$ONNX" ]]; then
       --model "$MODEL" \
       --output "$ONNX_OUT"
   else
-    # Last-resort reproducible path: ask Ultralytics for its canonical yolo26s.pt.
-    # This only downloads when the weight is not already in the Ultralytics cache.
     "$EXPORT_PY" "$ROOT/scripts/export_yolo26_batch6_onnx_v8.py" \
       --model yolo26s.pt \
       --allow-download \
@@ -90,9 +88,13 @@ if [[ -z "$ONNX" ]]; then
 fi
 
 mkdir -p "$(dirname "$ENGINE_OUT")"
+echo "V8_MODEL_PREP build_start=1 onnx=$ONNX engine=$ENGINE_OUT opt_level=$OPT_LEVEL timing_cache=$CACHE_OUT"
+echo "V8_MODEL_PREP note='First Pascal batch-6 build can take several minutes. TensorRT INFO lines now show progress; do not start the camera runtime until this command finishes.'"
 "$TRT_PY" "$ROOT/scripts/build_yolo26_batch6_trt86_v8.py" \
   --onnx "$ONNX" \
   --engine "$ENGINE_OUT" \
-  --workspace-gib "${CAMERA_V8_TRT_WORKSPACE_GIB:-1.0}"
+  --workspace-gib "${CAMERA_V8_TRT_WORKSPACE_GIB:-1.0}" \
+  --optimization-level "$OPT_LEVEL" \
+  --timing-cache "$CACHE_OUT"
 validate_engine "$ENGINE_OUT"
-echo "V8_MODEL_PREP status=READY onnx=$ONNX engine=$ENGINE_OUT"
+echo "V8_MODEL_PREP status=READY onnx=$ONNX engine=$ENGINE_OUT timing_cache=$CACHE_OUT"
