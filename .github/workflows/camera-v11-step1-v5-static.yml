@@ -1,0 +1,27 @@
+name: camera-v11-step1-v5-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step1-cam02-udp-v5-20260827
+  pull_request:
+    paths:
+      - 'services/camera_v11/step1_cam02_udp_v5.py'
+      - 'scripts/run_camera_v11_step1_v5.sh'
+      - '.github/workflows/camera-v11-step1-v5-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python -m py_compile services/camera_v11/step1_cam02_udp_v5.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step1_v5.sh
+      - name: V5 architecture guards
+        run: |
+          grep -q 'V11_UDP_CAMERAS.*CAM-02' scripts/run_camera_v11_step1_v5.sh
+          grep -q 'V11_RTSP_LATENCY_MS.*100' scripts/run_camera_v11_step1_v5.sh
+          grep -q 'protocols.*, 1 if transport == "udp" else 4' services/camera_v11/step1_cam02_udp_v5.py
+          grep -q 'select-rtp-protocol.*, 4 if transport == "tcp" else 0' services/camera_v11/step1_cam02_udp_v5.py
