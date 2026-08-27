@@ -1,0 +1,31 @@
+name: Camera V2 V8.8 Serialized GPU Static
+
+on:
+  push:
+    paths:
+      - 'services/camera_v2/runtime_v88_serialized_gpu.py'
+      - 'scripts/run_camera_v2_bbox_v88.sh'
+      - 'scripts/check_camera_v2_bbox_v88_log.py'
+      - '.github/workflows/camera-v2-v88-serialized-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python compile
+        run: python -m py_compile services/camera_v2/runtime_v88_serialized_gpu.py scripts/check_camera_v2_bbox_v88_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v88.sh
+      - name: Guard one-change scope
+        run: |
+          grep -q 'CAMERA_V2_TRACK_WIDTH.*512' scripts/run_camera_v2_bbox_v88.sh
+          grep -q 'CAMERA_V2_TRACK_FPS.*8' scripts/run_camera_v2_bbox_v88.sh
+          grep -q 'CAMERA_V85_NVDCF_FEATURE_LEVEL.*1' scripts/run_camera_v2_bbox_v88.sh
+          grep -q 'CAMERA_V88_QUIET_BEFORE_MS.*30' scripts/run_camera_v2_bbox_v88.sh
+          grep -q 'v88_detector_reserved' services/camera_v2/runtime_v88_serialized_gpu.py
+          grep -q 'display_gated=0' services/camera_v2/runtime_v88_serialized_gpu.py
+          grep -q 'mps=0' services/camera_v2/runtime_v88_serialized_gpu.py
