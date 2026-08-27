@@ -1,0 +1,61 @@
+name: camera-v11-step3-local-tracker-v1-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step3-local-tracker-v1-20260828
+    paths:
+      - 'services/camera_v11/step3_tracker_v1.py'
+      - 'services/camera_v11/step3_tracking_v1.py'
+      - 'scripts/test_camera_v11_step3_tracker_v1.py'
+      - 'scripts/run_camera_v11_step3_tracker_v1.sh'
+      - 'scripts/check_camera_v11_step3_tracker_v1_log.py'
+      - '.github/workflows/camera-v11-step3-local-tracker-v1-static.yml'
+  pull_request:
+    paths:
+      - 'services/camera_v11/step3_tracker_v1.py'
+      - 'services/camera_v11/step3_tracking_v1.py'
+      - 'scripts/test_camera_v11_step3_tracker_v1.py'
+      - 'scripts/run_camera_v11_step3_tracker_v1.sh'
+      - 'scripts/check_camera_v11_step3_tracker_v1_log.py'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Frozen Step2 is untouched
+        run: |
+          git diff --quiet 1e06df789913075ab5a357d174584b6a5ebadf82 HEAD -- \
+            services/camera_v11/step1_cam02_lowlat_v7.py \
+            services/camera_v11/step1_independent_egl_v4.py \
+            services/camera_v11/step2_production_fp32.py \
+            services/camera_v11/step2_production_fp32_v12.py \
+            services/camera_v11/step2_production_fp32_v13.py \
+            services/camera_v11/step2_production_fp32_v18.py \
+            services/camera_v11/step2_trt86.py \
+            scripts/yolo26_trt86_step2_worker.py \
+            scripts/run_camera_v11_step1_v7.sh \
+            scripts/check_camera_v11_step1_v7_log.py \
+            scripts/check_camera_v11_step2_production_log_v15.py
+      - name: Python and shell syntax
+        run: |
+          python -m py_compile \
+            services/camera_v11/step3_tracker_v1.py \
+            services/camera_v11/step3_tracking_v1.py \
+            scripts/test_camera_v11_step3_tracker_v1.py \
+            scripts/check_camera_v11_step3_tracker_v1_log.py
+          bash -n scripts/run_camera_v11_step3_tracker_v1.sh
+      - name: Architecture invariants
+        run: |
+          grep -F 'appearance_weight=0.0' services/camera_v11/step3_tracker_v1.py >/dev/null
+          grep -F 'display_topology_changed=0' services/camera_v11/step3_tracking_v1.py >/dev/null
+          grep -F 'tracker_gpu=0' services/camera_v11/step3_tracking_v1.py >/dev/null
+          grep -F 'self._consume_tracking(cid, result.boxes, accepted_ns)' services/camera_v11/step3_tracking_v1.py >/dev/null
+          grep -F 'check_camera_v11_step2_production_log_v15.py' scripts/check_camera_v11_step3_tracker_v1_log.py >/dev/null
+      - name: Synthetic tracker tests
+        run: |
+          python -m pip install -q numpy
+          python scripts/test_camera_v11_step3_tracker_v1.py
