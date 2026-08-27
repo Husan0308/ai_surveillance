@@ -1,0 +1,70 @@
+name: Step4 Local Tracking V3 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-local-tracking-v3-20260827
+  pull_request:
+    paths:
+      - 'services/ml_service/app/local_tracker.py'
+      - 'services/ml_service/app/local_tracker_sparse_v2.py'
+      - 'services/ml_service/app/local_tracker_sparse_v3.py'
+      - 'services/ml_service/app/detector_substream_tracking.py'
+      - 'services/ml_service/app/detector_substream_tracking_v2.py'
+      - 'services/ml_service/app/detector_substream_tracking_v3.py'
+      - 'scripts/test_step4_local_tracker.py'
+      - 'scripts/test_step4_sparse_recovery_v2.py'
+      - 'scripts/test_step4_observation_recovery_v3.py'
+      - 'scripts/run_ml_tracking_step4_v3.sh'
+      - '.github/workflows/step4-local-tracking-v3-static.yml'
+
+jobs:
+  tracker-v3-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install minimal CPU test dependency
+        run: python -m pip install --disable-pip-version-check numpy
+
+      - name: Compile Step 4 v3 modules
+        run: |
+          python -m py_compile \
+            services/ml_service/app/local_tracker.py \
+            services/ml_service/app/local_tracker_sparse_v2.py \
+            services/ml_service/app/local_tracker_sparse_v3.py \
+            services/ml_service/app/detector_substream_tracking.py \
+            services/ml_service/app/detector_substream_tracking_v2.py \
+            services/ml_service/app/detector_substream_tracking_v3.py \
+            scripts/test_step4_local_tracker.py \
+            scripts/test_step4_sparse_recovery_v2.py \
+            scripts/test_step4_observation_recovery_v3.py
+
+      - name: Original crossing and recovery smoke test
+        run: python scripts/test_step4_local_tracker.py
+
+      - name: V2 sparse lost-low recovery smoke test
+        run: python scripts/test_step4_sparse_recovery_v2.py
+
+      - name: V3 long-gap and low-hijack smoke test
+        run: python scripts/test_step4_observation_recovery_v3.py
+
+      - name: Guard frozen detector and CPU-only boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'ML_SUBSTREAM_TOKEN_CAPACITY="${ML_SUBSTREAM_TOKEN_CAPACITY:-3}"' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'ML_DETECTOR_TARGET_HZ="${ML_DETECTOR_TARGET_HZ:-2.0}"' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'ML_SUBSTREAM_PENDING_DEPTH="${ML_SUBSTREAM_PENDING_DEPTH:-4}"' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'ML_TRACK_MAX_LOST_SEC="${ML_TRACK_MAX_LOST_SEC:-5.0}"' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'ML_TRACK_LOW_RECOVERY_SEC="${ML_TRACK_LOW_RECOVERY_SEC:-3.0}"' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'ML_TRACK_SHADOW_SEC="${ML_TRACK_SHADOW_SEC:-1.1}"' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'services.ml_service.app.detector_substream_tracking_v3' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'gpu_tracker=0' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'reid=0' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'global_id=0' scripts/run_ml_tracking_step4_v3.sh
+          grep -q 'last_observation_anchor=1' services/ml_service/app/detector_substream_tracking_v3.py
