@@ -1,0 +1,30 @@
+name: Camera V2 V10.8 CAM02 UDP Static
+
+on:
+  push:
+    paths:
+      - 'services/camera_v2/runtime_v108_cam02_udp.py'
+      - 'scripts/run_camera_v2_bbox_v108.sh'
+      - 'scripts/check_camera_v2_bbox_v108_log.py'
+      - '.github/workflows/camera-v2-v108-cam02-udp-static.yml'
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v108_cam02_udp.py \
+            scripts/check_camera_v2_bbox_v108_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v108.sh
+      - name: Guard one-variable policy
+        run: |
+          grep -q 'TARGET_CAMERA = "CAM-02"' services/camera_v2/runtime_v108_cam02_udp.py
+          grep -q 'select-rtp-protocol", 0' services/camera_v2/runtime_v108_cam02_udp.py
+          grep -q 'protocols", self.UDP_PROTOCOL' services/camera_v2/runtime_v108_cam02_udp.py
+          grep -q 'UDP_PROTOCOL = 1' services/camera_v2/runtime_v108_cam02_udp.py
+          grep -q 'only_change=CAM-02-rtp-transport-tcp-to-udp' scripts/run_camera_v2_bbox_v108.sh
