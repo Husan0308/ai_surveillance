@@ -1,0 +1,40 @@
+name: camera-v11-step2-detector-protected-v2-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-detector-protected-v2-20260827
+    paths:
+      - 'services/camera_v11/step2_detector_protected_v2.py'
+      - 'scripts/run_camera_v11_step2_detector_protected_v2.sh'
+      - 'scripts/check_camera_v11_step2_detector_protected_v2_log.py'
+      - '.github/workflows/camera-v11-step2-detector-protected-v2-static.yml'
+  pull_request:
+    paths:
+      - 'services/camera_v11/step2_detector_protected_v2.py'
+      - 'scripts/run_camera_v11_step2_detector_protected_v2.sh'
+      - 'scripts/check_camera_v11_step2_detector_protected_v2_log.py'
+      - '.github/workflows/camera-v11-step2-detector-protected-v2-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v11/step2_detector_protected_v2.py \
+            scripts/check_camera_v11_step2_detector_protected_v2_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step2_detector_protected_v2.sh
+      - name: Architecture invariants
+        run: |
+          grep -F 'V11Step2DetectorOnly' services/camera_v11/step2_detector_protected_v2.py
+          grep -F 'prefetch=0' services/camera_v11/step2_detector_protected_v2.py
+          grep -F 'V11_DETECT_TARGET_HZ' scripts/run_camera_v11_step2_detector_protected_v2.sh
+          grep -F 'check_camera_v11_step1_v7_log.py' scripts/check_camera_v11_step2_detector_protected_v2_log.py
+          if grep -E '_make\("(nvtracker|nvdsosd|nvstreammux|nvmultistreamtiler|nvinfer)"' services/camera_v11/step2_detector_protected_v2.py; then
+            echo 'forbidden Step2 V2 analytics element found' >&2
+            exit 1
+          fi
