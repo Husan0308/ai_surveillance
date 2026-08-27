@@ -46,13 +46,11 @@ if [[ -s "$ENGINE_OUT" ]]; then
   rm -f "$ENGINE_OUT"
 fi
 
+# Only trust an explicitly supplied ONNX or the V8-specific batch-6 export path.
+# Older generic yolo26s ONNX files may be fixed batch=1; silently selecting one would
+# recreate the exact six-sequential-inference architecture V8 is removing.
 ONNX=""
-for candidate in \
-  "${CAMERA_V8_YOLO_ONNX:-}" \
-  "$ONNX_OUT" \
-  "$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384.onnx" \
-  "$ROOT/artifacts/yolo26s_trt86/yolo26s.onnx" \
-  "$ROOT/yolo26s.onnx"; do
+for candidate in "${CAMERA_V8_YOLO_ONNX:-}" "$ONNX_OUT"; do
   [[ -n "$candidate" && -s "$candidate" ]] || continue
   ONNX="$candidate"
   break
@@ -70,10 +68,10 @@ if [[ -z "$ONNX" ]]; then
     MODEL="$candidate"
     break
   done
-  [[ -n "$MODEL" ]] || fail "no batch-6 ONNX or yolo26s.pt found. Set CAMERA_V8_YOLO_PT=/path/yolo26s.pt or CAMERA_V8_YOLO_ONNX=/path/batch6.onnx"
+  [[ -n "$MODEL" ]] || fail "no V8 batch-6 ONNX or yolo26s.pt found. Set CAMERA_V8_YOLO_PT=/path/yolo26s.pt or CAMERA_V8_YOLO_ONNX=/path/true-batch6.onnx"
   [[ -x "$EXPORT_PY" ]] || fail "export python missing: $EXPORT_PY"
   if ! "$EXPORT_PY" -c 'import ultralytics' >/dev/null 2>&1; then
-    fail "ultralytics missing in $EXPORT_PY; install/use the environment that originally exported YOLO26 and set CAMERA_V8_EXPORT_PYTHON"
+    fail "ultralytics missing in $EXPORT_PY; use the environment that originally exported YOLO26 and set CAMERA_V8_EXPORT_PYTHON"
   fi
   "$EXPORT_PY" "$ROOT/scripts/export_yolo26_batch6_onnx_v8.py" \
     --model "$MODEL" \
