@@ -57,6 +57,11 @@ for candidate in "${CAMERA_V8_YOLO_ONNX:-}" "$ONNX_OUT"; do
 done
 
 if [[ -z "$ONNX" ]]; then
+  [[ -x "$EXPORT_PY" ]] || fail "export python missing: $EXPORT_PY"
+  if ! "$EXPORT_PY" -c 'import ultralytics' >/dev/null 2>&1; then
+    fail "ultralytics missing in $EXPORT_PY; use the environment that originally exported YOLO26 and set CAMERA_V8_EXPORT_PYTHON"
+  fi
+
   MODEL=""
   for candidate in \
     "${CAMERA_V8_YOLO_PT:-}" \
@@ -68,14 +73,19 @@ if [[ -z "$ONNX" ]]; then
     MODEL="$candidate"
     break
   done
-  [[ -n "$MODEL" ]] || fail "no V8 batch-6 ONNX or yolo26s.pt found. Set CAMERA_V8_YOLO_PT=/path/yolo26s.pt or CAMERA_V8_YOLO_ONNX=/path/true-batch6.onnx"
-  [[ -x "$EXPORT_PY" ]] || fail "export python missing: $EXPORT_PY"
-  if ! "$EXPORT_PY" -c 'import ultralytics' >/dev/null 2>&1; then
-    fail "ultralytics missing in $EXPORT_PY; use the environment that originally exported YOLO26 and set CAMERA_V8_EXPORT_PYTHON"
+
+  if [[ -n "$MODEL" ]]; then
+    "$EXPORT_PY" "$ROOT/scripts/export_yolo26_batch6_onnx_v8.py" \
+      --model "$MODEL" \
+      --output "$ONNX_OUT"
+  else
+    # Last-resort reproducible path: ask Ultralytics for its canonical yolo26s.pt.
+    # This only downloads when the weight is not already in the Ultralytics cache.
+    "$EXPORT_PY" "$ROOT/scripts/export_yolo26_batch6_onnx_v8.py" \
+      --model yolo26s.pt \
+      --allow-download \
+      --output "$ONNX_OUT"
   fi
-  "$EXPORT_PY" "$ROOT/scripts/export_yolo26_batch6_onnx_v8.py" \
-    --model "$MODEL" \
-    --output "$ONNX_OUT"
   ONNX="$ONNX_OUT"
 fi
 
