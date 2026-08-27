@@ -1,0 +1,34 @@
+name: camera-v11-step2-int8-personcal-v9-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-int8-personcal-v9-20260828
+    paths:
+      - 'scripts/prepare_coco_v11_int8_person_calibration.py'
+      - 'scripts/build_yolo26s_b1_int8_trt86.py'
+      - 'scripts/evaluate_camera_v11_trt86_person_quality.py'
+      - '.github/workflows/camera-v11-step2-int8-personcal-v9-static.yml'
+  pull_request:
+    paths:
+      - 'scripts/prepare_coco_v11_int8_person_calibration.py'
+      - 'scripts/build_yolo26s_b1_int8_trt86.py'
+      - 'scripts/evaluate_camera_v11_trt86_person_quality.py'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            scripts/prepare_coco_v11_int8_person_calibration.py \
+            scripts/build_yolo26s_b1_int8_trt86.py \
+            scripts/evaluate_camera_v11_trt86_person_quality.py
+      - name: Person calibration invariants
+        run: |
+          grep -F 'CAM-COCO-PERSON' scripts/prepare_coco_v11_int8_person_calibration.py >/dev/null
+          grep -F 'held_out_quality=' scripts/prepare_coco_v11_int8_person_calibration.py >/dev/null
+          grep -F 'expected>=1000' scripts/prepare_coco_v11_int8_person_calibration.py >/dev/null
+          grep -F 'V11_PERSON_QUALITY_GATE status=PASS' scripts/evaluate_camera_v11_trt86_person_quality.py >/dev/null
