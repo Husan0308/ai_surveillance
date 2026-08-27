@@ -17,8 +17,11 @@ for plugin in nvurisrcbin queue nvvideoconvert capsfilter nveglglessink rtspsrc;
   gst-inspect-1.0 "$plugin" >/dev/null 2>&1 || fail "missing plugin: $plugin"
 done
 
-gst-inspect-1.0 nvvideoconvert 2>/dev/null | grep -q 'interpolation-method' || \
+# Do not use grep -q with pipefail: early grep exit can SIGPIPE gst-inspect and
+# turn a successful property match into a false preflight failure.
+if ! gst-inspect-1.0 nvvideoconvert 2>/dev/null | grep 'interpolation-method' >/dev/null; then
   fail "nvvideoconvert interpolation-method property missing"
+fi
 
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -46,8 +49,14 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 Gst.init(None)
+factory = Gst.ElementFactory.find("nvvideoconvert")
+if factory is None:
+    raise SystemExit("nvvideoconvert factory missing")
+probe = factory.create("v11_interp_probe")
+if probe is None or probe.find_property("interpolation-method") is None:
+    raise SystemExit("nvvideoconvert interpolation-method runtime property missing")
 from services.camera_v11.step1_cam02_cubic_v8 import V11Step1Cam02CubicV8  # noqa: F401
-print(f"CAMERA_V11_STEP1V8_IMPORT python={sys.version.split()[0]} gst={Gst.version_string()} runtime=OK")
+print(f"CAMERA_V11_STEP1V8_IMPORT python={sys.version.split()[0]} gst={Gst.version_string()} interpolation_property=OK runtime=OK")
 PY
 
 printf '%s\n' \
