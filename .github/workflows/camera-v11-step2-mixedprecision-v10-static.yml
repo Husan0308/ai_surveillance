@@ -51,5 +51,5 @@ jobs:
           grep -F 'score_loss=' scripts/diagnose_camera_v11_trt86_output_drift.py >/dev/null
           grep -F 'geometry_loss=' scripts/diagnose_camera_v11_trt86_output_drift.py >/dev/null
           grep -F 'V11_OUTPUT_DRIFT_DONE status=PASS' scripts/diagnose_camera_v11_trt86_output_drift.py >/dev/null
-          grep -F 'one2one_cv3' scripts/trace_yolo26s_trt86_score_sources.py >/dev/null
+          grep -F 'discovery=graph_edges' scripts/trace_yolo26s_trt86_score_sources.py >/dev/null
           grep -F 'V11_SCORE_PATH_RESULT status=PASS' scripts/trace_yolo26s_trt86_score_sources.py >/dev/null
