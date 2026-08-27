@@ -1,0 +1,30 @@
+name: Camera V2 V8.6 CUDA Schedule Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v86-cuda-schedule-ab-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python compile
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v86_cuda_schedule.py \
+            scripts/check_camera_v2_bbox_v86_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v86.sh
+      - name: Guard single scheduling change
+        run: |
+          grep -q '^export NVDS_DISABLE_CUDADEV_BLOCKINGSYNC=1$' scripts/run_camera_v2_bbox_v86.sh
+          grep -q 'CAMERA_V2_TRACK_WIDTH.*512' scripts/run_camera_v2_bbox_v86.sh
+          grep -q 'CAMERA_V2_TRACK_HEIGHT.*288' scripts/run_camera_v2_bbox_v86.sh
+          grep -q 'CAMERA_V2_TRACK_FPS.*8' scripts/run_camera_v2_bbox_v86.sh
+          grep -q 'CAMERA_V85_NVDCF_FEATURE_LEVEL.*1' scripts/run_camera_v2_bbox_v86.sh
+          grep -q 'CAMERA_V84_DETECT_GPU_BUDGET.*0.30' scripts/run_camera_v2_bbox_v86.sh
+          grep -q 'bbox_policy=unchanged' services/camera_v2/runtime_v86_cuda_schedule.py
+          grep -q 'detector_policy=unchanged' services/camera_v2/runtime_v86_cuda_schedule.py
