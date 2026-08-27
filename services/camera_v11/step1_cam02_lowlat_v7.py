@@ -10,15 +10,20 @@ class V11Step1Cam02LowLatV7(V11Step1IndependentEglV4):
     """V4 independent EGL display with one controlled decoder change.
 
     All cameras remain TCP, 100 ms RTSP latency, latest-only queue, GPU scaling
-    and independent nveglglessink rendering. Only CAM-02 enables nvurisrcbin
-    low-latency-mode. This is safe for the measured CAM-02 H.264 IPPP stream
-    because ffprobe observed zero B-frames.
+    and independent nveglglessink rendering. Only CAM-02 enables the internal
+    nvv4l2decoder low-latency-mode. This is safe for the measured CAM-02 H.264
+    IPPP stream because ffprobe observed zero B-frames.
+
+    This DeepStream 7.1 build does not expose low-latency-mode on nvurisrcbin,
+    so the property is applied to the decoder child via deep-element-added.
     """
 
     def __init__(self) -> None:
         raw = os.environ.get("V11_LOWLAT_CAMERAS", "CAM-02")
         self.lowlat_cameras = {item.strip() for item in raw.split(",") if item.strip()}
+        self.decoder_lowlat_effective: dict[str, int] = {}
         super().__init__()
+
         known = {c.camera_id for c in self.cameras}
         unknown = sorted(self.lowlat_cameras.difference(known))
         if unknown:
@@ -35,13 +40,50 @@ class V11Step1Cam02LowLatV7(V11Step1IndependentEglV4):
         print(
             "CAMERA_V11_STEP1V7_POLICY "
             f"latency_ms={self.latency_ms} drop_on_latency={int(self.drop_on_latency)} "
-            f"low_latency_matrix={matrix}",
+            f"low_latency_matrix={matrix} target=nvv4l2decoder",
+            flush=True,
+        )
+
+    def _configure_rtsp_child(self, bin_obj, sub_bin, element, camera: CameraConfig) -> None:
+        # Keep the proven V4 RTSP child configuration.
+        super()._configure_rtsp_child(bin_obj, sub_bin, element, camera)
+
+        factory = element.get_factory()
+        factory_name = factory.get_name() if factory is not None else ""
+        element_name = element.get_name() or ""
+        if factory_name != "nvv4l2decoder" and "nvv4l2decoder" not in element_name:
+            return
+
+        cid = camera.camera_id
+        requested = cid in self.lowlat_cameras
+        prop = element.find_property("low-latency-mode")
+        if prop is None:
+            with self.lock:
+                self.stats[cid].errors += 1
+            print(
+                "CAMERA_V11_STEP1V7_DECODER "
+                f"camera={cid} low_latency=-1 property=missing element={element_name}",
+                flush=True,
+            )
+            return
+
+        element.set_property("low-latency-mode", bool(requested))
+        effective = int(bool(element.get_property("low-latency-mode")))
+        self.decoder_lowlat_effective[cid] = effective
+        if effective != int(requested):
+            with self.lock:
+                self.stats[cid].errors += 1
+
+        print(
+            "CAMERA_V11_STEP1V7_DECODER "
+            f"camera={cid} low_latency={effective} property=low-latency-mode "
+            f"element={element_name} expected={int(requested)}",
             flush=True,
         )
 
     def _build_camera(self, index: int, camera: CameraConfig) -> None:
         cid = camera.camera_id
-        lowlat = cid in self.lowlat_cameras
+        requested_lowlat = int(cid in self.lowlat_cameras)
         safe = cid.lower().replace("-", "_")
 
         pipeline = self.Gst.Pipeline.new(f"v11_step1v7_{safe}")
@@ -70,15 +112,6 @@ class V11Step1Cam02LowLatV7(V11Step1IndependentEglV4):
         self._set_if(source, "rtsp-reconnect-attempts", -1)
         self._set_if(source, "message-forward", True)
         self._set_if(source, "async-handling", True)
-
-        if source.find_property("low-latency-mode") is None:
-            raise RuntimeError(f"{cid}: nvurisrcbin low-latency-mode property missing")
-        source.set_property("low-latency-mode", bool(lowlat))
-        effective_lowlat = int(bool(source.get_property("low-latency-mode")))
-        if effective_lowlat != int(lowlat):
-            raise RuntimeError(
-                f"{cid}: low-latency-mode readback mismatch expected={int(lowlat)} got={effective_lowlat}"
-            )
 
         self._set_if(convert, "gpu-id", self.gpu_id)
         self._set_if(convert, "nvbuf-memory-type", 0)
@@ -126,7 +159,7 @@ class V11Step1Cam02LowLatV7(V11Step1IndependentEglV4):
 
         print(
             "CAMERA_V11_STEP1V7_WINDOW "
-            f"camera={cid} transport=tcp low_latency={effective_lowlat} "
+            f"camera={cid} transport=tcp low_latency={requested_lowlat} "
             f"xid={self.wall.children[index]} overlay={overlay_ok} "
             f"tile={self.tile_width}x{self.tile_height}",
             flush=True,
