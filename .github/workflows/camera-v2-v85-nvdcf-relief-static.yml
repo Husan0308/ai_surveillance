@@ -1,0 +1,35 @@
+name: Camera V2 V8.5 NvDCF Relief Static
+
+on:
+  push:
+    paths:
+      - 'services/camera_v2/runtime_v85_nvdcf_relief.py'
+      - 'scripts/run_camera_v2_bbox_v85.sh'
+      - 'scripts/check_camera_v2_bbox_v85_log.py'
+      - '.github/workflows/camera-v2-v85-nvdcf-relief-static.yml'
+  pull_request:
+    paths:
+      - 'services/camera_v2/runtime_v85_nvdcf_relief.py'
+      - 'scripts/run_camera_v2_bbox_v85.sh'
+      - 'scripts/check_camera_v2_bbox_v85_log.py'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python compile
+        run: |
+          python -m py_compile services/camera_v2/runtime_v85_nvdcf_relief.py scripts/check_camera_v2_bbox_v85_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v85.sh
+      - name: Guard single-change scope
+        run: |
+          grep -q 'featureImgSizeLevel' services/camera_v2/runtime_v85_nvdcf_relief.py
+          grep -q 'CAMERA_V85_NVDCF_FEATURE_LEVEL.*1' scripts/run_camera_v2_bbox_v85.sh
+          grep -q 'CAMERA_V2_TRACK_WIDTH.*512' scripts/run_camera_v2_bbox_v85.sh
+          grep -q 'CAMERA_V2_TRACK_FPS.*8' scripts/run_camera_v2_bbox_v85.sh
+          grep -q 'CAMERA_V84_DETECT_GPU_BUDGET.*0.30' scripts/run_camera_v2_bbox_v85.sh
