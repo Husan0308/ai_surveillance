@@ -19,7 +19,8 @@ jobs:
         run: |
           python -m py_compile \
             scripts/yolo26_trt86_batch6_worker_v83.py \
-            scripts/check_camera_v2_v83_step1_log.py
+            scripts/check_camera_v2_v83_step1_log.py \
+            scripts/check_trt86_batch6_cleanroom_v83.py
 
       - name: Shell syntax
         run: bash -n scripts/run_camera_v2_v83_step1_detector.sh
@@ -43,6 +44,16 @@ jobs:
           grep -q 'self.context.execute_async_v2' scripts/yolo26_trt86_batch6_worker_v83.py
           grep -q 'cudaStreamSynchronize' scripts/yolo26_trt86_batch6_worker_v83.py
           grep -q 'warmup_iters.*12' scripts/yolo26_trt86_batch6_worker_v83.py
+
+      - name: Guard true cleanroom benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'repo_gpu_processes_alive' scripts/check_trt86_batch6_cleanroom_v83.py
+          grep -q 'V83_CLEANROOM_RESULT' scripts/check_trt86_batch6_cleanroom_v83.py
+          grep -q 'engine-fast-without-deepstream' scripts/check_trt86_batch6_cleanroom_v83.py
+          grep -q 'engine-or-gpu-slow-even-without-deepstream' scripts/check_trt86_batch6_cleanroom_v83.py
+          grep -q 'sha256=' scripts/check_trt86_batch6_cleanroom_v83.py
 
       - name: Guard causal acceptance
         shell: bash
