@@ -1,0 +1,36 @@
+name: Camera V2 V9.2 Current Bbox Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v92-current-frame-bbox-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile services/camera_v2/runtime_v92_current_bbox.py
+          python -m py_compile scripts/check_camera_v2_bbox_v92_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v92.sh
+      - name: Guard bbox semantics
+        run: |
+          grep -q 'partial_batch=present-rows-only' services/camera_v2/runtime_v92_current_bbox.py
+          grep -q 'minTrackerConfidence.*0.12' services/camera_v2/runtime_v92_current_bbox.py
+          grep -q 'outputShadowTracks.*0' services/camera_v2/runtime_v92_current_bbox.py
+          grep -q 'currentize' services/camera_v2/runtime_v92_current_bbox.py
+          grep -q 'CAMERA_V2_DISPLAY_EMPTY_HOLD_MS.*180' scripts/run_camera_v2_bbox_v92.sh
+          grep -q 'CAMERA_V2_DISPLAY_TRACK_MAX_AGE_MS.*230' scripts/run_camera_v2_bbox_v92.sh
+          grep -q 'CAMERA_V2_MIN_DISPLAY_TRACK_CONF.*0.10' scripts/run_camera_v2_bbox_v92.sh
+          grep -q 'CAMERA_V2_MAX_DETECT_RESULT_AGE_MS.*280' scripts/run_camera_v2_bbox_v92.sh
+      - name: Guard V9.1 architecture retained
+        run: |
+          grep -q 'PascalInProcessTrt86Runtime' services/camera_v2/runtime_v92_current_bbox.py
+          ! grep -q 'multiprocessing' services/camera_v2/runtime_v92_current_bbox.py
+          ! grep -q 'SharedMemory' services/camera_v2/runtime_v92_current_bbox.py
+          ! grep -q 'subprocess' services/camera_v2/runtime_v92_current_bbox.py
+          grep -q 'CAMERA_V2_TRACK_FPS.*8' scripts/run_camera_v2_bbox_v92.sh
