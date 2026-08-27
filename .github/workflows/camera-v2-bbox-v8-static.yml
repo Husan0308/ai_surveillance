@@ -23,6 +23,7 @@ jobs:
             scripts/yolo26_trt86_batch6_worker_v8.py \
             scripts/build_yolo26_batch6_trt86_v8.py \
             scripts/export_yolo26_batch6_onnx_v8.py \
+            scripts/check_trt86_batch6_isolation_v8.py \
             scripts/check_camera_v2_bbox_v8_log.py
 
       - name: Shell syntax
