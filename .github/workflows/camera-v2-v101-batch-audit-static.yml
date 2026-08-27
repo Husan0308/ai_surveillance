@@ -1,0 +1,27 @@
+name: Camera V2 V10.1 Tracker Batch Audit Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v100-tracker-timeout40-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Compile V10.1 files
+        run: |
+          python -m py_compile services/camera_v2/runtime_v101_tracker_batch_audit.py
+          python -m py_compile scripts/check_camera_v2_bbox_v101_log.py
+          bash -n scripts/run_camera_v2_bbox_v101.sh
+      - name: Guard diagnostic-only V10.1
+        run: |
+          grep -q 'runtime_v100_tracker_timeout40' services/camera_v2/runtime_v101_tracker_batch_audit.py
+          grep -q 'behavior_change=0' services/camera_v2/runtime_v101_tracker_batch_audit.py
+          grep -q 'tracker_timeout_us=40000' services/camera_v2/runtime_v101_tracker_batch_audit.py
+          grep -q 'tracker-batch-formation-instrumentation' scripts/run_camera_v2_bbox_v101.sh
