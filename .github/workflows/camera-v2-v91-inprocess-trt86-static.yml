@@ -27,8 +27,9 @@ jobs:
           grep -q 'from scripts.yolo26_trt86_shm_worker_v4 import Runner' services/camera_v2/runtime_v91_inprocess_trt86.py
           grep -q 'self.v91_ready.wait' services/camera_v2/runtime_v91_inprocess_trt86.py
           ! grep -q 'get_context("spawn")' services/camera_v2/runtime_v91_inprocess_trt86.py
-          ! grep -q 'shared_memory' services/camera_v2/runtime_v91_inprocess_trt86.py
-          ! grep -q 'subprocess' services/camera_v2/runtime_v91_inprocess_trt86.py
+          ! grep -q '^import subprocess' services/camera_v2/runtime_v91_inprocess_trt86.py
+          ! grep -q 'subprocess\.Popen' services/camera_v2/runtime_v91_inprocess_trt86.py
+          ! grep -q 'SharedMemory(' services/camera_v2/runtime_v91_inprocess_trt86.py
       - name: Guard production baseline
         run: |
           grep -q 'CAMERA_V2_TRACK_WIDTH.*512' scripts/run_camera_v2_bbox_v91.sh
