@@ -1,0 +1,55 @@
+name: Camera V2 BBox V7 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v7-nvdcf-bbox-20260827
+  pull_request:
+
+jobs:
+  bbox-v7-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependency
+        run: python -m pip install numpy
+
+      - name: Compile V7
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_bbox_v7.py \
+            scripts/test_camera_v2_bbox_v7.py \
+            scripts/check_camera_v2_bbox_v7_log.py
+
+      - name: Deterministic bbox policy tests
+        run: python scripts/test_camera_v2_bbox_v7.py
+
+      - name: Guard NvDCF per-frame contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'CAMERA_V2_TRACK_FPS=.*20' scripts/run_camera_v2_bbox_v7.sh
+          grep -q 'CAMERA_V2_DETECT_HZ=.*1.50' scripts/run_camera_v2_bbox_v7.sh
+          grep -q 'CAMERA_V2_MIN_DISPLAY_TRACK_CONF=.*0.28' scripts/run_camera_v2_bbox_v7.sh
+          grep -q 'CAMERA_V2_DISPLAY_BOX_SIDE_MARGIN=.*0.06' scripts/run_camera_v2_bbox_v7.sh
+          grep -q 'custom_velocity_predictor=0' services/camera_v2/runtime_bbox_v7.py
+          grep -q 'outputShadowTracks", "0"' services/camera_v2/runtime_bbox_v7.py
+          grep -q 'minTrackerConfidence", "0.28"' services/camera_v2/runtime_bbox_v7.py
+          grep -q 'probationAge", "2"' services/camera_v2/runtime_bbox_v7.py
+          grep -q 'minIouDiff4NewTarget", "0.72"' services/camera_v2/runtime_bbox_v7.py
+          grep -q 'self.track_cache\[source_id\] = (now, tracks)' services/camera_v2/runtime_bbox_v7.py
+          ! grep -q 'bounded_center_prediction' services/camera_v2/runtime_bbox_v7.py
+
+      - name: Guard display-only body envelope
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'DISPLAY_SIZE_HOLD_SEC' scripts/run_camera_v2_bbox_v7.sh
+          grep -q '_stable_size' services/camera_v2/runtime_bbox_v7.py
+          grep -q '_expand_box' services/camera_v2/runtime_bbox_v7.py
+          grep -q 'current_nvdcf_only=1' services/camera_v2/runtime_bbox_v7.py
+          grep -q 'shadow_render=0' services/camera_v2/runtime_bbox_v7.py
