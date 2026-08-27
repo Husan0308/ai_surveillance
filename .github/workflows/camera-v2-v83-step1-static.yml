@@ -1,0 +1,54 @@
+name: Camera V2 V8.3 Step1 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v83-detector-recovery-20260827
+  pull_request:
+
+jobs:
+  v83-step1-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile Step1 scripts
+        run: |
+          python -m py_compile \
+            scripts/yolo26_trt86_batch6_worker_v83.py \
+            scripts/check_camera_v2_v83_step1_log.py
+
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_v83_step1_detector.sh
+
+      - name: Guard exact V8 A-B baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'exec bash .*run_camera_v2_bbox_v8.sh' scripts/run_camera_v2_v83_step1_detector.sh
+          grep -q 'CAMERA_V2_TRACK_FPS=.*8' scripts/run_camera_v2_v83_step1_detector.sh
+          grep -q 'CAMERA_V2_MIN_DISPLAY_TRACK_CONF=.*0.28' scripts/run_camera_v2_v83_step1_detector.sh
+          grep -q 'CAMERA_V8_DETECT_INITIAL_HZ=.*2.00' scripts/run_camera_v2_v83_step1_detector.sh
+          ! grep -q 'runtime_v81' scripts/run_camera_v2_v83_step1_detector.sh
+          ! grep -q 'runtime_v82' scripts/run_camera_v2_v83_step1_detector.sh
+
+      - name: Guard same-context TRT warmup
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'CAMERA_V83_TRT_WARMUP' scripts/yolo26_trt86_batch6_worker_v83.py
+          grep -q 'self.context.execute_async_v2' scripts/yolo26_trt86_batch6_worker_v83.py
+          grep -q 'cudaStreamSynchronize' scripts/yolo26_trt86_batch6_worker_v83.py
+          grep -q 'warmup_iters.*12' scripts/yolo26_trt86_batch6_worker_v83.py
+
+      - name: Guard causal acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'warm_fast/live_slow' scripts/check_camera_v2_v83_step1_log.py
+          grep -q 'warm_slow' scripts/check_camera_v2_v83_step1_log.py
+          grep -q 'real_updates=0' scripts/check_camera_v2_v83_step1_log.py
+          grep -q 'tracked_now=0' scripts/check_camera_v2_v83_step1_log.py
