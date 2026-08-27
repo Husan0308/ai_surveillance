@@ -45,7 +45,7 @@ deepstream:
   startup_stagger_sec: 0.50
 
 display:
-  width: 736
-  height: 416
+  width: 960
+  height: 540
   fps: 20
-  jpeg_quality: 70
+  jpeg_quality: 85
