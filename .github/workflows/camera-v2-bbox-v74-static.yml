@@ -1,0 +1,48 @@
+name: Camera V2 BBox V7.4 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v7-4-pascal-balanced-20260827
+  pull_request:
+
+jobs:
+  v74-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile Python
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_bbox_v74.py \
+            scripts/auto_profile_camera_v74.py \
+            scripts/check_camera_v2_bbox_v74_log.py
+
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v74.sh
+
+      - name: Guard Pascal budget policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'useColorNames", "1"' services/camera_v2/runtime_bbox_v74.py
+          grep -q 'useHog", "0"' services/camera_v2/runtime_bbox_v74.py
+          grep -q 'featureImgSizeLevel", "2"' services/camera_v2/runtime_bbox_v74.py
+          grep -q 'useHighPrecisionFeature", "0"' services/camera_v2/runtime_bbox_v74.py
+          grep -q 'detector_gpu_budget' scripts/auto_profile_camera_v74.py
+          grep -q '0.30 /' scripts/auto_profile_camera_v74.py
+          grep -q 'CAMERA_V2_TRACK_FPS' scripts/auto_profile_camera_v74.py
+          grep -q 'DISPLAY_EMPTY_HOLD_MS' scripts/run_camera_v2_bbox_v74.sh
+          grep -q 'flock -n 9' scripts/run_camera_v2_bbox_v74.sh
+          grep -q 'runtime_bbox_v74' scripts/run_camera_v2_bbox_v74.sh
+
+      - name: Guard no false 35ms hard failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -q 'med <= 35.0 and p95 <= 60.0' scripts/auto_profile_camera_v74.py
+          grep -q 'med > 130.0' scripts/auto_profile_camera_v74.py
