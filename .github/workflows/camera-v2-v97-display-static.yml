@@ -1,0 +1,26 @@
+name: Camera V2 V9.7 Display Pool Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v97-display-pool-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Compile V9.7 files
+        run: |
+          python -m py_compile services/camera_v2/runtime_v97_display_pool.py
+          python -m py_compile scripts/check_camera_v2_bbox_v97_log.py
+          bash -n scripts/run_camera_v2_bbox_v97.sh
+      - name: Guard one-variable A/B
+        run: |
+          grep -q 'buffer-pool-size", 4' services/camera_v2/runtime_v97_display_pool.py
+          grep -q 'runtime_v96_display_freshness' services/camera_v2/runtime_v97_display_pool.py
+          grep -q 'only_change=display-mux-buffer-pool' services/camera_v2/runtime_v97_display_pool.py
