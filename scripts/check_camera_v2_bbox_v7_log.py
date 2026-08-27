@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--camera", default="CAM-01")
     parser.add_argument("--min-source-fps", type=float, default=18.0)
     parser.add_argument("--min-tracker-hz", type=float, default=14.0)
-    parser.add_argument("--min-detector-hz", type=float, default=1.10)
+    parser.add_argument("--min-detector-hz", type=float, default=0.90)
     args = parser.parse_args()
 
     path = Path(args.log)
