@@ -10,6 +10,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Export YOLO26 person detector as batch-6 ONNX")
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--allow-download", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -17,16 +18,23 @@ def main() -> int:
     except Exception as exc:
         raise SystemExit(f"V8_ONNX FAIL ultralytics import: {type(exc).__name__}: {exc}")
 
-    model_path = Path(args.model).expanduser().resolve()
-    output_path = Path(args.output).expanduser().resolve()
-    if not model_path.is_file():
-        raise SystemExit(f"V8_ONNX FAIL model missing: {model_path}")
+    model_arg = args.model
+    candidate = Path(model_arg).expanduser()
+    if candidate.is_file():
+        model_spec = str(candidate.resolve())
+    elif args.allow_download and candidate.name == model_arg and model_arg.endswith(".pt"):
+        # Ultralytics resolves/downloads its canonical model weight by name.
+        model_spec = model_arg
+        print(f"V8_ONNX_DOWNLOAD model={model_spec} source=ultralytics-canonical", flush=True)
+    else:
+        raise SystemExit(f"V8_ONNX FAIL model missing: {candidate}")
 
+    output_path = Path(args.output).expanduser().resolve()
     print(
-        f"V8_ONNX_EXPORT model={model_path} batch=6 imgsz=384x672 dynamic=0 nms=1 fp32=1",
+        f"V8_ONNX_EXPORT model={model_spec} batch=6 imgsz=384x672 dynamic=0 nms=1 fp32=1",
         flush=True,
     )
-    model = YOLO(str(model_path))
+    model = YOLO(model_spec)
     exported = model.export(
         format="onnx",
         imgsz=(384, 672),
