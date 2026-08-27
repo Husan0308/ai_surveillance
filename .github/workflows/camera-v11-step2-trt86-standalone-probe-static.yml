@@ -1,0 +1,26 @@
+name: camera-v11-step2-trt86-standalone-probe-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-trt86-standalone-probe-v3-20260827
+    paths:
+      - 'scripts/probe_camera_v11_trt86_batch6_standalone.py'
+      - '.github/workflows/camera-v11-step2-trt86-standalone-probe-static.yml'
+  pull_request:
+    paths:
+      - 'scripts/probe_camera_v11_trt86_batch6_standalone.py'
+      - '.github/workflows/camera-v11-step2-trt86-standalone-probe-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python -m py_compile scripts/probe_camera_v11_trt86_batch6_standalone.py
+      - name: Probe invariants
+        run: |
+          grep -F 'Batch6TRT86Client' scripts/probe_camera_v11_trt86_batch6_standalone.py
+          grep -F 'V11_TRT86_STANDALONE_RESULT' scripts/probe_camera_v11_trt86_batch6_standalone.py
+          grep -F 'stalls_ge900' scripts/probe_camera_v11_trt86_batch6_standalone.py
