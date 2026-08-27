@@ -69,3 +69,16 @@ jobs:
           grep -q 'useColorNames.*"1"' services/camera_v2/runtime_v8_pascal.py
           grep -q 'useHog.*"0"' services/camera_v2/runtime_v8_pascal.py
           grep -q 'featureImgSizeLevel.*"2"' services/camera_v2/runtime_v8_pascal.py
+
+      - name: Guard offline observable TensorRT build
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'builder_optimization_level = optimization_level' scripts/build_yolo26_batch6_trt86_v8.py
+          grep -q 'create_timing_cache' scripts/build_yolo26_batch6_trt86_v8.py
+          grep -q 'set_timing_cache' scripts/build_yolo26_batch6_trt86_v8.py
+          grep -q 'Logger.INFO' scripts/build_yolo26_batch6_trt86_v8.py
+          grep -q 'V8_ENGINE_BUILD_PROGRESS' scripts/build_yolo26_batch6_trt86_v8.py
+          grep -q 'CAMERA_V8_TRT_BUILD_OPT_LEVEL:-2' scripts/prepare_yolo26_batch6_v8.sh
+          grep -q 'batch-6 engine missing' scripts/run_camera_v2_bbox_v8.sh
+          ! grep -q 'if.*DETECT_ENABLED.*prepare_yolo26_batch6_v8.sh' scripts/run_camera_v2_bbox_v8.sh
