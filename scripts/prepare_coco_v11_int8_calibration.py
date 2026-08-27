@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import shutil
@@ -12,8 +13,10 @@ from pathlib import Path
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-VAL_URL = "https://images.cocodataset.org/zips/val2017.zip"
-ANN_URL = "https://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+VAL_URL = "https://huggingface.co/datasets/baohao/coco2017/resolve/main/coco_val2017.zip?download=true"
+VAL_SHA256 = "6cb37504e5c5106585bfb82b109de3a321f406892ec06c1c547d39310a26bf92"
+ANN_URL = "https://huggingface.co/datasets/LibreYOLO/coco2017/resolve/main/instances_val2017.json?download=true"
+ANN_SHA256 = "e8c7f7908f1d7278341fae127d0da654f102f11bd7b21d8aeefa635b8c810b6f"
 TARGET_W = 672
 TARGET_H = 384
 PERSON_CATEGORY_ID = 1
@@ -24,18 +27,56 @@ def resolve(path: str) -> Path:
     return p if p.is_absolute() else ROOT / p
 
 
-def download(url: str, dst: Path) -> None:
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_verified(url: str, dst: Path, expected_sha256: str) -> None:
     if dst.is_file() and dst.stat().st_size > 0:
-        print(f"V11_COCO_DOWNLOAD status=HIT file={dst} bytes={dst.stat().st_size}", flush=True)
-        return
+        actual = sha256_file(dst)
+        if actual == expected_sha256:
+            print(
+                f"V11_COCO_DOWNLOAD status=HIT file={dst} bytes={dst.stat().st_size} sha256={actual}",
+                flush=True,
+            )
+            return
+        print(
+            f"V11_COCO_DOWNLOAD status=STALE file={dst} sha256={actual} expected={expected_sha256}",
+            flush=True,
+        )
+        dst.unlink()
+
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".part")
     if tmp.exists():
         tmp.unlink()
+
     print(f"V11_COCO_DOWNLOAD status=START url={url} file={dst}", flush=True)
-    urllib.request.urlretrieve(url, tmp)
+    request = urllib.request.Request(url, headers={"User-Agent": "ai-surveillance-v11-coco-prep/1.0"})
+    h = hashlib.sha256()
+    with urllib.request.urlopen(request, timeout=60) as src, tmp.open("wb") as out:
+        while True:
+            chunk = src.read(8 << 20)
+            if not chunk:
+                break
+            out.write(chunk)
+            h.update(chunk)
+
+    actual = h.hexdigest()
+    if actual != expected_sha256:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"V11_COCO_DOWNLOAD checksum mismatch file={dst.name} sha256={actual} expected={expected_sha256}"
+        )
     tmp.replace(dst)
-    print(f"V11_COCO_DOWNLOAD status=DONE file={dst} bytes={dst.stat().st_size}", flush=True)
+    print(
+        f"V11_COCO_DOWNLOAD status=DONE file={dst} bytes={dst.stat().st_size} sha256={actual}",
+        flush=True,
+    )
 
 
 def extract_if_needed(archive: Path, dst: Path, sentinel: Path) -> None:
@@ -45,6 +86,9 @@ def extract_if_needed(archive: Path, dst: Path, sentinel: Path) -> None:
     print(f"V11_COCO_EXTRACT status=START archive={archive}", flush=True)
     dst.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as zf:
+        bad = zf.testzip()
+        if bad is not None:
+            raise RuntimeError(f"V11_COCO_EXTRACT corrupt_member={bad}")
         zf.extractall(dst)
     print(f"V11_COCO_EXTRACT status=DONE archive={archive}", flush=True)
 
@@ -95,16 +139,20 @@ def main() -> int:
     calib_root = resolve(args.calibration_dir)
     calib = calib_root / "CAM-COCO"
     quality = resolve(args.quality_dir)
-    val_zip = work / "val2017.zip"
-    ann_zip = work / "annotations_trainval2017.zip"
+    val_zip = work / "coco_val2017.zip"
+    ann_download = work / "instances_val2017.json"
     data_root = work / "data"
     val_dir = data_root / "val2017"
     ann_path = data_root / "annotations" / "instances_val2017.json"
 
-    download(VAL_URL, val_zip)
-    download(ANN_URL, ann_zip)
+    download_verified(VAL_URL, val_zip, VAL_SHA256)
+    download_verified(ANN_URL, ann_download, ANN_SHA256)
     extract_if_needed(val_zip, data_root, val_dir / "000000000139.jpg")
-    extract_if_needed(ann_zip, data_root, ann_path)
+    ann_path.parent.mkdir(parents=True, exist_ok=True)
+    if not ann_path.is_file() or sha256_file(ann_path) != ANN_SHA256:
+        shutil.copy2(ann_download, ann_path)
+    if sha256_file(ann_path) != ANN_SHA256:
+        raise RuntimeError("V11_COCO_PREP annotations checksum mismatch after install")
 
     payload = json.loads(ann_path.read_text(encoding="utf-8"))
     images = {int(row["id"]): row for row in payload["images"]}
@@ -142,7 +190,7 @@ def main() -> int:
     print(
         "V11_COCO_PREP_START "
         f"val_images={len(images)} calibration={len(calib_ids)} quality_person={len(quality_ids)} "
-        f"geometry={TARGET_W}x{TARGET_H} letterbox114=1 seed={args.seed} calibration_shard=CAM-COCO",
+        f"geometry={TARGET_W}x{TARGET_H} letterbox114=1 seed={args.seed} calibration_shard=CAM-COCO source=hf-verified",
         flush=True,
     )
 
