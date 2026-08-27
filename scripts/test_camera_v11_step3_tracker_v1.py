@@ -32,16 +32,29 @@ class Step3TrackerV1Test(unittest.TestCase):
         self.assertEqual(update.created, 0)
         self.assertEqual(update.active, 0)
 
-    def test_low_confidence_can_recover_existing_track(self):
+    def test_low_confidence_keeps_active_track_without_new_id(self):
+        tracker = self.tracker()
+        tracker.update("CAM01", [[100, 80, 220, 330, 0.90]], 1_000_000_000)
+        confirmed = tracker.update("CAM01", [[105, 80, 225, 330, 0.88]], 1_500_000_000)
+        track_id = confirmed.snapshots[0].track_id
+        low = tracker.update("CAM01", [[110, 82, 230, 332, 0.24]], 2_000_000_000)
+        self.assertTrue(low.snapshots)
+        self.assertEqual(track_id, low.snapshots[0].track_id)
+        self.assertGreaterEqual(low.matched_low, 1)
+        self.assertEqual(low.created, 0)
+
+    def test_lost_track_requires_high_confidence_recovery(self):
         tracker = self.tracker()
         tracker.update("CAM01", [[100, 80, 220, 330, 0.90]], 1_000_000_000)
         confirmed = tracker.update("CAM01", [[105, 80, 225, 330, 0.88]], 1_500_000_000)
         track_id = confirmed.snapshots[0].track_id
         tracker.update("CAM01", [], 2_000_000_000)
-        recovered = tracker.update("CAM01", [[112, 82, 232, 332, 0.24]], 2_500_000_000)
-        self.assertTrue(recovered.snapshots)
-        self.assertEqual(track_id, recovered.snapshots[0].track_id)
-        self.assertGreaterEqual(recovered.matched_low, 1)
+        low = tracker.update("CAM01", [[112, 82, 232, 332, 0.24]], 2_500_000_000)
+        self.assertEqual(low.recovered, 0)
+        high = tracker.update("CAM01", [[115, 84, 235, 334, 0.80]], 3_000_000_000)
+        self.assertTrue(high.snapshots)
+        self.assertEqual(track_id, high.snapshots[0].track_id)
+        self.assertGreaterEqual(high.recovered, 1)
 
     def test_camera_id_spaces_are_isolated(self):
         tracker = self.tracker()
