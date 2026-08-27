@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import statistics
@@ -10,10 +9,9 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import tensorrt as trt
 
-from scripts.yolo26_trt86_batch6_worker_v8 import Batch6Runner, emit
+from yolo26_trt86_batch6_worker_v8 import Batch6Runner, emit
 
 
 class WarmBatch6Runner(Batch6Runner):
@@ -60,8 +58,6 @@ class WarmBatch6Runner(Batch6Runner):
 
     def warmup(self, iterations: int) -> tuple[list[float], float, float]:
         iterations = max(4, min(40, int(iterations)))
-        # Deterministic finite input. The timing path is identical to production
-        # H2D -> TRT enqueue -> D2H -> stream sync, only post-processing is skipped.
         self.x.fill(0.0)
         self.y.fill(0.0)
         samples: list[float] = []
