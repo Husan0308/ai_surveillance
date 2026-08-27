@@ -1,0 +1,58 @@
+name: Camera V2 BBox V7.1 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v7-1-no-flicker-20260827
+  pull_request:
+
+jobs:
+  bbox-v71-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile V7.1
+        run: |
+          python -m py_compile \
+            services/camera_v2/visibility_policy_v71.py \
+            services/camera_v2/runtime_bbox_v71.py \
+            scripts/test_camera_v2_bbox_v71.py \
+            scripts/check_camera_v2_bbox_v71_log.py
+          bash -n scripts/run_camera_v2_bbox_v71.sh
+
+      - name: Deterministic visibility hysteresis tests
+        run: python scripts/test_camera_v2_bbox_v71.py
+
+      - name: Guard no-flicker policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'CAMERA_V2_DISPLAY_EMPTY_HOLD_MS=.*320' scripts/run_camera_v2_bbox_v71.sh
+          grep -q 'CAMERA_V2_DISPLAY_TRACK_MAX_AGE_MS=.*360' scripts/run_camera_v2_bbox_v71.sh
+          grep -q 'should_hold_last_good' services/camera_v2/runtime_bbox_v71.py
+          grep -q 'last_good_only=1 prediction=0' services/camera_v2/runtime_bbox_v71.py
+          grep -q 'previous\[0\]' services/camera_v2/runtime_bbox_v71.py
+          grep -q 'self.track_cache.pop(source_id, None)' services/camera_v2/runtime_bbox_v71.py
+          ! grep -q 'velocity' services/camera_v2/visibility_policy_v71.py
+
+      - name: Guard capture-before-lock ordering
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('services/camera_v2/runtime_bbox_v71.py').read_text()
+          start = text.index('def _detector_scheduler')
+          block = text[start:]
+          capture = block.index('self._request_capture(cid)')
+          wait_frame = block.index('self.mailbox.wait_new')
+          lane_wait = block.index('wait_started = time.monotonic()')
+          lane_acquire = block.index('self.gpu_lane.acquire')
+          job = block.index('self.job_q.put')
+          assert capture < wait_frame < lane_wait < lane_acquire < job
+          print('V71_LOCK_ORDER PASS capture->frame->lane->TRT')
+          PY
+          grep -q 'capture=fresh-before-gpu-lane gpu_lane=trt-only' services/camera_v2/runtime_bbox_v71.py
+          grep -q 'CAMERA_V2_DETECT_HZ=.*1.25' scripts/run_camera_v2_bbox_v71.sh
