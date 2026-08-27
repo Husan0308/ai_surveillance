@@ -1,0 +1,30 @@
+name: Camera V2 V10.9 RTP Audit Static
+
+on:
+  push:
+    paths:
+      - 'services/camera_v2/runtime_v109_rtp_health_audit.py'
+      - 'scripts/run_camera_v2_bbox_v109.sh'
+      - 'scripts/check_camera_v2_bbox_v109_log.py'
+      - '.github/workflows/camera-v2-v109-rtp-audit-static.yml'
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v109_rtp_health_audit.py \
+            scripts/check_camera_v2_bbox_v109_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v109.sh
+      - name: Guard diagnostic-only policy
+        run: |
+          grep -q 'behavior_change=0' services/camera_v2/runtime_v109_rtp_health_audit.py
+          grep -q 'new-jitterbuffer' services/camera_v2/runtime_v109_rtp_health_audit.py
+          grep -q 'get_property("stats")' services/camera_v2/runtime_v109_rtp_health_audit.py
+          grep -q 'CAMERA_V2_RTSP_TRANSPORT="tcp"' scripts/run_camera_v2_bbox_v109.sh
+          grep -q 'CAMERA_V2_RTSP_LATENCY_MS="60"' scripts/run_camera_v2_bbox_v109.sh
