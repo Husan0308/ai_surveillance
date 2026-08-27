@@ -1,0 +1,41 @@
+name: Camera V2 V9.4 X-map Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v94-xmap-fix-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Syntax check
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v94_xmap.py \
+            scripts/test_v94_xmap.py \
+            scripts/check_camera_v2_bbox_v94_log.py
+          bash -n scripts/run_camera_v2_bbox_v94.sh
+      - name: Guard one-variable coordinate fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('services/camera_v2/runtime_v94_xmap.py').read_text()
+          assert 'x_scale = self.track_width / float(DETECT_W)' in p
+          assert 'x1 = x1 * x_scale' in p
+          assert 'x2 = x2 * x_scale' in p
+          assert 'y_scale = self.track_height / float(DETECT_CONTENT_H)' in p
+          assert 'y1 = (y1 - 3.0) * y_scale' in p
+          assert 'y2 = (y2 - 3.0) * y_scale' in p
+          assert 'PascalMotionDisplayRuntime' in p
+          launcher = Path('scripts/run_camera_v2_bbox_v94.sh').read_text()
+          assert 'CAMERA_V2_TRACK_FPS="${CAMERA_V2_TRACK_FPS:-10}"' in launcher
+          assert 'CAMERA_V84_DETECT_GPU_BUDGET="${CAMERA_V84_DETECT_GPU_BUDGET:-0.26}"' in launcher
+          assert 'only_change=detector-x-scale-672-to-' in launcher
+          print('V94_STATIC PASS x-map-only guard')
+          PY
