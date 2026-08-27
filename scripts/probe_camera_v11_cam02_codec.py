@@ -6,7 +6,12 @@ import shutil
 import subprocess
 import sys
 from collections import Counter
+from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from services.ml_service.app.config import load_settings
 
