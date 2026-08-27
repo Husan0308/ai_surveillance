@@ -31,4 +31,4 @@ jobs:
           grep -q 'runtime_v101_tracker_batch_audit' services/camera_v2/runtime_v103_shared_phase_gate.py
           grep -q 'slot = int(now / period_s)' services/camera_v2/runtime_v103_shared_phase_gate.py
           grep -q 'tracker_batch_size=' services/camera_v2/runtime_v103_shared_phase_gate.py
-          grep -q 'target=6 timeout_us=40000 sync_inputs=0' scripts/run_camera_v2_bbox_v103.sh
+          grep -q 'batch_size=6 timeout_us=40000 sync_inputs=0' scripts/run_camera_v2_bbox_v103.sh
