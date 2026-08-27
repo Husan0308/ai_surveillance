@@ -9,6 +9,7 @@ on:
       - 'scripts/build_yolo26s_b1_mixed_trt86.py'
       - 'scripts/sweep_camera_v11_trt86_person_conf.py'
       - 'scripts/prepare_coco_v11_final_person_holdout.py'
+      - 'scripts/diagnose_camera_v11_trt86_output_drift.py'
       - '.github/workflows/camera-v11-step2-mixedprecision-v10-static.yml'
   pull_request:
     paths:
@@ -16,6 +17,7 @@ on:
       - 'scripts/build_yolo26s_b1_mixed_trt86.py'
       - 'scripts/sweep_camera_v11_trt86_person_conf.py'
       - 'scripts/prepare_coco_v11_final_person_holdout.py'
+      - 'scripts/diagnose_camera_v11_trt86_output_drift.py'
 
 jobs:
   static:
@@ -28,7 +30,8 @@ jobs:
             scripts/inspect_yolo26s_trt86_layers.py \
             scripts/build_yolo26s_b1_mixed_trt86.py \
             scripts/sweep_camera_v11_trt86_person_conf.py \
-            scripts/prepare_coco_v11_final_person_holdout.py
+            scripts/prepare_coco_v11_final_person_holdout.py \
+            scripts/diagnose_camera_v11_trt86_output_drift.py
       - name: Mixed precision invariants
         run: |
           grep -F 'V11_LAYER_INSPECT_RESULT status=PASS' scripts/inspect_yolo26s_trt86_layers.py >/dev/null
@@ -42,3 +45,6 @@ jobs:
           grep -F 'diagnostic=1' scripts/sweep_camera_v11_trt86_person_conf.py >/dev/null
           grep -F 'overlap_quality=0 overlap_calibration=0' scripts/prepare_coco_v11_final_person_holdout.py >/dev/null
           grep -F 'V11_FINAL_HOLDOUT_RESULT' scripts/prepare_coco_v11_final_person_holdout.py >/dev/null
+          grep -F 'score_loss=' scripts/diagnose_camera_v11_trt86_output_drift.py >/dev/null
+          grep -F 'geometry_loss=' scripts/diagnose_camera_v11_trt86_output_drift.py >/dev/null
+          grep -F 'V11_OUTPUT_DRIFT_DONE status=PASS' scripts/diagnose_camera_v11_trt86_output_drift.py >/dev/null
