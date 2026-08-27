@@ -1,0 +1,40 @@
+name: camera-v11-step2-sharedscale-v7-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-sharedscale-v7-20260827
+  pull_request:
+    paths:
+      - 'services/camera_v11/step2_detector_b1_sharedscale_v7.py'
+      - 'scripts/run_camera_v11_step2_detector_sharedscale_v7.sh'
+      - 'scripts/check_camera_v11_step2_detector_sharedscale_v7_log.py'
+      - '.github/workflows/camera-v11-step2-sharedscale-v7-static.yml'
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            services/camera_v11/step2_detector_b1_sharedscale_v7.py \
+            scripts/check_camera_v11_step2_detector_sharedscale_v7_log.py
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v11_step2_detector_sharedscale_v7.sh
+      - name: V7 architecture guard
+        run: |
+          grep -F 'scale_once_before_tee=1' services/camera_v11/step2_detector_b1_sharedscale_v7.py
+          grep -F 'shared_display_surface=1' services/camera_v11/step2_detector_b1_sharedscale_v7.py
+          grep -F 'fullres_detector_resize=0' services/camera_v11/step2_detector_b1_sharedscale_v7.py
+          grep -F 'detector_source=shared' services/camera_v11/step2_detector_b1_sharedscale_v7.py
+          grep -F 'V11_DETECT_B1_HZ_PER_CAMERA=2.0' scripts/run_camera_v11_step2_detector_sharedscale_v7.sh
+          if grep -E '\|[[:space:]]*grep[[:space:]]+-q([[:space:]]|$)' scripts/run_camera_v11_step2_detector_sharedscale_v7.sh; then
+            echo 'pipefail-unsafe piped grep -q found in runner' >&2
+            exit 1
+          fi
+          if grep -E 'ElementFactory\.make\("(nvstreammux|nvmultistreamtiler|nvtracker|nvdsosd|nvinfer)' services/camera_v11/step2_detector_b1_sharedscale_v7.py; then
+            echo 'forbidden analytics element found in V7' >&2
+            exit 1
+          fi
