@@ -3,7 +3,7 @@ name: Camera V2 V9.7 Display Pool Static
 on:
   push:
     branches:
-      - rebuild/service-architecture-step4-v97-display-pool-20260827
+      - rebuild/service-architecture-step4-v96-display-freshness-20260827
   workflow_dispatch:
 
 jobs:
