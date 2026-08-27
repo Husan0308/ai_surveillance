@@ -1,0 +1,27 @@
+name: Camera V2 V9.9 Tracker Stage Audit Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v98-tracker-pool-20260827
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Compile V9.9 files
+        run: |
+          python -m py_compile services/camera_v2/runtime_v99_tracker_latency_audit.py
+          python -m py_compile scripts/check_camera_v2_bbox_v99_log.py
+          bash -n scripts/run_camera_v2_bbox_v99.sh
+      - name: Guard diagnostic-only contract
+        run: |
+          grep -q 'behavior_change=0' services/camera_v2/runtime_v99_tracker_latency_audit.py
+          grep -q 'exact_pts_match=1' services/camera_v2/runtime_v99_tracker_latency_audit.py
+          grep -q 'runtime_v98_tracker_pool' services/camera_v2/runtime_v99_tracker_latency_audit.py
+          grep -q 'only_change=tracker-stage-PTS-instrumentation' scripts/run_camera_v2_bbox_v99.sh
