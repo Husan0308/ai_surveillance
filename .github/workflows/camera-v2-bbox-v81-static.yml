@@ -1,0 +1,70 @@
+name: Camera V2 BBox V8.1 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-step4-v8-1-pts-sync-sticky-20260827
+  pull_request:
+
+jobs:
+  v81-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile V8.1 Python
+        run: |
+          python -m py_compile \
+            services/camera_v2/runtime_v81_sync.py \
+            scripts/check_camera_v2_bbox_v81_log.py
+
+      - name: Shell syntax
+        run: bash -n scripts/run_camera_v2_bbox_v81.sh
+
+      - name: Existing bbox geometry regressions
+        run: python scripts/test_camera_v2_bbox_v7.py
+
+      - name: Guard moving-target confidence policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'CAMERA_V2_TRACK_FPS=.*12' scripts/run_camera_v2_bbox_v81.sh
+          grep -q 'CAMERA_V2_MIN_DISPLAY_TRACK_CONF=.*0.10' scripts/run_camera_v2_bbox_v81.sh
+          grep -q 'minTrackerConfidence", "0.12"' services/camera_v2/runtime_v81_sync.py
+          grep -q 'minTrackingConfidenceDuringInactive' services/camera_v2/runtime_v81_sync.py
+          grep -q 'outputShadowTracks", "0"' services/camera_v2/runtime_v81_sync.py
+
+      - name: Guard no fabricated empty source updates
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'grouped = {}' services/camera_v2/runtime_v81_sync.py
+          grep -q 'false_empty_fabrication=0' services/camera_v2/runtime_v81_sync.py
+          ! grep -q 'grouped = {int(source_id): \[\] for source_id in self.index_camera}' services/camera_v2/runtime_v81_sync.py
+          grep -q 'self.track_cache.pop(source_id, None)' services/camera_v2/runtime_v81_sync.py
+
+      - name: Guard stale detector geometry protection
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '_match_detector_to_raw_tracks' services/camera_v2/runtime_v81_sync.py
+          grep -q 'v81_detector_currentized' services/camera_v2/runtime_v81_sync.py
+          grep -q 'v81_empty_detector_skips' services/camera_v2/runtime_v81_sync.py
+          grep -q 'not boxes' services/camera_v2/runtime_v81_sync.py
+          grep -q 'has_recent_active' services/camera_v2/runtime_v81_sync.py
+          grep -q 'stale_geometry_currentization=1' services/camera_v2/runtime_v81_sync.py
+          grep -q 'CAMERA_V2_MAX_DETECT_RESULT_AGE_MS=.*300' scripts/run_camera_v2_bbox_v81.sh
+
+      - name: Guard low-latency V8 architecture remains intact
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'runtime_v81_sync' scripts/run_camera_v2_bbox_v81.sh
+          grep -q 'CAMERA_V2_RTSP_LATENCY_MS=.*60' scripts/run_camera_v2_bbox_v81.sh
+          grep -q 'gpu_lane=0' scripts/run_camera_v2_bbox_v81.sh
+          grep -q 'predictor=0' scripts/run_camera_v2_bbox_v81.sh
+          grep -q 'batch-6 engine missing' scripts/run_camera_v2_bbox_v81.sh
+          ! grep -q 'SerializedGpuLaneRuntime' services/camera_v2/runtime_v81_sync.py
