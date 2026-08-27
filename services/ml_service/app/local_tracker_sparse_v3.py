@@ -127,13 +127,11 @@ class ObservationRecoveryPersonTracker(SparseRecoveryPersonTracker):
             return True
 
         # V2 only checked tracks matched in the current update. A detector box can still
-        # mint a duplicate ID beside a recently-lost confirmed track if association just
-        # missed its threshold. Strong overlap with a live confirmed track vetoes that.
+        # mint a duplicate ID beside a confirmed live/lost track if association just
+        # missed its threshold. Strong overlap plus compatible appearance vetoes that.
         for track in self._tracks:
             if track.status == "removed" or track.hits < self.confirm_hits:
                 continue
-            since = max(0.0, float(det.score * 0.0) + 0.0)  # keep branch deterministic
-            _ = since
             predicted = self._state_to_xyxy(track.state_vec)
             anchor = self._state_to_xyxy(track.last_measurement)
             overlap = max(self._iou(predicted, det.bbox), self._iou(anchor, det.bbox))
