@@ -12,6 +12,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 TRT86_RUNTIME_SITE = ROOT / "artifacts/reid/python_trt86_site"
+TRT86_RUNTIME_MANIFEST = TRT86_RUNTIME_SITE / ".v11_runtime_paths.json"
 MAX_BATCH = 8
 INPUT_SHAPE = (MAX_BATCH, 3, 256, 128)
 OUTPUT_SHAPE = (MAX_BATCH, 256)
@@ -44,6 +45,7 @@ class V11ReIDTRT86Client:
         self.python = self._resolve(python or ".venv-trt86/bin/python")
         self.worker = self._resolve(worker or "scripts/reid_trt86_worker_v11.py")
         self.runtime_site = TRT86_RUNTIME_SITE.resolve()
+        self.runtime_manifest = TRT86_RUNTIME_MANIFEST.resolve()
         self.timeout_sec = max(1.0, float(timeout_sec))
         for path, label in ((self.engine, "engine"), (self.python, "python"), (self.worker, "worker")):
             if not path.is_file():
@@ -53,6 +55,19 @@ class V11ReIDTRT86Client:
                 f"ReID TRT86 runtime site missing: {self.runtime_site}; "
                 "run scripts/ensure_camera_v11_trt86_runtime_v1.sh"
             )
+        if not self.runtime_manifest.is_file():
+            raise FileNotFoundError(
+                f"ReID TRT86 runtime manifest missing: {self.runtime_manifest}; "
+                "run scripts/ensure_camera_v11_trt86_runtime_v1.sh"
+            )
+        try:
+            runtime = json.loads(self.runtime_manifest.read_text(encoding="utf-8"))
+            self.tensorrt_root = Path(runtime["tensorrt_root"]).expanduser().resolve()
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"invalid ReID TRT86 runtime manifest: {self.runtime_manifest}: {exc}") from exc
+        if not self.tensorrt_root.is_dir():
+            raise FileNotFoundError(f"ReID TensorRT module root missing: {self.tensorrt_root}")
+
         self.input_shm = shared_memory.SharedMemory(create=True, size=int(np.prod(INPUT_SHAPE) * 4))
         self.output_shm = shared_memory.SharedMemory(create=True, size=int(np.prod(OUTPUT_SHAPE) * 4))
         self.input = np.ndarray(INPUT_SHAPE, dtype=np.float32, buffer=self.input_shm.buf)
@@ -62,12 +77,12 @@ class V11ReIDTRT86Client:
         self._lock = threading.RLock()
         self._request_id = 0
 
-        # Keep Python isolated (-I), but prepend one project-local dependency
-        # overlay before executing the unchanged TensorRT 8.6 worker. This avoids
-        # relying on a broken /usr/lib NumPy while never modifying system Python.
+        # Keep Python isolated (-I), but explicitly restore only the two verified
+        # dependency roots: the project-local NumPy wheel and the TensorRT 8.6.1
+        # module root discovered by the preflight using this same interpreter.
         bootstrap = (
             "import runpy,sys;"
-            f"sys.path.insert(0,{str(self.runtime_site)!r});"
+            f"sys.path[:0]=[{str(self.runtime_site)!r},{str(self.tensorrt_root)!r}];"
             f"sys.argv[0]={str(self.worker)!r};"
             f"runpy.run_path({str(self.worker)!r},run_name='__main__')"
         )
