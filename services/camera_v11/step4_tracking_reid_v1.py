@@ -68,6 +68,14 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
         self.reid_crop_copy_values: deque[float] = deque(maxlen=2048)
         self.reid_result_lock = threading.RLock()
         self.reid_last_match: dict[tuple[str, str], tuple[str, str, str]] = {}
+        self.reid_last_crossroom_probe: dict[
+            tuple[str, str], tuple[tuple[str, str, str, str, int], int]
+        ] = {}
+        self.reid_crossroom_probe_count = 0
+        self.reid_crossroom_probe_interval_ns = int(
+            max(1.0, float(os.environ.get("V11_STEP4_REID_CROSSROOM_PROBE_SEC", "5.0")))
+            * 1_000_000_000.0
+        )
 
         self.identity_shadow = V11CrossCameraIdentityShadowV1(
             gallery_size=int(os.environ.get("V11_STEP4_REID_GALLERY_SIZE", "4")),
@@ -116,8 +124,9 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             f"strong_votes={self.identity_shadow.strong_votes} "
             f"cross_room_gap={self.identity_shadow.min_cross_room_gap_sec:.2f}s "
             f"room_graph={topology_text or 'none'} "
-            "reciprocal_best=required direct_room_neighbor=required "
-            "confirmed_tracks_only=1 stale_policy=drop no_global_id_mutation=1",
+            "similarity=gallery-max prototype=telemetry reciprocal_best=required "
+            "direct_room_neighbor=required confirmed_tracks_only=1 stale_policy=drop "
+            "no_global_id_mutation=1",
             flush=True,
         )
 
@@ -207,20 +216,57 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             captured_at=candidate.captured_ns / 1_000_000_000.0,
         )
         state = str(decision["state"])
+        reason = str(decision["reason"])
         peer = (str(decision["candidate_camera"]), str(decision["candidate_track"]))
         key = candidate.key
         signature = (state, peer[0], peer[1])
         with self.reid_result_lock:
             previous = self.reid_last_match.get(key)
             self.reid_last_match[key] = signature
+
+        same_room = bool(decision["same_room"])
+        if peer[0] and not same_room:
+            score = float(decision["score"])
+            probe_signature = (peer[0], peer[1], state, reason, int(score * 20.0))
+            emit_probe = False
+            with self.reid_result_lock:
+                previous_probe = self.reid_last_crossroom_probe.get(key)
+                if (
+                    previous_probe is None
+                    or previous_probe[0] != probe_signature
+                    or candidate.captured_ns - previous_probe[1] >= self.reid_crossroom_probe_interval_ns
+                ):
+                    self.reid_last_crossroom_probe[key] = (probe_signature, candidate.captured_ns)
+                    self.reid_crossroom_probe_count += 1
+                    emit_probe = True
+            if emit_probe:
+                gap_sec = float(decision["cross_room_gap_sec"])
+                print(
+                    "CAMERA_V11_STEP4_REID_CROSSROOM_PROBE "
+                    f"camera={candidate.camera_id} track={candidate.track_id} "
+                    f"peer_camera={peer[0]} peer_track={peer[1]} state={state} reason={reason} "
+                    f"gallery_score={score:.4f} "
+                    f"prototype_score={float(decision['prototype_score']):.4f} "
+                    f"margin={float(decision['margin']):.4f} "
+                    f"samples={int(decision['gallery_samples'])} "
+                    f"peer_samples={int(decision['peer_samples'])} "
+                    f"reciprocal={int(bool(decision['reciprocal']))} "
+                    f"votes={int(decision['consistency_votes'])} "
+                    f"cross_room_gap_ms={gap_sec * 1000.0:.1f} "
+                    f"batch={result.batch_size} queue_wait_ms={result.queue_wait_ms:.1f} merge=0",
+                    flush=True,
+                )
+
         if state in {"CANDIDATE", "STRONG"} and signature != previous:
             gap_sec = float(decision["cross_room_gap_sec"])
             print(
                 "CAMERA_V11_STEP4_REID_MATCH "
                 f"mode=shadow camera={candidate.camera_id} track={candidate.track_id} "
                 f"peer_camera={peer[0]} peer_track={peer[1]} state={state} "
-                f"score={float(decision['score']):.4f} margin={float(decision['margin']):.4f} "
-                f"same_room={int(bool(decision['same_room']))} "
+                f"score={float(decision['score']):.4f} "
+                f"prototype_score={float(decision['prototype_score']):.4f} "
+                f"margin={float(decision['margin']):.4f} "
+                f"same_room={int(same_room)} "
                 f"samples={int(decision['gallery_samples'])} peer_samples={int(decision['peer_samples'])} "
                 f"reciprocal={int(bool(decision['reciprocal']))} "
                 f"votes={int(decision['consistency_votes'])} "
@@ -257,7 +303,7 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             + f" topology_reject={shadow['topology_rejects']}"
             + f" route_reject={shadow['route_rejects']} time_reject={shadow['time_rejects']}"
             + f" nonreciprocal={shadow['nonreciprocal']} vote_wait={shadow['vote_waits']}"
-            + " identity_merge=0",
+            + f" crossroom_probe={self.reid_crossroom_probe_count} identity_merge=0",
             flush=True,
         )
 
