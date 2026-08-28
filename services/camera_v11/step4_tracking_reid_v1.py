@@ -70,6 +70,12 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             strong_similarity=float(os.environ.get("V11_STEP4_REID_STRONG_SIM", "0.84")),
             min_margin=float(os.environ.get("V11_STEP4_REID_MIN_MARGIN", "0.04")),
             strong_margin=float(os.environ.get("V11_STEP4_REID_STRONG_MARGIN", "0.025")),
+            min_gallery_samples=int(os.environ.get("V11_STEP4_REID_MIN_GALLERY_SAMPLES", "3")),
+            candidate_votes=int(os.environ.get("V11_STEP4_REID_CANDIDATE_VOTES", "2")),
+            strong_votes=int(os.environ.get("V11_STEP4_REID_STRONG_VOTES", "3")),
+            min_cross_room_gap_sec=float(
+                os.environ.get("V11_STEP4_REID_MIN_CROSS_ROOM_GAP_SEC", "1.5")
+            ),
         )
         self.reid_scheduler = V11ReIDSchedulerV1(
             self._on_reid_result,
@@ -93,7 +99,12 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             f"refresh={self.reid_refresh_sec:.2f}s min_score={self.reid_min_score:.2f} "
             f"min_crop={self.reid_min_width}x{self.reid_min_height} "
             f"max_per_camera_update={self.reid_max_per_update} predicted=skip "
-            "confirmed_tracks_only=1 stale_policy=drop no_global_id_mutation=1",
+            f"gallery_min={self.identity_shadow.min_gallery_samples} "
+            f"candidate_votes={self.identity_shadow.candidate_votes} "
+            f"strong_votes={self.identity_shadow.strong_votes} "
+            f"cross_room_gap={self.identity_shadow.min_cross_room_gap_sec:.2f}s "
+            "reciprocal_best=required confirmed_tracks_only=1 stale_policy=drop "
+            "no_global_id_mutation=1",
             flush=True,
         )
 
@@ -197,12 +208,17 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             previous = self.reid_last_match.get(key)
             self.reid_last_match[key] = signature
         if state in {"CANDIDATE", "STRONG"} and signature != previous:
+            gap_sec = float(decision["cross_room_gap_sec"])
             print(
                 "CAMERA_V11_STEP4_REID_MATCH "
                 f"mode=shadow camera={candidate.camera_id} track={candidate.track_id} "
                 f"peer_camera={peer[0]} peer_track={peer[1]} state={state} "
                 f"score={float(decision['score']):.4f} margin={float(decision['margin']):.4f} "
-                f"same_room={int(bool(decision['same_room']))} samples={int(decision['gallery_samples'])} "
+                f"same_room={int(bool(decision['same_room']))} "
+                f"samples={int(decision['gallery_samples'])} peer_samples={int(decision['peer_samples'])} "
+                f"reciprocal={int(bool(decision['reciprocal']))} "
+                f"votes={int(decision['consistency_votes'])} "
+                f"cross_room_gap_ms={gap_sec * 1000.0:.1f} "
                 f"batch={result.batch_size} queue_wait_ms={result.queue_wait_ms:.1f} merge=0",
                 flush=True,
             )
@@ -231,7 +247,10 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             + f" skip_size={self.reid_skip_size} worker_errors={scheduler['worker_errors']}"
             + f" shadow_tracks={shadow['tracks']} observations={shadow['observations']}"
             + f" weak={shadow['weak']} candidates={shadow['candidates']} strong={shadow['strong']}"
-            + f" ambiguous={shadow['ambiguous']} identity_merge=0",
+            + f" ambiguous={shadow['ambiguous']} insufficient={shadow['insufficient_samples']}"
+            + f" topology_reject={shadow['topology_rejects']}"
+            + f" nonreciprocal={shadow['nonreciprocal']} vote_wait={shadow['vote_waits']}"
+            + " identity_merge=0",
             flush=True,
         )
 
