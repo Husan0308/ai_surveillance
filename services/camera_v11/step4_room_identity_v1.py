@@ -27,9 +27,12 @@ class _PendingTrack:
     camera_id: str
     track_id: str
     room_id: str
+    first_seen: float
     last_seen: float
     embeddings: list[np.ndarray] = field(default_factory=list)
     qualities: list[float] = field(default_factory=list)
+    best_identity_id: str | None = None
+    best_identity_streak: int = 0
 
     @property
     def key(self) -> tuple[str, str]:
@@ -53,12 +56,12 @@ class _RoomIdentity:
 class V11RoomIdentityShadowV1:
     """Fuse stable camera-tracklet identities across cameras inside one room.
 
-    This layer is intentionally *not* a second single-camera re-associator. Step4's
-    camera-tracklet layer already stitches local T-ID fragments inside one camera.
-    A Room Identity may therefore adopt a new member only from a different camera in
-    the same room. While fusing live views, both the incoming camera-tracklet and at
-    least one peer-camera member must be active, so stale same-room galleries cannot
-    steal a currently visible person. Step3/local IDs remain untouched.
+    Single-camera T-ID stitching belongs to the camera-tracklet layer. This room
+    layer performs only simultaneous different-camera association. The association
+    is conservative: both sides must be active, the incoming tracklet and room anchor
+    must be mutual best matches, and the same pair must win repeatedly before JOIN.
+    This mirrors the one-to-one peer-association principle used by multi-camera
+    trackers while remaining calibration-free and shadow-only.
     """
 
     def __init__(
@@ -68,12 +71,14 @@ class V11RoomIdentityShadowV1:
         decision_samples: int = 6,
         track_gallery_size: int = 6,
         identity_gallery_size: int = 12,
-        join_similarity: float = 0.76,
+        join_similarity: float = 0.68,
         weak_hold_similarity: float = 0.55,
         min_margin: float = 0.04,
         ttl_sec: float = 45.0,
         cross_camera_only: bool = True,
         require_active_overlap: bool = True,
+        candidate_votes: int = 2,
+        max_pair_wait_sec: float = 8.0,
     ) -> None:
         self.min_track_samples = max(2, min(6, int(min_track_samples)))
         self.decision_samples = max(
@@ -89,6 +94,8 @@ class V11RoomIdentityShadowV1:
         self.ttl_sec = max(10.0, float(ttl_sec))
         self.cross_camera_only = bool(cross_camera_only)
         self.require_active_overlap = bool(require_active_overlap)
+        self.candidate_votes = max(1, int(candidate_votes))
+        self.max_pair_wait_sec = max(2.0, float(max_pair_wait_sec))
         self._lock = threading.RLock()
         self._next_by_room: dict[str, int] = {}
         self._pending: dict[tuple[str, str], _PendingTrack] = {}
@@ -104,6 +111,8 @@ class V11RoomIdentityShadowV1:
         self.ambiguous_new = 0
         self.same_camera_collision_rejects = 0
         self.inactive_overlap_rejects = 0
+        self.reciprocal_rejects = 0
+        self.vote_waits = 0
         self.expired = 0
         self.activations = 0
         self.deactivations = 0
@@ -176,6 +185,45 @@ class V11RoomIdentityShadowV1:
             if track_id in self._active_by_camera.get(camera_id, set()):
                 return True
         return False
+
+    def _eligible_identity(self, pending: _PendingTrack, identity: _RoomIdentity) -> bool:
+        if identity.room_id != pending.room_id:
+            return False
+        if self.cross_camera_only and self._has_camera_member(identity, pending.camera_id):
+            return False
+        if self.require_active_overlap and (
+            not self._incoming_is_active(pending)
+            or not self._has_active_peer_camera(pending, identity)
+        ):
+            return False
+        return True
+
+    def _is_reciprocal_best(
+        self,
+        pending: _PendingTrack,
+        identity: _RoomIdentity,
+        score: float,
+    ) -> bool:
+        """Require this room anchor to choose the incoming camera tracklet back.
+
+        The reverse side compares only active unassigned tracklets from the incoming
+        camera. This turns the room association into a one-to-one mutual-best match
+        without letting duplicate peer fragments destroy the forward runner margin.
+        """
+        best_reverse = -1.0
+        best_key: tuple[str, str] | None = None
+        for other in self._pending.values():
+            if other.room_id != pending.room_id or other.camera_id != pending.camera_id:
+                continue
+            if len(other.embeddings) < self.min_track_samples:
+                continue
+            if not self._incoming_is_active(other):
+                continue
+            other_score = self._gallery_score(other.embeddings, identity.embeddings)
+            if other_score > best_reverse:
+                best_reverse = other_score
+                best_key = other.key
+        return best_key == pending.key and score >= best_reverse - 1e-6
 
     def _new_identity(self, pending: _PendingTrack, now: float) -> _RoomIdentity:
         room = pending.room_id
@@ -289,12 +337,14 @@ class V11RoomIdentityShadowV1:
                         "members": len(identity.members),
                         "collision_rejects": 0,
                         "inactive_overlap_rejects": 0,
+                        "reciprocal": True,
+                        "votes": self.candidate_votes,
                     }
                 self._assigned.pop(key, None)
 
             pending = self._pending.get(key)
             if pending is None:
-                pending = _PendingTrack(camera_id, track_id, room_id, now)
+                pending = _PendingTrack(camera_id, track_id, room_id, now, now)
                 self._pending[key] = pending
             pending.last_seen = max(pending.last_seen, now)
             pending.room_id = room_id
@@ -314,6 +364,8 @@ class V11RoomIdentityShadowV1:
                     "members": 0,
                     "collision_rejects": 0,
                     "inactive_overlap_rejects": 0,
+                    "reciprocal": False,
+                    "votes": 0,
                 }
 
             incoming_active = self._incoming_is_active(pending)
@@ -323,9 +375,6 @@ class V11RoomIdentityShadowV1:
             for identity in self._identities.values():
                 if identity.room_id != room_id:
                     continue
-                # Critical invariant: single-camera stitching belongs to the camera
-                # tracklet layer. A Room ID can never absorb a second C-ID from the
-                # same camera, active or inactive.
                 if self.cross_camera_only and self._has_camera_member(identity, camera_id):
                     collision_rejects += 1
                     continue
@@ -343,39 +392,83 @@ class V11RoomIdentityShadowV1:
             best_score = ranked[0][0] if ranked else -1.0
             runner_score = ranked[1][0] if len(ranked) > 1 else -1.0
             margin = best_score - runner_score if ranked else 0.0
+            reciprocal = False
 
-            if ranked and best_score >= self.join_similarity and margin >= self.min_margin:
-                identity = ranked[0][1]
-                self._assigned[key] = identity.identity_id
-                for sample, sample_quality in zip(pending.embeddings, pending.qualities):
-                    self._append_identity(
-                        identity,
-                        key=key,
-                        embedding=sample,
-                        quality=sample_quality,
-                        now=now,
+            if ranked:
+                best_identity = ranked[0][1]
+                reciprocal = self._is_reciprocal_best(pending, best_identity, best_score)
+                if pending.best_identity_id == best_identity.identity_id:
+                    if best_score >= self.join_similarity and reciprocal:
+                        pending.best_identity_streak += 1
+                else:
+                    pending.best_identity_id = best_identity.identity_id
+                    pending.best_identity_streak = (
+                        1 if best_score >= self.join_similarity and reciprocal else 0
                     )
-                self._pending.pop(key, None)
-                self._refresh_activity(now)
-                self.joined += 1
-                return {
-                    "state": "JOIN",
-                    "room_identity": identity.identity_id,
-                    "score": best_score,
-                    "margin": margin,
-                    "samples": len(identity.embeddings),
-                    "members": len(identity.members),
-                    "collision_rejects": collision_rejects,
-                    "inactive_overlap_rejects": inactive_overlap_rejects,
-                }
 
-            # Different-camera evidence near the threshold gets extra samples. Same-
-            # camera identities are not candidates and therefore cannot influence the
-            # hold/new decision except through telemetry counters.
+                if best_score >= self.join_similarity and not reciprocal:
+                    self.reciprocal_rejects += 1
+
+                if (
+                    best_score >= self.join_similarity
+                    and reciprocal
+                    and pending.best_identity_streak >= self.candidate_votes
+                ):
+                    identity = best_identity
+                    self._assigned[key] = identity.identity_id
+                    for sample, sample_quality in zip(pending.embeddings, pending.qualities):
+                        self._append_identity(
+                            identity,
+                            key=key,
+                            embedding=sample,
+                            quality=sample_quality,
+                            now=now,
+                        )
+                    self._pending.pop(key, None)
+                    self._refresh_activity(now)
+                    self.joined += 1
+                    return {
+                        "state": "JOIN",
+                        "room_identity": identity.identity_id,
+                        "score": best_score,
+                        "margin": margin,
+                        "samples": len(identity.embeddings),
+                        "members": len(identity.members),
+                        "collision_rejects": collision_rejects,
+                        "inactive_overlap_rejects": inactive_overlap_rejects,
+                        "reciprocal": True,
+                        "votes": pending.best_identity_streak,
+                    }
+
+                if best_score >= self.join_similarity and reciprocal:
+                    self.vote_waits += 1
+                    self.pending_match_waits += 1
+                    return {
+                        "state": "PENDING_MATCH",
+                        "room_identity": "",
+                        "score": best_score,
+                        "margin": margin,
+                        "samples": len(pending.embeddings),
+                        "members": 0,
+                        "collision_rejects": collision_rejects,
+                        "inactive_overlap_rejects": inactive_overlap_rejects,
+                        "reciprocal": True,
+                        "votes": pending.best_identity_streak,
+                    }
+
+            # If an active peer camera exists, keep accumulating a short gallery even
+            # when the first cross-view samples are weak. Cross-view appearance often
+            # improves after pose/viewpoint changes; creating a solo Room ID at sample
+            # three permanently fragments the same physical person.
+            has_live_peer_candidate = bool(ranked)
+            pair_age = max(0.0, now - pending.first_seen)
             should_hold = bool(
-                ranked
-                and best_score >= self.weak_hold_similarity
-                and len(pending.embeddings) < self.decision_samples
+                has_live_peer_candidate
+                and pair_age < self.max_pair_wait_sec
+                and (
+                    len(pending.embeddings) < self.decision_samples
+                    or best_score >= self.weak_hold_similarity
+                )
             )
             if should_hold:
                 self.pending_match_waits += 1
@@ -388,6 +481,8 @@ class V11RoomIdentityShadowV1:
                     "members": 0,
                     "collision_rejects": collision_rejects,
                     "inactive_overlap_rejects": inactive_overlap_rejects,
+                    "reciprocal": reciprocal,
+                    "votes": pending.best_identity_streak,
                 }
 
             ambiguous = bool(ranked and best_score >= self.join_similarity)
@@ -403,6 +498,8 @@ class V11RoomIdentityShadowV1:
                 "members": len(identity.members),
                 "collision_rejects": collision_rejects,
                 "inactive_overlap_rejects": inactive_overlap_rejects,
+                "reciprocal": reciprocal,
+                "votes": pending.best_identity_streak,
             }
 
     def snapshot(self) -> dict[str, int]:
@@ -420,6 +517,8 @@ class V11RoomIdentityShadowV1:
                 "ambiguous_new": self.ambiguous_new,
                 "collision_rejects": self.same_camera_collision_rejects,
                 "inactive_overlap_rejects": self.inactive_overlap_rejects,
+                "reciprocal_rejects": self.reciprocal_rejects,
+                "vote_waits": self.vote_waits,
                 "expired": self.expired,
                 "activations": self.activations,
                 "deactivations": self.deactivations,
