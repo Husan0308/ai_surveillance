@@ -35,6 +35,11 @@ jobs:
           grep -q 'profile.get_shape' scripts/build_camera_v11_step4_reid_trt86.py
           grep -q 'add_optimization_profile' scripts/build_camera_v11_step4_reid_trt86.py
           ! grep -q 'if not profile.set_shape' scripts/build_camera_v11_step4_reid_trt86.py
+      - name: Benchmark import-path guard
+        run: |
+          grep -Fq 'ROOT = Path(__file__).resolve().parents[1]' scripts/benchmark_camera_v11_step4_reid_v1.py
+          grep -Fq 'sys.path.insert(0, root_text)' scripts/benchmark_camera_v11_step4_reid_v1.py
+          grep -Fq 'engine = ROOT / engine' scripts/benchmark_camera_v11_step4_reid_v1.py
       - name: Frozen Step3 guard
         run: |
           git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
