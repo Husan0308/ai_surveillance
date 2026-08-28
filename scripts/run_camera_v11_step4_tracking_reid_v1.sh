@@ -136,7 +136,7 @@ nvidia-smi \
   --format=csv,noheader,nounits -lms 500 >"$GPU_LOG" 2>&1 &
 telemetry_pid=$!
 
-"$ROOT/.venv/bin/python" -u -m services.camera_v11.step4_tracking_reid_v1 >"$STEP4_LOG" 2>&1 &
+"$ROOT/.venv/bin/python" -u -m services.camera_v11.step4_tracking_reid_v2 >"$STEP4_LOG" 2>&1 &
 step4_pid=$!
 
 live_ready=0
