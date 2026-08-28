@@ -19,16 +19,23 @@ ROOT = Path(__file__).resolve().parents[2]
 FROZEN_STEP3_SHA = "d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51"
 
 
-def _camera_rooms() -> dict[str, str]:
+def _camera_layout() -> tuple[dict[str, str], dict[str, set[str]]]:
     path = Path(os.environ.get("CAMERA_CONFIG", "config/cameras.yaml")).expanduser()
     if not path.is_absolute():
         path = ROOT / path
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return {
+    camera_rooms = {
         str(row.get("id", "")): str(row.get("room", ""))
         for row in raw.get("cameras") or []
         if row.get("id")
     }
+    topology = raw.get("reid_topology") or {}
+    room_neighbors_raw = topology.get("room_neighbors") or {}
+    room_neighbors = {
+        str(room): {str(peer) for peer in (peers or [])}
+        for room, peers in room_neighbors_raw.items()
+    }
+    return camera_rooms, room_neighbors
 
 
 class V11Step4TrackingReIDV1(V11Step3TrackingV2):
@@ -36,7 +43,7 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
 
     def __init__(self) -> None:
         super().__init__()
-        self.camera_rooms = _camera_rooms()
+        self.camera_rooms, self.reid_room_neighbors = _camera_layout()
         self.reid_refresh_sec = max(
             0.5, min(10.0, float(os.environ.get("V11_STEP4_REID_REFRESH_SEC", "1.0")))
         )
@@ -76,6 +83,7 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             min_cross_room_gap_sec=float(
                 os.environ.get("V11_STEP4_REID_MIN_CROSS_ROOM_GAP_SEC", "1.5")
             ),
+            allowed_room_transitions=self.reid_room_neighbors,
         )
         self.reid_scheduler = V11ReIDSchedulerV1(
             self._on_reid_result,
@@ -86,6 +94,10 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
         )
         self._reid_closed = False
 
+        topology_text = ";".join(
+            f"{room}->{','.join(sorted(peers)) or '-'}"
+            for room, peers in sorted(self.reid_room_neighbors.items())
+        )
         print(
             "CAMERA_V11_STEP4_ARCH "
             f"frozen_step3_sha={FROZEN_STEP3_SHA} reid=trt86-resnet50 scheduler=async-thread "
@@ -103,8 +115,9 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             f"candidate_votes={self.identity_shadow.candidate_votes} "
             f"strong_votes={self.identity_shadow.strong_votes} "
             f"cross_room_gap={self.identity_shadow.min_cross_room_gap_sec:.2f}s "
-            "reciprocal_best=required confirmed_tracks_only=1 stale_policy=drop "
-            "no_global_id_mutation=1",
+            f"room_graph={topology_text or 'none'} "
+            "reciprocal_best=required direct_room_neighbor=required "
+            "confirmed_tracks_only=1 stale_policy=drop no_global_id_mutation=1",
             flush=True,
         )
 
@@ -147,8 +160,6 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
                 continue
             eligible.append((previous, -float(snapshot.score), snapshot, (x1, y1, x2, y2)))
 
-        # Oldest-never-sampled tracks win first. This prevents a crowded camera from
-        # repeatedly feeding the same high-score person while another track starves.
         eligible.sort(key=lambda row: (row[0] != 0, row[0], row[1]))
         for _previous, _neg_score, snapshot, (x1, y1, x2, y2) in eligible[: self.reid_max_per_update]:
             copy_started = time.perf_counter()
@@ -171,8 +182,6 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
                 self.reid_submit_rejected += 1
 
     def _consume_tracking(self, cid: str, boxes: list[list[float]], captured_ns: int) -> None:
-        # Deliberately duplicate only Step3's small bookkeeping adapter so the frozen
-        # Step3 files remain byte-for-byte unchanged while Step4 can see snapshots.
         update = self.tracker.update(cid, boxes, captured_ns)
         self.stage_values["tracker"].append(float(update.step_ms))
         ids = tuple(snapshot.track_id for snapshot in update.snapshots)
@@ -185,9 +194,6 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
         self.track_recovered[cid] += int(update.recovered)
         self.track_removed[cid] += int(update.removed)
         self.latest_track_ids[cid] = ids
-
-        # Main detector/tracker path only performs bounded crop copies + O(1) submit.
-        # All resize/preprocess/TRT/matching work happens on the ReID scheduler thread.
         self._schedule_reid(cid, update.snapshots, captured_ns)
 
     def _on_reid_result(self, result: ReIDResult) -> None:
@@ -249,6 +255,7 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             + f" weak={shadow['weak']} candidates={shadow['candidates']} strong={shadow['strong']}"
             + f" ambiguous={shadow['ambiguous']} insufficient={shadow['insufficient_samples']}"
             + f" topology_reject={shadow['topology_rejects']}"
+            + f" route_reject={shadow['route_rejects']} time_reject={shadow['time_rejects']}"
             + f" nonreciprocal={shadow['nonreciprocal']} vote_wait={shadow['vote_waits']}"
             + " identity_merge=0",
             flush=True,
