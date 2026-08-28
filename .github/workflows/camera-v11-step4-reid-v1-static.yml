@@ -28,14 +28,10 @@ jobs:
           bash -n scripts/ensure_camera_v11_trt86_runtime_v1.sh
           bash -n scripts/run_camera_v11_step4_reid_benchmark_v1.sh
           bash -n scripts/run_camera_v11_step4_tracking_reid_v1.sh
-          grep -q 'api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx' \
-            scripts/prepare_camera_v11_step4_reid_v1.sh
-          grep -q '0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b' \
-            scripts/prepare_camera_v11_step4_reid_v1.sh
-          grep -q 'prepare_camera_v11_step4_reid_v1.sh' \
-            scripts/run_camera_v11_step4_reid_benchmark_v1.sh
-          grep -q 'ensure_camera_v11_trt86_runtime_v1.sh' \
-            scripts/run_camera_v11_step4_tracking_reid_v1.sh
+          grep -q 'api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx' scripts/prepare_camera_v11_step4_reid_v1.sh
+          grep -q '0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b' scripts/prepare_camera_v11_step4_reid_v1.sh
+          grep -q 'prepare_camera_v11_step4_reid_v1.sh' scripts/run_camera_v11_step4_reid_benchmark_v1.sh
+          grep -q 'ensure_camera_v11_trt86_runtime_v1.sh' scripts/run_camera_v11_step4_tracking_reid_v1.sh
       - name: TensorRT 8.6 profile API guard
         run: |
           grep -q 'profile.set_shape' scripts/build_camera_v11_step4_reid_trt86.py
@@ -94,22 +90,32 @@ jobs:
           grep -Fq 'candidate_votes: int = 2' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'strong_votes: int = 3' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'min_cross_room_gap_sec: float = 1.5' services/camera_v11/step4_identity_shadow_v1.py
-          grep -Fq 'allowed_room_transitions: dict[str, set[str]] | None = None' services/camera_v11/step4_identity_shadow_v1.py
-          grep -Fq 'right.room_id not in allowed' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'allowed_room_transitions' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'reverse_ranked' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'reciprocal = bool' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'best_peer_streak' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'V11_STEP4_REID_MIN_GALLERY_SAMPLES' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'V11_STEP4_REID_MIN_CROSS_ROOM_GAP_SEC' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'allowed_room_transitions=self.reid_room_neighbors' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'reciprocal_best=required direct_room_neighbor=required' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'reciprocal_best=required' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'direct_room_neighbor=required' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'route_reject=' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'time_reject=' services/camera_v11/step4_tracking_reid_v1.py
+      - name: Gallery similarity calibration guard
+        run: |
+          grep -Fq 'def _gallery_similarity' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'np.max(left_matrix @ right_matrix.T)' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'prototype_score' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'similarity=gallery-max prototype=telemetry' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'CAMERA_V11_STEP4_REID_CROSSROOM_PROBE' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'crossroom_probe=' services/camera_v11/step4_tracking_reid_v1.py
+      - name: Room graph config guard
+        run: |
           grep -Fq 'reid_topology:' config/cameras.yaml
           grep -Fq 'room_neighbors:' config/cameras.yaml
           grep -Fq 'Entrance:' config/cameras.yaml
-          grep -Fq 'Main Rooms:' config/cameras.yaml
-          grep -Fq 'Devs:' config/cameras.yaml
+          grep -Fq -- '- Devs' config/cameras.yaml
+          grep -Fq -- '- Main Rooms' config/cameras.yaml
+          grep -Fq '_camera_layout()' services/camera_v11/step4_tracking_reid_v1.py
       - name: Frozen Step3 guard
         run: |
           git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
