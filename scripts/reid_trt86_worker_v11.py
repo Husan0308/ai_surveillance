@@ -7,7 +7,7 @@ import ctypes.util
 import json
 import sys
 import time
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +27,23 @@ def cuda_check(code: int, name: str) -> None:
         raise RuntimeError(f"{name}: cuda={int(code)}")
 
 
+def attach_nonowning_shared_memory(name: str) -> shared_memory.SharedMemory:
+    """Attach to parent-owned POSIX SHM without letting this subprocess unlink it.
+
+    Python 3.13 added SharedMemory(track=False) for exactly this subprocess case.
+    The TRT86 worker is pinned to Python 3.10, so unregister the attached handle
+    from this worker's independent resource_tracker while the parent remains the
+    sole owner responsible for unlink().
+    """
+    shm = shared_memory.SharedMemory(name=name)
+    try:
+        resource_tracker.unregister(shm._name, "shared_memory")
+    except BaseException:
+        shm.close()
+        raise
+    return shm
+
+
 def load_cudart():
     path = ctypes.util.find_library("cudart")
     if not path:
@@ -42,14 +59,14 @@ def load_cudart():
     lib.cudaFreeHost.restype = ctypes.c_int
     lib.cudaMemcpyAsync.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_void_p]
     lib.cudaMemcpyAsync.restype = ctypes.c_int
+    lib.cudaDeviceGetStreamPriorityRange.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    lib.cudaDeviceGetStreamPriorityRange.restype = ctypes.c_int
     lib.cudaStreamCreateWithPriority.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint, ctypes.c_int]
     lib.cudaStreamCreateWithPriority.restype = ctypes.c_int
     lib.cudaStreamDestroy.argtypes = [ctypes.c_void_p]
     lib.cudaStreamDestroy.restype = ctypes.c_int
     lib.cudaStreamSynchronize.argtypes = [ctypes.c_void_p]
     lib.cudaStreamSynchronize.restype = ctypes.c_int
-    lib.cudaDeviceGetStreamPriorityRange.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
-    lib.cudaDeviceGetStreamPriorityRange.restype = ctypes.c_int
     lib.cudaEventCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
     lib.cudaEventCreate.restype = ctypes.c_int
     lib.cudaEventDestroy.argtypes = [ctypes.c_void_p]
@@ -66,8 +83,8 @@ class Runner:
         if not str(trt.__version__).startswith("8.6.1"):
             raise RuntimeError(f"TensorRT 8.6.1 required, got {trt.__version__}")
         self.cudart = load_cudart()
-        self.input_shm = shared_memory.SharedMemory(name=input_shm_name)
-        self.output_shm = shared_memory.SharedMemory(name=output_shm_name)
+        self.input_shm = attach_nonowning_shared_memory(input_shm_name)
+        self.output_shm = attach_nonowning_shared_memory(output_shm_name)
         self.input = np.ndarray(INPUT_SHAPE, dtype=np.float32, buffer=self.input_shm.buf)
         self.output = np.ndarray(OUTPUT_SHAPE, dtype=np.float32, buffer=self.output_shm.buf)
         self.logger = trt.Logger(trt.Logger.WARNING)
