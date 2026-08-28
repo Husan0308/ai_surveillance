@@ -13,7 +13,6 @@ fail() {
 }
 
 [[ -n "${DISPLAY:-}" ]] || fail "DISPLAY_empty"
-[[ -s "$ENGINE" ]] || fail "engine_missing path=$ENGINE"
 command -v nvidia-smi >/dev/null 2>&1 || fail "nvidia_smi_missing"
 
 CONFLICT_PATTERN='services\.camera_v11\.(step1_|step2_|step3_|step4_)|yolo26_trt86_step2_worker\.py|reid_trt86_worker_v11\.py'
@@ -34,6 +33,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 v11_powermizer_start || fail "powermizer_keeper_start"
+
+if [[ ! -s "$ENGINE" ]]; then
+  printf 'V11_STEP4_REID_BENCH_WRAPPER ENGINE_MISSING action=prepare path=%s\n' "$ENGINE"
+  bash "$ROOT/scripts/prepare_camera_v11_step4_reid_v1.sh" \
+    || fail "engine_prepare_failed"
+fi
+[[ -s "$ENGINE" ]] || fail "engine_missing_after_prepare path=$ENGINE"
+
 telemetry="$OUT/gpu.csv"
 : >"$telemetry"
 nvidia-smi \
