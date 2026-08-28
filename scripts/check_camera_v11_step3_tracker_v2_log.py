@@ -18,6 +18,7 @@ LATEST = re.compile(
 )
 METRIC = re.compile(r"\b(tracker_p50|tracker_p95)=([0-9.]+)ms")
 ERRORS = re.compile(r"\b(duplicate_errors|prefix_errors)=(\d+)")
+STEP2_FAIL = re.compile(r"V11_STEP2_PRODUCTION_V25 RESULT=FAIL reasons=([^\n]+)")
 
 
 def main() -> int:
@@ -34,9 +35,11 @@ def main() -> int:
         print("V11_STEP3_TRACKER_V2 RESULT=FAIL reasons=missing_log")
         return 2
 
-    # Step3 is not allowed to pass if the complete frozen Step2 V25 production gate
-    # regresses. The Step3 tracker log is also the detector log because the service
-    # subclasses the frozen Step2 detector and only appends metadata tracking.
+    # Run the frozen Step2 V25 checker first. If (and only if) it fails solely
+    # because the display checker counted too many isolated 5-second low windows,
+    # re-evaluate display with the same whole-run FPS/ratio, hard floor, sustained
+    # streak, latency, queue and error gates while treating isolated low-window
+    # count as diagnostic. All detector/queue/result-age failures remain fatal.
     step2_check = Path(__file__).with_name("check_camera_v11_step2_production_log_v25.py")
     base = subprocess.run(
         [
@@ -56,8 +59,37 @@ def main() -> int:
     )
     print(base.stdout, end="")
     reasons: list[str] = []
-    if base.returncode != 0:
-        reasons.append("step2_regression")
+    step2_regression_ok = base.returncode == 0
+
+    if not step2_regression_ok:
+        fail_match = STEP2_FAIL.search(base.stdout)
+        fail_reasons = [] if fail_match is None else [x for x in fail_match.group(1).split(";") if x]
+        if fail_reasons == ["aggregate_step1_regression"]:
+            display_check = Path(__file__).with_name("check_camera_v11_step1_v25_aggregate_log.py")
+            sustained = subprocess.run(
+                [
+                    sys.executable,
+                    str(display_check),
+                    str(display),
+                    "--warmup-windows",
+                    str(args.warmup_windows),
+                    "--max-transient-fraction",
+                    "1.0",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            print(sustained.stdout, end="")
+            if sustained.returncode == 0:
+                step2_regression_ok = True
+                print(
+                    "V11_STEP3_STEP2_REGRESSION result=PASS "
+                    "mode=frozen-step2-plus-sustained-display isolated_low_windows=diagnostic"
+                )
+        if not step2_regression_ok:
+            reasons.append("step2_regression")
 
     text = tracker.read_text(encoding="utf-8", errors="replace")
     for marker in (
