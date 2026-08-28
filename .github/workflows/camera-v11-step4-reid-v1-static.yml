@@ -18,6 +18,7 @@ jobs:
             services/camera_v11/step4_reid_trt86.py \
             services/camera_v11/step4_reid_scheduler_v1.py \
             services/camera_v11/step4_identity_shadow_v1.py \
+            services/camera_v11/step4_room_identity_v1.py \
             services/camera_v11/step4_tracking_reid_v1.py \
             scripts/reid_trt86_worker_v11.py \
             scripts/benchmark_camera_v11_step4_reid_v1.py \
@@ -77,14 +78,29 @@ jobs:
           grep -Fq 'self._pending[key] = (candidate, enqueued_ns)' services/camera_v11/step4_reid_scheduler_v1.py
           grep -Fq 'self._pending.popitem(last=False)' services/camera_v11/step4_reid_scheduler_v1.py
           grep -Fq 'age_ms > self.max_age_ms' services/camera_v11/step4_reid_scheduler_v1.py
-          grep -Fq 'identity_mode=shadow-no-merge' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'identity_mode=room-shadow+handoff-shadow-no-merge' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'max_per_camera_update=' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'predicted=skip' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'merge=0' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'identity_merge=0' services/camera_v11/step4_tracking_reid_v1.py
           ! grep -Fq 'embed_crops(' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'client.embed_crops' services/camera_v11/step4_reid_scheduler_v1.py
-      - name: Shadow identity safety invariants
+      - name: Shadow room identity invariants
+        run: |
+          grep -Fq 'class V11RoomIdentityShadowV1' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'min_track_samples: int = 3' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'join_similarity: float = 0.76' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'def update_active_tracks' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'def _same_camera_collision' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'track_id in active' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'np.max(left_matrix @ right_matrix.T)' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'AMBIGUOUS_NEW' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'V11RoomIdentityShadowV1' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'CAMERA_V11_STEP4_ROOM_IDENTITY' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'camera_id=f"ROOM::{candidate.room_id}"' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'room_identity={room_identity}' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'same_camera_simultaneous_room_join=forbidden' services/camera_v11/step4_tracking_reid_v1.py
+      - name: Shadow handoff safety invariants
         run: |
           grep -Fq 'min_gallery_samples: int = 3' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'candidate_votes: int = 2' services/camera_v11/step4_identity_shadow_v1.py
