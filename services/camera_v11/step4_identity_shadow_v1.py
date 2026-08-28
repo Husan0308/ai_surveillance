@@ -36,10 +36,10 @@ class V11CrossCameraIdentityShadowV1:
     """Calibration-first cross-camera matcher with conservative safety gates.
 
     This layer never mutates Step3 local IDs. A candidate must have multi-shot
-    evidence on both tracks, be physically feasible by room/time, be a reciprocal
-    nearest neighbour, have a useful runner-up margin and remain the same peer over
-    multiple observations. The purpose is to collect trustworthy live calibration
-    data before any global-ID merge policy is enabled.
+    evidence on both tracks, be physically feasible by room graph and time, be a
+    reciprocal nearest neighbour, have a useful runner-up margin and remain the same
+    peer over multiple observations. The purpose is to collect trustworthy live
+    calibration data before any global-ID merge policy is enabled.
     """
 
     def __init__(
@@ -56,6 +56,7 @@ class V11CrossCameraIdentityShadowV1:
         candidate_votes: int = 2,
         strong_votes: int = 3,
         min_cross_room_gap_sec: float = 1.5,
+        allowed_room_transitions: dict[str, set[str]] | None = None,
     ) -> None:
         self.gallery_size = max(2, min(8, int(gallery_size)))
         self.ttl_sec = max(3.0, float(ttl_sec))
@@ -68,6 +69,14 @@ class V11CrossCameraIdentityShadowV1:
         self.candidate_votes = max(1, int(candidate_votes))
         self.strong_votes = max(self.candidate_votes, int(strong_votes))
         self.min_cross_room_gap_sec = max(0.0, float(min_cross_room_gap_sec))
+        self.allowed_room_transitions = (
+            None
+            if allowed_room_transitions is None
+            else {
+                str(room): {str(peer) for peer in peers}
+                for room, peers in allowed_room_transitions.items()
+            }
+        )
         self._lock = threading.RLock()
         self._tracks: dict[tuple[str, str], _TrackGallery] = {}
         self.observations = 0
@@ -77,6 +86,8 @@ class V11CrossCameraIdentityShadowV1:
         self.ambiguous = 0
         self.insufficient_samples = 0
         self.topology_rejects = 0
+        self.route_rejects = 0
+        self.time_rejects = 0
         self.nonreciprocal = 0
         self.vote_waits = 0
 
@@ -92,35 +103,53 @@ class V11CrossCameraIdentityShadowV1:
         for key in stale:
             self._tracks.pop(key, None)
 
-    def _pair_allowed(self, left: _TrackGallery, right: _TrackGallery) -> tuple[bool, float]:
+    def _pair_allowed(
+        self,
+        left: _TrackGallery,
+        right: _TrackGallery,
+    ) -> tuple[bool, float, str]:
         if left.key == right.key or left.camera_id == right.camera_id:
-            return False, 0.0
+            return False, 0.0, "same_camera"
+
         gap_sec = abs(float(left.last_seen) - float(right.last_seen))
+        same_room = bool(left.room_id and left.room_id == right.room_id)
+        if same_room:
+            return True, gap_sec, "same_room"
+
+        if left.room_id and right.room_id and self.allowed_room_transitions is not None:
+            allowed = self.allowed_room_transitions.get(left.room_id, set())
+            if right.room_id not in allowed:
+                return False, gap_sec, "route"
+
         if (
             left.room_id
             and right.room_id
             and left.room_id != right.room_id
             and gap_sec < self.min_cross_room_gap_sec
         ):
-            return False, gap_sec
-        return True, gap_sec
+            return False, gap_sec, "time"
+        return True, gap_sec, "cross_room"
 
     def _rank_for(
         self,
         gallery: _TrackGallery,
         prototypes: dict[tuple[str, str], np.ndarray],
-    ) -> tuple[list[tuple[float, _TrackGallery, float]], int]:
+    ) -> tuple[list[tuple[float, _TrackGallery, float]], int, int]:
         query = prototypes[gallery.key]
         ranked: list[tuple[float, _TrackGallery, float]] = []
-        topology_rejects = 0
+        route_rejects = 0
+        time_rejects = 0
         for other in self._tracks.values():
             if other.key == gallery.key or other.camera_id == gallery.camera_id:
                 continue
             if len(other.embeddings) < self.min_gallery_samples:
                 continue
-            allowed, gap_sec = self._pair_allowed(gallery, other)
+            allowed, gap_sec, reason = self._pair_allowed(gallery, other)
             if not allowed:
-                topology_rejects += 1
+                if reason == "route":
+                    route_rejects += 1
+                elif reason == "time":
+                    time_rejects += 1
                 continue
             prototype = prototypes.get(other.key)
             if prototype is None:
@@ -128,7 +157,7 @@ class V11CrossCameraIdentityShadowV1:
                 prototypes[other.key] = prototype
             ranked.append((float(np.dot(query, prototype)), other, gap_sec))
         ranked.sort(key=lambda row: row[0], reverse=True)
-        return ranked, topology_rejects
+        return ranked, route_rejects, time_rejects
 
     @staticmethod
     def _none_decision(gallery_samples: int, *, reason: str = "none") -> dict[str, object]:
@@ -184,8 +213,10 @@ class V11CrossCameraIdentityShadowV1:
                 return self._none_decision(len(gallery.embeddings), reason="query_samples")
 
             prototypes = {gallery.key: self._prototype(gallery)}
-            ranked, rejected = self._rank_for(gallery, prototypes)
-            self.topology_rejects += rejected
+            ranked, route_rejected, time_rejected = self._rank_for(gallery, prototypes)
+            self.route_rejects += route_rejected
+            self.time_rejects += time_rejected
+            self.topology_rejects += route_rejected + time_rejected
             if not ranked:
                 gallery.best_peer_key = None
                 gallery.best_peer_streak = 0
@@ -202,14 +233,16 @@ class V11CrossCameraIdentityShadowV1:
                 gallery.best_peer_key = best_key
                 gallery.best_peer_streak = 1
 
-            # Reciprocal-nearest-neighbour gate: the selected peer must independently
-            # select this track as its own best feasible different-camera candidate.
             best_proto = prototypes.get(best_key)
             if best_proto is None:
                 best_proto = self._prototype(best)
                 prototypes[best_key] = best_proto
-            reverse_ranked, reverse_rejected = self._rank_for(best, prototypes)
-            self.topology_rejects += reverse_rejected
+            reverse_ranked, reverse_route_rejected, reverse_time_rejected = self._rank_for(
+                best, prototypes
+            )
+            self.route_rejects += reverse_route_rejected
+            self.time_rejects += reverse_time_rejected
+            self.topology_rejects += reverse_route_rejected + reverse_time_rejected
             reciprocal = bool(reverse_ranked and reverse_ranked[0][1].key == gallery.key)
 
             same_room = bool(gallery.room_id and gallery.room_id == best.room_id)
@@ -278,6 +311,8 @@ class V11CrossCameraIdentityShadowV1:
                 "ambiguous": self.ambiguous,
                 "insufficient_samples": self.insufficient_samples,
                 "topology_rejects": self.topology_rejects,
+                "route_rejects": self.route_rejects,
+                "time_rejects": self.time_rejects,
                 "nonreciprocal": self.nonreciprocal,
                 "vote_waits": self.vote_waits,
             }
