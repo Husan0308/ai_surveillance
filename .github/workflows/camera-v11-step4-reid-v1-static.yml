@@ -99,7 +99,7 @@ jobs:
           grep -Fq 'best_peer_streak' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'V11_STEP4_REID_MIN_GALLERY_SAMPLES' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'V11_STEP4_REID_MIN_CROSS_ROOM_GAP_SEC' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'reciprocal=required' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'reciprocal_best=required' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'topology_reject=' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'nonreciprocal=' services/camera_v11/step4_tracking_reid_v1.py
       - name: Frozen Step3 guard
