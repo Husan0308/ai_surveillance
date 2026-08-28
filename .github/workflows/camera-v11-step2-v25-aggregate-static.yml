@@ -1,0 +1,30 @@
+name: Camera V11 Step2 V25 Aggregate Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step2-recovery-v22-20260828
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            scripts/check_camera_v11_step1_v25_aggregate_log.py \
+            scripts/check_camera_v11_step2_production_log_v25.py
+      - name: Shell syntax
+        run: |
+          bash -n scripts/run_camera_v11_step2_acceptance_v25.sh
+          bash -n scripts/run_camera_v11_step2_production_fp32_v25.sh
+          bash -n scripts/camera_v11_powermizer_keeper_v25.sh
+      - name: Frozen Step1 unchanged
+        run: |
+          git diff --exit-code dfb88d9850e8d73b14b06e78b3f884d8c01a5788 -- \
+            services/camera_v11/step1_cam02_lowlat_v7.py \
+            services/camera_v11/step1_independent_egl_v4.py \
+            scripts/run_camera_v11_step1_v7.sh \
+            scripts/check_camera_v11_step1_v7_log.py
