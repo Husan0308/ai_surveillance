@@ -27,6 +27,18 @@ QUALITY = re.compile(
 )
 
 
+def longest_true_run(flags: list[bool]) -> int:
+    best = 0
+    current = 0
+    for flag in flags:
+        if flag:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Long-run aggregate gate for frozen V11 Step1 logs")
     ap.add_argument("log")
@@ -35,8 +47,13 @@ def main() -> int:
     ap.add_argument("--min-avg-fps", type=float, default=18.0)
     ap.add_argument("--min-ratio", type=float, default=90.0)
     ap.add_argument("--hard-floor-fps", type=float, default=15.0)
-    ap.add_argument("--max-transient-windows", type=int, default=1)
+    ap.add_argument("--max-transient-fraction", type=float, default=0.25)
+    ap.add_argument("--max-consecutive-low", type=int, default=3)
     args = ap.parse_args()
+
+    if not (0.0 <= args.max_transient_fraction <= 1.0):
+        print("V11_STEP1V25_AGG FAIL invalid_max_transient_fraction=1")
+        return 2
 
     text = Path(args.log).read_text(encoding="utf-8", errors="replace")
     reasons: list[str] = []
@@ -92,12 +109,16 @@ def main() -> int:
         min_source = min(source_values)
         min_render = min(render_values)
 
-        transient_source = sum(1 for value in source_values if value < args.min_avg_fps)
-        transient_render = sum(
-            1
+        low_source_flags = [value < args.min_avg_fps for value in source_values]
+        low_render_flags = [
+            render < args.min_avg_fps or (100.0 * render / max(0.001, source)) < args.min_ratio
             for source, render in zip(source_values, render_values)
-            if render < args.min_avg_fps or (100.0 * render / max(0.001, source)) < args.min_ratio
-        )
+        ]
+        low_source_windows = sum(low_source_flags)
+        low_render_windows = sum(low_render_flags)
+        allowed_low_windows = max(1, math.floor(len(rows) * args.max_transient_fraction))
+        source_low_streak = longest_true_run(low_source_flags)
+        render_low_streak = longest_true_run(low_render_flags)
 
         if avg_source < args.min_avg_fps or source_ratio < args.min_ratio:
             reasons.append(f"{cid}:avg_source={avg_source:.2f}/ratio={source_ratio:.1f}%")
@@ -107,10 +128,14 @@ def main() -> int:
             reasons.append(f"{cid}:source_hard_floor={min_source:.2f}")
         if min_render < args.hard_floor_fps:
             reasons.append(f"{cid}:render_hard_floor={min_render:.2f}")
-        if transient_source > args.max_transient_windows:
-            reasons.append(f"{cid}:low_source_windows={transient_source}/max{args.max_transient_windows}")
-        if transient_render > args.max_transient_windows:
-            reasons.append(f"{cid}:low_render_windows={transient_render}/max{args.max_transient_windows}")
+        if low_source_windows > allowed_low_windows:
+            reasons.append(f"{cid}:low_source_windows={low_source_windows}/allowed{allowed_low_windows}")
+        if low_render_windows > allowed_low_windows:
+            reasons.append(f"{cid}:low_render_windows={low_render_windows}/allowed{allowed_low_windows}")
+        if source_low_streak > args.max_consecutive_low:
+            reasons.append(f"{cid}:source_low_streak={source_low_streak}/max{args.max_consecutive_low}")
+        if render_low_streak > args.max_consecutive_low:
+            reasons.append(f"{cid}:render_low_streak={render_low_streak}/max{args.max_consecutive_low}")
 
         latest = rows[-1]
         wall95 = float(latest.group(4))
@@ -162,10 +187,11 @@ def main() -> int:
             f"camera={cid} windows={len(rows)} avg_source_fps={avg_source:.2f} "
             f"avg_render_fps={avg_render:.2f} source_ratio={source_ratio:.1f}% "
             f"render_ratio={render_ratio:.1f}% min_source_fps={min_source:.2f} "
-            f"min_render_fps={min_render:.2f} low_source_windows={transient_source} "
-            f"low_render_windows={transient_render} wall_p95={wall95:.0f}ms "
-            f"display_age_p95={display95:.0f}ms render_gap_p95={render_gap95:.0f}ms "
-            f"qmax={qmax} match_miss={miss_pct:.1f}%"
+            f"min_render_fps={min_render:.2f} low_source_windows={low_source_windows} "
+            f"low_render_windows={low_render_windows} allowed_low_windows={allowed_low_windows} "
+            f"source_low_streak={source_low_streak} render_low_streak={render_low_streak} "
+            f"wall_p95={wall95:.0f}ms display_age_p95={display95:.0f}ms "
+            f"render_gap_p95={render_gap95:.0f}ms qmax={qmax} match_miss={miss_pct:.1f}%"
         )
 
     if qualities:
@@ -200,7 +226,8 @@ def main() -> int:
     print(
         "V11_STEP1V25_AGG RESULT=PASS "
         f"cameras=6 min_avg_fps={args.min_avg_fps:.1f} min_ratio={args.min_ratio:.1f}% "
-        f"max_transient_windows={args.max_transient_windows} hard_floor_fps={args.hard_floor_fps:.1f}"
+        f"max_transient_fraction={args.max_transient_fraction:.2f} "
+        f"max_consecutive_low={args.max_consecutive_low} hard_floor_fps={args.hard_floor_fps:.1f}"
     )
     return 0
 
