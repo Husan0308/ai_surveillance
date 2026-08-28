@@ -6,7 +6,8 @@ ROOT="$PWD"
 MODEL_DIR="$ROOT/artifacts/reid"
 ONNX="${V11_STEP4_REID_ONNX:-$MODEL_DIR/resnet50_market1501_aicity156.onnx}"
 ENGINE="${V11_STEP4_REID_ENGINE:-$MODEL_DIR/resnet50_market1501_aicity156_b1-8_fp32_trt86.engine}"
-URL="${V11_STEP4_REID_ONNX_URL:-https://api.ngc.nvidia.com/v2/models/org/nvidia/team/tao/reidentificationnet/deployable_v1.2/files/resnet50_market1501_aicity156.onnx}"
+URL="${V11_STEP4_REID_ONNX_URL:-https://api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx}"
+EXPECTED_SHA256="${V11_STEP4_REID_ONNX_SHA256-0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b}"
 PYTHON="$ROOT/.venv-trt86/bin/python"
 mkdir -p "$MODEL_DIR"
 
@@ -15,7 +16,31 @@ fail() {
   exit 1
 }
 
+verify_onnx() {
+  local path="$1"
+  [[ -s "$path" ]] || return 1
+  local size
+  size="$(stat -c '%s' "$path" 2>/dev/null || printf '0')"
+  (( size > 90000000 )) || return 1
+  if [[ -n "$EXPECTED_SHA256" ]]; then
+    command -v sha256sum >/dev/null 2>&1 || fail "sha256sum_missing"
+    local actual_sha256
+    actual_sha256="$(sha256sum "$path" | awk '{print $1}')"
+    if [[ "$actual_sha256" != "$EXPECTED_SHA256" ]]; then
+      printf 'V11_STEP4_REID_PREPARE ONNX_VERIFY=FAIL path=%s expected_sha256=%s actual_sha256=%s\n' \
+        "$path" "$EXPECTED_SHA256" "$actual_sha256" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
 [[ -x "$PYTHON" ]] || fail "trt86_python_missing path=$PYTHON"
+
+if [[ -s "$ONNX" ]] && ! verify_onnx "$ONNX"; then
+  printf 'V11_STEP4_REID_PREPARE ONNX_INVALID action=redownload path=%s\n' "$ONNX" >&2
+  rm -f "$ONNX"
+fi
 
 if [[ ! -s "$ONNX" ]]; then
   tmp="$ONNX.download"
@@ -30,10 +55,11 @@ if [[ ! -s "$ONNX" ]]; then
   else
     fail "curl_or_wget_missing"
   fi
+  verify_onnx "$tmp" || fail "onnx_download_verification_failed"
   size="$(stat -c '%s' "$tmp" 2>/dev/null || printf '0')"
-  (( size > 1000000 )) || fail "onnx_download_too_small bytes=$size"
   mv -f "$tmp" "$ONNX"
-  printf 'V11_STEP4_REID_PREPARE DOWNLOAD_RESULT=PASS path=%s bytes=%s\n' "$ONNX" "$size"
+  printf 'V11_STEP4_REID_PREPARE DOWNLOAD_RESULT=PASS path=%s bytes=%s sha256=%s\n' \
+    "$ONNX" "$size" "${EXPECTED_SHA256:-unchecked}"
 else
   printf 'V11_STEP4_REID_PREPARE ONNX_REUSE path=%s bytes=%s\n' \
     "$ONNX" "$(stat -c '%s' "$ONNX")"
