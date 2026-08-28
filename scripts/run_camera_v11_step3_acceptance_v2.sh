@@ -13,6 +13,21 @@ fail() {
   exit 1
 }
 
+dump_failure_context() {
+  local launcher_log="$1"
+  local tracker_log="$2"
+  local display_log="$3"
+  printf 'CAMERA_V11_STEP3_V2_FAILURE_CONTEXT begin\n'
+  for log in "$launcher_log" "$tracker_log" "$display_log"; do
+    [[ -s "$log" ]] || continue
+    printf '%s\n' "--- $(basename "$log") ---"
+    grep -E \
+      'CAMERA_V11_STEP3_V2_PREFLIGHT|CAMERA_V11_POWERMIZER_KEEPER|CAMERA_V11_STEP1V7_PREFLIGHT|CAMERA_V11_STEP2_WARMUP|Traceback|ModuleNotFoundError|ImportError|RuntimeError|ERROR|FAIL' \
+      "$log" | tail -n 40 || true
+  done
+  printf 'CAMERA_V11_STEP3_V2_FAILURE_CONTEXT end\n'
+}
+
 [[ "$DURATION" =~ ^[1-9][0-9]*$ ]] || fail "invalid_duration=$DURATION"
 [[ "$WARMUP_WINDOWS" =~ ^[0-9]+$ ]] || fail "invalid_warmup_windows=$WARMUP_WINDOWS"
 command -v timeout >/dev/null 2>&1 || fail "timeout_missing"
@@ -53,6 +68,7 @@ if (( failed == 0 )); then
     if (( status != 0 && status != 124 && status != 130 && status != 143 )); then
       printf 'CAMERA_V11_STEP3_V2_ACCEPTANCE_RESULT stage=full run=%s result=FAIL launcher_status=%s\n' \
         "$run" "$status" | tee -a "$check_log"
+      dump_failure_context "$launcher_log" "$tracker_log" "$display_log" | tee -a "$check_log"
       failed=1
       break
     fi
@@ -60,6 +76,7 @@ if (( failed == 0 )); then
     if ! grep -q 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK' "$launcher_log"; then
       printf 'CAMERA_V11_STEP3_V2_ACCEPTANCE_RESULT stage=full run=%s result=FAIL reason=no_vram_boost_gate\n' \
         "$run" | tee -a "$check_log"
+      dump_failure_context "$launcher_log" "$tracker_log" "$display_log" | tee -a "$check_log"
       failed=1
       break
     fi
@@ -71,6 +88,7 @@ if (( failed == 0 )); then
     if (( check_status != 0 )); then
       printf 'CAMERA_V11_STEP3_V2_ACCEPTANCE_RESULT stage=full run=%s result=FAIL reason=tracker_checker\n' \
         "$run" | tee -a "$check_log"
+      dump_failure_context "$launcher_log" "$tracker_log" "$display_log" | tee -a "$check_log"
       failed=1
       break
     fi
