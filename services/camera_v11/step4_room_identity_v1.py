@@ -51,13 +51,14 @@ class _RoomIdentity:
 
 
 class V11RoomIdentityShadowV1:
-    """Group fragmented local tracks into conservative per-room shadow identities.
+    """Fuse stable camera-tracklet identities across cameras inside one room.
 
-    This layer never rewrites Step3 local IDs. A local track first builds a ReID
-    gallery. Borderline cross-camera evidence is allowed to mature for several
-    samples before opening another room identity, while simultaneous same-camera
-    tracks are always kept separate. Activity state is exposed for handoff lifecycle
-    gating but does not change the frozen tracker.
+    This layer is intentionally *not* a second single-camera re-associator. Step4's
+    camera-tracklet layer already stitches local T-ID fragments inside one camera.
+    A Room Identity may therefore adopt a new member only from a different camera in
+    the same room. While fusing live views, both the incoming camera-tracklet and at
+    least one peer-camera member must be active, so stale same-room galleries cannot
+    steal a currently visible person. Step3/local IDs remain untouched.
     """
 
     def __init__(
@@ -71,6 +72,8 @@ class V11RoomIdentityShadowV1:
         weak_hold_similarity: float = 0.55,
         min_margin: float = 0.04,
         ttl_sec: float = 45.0,
+        cross_camera_only: bool = True,
+        require_active_overlap: bool = True,
     ) -> None:
         self.min_track_samples = max(2, min(6, int(min_track_samples)))
         self.decision_samples = max(
@@ -84,6 +87,8 @@ class V11RoomIdentityShadowV1:
         self.weak_hold_similarity = min(self.join_similarity, float(weak_hold_similarity))
         self.min_margin = max(0.0, float(min_margin))
         self.ttl_sec = max(10.0, float(ttl_sec))
+        self.cross_camera_only = bool(cross_camera_only)
+        self.require_active_overlap = bool(require_active_overlap)
         self._lock = threading.RLock()
         self._next_by_room: dict[str, int] = {}
         self._pending: dict[tuple[str, str], _PendingTrack] = {}
@@ -98,6 +103,7 @@ class V11RoomIdentityShadowV1:
         self.pending_match_waits = 0
         self.ambiguous_new = 0
         self.same_camera_collision_rejects = 0
+        self.inactive_overlap_rejects = 0
         self.expired = 0
         self.activations = 0
         self.deactivations = 0
@@ -156,12 +162,18 @@ class V11RoomIdentityShadowV1:
         right_matrix = np.stack(right, axis=0)
         return float(np.max(left_matrix @ right_matrix.T))
 
-    def _same_camera_collision(self, pending: _PendingTrack, identity: _RoomIdentity) -> bool:
-        active = self._active_by_camera.get(pending.camera_id, set())
+    @staticmethod
+    def _has_camera_member(identity: _RoomIdentity, camera_id: str) -> bool:
+        return any(member_camera == camera_id for member_camera, _track_id in identity.members)
+
+    def _incoming_is_active(self, pending: _PendingTrack) -> bool:
+        return pending.track_id in self._active_by_camera.get(pending.camera_id, set())
+
+    def _has_active_peer_camera(self, pending: _PendingTrack, identity: _RoomIdentity) -> bool:
         for camera_id, track_id in identity.members:
-            if camera_id != pending.camera_id or track_id == pending.track_id:
+            if camera_id == pending.camera_id:
                 continue
-            if track_id in active:
+            if track_id in self._active_by_camera.get(camera_id, set()):
                 return True
         return False
 
@@ -276,6 +288,7 @@ class V11RoomIdentityShadowV1:
                         "samples": len(identity.embeddings),
                         "members": len(identity.members),
                         "collision_rejects": 0,
+                        "inactive_overlap_rejects": 0,
                     }
                 self._assigned.pop(key, None)
 
@@ -300,20 +313,32 @@ class V11RoomIdentityShadowV1:
                     "samples": len(pending.embeddings),
                     "members": 0,
                     "collision_rejects": 0,
+                    "inactive_overlap_rejects": 0,
                 }
 
+            incoming_active = self._incoming_is_active(pending)
             ranked: list[tuple[float, _RoomIdentity]] = []
             collision_rejects = 0
+            inactive_overlap_rejects = 0
             for identity in self._identities.values():
                 if identity.room_id != room_id:
                     continue
-                if self._same_camera_collision(pending, identity):
+                # Critical invariant: single-camera stitching belongs to the camera
+                # tracklet layer. A Room ID can never absorb a second C-ID from the
+                # same camera, active or inactive.
+                if self.cross_camera_only and self._has_camera_member(identity, camera_id):
                     collision_rejects += 1
+                    continue
+                if self.require_active_overlap and (
+                    not incoming_active or not self._has_active_peer_camera(pending, identity)
+                ):
+                    inactive_overlap_rejects += 1
                     continue
                 score = self._gallery_score(pending.embeddings, identity.embeddings)
                 ranked.append((score, identity))
             ranked.sort(key=lambda row: row[0], reverse=True)
             self.same_camera_collision_rejects += collision_rejects
+            self.inactive_overlap_rejects += inactive_overlap_rejects
 
             best_score = ranked[0][0] if ranked else -1.0
             runner_score = ranked[1][0] if len(ranked) > 1 else -1.0
@@ -341,15 +366,14 @@ class V11RoomIdentityShadowV1:
                     "samples": len(identity.embeddings),
                     "members": len(identity.members),
                     "collision_rejects": collision_rejects,
+                    "inactive_overlap_rejects": inactive_overlap_rejects,
                 }
 
-            # Do not permanently split a cross-camera track on only three samples.
-            # Borderline evidence often improves as viewpoint/pose changes. Same-camera
-            # collisions are intentionally not held because simultaneous tracks from
-            # one camera represent different physical people.
+            # Different-camera evidence near the threshold gets extra samples. Same-
+            # camera identities are not candidates and therefore cannot influence the
+            # hold/new decision except through telemetry counters.
             should_hold = bool(
                 ranked
-                and collision_rejects == 0
                 and best_score >= self.weak_hold_similarity
                 and len(pending.embeddings) < self.decision_samples
             )
@@ -363,6 +387,7 @@ class V11RoomIdentityShadowV1:
                     "samples": len(pending.embeddings),
                     "members": 0,
                     "collision_rejects": collision_rejects,
+                    "inactive_overlap_rejects": inactive_overlap_rejects,
                 }
 
             ambiguous = bool(ranked and best_score >= self.join_similarity)
@@ -377,6 +402,7 @@ class V11RoomIdentityShadowV1:
                 "samples": len(identity.embeddings),
                 "members": len(identity.members),
                 "collision_rejects": collision_rejects,
+                "inactive_overlap_rejects": inactive_overlap_rejects,
             }
 
     def snapshot(self) -> dict[str, int]:
@@ -393,6 +419,7 @@ class V11RoomIdentityShadowV1:
                 "pending_match_waits": self.pending_match_waits,
                 "ambiguous_new": self.ambiguous_new,
                 "collision_rejects": self.same_camera_collision_rejects,
+                "inactive_overlap_rejects": self.inactive_overlap_rejects,
                 "expired": self.expired,
                 "activations": self.activations,
                 "deactivations": self.deactivations,
