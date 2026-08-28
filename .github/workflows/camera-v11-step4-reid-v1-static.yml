@@ -21,6 +21,7 @@ jobs:
             services/camera_v11/step4_identity_shadow_v1.py \
             services/camera_v11/step4_room_identity_v1.py \
             services/camera_v11/step4_tracking_reid_v1.py \
+            services/camera_v11/step4_tracking_reid_v2.py \
             scripts/reid_trt86_worker_v11.py \
             scripts/benchmark_camera_v11_step4_reid_v1.py \
             scripts/build_camera_v11_step4_reid_trt86.py
@@ -32,6 +33,7 @@ jobs:
           bash -n scripts/run_camera_v11_step4_tracking_reid_v1.sh
           grep -q 'api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx' scripts/prepare_camera_v11_step4_reid_v1.sh
           grep -q '0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b' scripts/prepare_camera_v11_step4_reid_v1.sh
+          grep -Fq 'services.camera_v11.step4_tracking_reid_v2' scripts/run_camera_v11_step4_tracking_reid_v1.sh
       - name: TensorRT 8.6 profile API guard
         run: |
           grep -q 'profile.set_shape' scripts/build_camera_v11_step4_reid_trt86.py
@@ -97,6 +99,19 @@ jobs:
           grep -Fq 'camera_decision = self.camera_tracklet_shadow.observe' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'track_id=camera_identity' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'single_camera_reassoc=before-room' services/camera_v11/step4_tracking_reid_v1.py
+      - name: Camera-tracklet handoff V2 invariants
+        run: |
+          grep -Fq 'class _V11CameraTrackletHandoffShadow' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'source=camera-tracklet cross_room_only=1 room_identity_dependency=0' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'def _sync_camera_identity_activity' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'self.identity_shadow.update_track_activity(' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'track_id=camera_identity' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'def _sync_room_identity_activity' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'Deliberately do not feed ROOM::<room> identities into the peer matcher.' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'camera_id=candidate.camera_id' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'mode=camera-tracklet-handoff-shadow' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'peer_camera_identity=' services/camera_v11/step4_tracking_reid_v2.py
+          ! grep -Fq 'track_id=room_identity' services/camera_v11/step4_tracking_reid_v2.py
       - name: Shadow room identity invariants
         run: |
           grep -Fq 'class V11RoomIdentityShadowV1' services/camera_v11/step4_room_identity_v1.py
@@ -116,9 +131,7 @@ jobs:
           grep -Fq 'def update_track_activity' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'if left.active == right.active' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'lifecycle_rejects' services/camera_v11/step4_identity_shadow_v1.py
-          grep -Fq 'require_handoff_lifecycle=True' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'def _sync_camera_identity_activity' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'def _sync_room_identity_activity' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'require_handoff_lifecycle=True' services/camera_v11/step4_tracking_reid_v2.py
           grep -Fq 'handoff_lifecycle=active-to-recently-lost' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'lifecycle_reject=' services/camera_v11/step4_tracking_reid_v1.py
       - name: Shadow handoff safety invariants
@@ -139,7 +152,7 @@ jobs:
           grep -Fq 'np.max(left_matrix @ right_matrix.T)' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'prototype_score' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'similarity=gallery-max prototype=telemetry' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'CAMERA_V11_STEP4_REID_CROSSROOM_PROBE' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'CAMERA_V11_STEP4_REID_CROSSROOM_PROBE' services/camera_v11/step4_tracking_reid_v2.py
           grep -Fq 'crossroom_probe=' services/camera_v11/step4_tracking_reid_v1.py
       - name: Room graph config guard
         run: |
