@@ -20,7 +20,6 @@ flock -n 8 || fail "another_launcher_holds=$LOCK_FILE"
 [[ -n "${DISPLAY:-}" ]] || fail "DISPLAY_empty"
 [[ -s "$ENGINE" ]] || fail "fp32_engine_missing"
 
-# Frozen Step1 remains byte-for-byte authoritative.
 git diff --quiet "$FROZEN_STEP1_SHA" -- \
   services/camera_v11/step1_cam02_lowlat_v7.py \
   services/camera_v11/step1_independent_egl_v4.py \
@@ -33,8 +32,10 @@ source "$ROOT/scripts/camera_v11_powermizer_keeper_v25.sh"
 
 display_pid=""
 detector_pid=""
+cleaned=0
 cleanup() {
-  trap - EXIT INT TERM
+  (( cleaned == 1 )) && return 0
+  cleaned=1
   for pid in "$detector_pid" "$display_pid"; do
     [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && kill -TERM "$pid" 2>/dev/null || true
   done
@@ -43,7 +44,12 @@ cleanup() {
   done
   v11_powermizer_stop || true
 }
-trap cleanup EXIT INT TERM
+on_signal() {
+  cleanup
+  exit 130
+}
+trap cleanup EXIT
+trap on_signal INT TERM
 
 : >"$DISPLAY_LOG"
 : >"$DETECTOR_LOG"
@@ -60,7 +66,6 @@ kill -0 "$display_pid" 2>/dev/null || fail "display_exited_during_warmup"
 "$ROOT/scripts/run_camera_v11_step2_stage_v18.sh" full >"$DETECTOR_LOG" 2>&1 &
 detector_pid=$!
 
-# TensorRT warmup supplies the load that should put VRAM at its performance clock.
 ready=0
 for _ in $(seq 1 300); do
   if grep -q 'CAMERA_V11_STEP2_WARMUP iterations=10 status=OK' "$DETECTOR_LOG"; then
