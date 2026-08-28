@@ -21,6 +21,9 @@ def main() -> int:
     parser.add_argument("--display-log", required=True)
     parser.add_argument("--detector-log", required=True)
     parser.add_argument("--warmup-windows", type=int, default=2)
+    parser.add_argument("--min-detector-hz", type=float, default=1.80)
+    parser.add_argument("--detector-hard-floor-hz", type=float, default=1.50)
+    parser.add_argument("--max-detector-transient-windows", type=int, default=1)
     args = parser.parse_args()
 
     display = Path(args.display_log)
@@ -64,16 +67,49 @@ def main() -> int:
     backlog_lines = [line for line in text.splitlines() if line.startswith("CAMERA_V11_STEP2_BACKLOG ")]
     latest_lines = [line for line in text.splitlines() if line.startswith("CAMERA_V11_STEP2_V12_LATEST ")]
     profile_lines = [line for line in text.splitlines() if line.startswith("CAMERA_V11_STEP2_PROFILE ")]
-    rates = RATE.findall(source_lines[-1]) if source_lines else []
+
+    rate_windows: list[list[tuple[str, str, str, str]]] = []
+    for line in source_lines:
+        parsed = RATE.findall(line)
+        if len(parsed) == 6:
+            rate_windows.append(parsed)
+    usable_rate_windows = rate_windows[max(0, args.warmup_windows) :]
+    if len(usable_rate_windows) < 6:
+        reasons.append(f"detector_windows={len(usable_rate_windows)}/min6")
+
+    detect_by_camera: dict[str, list[float]] = {}
+    for window in usable_rate_windows:
+        for cid, _rtsp, _decoded, detect in window:
+            detect_by_camera.setdefault(cid, []).append(float(detect))
+
+    avg_detect_by_camera: dict[str, float] = {}
+    if len(detect_by_camera) != 6:
+        reasons.append(f"detector_rate_cameras={len(detect_by_camera)}")
+    for cid, values in sorted(detect_by_camera.items()):
+        if not values:
+            reasons.append(f"{cid}:no_detector_rate_samples")
+            continue
+        avg_detect = sum(values) / len(values)
+        min_detect = min(values)
+        low_windows = sum(1 for value in values if value < args.min_detector_hz)
+        avg_detect_by_camera[cid] = avg_detect
+        if avg_detect < args.min_detector_hz:
+            reasons.append(f"{cid}:avg_detect_hz={avg_detect:.2f}")
+        if min_detect < args.detector_hard_floor_hz:
+            reasons.append(f"{cid}:detect_hard_floor={min_detect:.2f}Hz")
+        if low_windows > args.max_detector_transient_windows:
+            reasons.append(
+                f"{cid}:low_detect_windows={low_windows}/max{args.max_detector_transient_windows}"
+            )
+        print(
+            "V11_STEP2_V25_AGG_RATE "
+            f"camera={cid} windows={len(values)} avg_detect_hz={avg_detect:.2f} "
+            f"min_detect_hz={min_detect:.2f} low_detect_windows={low_windows}"
+        )
+
     queues = QUEUE.findall(backlog_lines[-1]) if backlog_lines else []
     latest = LATEST.findall(latest_lines[-1]) if latest_lines else []
     stages = {name: float(value) for name, value in VALUE.findall(profile_lines[-1])} if profile_lines else {}
-
-    if len(rates) != 6:
-        reasons.append(f"detector_rates={len(rates)}")
-    for cid, _rtsp, _decoded, detect in rates:
-        if float(detect) < 1.80:
-            reasons.append(f"{cid}:detect_hz={detect}")
 
     if len(queues) != 6:
         reasons.append(f"queue_rows={len(queues)}")
@@ -102,7 +138,7 @@ def main() -> int:
 
     print(
         "V11_STEP2_PRODUCTION_V25 RESULT=PASS "
-        f"cameras=6 rate_min={min(float(row[3]) for row in rates):.2f}Hz "
+        f"cameras=6 rate_min_avg={min(avg_detect_by_camera.values()):.2f}Hz "
         f"queue_max={max(int(row[4]) for row in queues)} "
         f"pending_max={max(int(row[6]) for row in latest)} "
         f"result_age_p95={stages['result_age_p95']:.1f}ms"
