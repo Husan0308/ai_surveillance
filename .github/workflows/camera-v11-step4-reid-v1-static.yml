@@ -22,6 +22,7 @@ jobs:
       - name: Check Step4 shell syntax
         run: |
           bash -n scripts/prepare_camera_v11_step4_reid_v1.sh
+          bash -n scripts/ensure_camera_v11_trt86_runtime_v1.sh
           bash -n scripts/run_camera_v11_step4_reid_benchmark_v1.sh
           grep -q 'api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx' \
             scripts/prepare_camera_v11_step4_reid_v1.sh
@@ -40,6 +41,15 @@ jobs:
           grep -Fq 'ROOT = Path(__file__).resolve().parents[1]' scripts/benchmark_camera_v11_step4_reid_v1.py
           grep -Fq 'sys.path.insert(0, root_text)' scripts/benchmark_camera_v11_step4_reid_v1.py
           grep -Fq 'engine = ROOT / engine' scripts/benchmark_camera_v11_step4_reid_v1.py
+      - name: TRT86 runtime isolation guard
+        run: |
+          grep -Fq 'numpy.core._multiarray_umath' scripts/ensure_camera_v11_trt86_runtime_v1.sh
+          grep -Fq -- '--only-binary=:all:' scripts/ensure_camera_v11_trt86_runtime_v1.sh
+          grep -Fq -- '--ignore-installed' scripts/ensure_camera_v11_trt86_runtime_v1.sh
+          grep -Fq 'numpy==$NUMPY_VERSION' scripts/ensure_camera_v11_trt86_runtime_v1.sh
+          grep -Fq 'ensure_camera_v11_trt86_runtime_v1.sh' scripts/run_camera_v11_step4_reid_benchmark_v1.sh
+          ! grep -Fq 'sudo pip' scripts/ensure_camera_v11_trt86_runtime_v1.sh
+          ! grep -Fq 'apt install' scripts/ensure_camera_v11_trt86_runtime_v1.sh
       - name: Frozen Step3 guard
         run: |
           git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
