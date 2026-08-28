@@ -35,11 +35,10 @@ class _TrackGallery:
 class V11CrossCameraIdentityShadowV1:
     """Calibration-first cross-camera matcher with conservative safety gates.
 
-    This layer never mutates Step3 local IDs. A candidate must have multi-shot
-    evidence on both tracks, be physically feasible by room graph and time, be a
-    reciprocal nearest neighbour, have a useful runner-up margin and remain the same
-    peer over multiple observations. The purpose is to collect trustworthy live
-    calibration data before any global-ID merge policy is enabled.
+    Similarity follows the NVIDIA tracker gallery idea: the primary ReID score is
+    the strongest cosine match between samples in the two short feature galleries.
+    A weighted prototype score is retained only as calibration telemetry. No local
+    Step3 ID is ever mutated by this shadow matcher.
     """
 
     def __init__(
@@ -98,6 +97,15 @@ class V11CrossCameraIdentityShadowV1:
         weights = np.maximum(weights, 0.05)
         return _normalize(np.average(matrix, axis=0, weights=weights))
 
+    @classmethod
+    def _gallery_similarity(cls, left: _TrackGallery, right: _TrackGallery) -> tuple[float, float]:
+        """Return NVIDIA-style nearest-neighbour gallery score plus prototype score."""
+        left_matrix = np.stack(left.embeddings, axis=0)
+        right_matrix = np.stack(right.embeddings, axis=0)
+        gallery_score = float(np.max(left_matrix @ right_matrix.T))
+        prototype_score = float(np.dot(cls._prototype(left), cls._prototype(right)))
+        return gallery_score, prototype_score
+
     def _expire(self, now: float) -> None:
         stale = [key for key, row in self._tracks.items() if now - row.last_seen > self.ttl_sec]
         for key in stale:
@@ -133,10 +141,8 @@ class V11CrossCameraIdentityShadowV1:
     def _rank_for(
         self,
         gallery: _TrackGallery,
-        prototypes: dict[tuple[str, str], np.ndarray],
-    ) -> tuple[list[tuple[float, _TrackGallery, float]], int, int]:
-        query = prototypes[gallery.key]
-        ranked: list[tuple[float, _TrackGallery, float]] = []
+    ) -> tuple[list[tuple[float, float, _TrackGallery, float]], int, int]:
+        ranked: list[tuple[float, float, _TrackGallery, float]] = []
         route_rejects = 0
         time_rejects = 0
         for other in self._tracks.values():
@@ -151,11 +157,8 @@ class V11CrossCameraIdentityShadowV1:
                 elif reason == "time":
                     time_rejects += 1
                 continue
-            prototype = prototypes.get(other.key)
-            if prototype is None:
-                prototype = self._prototype(other)
-                prototypes[other.key] = prototype
-            ranked.append((float(np.dot(query, prototype)), other, gap_sec))
+            gallery_score, prototype_score = self._gallery_similarity(gallery, other)
+            ranked.append((gallery_score, prototype_score, other, gap_sec))
         ranked.sort(key=lambda row: row[0], reverse=True)
         return ranked, route_rejects, time_rejects
 
@@ -165,6 +168,7 @@ class V11CrossCameraIdentityShadowV1:
             "state": "NONE",
             "reason": reason,
             "score": 0.0,
+            "prototype_score": 0.0,
             "margin": 0.0,
             "candidate_camera": "",
             "candidate_track": "",
@@ -212,8 +216,7 @@ class V11CrossCameraIdentityShadowV1:
                 self.insufficient_samples += 1
                 return self._none_decision(len(gallery.embeddings), reason="query_samples")
 
-            prototypes = {gallery.key: self._prototype(gallery)}
-            ranked, route_rejected, time_rejected = self._rank_for(gallery, prototypes)
+            ranked, route_rejected, time_rejected = self._rank_for(gallery)
             self.route_rejects += route_rejected
             self.time_rejects += time_rejected
             self.topology_rejects += route_rejected + time_rejected
@@ -222,7 +225,7 @@ class V11CrossCameraIdentityShadowV1:
                 gallery.best_peer_streak = 0
                 return self._none_decision(len(gallery.embeddings), reason="no_feasible_peer")
 
-            best_score, best, gap_sec = ranked[0]
+            best_score, best_prototype_score, best, gap_sec = ranked[0]
             runner_score = ranked[1][0] if len(ranked) > 1 else -1.0
             margin = best_score - runner_score
             best_key = best.key
@@ -233,17 +236,11 @@ class V11CrossCameraIdentityShadowV1:
                 gallery.best_peer_key = best_key
                 gallery.best_peer_streak = 1
 
-            best_proto = prototypes.get(best_key)
-            if best_proto is None:
-                best_proto = self._prototype(best)
-                prototypes[best_key] = best_proto
-            reverse_ranked, reverse_route_rejected, reverse_time_rejected = self._rank_for(
-                best, prototypes
-            )
+            reverse_ranked, reverse_route_rejected, reverse_time_rejected = self._rank_for(best)
             self.route_rejects += reverse_route_rejected
             self.time_rejects += reverse_time_rejected
             self.topology_rejects += reverse_route_rejected + reverse_time_rejected
-            reciprocal = bool(reverse_ranked and reverse_ranked[0][1].key == gallery.key)
+            reciprocal = bool(reverse_ranked and reverse_ranked[0][2].key == gallery.key)
 
             same_room = bool(gallery.room_id and gallery.room_id == best.room_id)
             state = "NONE"
@@ -289,6 +286,7 @@ class V11CrossCameraIdentityShadowV1:
                 "state": state,
                 "reason": reason,
                 "score": best_score,
+                "prototype_score": best_prototype_score,
                 "margin": margin,
                 "candidate_camera": best.camera_id,
                 "candidate_track": best.track_id,
