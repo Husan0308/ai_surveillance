@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+ROOT="$PWD"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export V11_RTSP_TRANSPORT=tcp
+export V11_RTSP_LATENCY_MS=100
+export V11_DROP_ON_LATENCY=1
+export V11_EXTRA_SURFACES=4
+export V11_STARTUP_STAGGER_SEC=0.40
+export V11_STATS_INTERVAL_SEC=5
+export V11_TILE_WIDTH=640
+export V11_TILE_HEIGHT=360
+export V11_SCALE_INTERPOLATION=4
+export V11_LOWLAT_CAMERAS=CAM-02
+exec "$ROOT/.venv-trt86/bin/python" -u -m services.camera_v11.step1_render_buffer_diag_v20
