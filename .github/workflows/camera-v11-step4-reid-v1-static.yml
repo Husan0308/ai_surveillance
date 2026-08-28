@@ -29,6 +29,12 @@ jobs:
             scripts/prepare_camera_v11_step4_reid_v1.sh
           grep -q 'prepare_camera_v11_step4_reid_v1.sh' \
             scripts/run_camera_v11_step4_reid_benchmark_v1.sh
+      - name: TensorRT 8.6 profile API guard
+        run: |
+          grep -q 'profile.set_shape' scripts/build_camera_v11_step4_reid_trt86.py
+          grep -q 'profile.get_shape' scripts/build_camera_v11_step4_reid_trt86.py
+          grep -q 'add_optimization_profile' scripts/build_camera_v11_step4_reid_trt86.py
+          ! grep -q 'if not profile.set_shape' scripts/build_camera_v11_step4_reid_trt86.py
       - name: Frozen Step3 guard
         run: |
           git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
