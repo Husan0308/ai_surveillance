@@ -52,6 +52,46 @@ conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 # shellcheck source=/dev/null
 source "$ROOT/scripts/camera_v11_powermizer_keeper_v25.sh"
 
+# NVIDIA 580 can report a successful GPUPowerMizerMode CLI assignment without
+# actually applying it. With the nvidia-settings GUI kept alive, re-issuing the
+# assignment while CUDA work is active reliably exposes whether the policy took
+# effect. This is bounded and fail-closed: no clock locking or overclocking.
+v11_step3_ensure_vram_boost() {
+  local minimum_mhz="${V11_POWERMIZER_MIN_MEMORY_MHZ:-3000}"
+  local attempts="${V11_STEP3_POWERMIZER_REAPPLY_ATTEMPTS:-20}"
+  local delay="${V11_STEP3_POWERMIZER_REAPPLY_DELAY_SEC:-0.25}"
+  local clock=""
+  local attempt=0
+
+  [[ "$minimum_mhz" =~ ^[0-9]+$ ]] || return 1
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ -n "${V11_POWERMIZER_KEEPER_PID:-}" ]] && kill -0 "$V11_POWERMIZER_KEEPER_PID" 2>/dev/null || return 1
+
+  for attempt in $(seq 1 "$attempts"); do
+    clock="$(v11_powermizer_mem_clock_mhz || true)"
+    if [[ "$clock" =~ ^[0-9]+$ ]] && (( clock >= minimum_mhz )); then
+      printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s minimum_mhz=%s pid=%s reapply_attempt=%s\n' \
+        "$clock" "$minimum_mhz" "$V11_POWERMIZER_KEEPER_PID" "$((attempt - 1))"
+      return 0
+    fi
+
+    DISPLAY="$DISPLAY" nvidia-settings -a '[gpu:0]/GPUPowerMizerMode=1' \
+      >>"$V11_POWERMIZER_KEEPER_LOG" 2>&1 || true
+    sleep "$delay"
+  done
+
+  clock="$(v11_powermizer_mem_clock_mhz || true)"
+  if [[ "$clock" =~ ^[0-9]+$ ]] && (( clock >= minimum_mhz )); then
+    printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s minimum_mhz=%s pid=%s reapply_attempt=%s\n' \
+      "$clock" "$minimum_mhz" "$V11_POWERMIZER_KEEPER_PID" "$attempts"
+    return 0
+  fi
+
+  printf 'CAMERA_V11_POWERMIZER_KEEPER result=FAIL reason=memory_clock_not_boosted_after_reapply memory_mhz=%s minimum_mhz=%s attempts=%s\n' \
+    "${clock:-unknown}" "$minimum_mhz" "$attempts" >&2
+  return 1
+}
+
 display_pid=""
 tracker_pid=""
 cleaned=0
@@ -105,7 +145,8 @@ for _ in $(seq 1 300); do
   sleep 0.1
 done
 (( ready == 1 )) || fail "tracker_detector_warmup_failed"
-v11_powermizer_verify_boost || fail "vram_boost_gate"
+
+v11_step3_ensure_vram_boost || fail "vram_boost_gate"
 
 printf 'CAMERA_V11_STEP3_V2_RUNNING display_pid=%s tracker_pid=%s keeper_pid=%s\n' \
   "$display_pid" "$tracker_pid" "$V11_POWERMIZER_KEEPER_PID"
