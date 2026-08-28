@@ -36,6 +36,21 @@ cameras:
     uri: rtsp://192.168.1.210:554/Streaming/Channels/401
     latency_ms: 80
 
+# Cross-camera ReID physical topology. Same-room camera pairs are always valid.
+# Entrance is the only transit room between Devs and Main Rooms, so a global
+# identity may move Devs <-> Entrance or Main Rooms <-> Entrance, but never
+# Devs <-> Main Rooms directly. A future global-ID layer can preserve identity
+# across Devs -> Entrance -> Main Rooms and the reverse path.
+reid_topology:
+  room_neighbors:
+    Entrance:
+      - Devs
+      - Main Rooms
+    Devs:
+      - Entrance
+    Main Rooms:
+      - Entrance
+
 deepstream:
   gpu_id: 0
   cudadec_memtype: 0
