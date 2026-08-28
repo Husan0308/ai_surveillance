@@ -24,15 +24,22 @@ class _TrackGallery:
     last_seen: float
     embeddings: list[np.ndarray] = field(default_factory=list)
     qualities: list[float] = field(default_factory=list)
+    best_peer_key: tuple[str, str] | None = None
+    best_peer_streak: int = 0
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.camera_id, self.track_id
 
 
 class V11CrossCameraIdentityShadowV1:
-    """Calibration-first cross-camera matcher.
+    """Calibration-first cross-camera matcher with conservative safety gates.
 
-    This layer intentionally does not merge or rename Step3 local IDs. It builds a
-    tiny per-track ReID gallery and reports the best different-camera candidate,
-    score, runner-up margin and confidence band. Live data can then calibrate safe
-    merge thresholds without contaminating local tracking with false identities.
+    This layer never mutates Step3 local IDs. A candidate must have multi-shot
+    evidence on both tracks, be physically feasible by room/time, be a reciprocal
+    nearest neighbour, have a useful runner-up margin and remain the same peer over
+    multiple observations. The purpose is to collect trustworthy live calibration
+    data before any global-ID merge policy is enabled.
     """
 
     def __init__(
@@ -45,6 +52,10 @@ class V11CrossCameraIdentityShadowV1:
         strong_similarity: float = 0.84,
         min_margin: float = 0.04,
         strong_margin: float = 0.025,
+        min_gallery_samples: int = 3,
+        candidate_votes: int = 2,
+        strong_votes: int = 3,
+        min_cross_room_gap_sec: float = 1.5,
     ) -> None:
         self.gallery_size = max(2, min(8, int(gallery_size)))
         self.ttl_sec = max(3.0, float(ttl_sec))
@@ -53,6 +64,10 @@ class V11CrossCameraIdentityShadowV1:
         self.strong_similarity = float(strong_similarity)
         self.min_margin = max(0.0, float(min_margin))
         self.strong_margin = max(0.0, float(strong_margin))
+        self.min_gallery_samples = max(2, min(self.gallery_size, int(min_gallery_samples)))
+        self.candidate_votes = max(1, int(candidate_votes))
+        self.strong_votes = max(self.candidate_votes, int(strong_votes))
+        self.min_cross_room_gap_sec = max(0.0, float(min_cross_room_gap_sec))
         self._lock = threading.RLock()
         self._tracks: dict[tuple[str, str], _TrackGallery] = {}
         self.observations = 0
@@ -60,6 +75,10 @@ class V11CrossCameraIdentityShadowV1:
         self.candidates = 0
         self.strong = 0
         self.ambiguous = 0
+        self.insufficient_samples = 0
+        self.topology_rejects = 0
+        self.nonreciprocal = 0
+        self.vote_waits = 0
 
     @staticmethod
     def _prototype(gallery: _TrackGallery) -> np.ndarray:
@@ -72,6 +91,61 @@ class V11CrossCameraIdentityShadowV1:
         stale = [key for key, row in self._tracks.items() if now - row.last_seen > self.ttl_sec]
         for key in stale:
             self._tracks.pop(key, None)
+
+    def _pair_allowed(self, left: _TrackGallery, right: _TrackGallery) -> tuple[bool, float]:
+        if left.key == right.key or left.camera_id == right.camera_id:
+            return False, 0.0
+        gap_sec = abs(float(left.last_seen) - float(right.last_seen))
+        if (
+            left.room_id
+            and right.room_id
+            and left.room_id != right.room_id
+            and gap_sec < self.min_cross_room_gap_sec
+        ):
+            return False, gap_sec
+        return True, gap_sec
+
+    def _rank_for(
+        self,
+        gallery: _TrackGallery,
+        prototypes: dict[tuple[str, str], np.ndarray],
+    ) -> tuple[list[tuple[float, _TrackGallery, float]], int]:
+        query = prototypes[gallery.key]
+        ranked: list[tuple[float, _TrackGallery, float]] = []
+        topology_rejects = 0
+        for other in self._tracks.values():
+            if other.key == gallery.key or other.camera_id == gallery.camera_id:
+                continue
+            if len(other.embeddings) < self.min_gallery_samples:
+                continue
+            allowed, gap_sec = self._pair_allowed(gallery, other)
+            if not allowed:
+                topology_rejects += 1
+                continue
+            prototype = prototypes.get(other.key)
+            if prototype is None:
+                prototype = self._prototype(other)
+                prototypes[other.key] = prototype
+            ranked.append((float(np.dot(query, prototype)), other, gap_sec))
+        ranked.sort(key=lambda row: row[0], reverse=True)
+        return ranked, topology_rejects
+
+    @staticmethod
+    def _none_decision(gallery_samples: int, *, reason: str = "none") -> dict[str, object]:
+        return {
+            "state": "NONE",
+            "reason": reason,
+            "score": 0.0,
+            "margin": 0.0,
+            "candidate_camera": "",
+            "candidate_track": "",
+            "same_room": False,
+            "gallery_samples": int(gallery_samples),
+            "peer_samples": 0,
+            "reciprocal": False,
+            "consistency_votes": 0,
+            "cross_room_gap_sec": -1.0,
+        }
 
     def observe(
         self,
@@ -103,50 +177,94 @@ class V11CrossCameraIdentityShadowV1:
                 gallery.qualities = gallery.qualities[-self.gallery_size :]
 
             self.observations += 1
-            query = self._prototype(gallery)
-            ranked: list[tuple[float, _TrackGallery]] = []
-            for other_key, other in self._tracks.items():
-                if other_key == key or other.camera_id == gallery.camera_id or not other.embeddings:
-                    continue
-                score = float(np.dot(query, self._prototype(other)))
-                ranked.append((score, other))
-            ranked.sort(key=lambda row: row[0], reverse=True)
+            if len(gallery.embeddings) < self.min_gallery_samples:
+                gallery.best_peer_key = None
+                gallery.best_peer_streak = 0
+                self.insufficient_samples += 1
+                return self._none_decision(len(gallery.embeddings), reason="query_samples")
 
+            prototypes = {gallery.key: self._prototype(gallery)}
+            ranked, rejected = self._rank_for(gallery, prototypes)
+            self.topology_rejects += rejected
             if not ranked:
-                return {
-                    "state": "NONE",
-                    "score": 0.0,
-                    "margin": 0.0,
-                    "candidate_camera": "",
-                    "candidate_track": "",
-                    "same_room": False,
-                    "gallery_samples": len(gallery.embeddings),
-                }
+                gallery.best_peer_key = None
+                gallery.best_peer_streak = 0
+                return self._none_decision(len(gallery.embeddings), reason="no_feasible_peer")
 
-            best_score, best = ranked[0]
+            best_score, best, gap_sec = ranked[0]
             runner_score = ranked[1][0] if len(ranked) > 1 else -1.0
             margin = best_score - runner_score
+            best_key = best.key
+
+            if gallery.best_peer_key == best_key:
+                gallery.best_peer_streak += 1
+            else:
+                gallery.best_peer_key = best_key
+                gallery.best_peer_streak = 1
+
+            # Reciprocal-nearest-neighbour gate: the selected peer must independently
+            # select this track as its own best feasible different-camera candidate.
+            best_proto = prototypes.get(best_key)
+            if best_proto is None:
+                best_proto = self._prototype(best)
+                prototypes[best_key] = best_proto
+            reverse_ranked, reverse_rejected = self._rank_for(best, prototypes)
+            self.topology_rejects += reverse_rejected
+            reciprocal = bool(reverse_ranked and reverse_ranked[0][1].key == gallery.key)
+
+            same_room = bool(gallery.room_id and gallery.room_id == best.room_id)
             state = "NONE"
-            if best_score >= self.strong_similarity and margin >= self.strong_margin:
-                state = "STRONG"
-                self.strong += 1
-            elif best_score >= self.candidate_similarity and margin >= self.min_margin:
-                state = "CANDIDATE"
-                self.candidates += 1
-            elif best_score >= self.weak_similarity:
+            reason = "below_weak"
+
+            if best_score >= self.weak_similarity:
                 state = "WEAK"
+                reason = "weak"
                 self.weak += 1
-                if best_score >= self.candidate_similarity:
-                    self.ambiguous += 1
+
+                margin_needed = (
+                    self.strong_margin if best_score >= self.strong_similarity else self.min_margin
+                )
+                if margin < margin_needed:
+                    reason = "margin"
+                    if best_score >= self.candidate_similarity:
+                        self.ambiguous += 1
+                elif not reciprocal:
+                    reason = "nonreciprocal"
+                    self.nonreciprocal += 1
+                    if best_score >= self.candidate_similarity:
+                        self.ambiguous += 1
+                elif best_score >= self.strong_similarity:
+                    if gallery.best_peer_streak >= self.strong_votes:
+                        state = "STRONG"
+                        reason = "strong"
+                        self.strong += 1
+                    else:
+                        reason = "vote_wait"
+                        self.vote_waits += 1
+                        self.ambiguous += 1
+                elif best_score >= self.candidate_similarity:
+                    if gallery.best_peer_streak >= self.candidate_votes:
+                        state = "CANDIDATE"
+                        reason = "candidate"
+                        self.candidates += 1
+                    else:
+                        reason = "vote_wait"
+                        self.vote_waits += 1
+                        self.ambiguous += 1
 
             return {
                 "state": state,
+                "reason": reason,
                 "score": best_score,
                 "margin": margin,
                 "candidate_camera": best.camera_id,
                 "candidate_track": best.track_id,
-                "same_room": bool(gallery.room_id and gallery.room_id == best.room_id),
+                "same_room": same_room,
                 "gallery_samples": len(gallery.embeddings),
+                "peer_samples": len(best.embeddings),
+                "reciprocal": reciprocal,
+                "consistency_votes": gallery.best_peer_streak,
+                "cross_room_gap_sec": -1.0 if same_room else gap_sec,
             }
 
     def snapshot(self) -> dict[str, int]:
@@ -158,4 +276,8 @@ class V11CrossCameraIdentityShadowV1:
                 "candidates": self.candidates,
                 "strong": self.strong,
                 "ambiguous": self.ambiguous,
+                "insufficient_samples": self.insufficient_samples,
+                "topology_rejects": self.topology_rejects,
+                "nonreciprocal": self.nonreciprocal,
+                "vote_waits": self.vote_waits,
             }
