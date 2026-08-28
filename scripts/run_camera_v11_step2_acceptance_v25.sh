@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 OUT="${V11_STEP2_V25_ACCEPTANCE_OUT:-/tmp/camera_v11_step2_acceptance_v25}"
 DURATION="${V11_STEP2_V25_DURATION_SEC:-60}"
+WARMUP_WINDOWS="${V11_STEP2_V25_WARMUP_WINDOWS:-2}"
 mkdir -p "$OUT"
 
 fail() {
@@ -13,11 +14,13 @@ fail() {
 }
 
 [[ "$DURATION" =~ ^[1-9][0-9]*$ ]] || fail "invalid_duration=$DURATION"
+[[ "$WARMUP_WINDOWS" =~ ^[0-9]+$ ]] || fail "invalid_warmup_windows=$WARMUP_WINDOWS"
 command -v timeout >/dev/null 2>&1 || fail "timeout_missing"
 
 failed=0
 
-printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_START stage=display-only duration=%ss\n' "$DURATION"
+printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_START stage=display-only duration=%ss aggregate=1 warmup_windows=%s\n' \
+  "$DURATION" "$WARMUP_WINDOWS"
 display_only_log="$OUT/display_only.display.log"
 : >"$display_only_log"
 timeout -s TERM "${DURATION}s" bash "$ROOT/scripts/run_camera_v11_step1_v7.sh" >"$display_only_log" 2>&1
@@ -26,8 +29,8 @@ if (( status != 0 && status != 124 && status != 130 && status != 143 )); then
   printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_RESULT stage=display-only result=FAIL launcher_status=%s\n' "$status"
   failed=1
 fi
-"$ROOT/.venv/bin/python" "$ROOT/scripts/check_camera_v11_step1_v7_log.py" "$display_only_log" \
-  | tee "$OUT/display_only.check.log"
+"$ROOT/.venv/bin/python" "$ROOT/scripts/check_camera_v11_step1_v25_aggregate_log.py" \
+  "$display_only_log" --warmup-windows "$WARMUP_WINDOWS" | tee "$OUT/display_only.check.log"
 (( PIPESTATUS[0] == 0 )) || failed=1
 
 if (( failed == 0 )); then
@@ -41,7 +44,8 @@ if (( failed == 0 )); then
     : >"$launcher_log"
     : >"$check_log"
 
-    printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_START stage=full run=%s duration=%ss\n' "$run" "$DURATION"
+    printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_START stage=full run=%s duration=%ss aggregate=1 warmup_windows=%s\n' \
+      "$run" "$DURATION" "$WARMUP_WINDOWS"
     V11_STEP2_DISPLAY_LOG="$display_log" \
     V11_STEP2_DETECTOR_LOG="$detector_log" \
       timeout -s TERM "$((DURATION + 25))s" \
@@ -63,8 +67,9 @@ if (( failed == 0 )); then
       break
     fi
 
-    "$ROOT/.venv/bin/python" "$ROOT/scripts/check_camera_v11_step2_production_log_v15.py" \
-      --display-log "$display_log" --detector-log "$detector_log" | tee -a "$check_log"
+    "$ROOT/.venv/bin/python" "$ROOT/scripts/check_camera_v11_step2_production_log_v25.py" \
+      --display-log "$display_log" --detector-log "$detector_log" \
+      --warmup-windows "$WARMUP_WINDOWS" | tee -a "$check_log"
     check_status=${PIPESTATUS[0]}
     if (( check_status != 0 )); then
       printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_RESULT stage=full run=%s result=FAIL reason=production_checker\n' \
@@ -86,8 +91,8 @@ if (( failed == 0 )); then
 fi
 
 if (( failed == 0 )); then
-  printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_FINAL result=PASS display_only=1 full_consecutive=3 duration=%ss\n' "$DURATION"
+  printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_FINAL result=PASS display_only=1 full_consecutive=3 duration=%ss aggregate=1\n' "$DURATION"
 else
-  printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_FINAL result=FAIL duration=%ss\n' "$DURATION"
+  printf 'CAMERA_V11_STEP2_V25_ACCEPTANCE_FINAL result=FAIL duration=%ss aggregate=1\n' "$DURATION"
 fi
 exit "$failed"
