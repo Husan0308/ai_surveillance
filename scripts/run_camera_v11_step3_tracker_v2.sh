@@ -9,6 +9,8 @@ STEP2_LOCK="/tmp/ai_surveillance_camera_v11_step2_production_v25.lock"
 DISPLAY_LOG="${V11_STEP3_DISPLAY_LOG:-/tmp/CAMERA_V11_STEP3_DISPLAY.log}"
 TRACKER_LOG="${V11_STEP3_TRACKER_LOG:-/tmp/CAMERA_V11_STEP3_TRACKER.log}"
 ENGINE="$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b1-fp32-trt86.engine"
+TRT_PY="$ROOT/.venv-trt86/bin/python"
+PRIME_SCRIPT="$ROOT/scripts/benchmark_yolo26_trt86_step2_worker_v22.py"
 
 fail() {
   printf 'CAMERA_V11_STEP3_V2_PREFLIGHT result=FAIL reason=%s\n' "$*" >&2
@@ -22,6 +24,8 @@ exec 7>"$STEP2_LOCK"
 flock -n 7 || fail "step2_or_other_step3_holds=$STEP2_LOCK"
 [[ -n "${DISPLAY:-}" ]] || fail "DISPLAY_empty"
 [[ -s "$ENGINE" ]] || fail "fp32_engine_missing"
+[[ -x "$TRT_PY" ]] || fail "trt86_python_missing"
+[[ -f "$PRIME_SCRIPT" ]] || fail "trt_prime_script_missing"
 
 git cat-file -e "${FROZEN_STEP2_SHA}^{commit}" 2>/dev/null || fail "frozen_step2_sha_missing_locally"
 git merge-base --is-ancestor "$FROZEN_STEP2_SHA" HEAD || fail "branch_not_based_on_frozen_step2"
@@ -50,38 +54,6 @@ conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 # shellcheck source=/dev/null
 source "$ROOT/scripts/camera_v11_powermizer_keeper_v25.sh"
 
-# NVIDIA 580 can report a successful GPUPowerMizerMode CLI assignment without
-# actually applying it. Re-issue mode=1 only after live TensorRT inference has
-# definitely started, then verify the real memory clock. This is bounded and
-# fail-closed; no clock locking or overclocking is performed.
-v11_step3_ensure_vram_boost() {
-  local minimum_mhz="${V11_POWERMIZER_MIN_MEMORY_MHZ:-3000}"
-  local attempts="${V11_STEP3_POWERMIZER_REAPPLY_ATTEMPTS:-20}"
-  local delay="${V11_STEP3_POWERMIZER_REAPPLY_DELAY_SEC:-0.25}"
-  local clock=""
-  local attempt=0
-
-  [[ "$minimum_mhz" =~ ^[0-9]+$ ]] || return 1
-  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ -n "${V11_POWERMIZER_KEEPER_PID:-}" ]] && kill -0 "$V11_POWERMIZER_KEEPER_PID" 2>/dev/null || return 1
-
-  for attempt in $(seq 1 "$attempts"); do
-    DISPLAY="$DISPLAY" nvidia-settings -a '[gpu:0]/GPUPowerMizerMode=1' \
-      >>"$V11_POWERMIZER_KEEPER_LOG" 2>&1 || true
-    sleep "$delay"
-    clock="$(v11_powermizer_mem_clock_mhz || true)"
-    if [[ "$clock" =~ ^[0-9]+$ ]] && (( clock >= minimum_mhz )); then
-      printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s minimum_mhz=%s pid=%s reapply_attempt=%s live_inference=1\n' \
-        "$clock" "$minimum_mhz" "$V11_POWERMIZER_KEEPER_PID" "$attempt"
-      return 0
-    fi
-  done
-
-  printf 'CAMERA_V11_POWERMIZER_KEEPER result=FAIL reason=memory_clock_not_boosted_during_live_inference memory_mhz=%s minimum_mhz=%s attempts=%s\n' \
-    "${clock:-unknown}" "$minimum_mhz" "$attempts" >&2
-  return 1
-}
-
 display_pid=""
 tracker_pid=""
 cleaned=0
@@ -105,9 +77,39 @@ trap on_signal INT TERM
 
 : >"$DISPLAY_LOG"
 : >"$TRACKER_LOG"
-v11_powermizer_start || fail "powermizer_keeper_start"
 
-printf 'CAMERA_V11_STEP3_V2_PREFLIGHT result=PASS frozen_step2_sha=%s power_keeper=1 display_log=%s tracker_log=%s\n' \
+# NVIDIA 580 PowerMizer regression: a CLI mode assignment may report success
+# without latching the memory-performance state. Reproduce the exact sequence
+# that was proven on this host by V24: continuous FP32 TRT load first, then keep
+# the nvidia-settings GUI alive, apply mode=1, run another continuous FP32 load,
+# and accept only if the real memory clock is >= 3000 MHz. This happens before
+# cameras open, so it cannot create display backlog or change Step2 runtime
+# scheduling. No clock locking or overclocking is used.
+printf 'CAMERA_V11_STEP3_V2_POWER_PRIME phase=baseline start=1\n'
+"$TRT_PY" "$PRIME_SCRIPT" --engine "$ENGINE" --warmup 30 --iterations 100 \
+  >>"${V11_POWERMIZER_KEEPER_LOG:-/tmp/CAMERA_V11_POWERMIZER_KEEPER.log}" 2>&1 \
+  || fail "power_prime_baseline_failed"
+printf 'CAMERA_V11_STEP3_V2_POWER_PRIME phase=baseline result=PASS\n'
+
+v11_powermizer_start || fail "powermizer_keeper_start"
+sleep 1
+printf 'CAMERA_V11_STEP3_V2_POWER_PRIME phase=gui_held start=1\n'
+"$TRT_PY" "$PRIME_SCRIPT" --engine "$ENGINE" --warmup 30 --iterations 100 \
+  >>"$V11_POWERMIZER_KEEPER_LOG" 2>&1 \
+  || fail "power_prime_gui_held_failed"
+
+clock="$(v11_powermizer_mem_clock_mhz || true)"
+minimum_mhz="${V11_POWERMIZER_MIN_MEMORY_MHZ:-3000}"
+if [[ ! "$clock" =~ ^[0-9]+$ ]] || (( clock < minimum_mhz )); then
+  printf 'CAMERA_V11_POWERMIZER_KEEPER result=FAIL reason=startup_prime_did_not_latch memory_mhz=%s minimum_mhz=%s\n' \
+    "${clock:-unknown}" "$minimum_mhz" >&2
+  fail "vram_startup_prime_gate"
+fi
+printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s minimum_mhz=%s pid=%s source=v24-continuous-prime\n' \
+  "$clock" "$minimum_mhz" "$V11_POWERMIZER_KEEPER_PID"
+printf 'CAMERA_V11_STEP3_V2_POWER_PRIME phase=gui_held result=PASS memory_mhz=%s\n' "$clock"
+
+printf 'CAMERA_V11_STEP3_V2_PREFLIGHT result=PASS frozen_step2_sha=%s power_keeper=1 power_prime=v24 display_log=%s tracker_log=%s\n' \
   "$FROZEN_STEP2_SHA" "$DISPLAY_LOG" "$TRACKER_LOG"
 
 bash "$ROOT/scripts/run_camera_v11_step1_v7.sh" >"$DISPLAY_LOG" 2>&1 &
@@ -119,16 +121,12 @@ export V11_STEP2_MODE=full
 export V11_STEP2_HZ="${V11_STEP3_HZ:-2.0}"
 export V11_STEP2_CONF="${V11_STEP3_CONF:-0.18}"
 export V11_STEP2_ENGINE="$ENGINE"
-export V11_STEP2_TRT86_PYTHON="$ROOT/.venv-trt86/bin/python"
+export V11_STEP2_TRT86_PYTHON="$TRT_PY"
 export V11_STEP2_TRT86_WORKER="$ROOT/scripts/yolo26_trt86_step2_worker.py"
 
 "$ROOT/.venv/bin/python" -u -m services.camera_v11.step3_tracking_v2 >"$TRACKER_LOG" 2>&1 &
 tracker_pid=$!
 
-# Warmup only proves the engine/context works. It does NOT prove live inference
-# has started because _start_ingest() still opens six detector RTSP streams after
-# warmup. Wait for the first 5-second tracker stats line, which can only appear
-# after ingest + demand scheduling + real detector processing are active.
 live_ready=0
 for _ in $(seq 1 "${V11_STEP3_LIVE_READY_ATTEMPTS:-600}"); do
   if grep -q '^CAMERA_V11_STEP3_V2_TRACKER ' "$TRACKER_LOG"; then
@@ -140,7 +138,12 @@ for _ in $(seq 1 "${V11_STEP3_LIVE_READY_ATTEMPTS:-600}"); do
 done
 (( live_ready == 1 )) || fail "live_inference_not_ready"
 
-v11_step3_ensure_vram_boost || fail "vram_boost_gate"
+# Do not gate on a single instantaneous memory-clock sample here. At 2 Hz/camera
+# the device may be sampled between bursts. The startup prime above proves the
+# PowerMizer state latched; the authoritative Step2 V25 regression checker below
+# will fail if runtime inference throughput/result-age actually regresses.
+clock="$(v11_powermizer_mem_clock_mhz || true)"
+printf 'CAMERA_V11_STEP3_V2_RUNTIME_CLOCK memory_mhz=%s diagnostic_only=1\n' "${clock:-unknown}"
 
 printf 'CAMERA_V11_STEP3_V2_RUNNING display_pid=%s tracker_pid=%s keeper_pid=%s live_inference=1\n' \
   "$display_pid" "$tracker_pid" "$V11_POWERMIZER_KEEPER_PID"
