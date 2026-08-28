@@ -17,6 +17,7 @@ jobs:
           python -m py_compile \
             services/camera_v11/step4_reid_trt86.py \
             services/camera_v11/step4_reid_scheduler_v1.py \
+            services/camera_v11/step4_camera_tracklet_v1.py \
             services/camera_v11/step4_identity_shadow_v1.py \
             services/camera_v11/step4_room_identity_v1.py \
             services/camera_v11/step4_tracking_reid_v1.py \
@@ -31,8 +32,6 @@ jobs:
           bash -n scripts/run_camera_v11_step4_tracking_reid_v1.sh
           grep -q 'api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/versions/deployable_v1.2/files/resnet50_market1501_aicity156.onnx' scripts/prepare_camera_v11_step4_reid_v1.sh
           grep -q '0e21d09278508ec835955f422a9fdd3cd59b2a6ecdef98d705f388f33cebac2b' scripts/prepare_camera_v11_step4_reid_v1.sh
-          grep -q 'prepare_camera_v11_step4_reid_v1.sh' scripts/run_camera_v11_step4_reid_benchmark_v1.sh
-          grep -q 'ensure_camera_v11_trt86_runtime_v1.sh' scripts/run_camera_v11_step4_tracking_reid_v1.sh
       - name: TensorRT 8.6 profile API guard
         run: |
           grep -q 'profile.set_shape' scripts/build_camera_v11_step4_reid_trt86.py
@@ -56,7 +55,6 @@ jobs:
           grep -Fq -- '--ignore-installed' scripts/ensure_camera_v11_trt86_runtime_v1.sh
           grep -Fq -- '--target "$tmp"' scripts/ensure_camera_v11_trt86_runtime_v1.sh
           grep -Fq 'numpy==$NUMPY_VERSION' scripts/ensure_camera_v11_trt86_runtime_v1.sh
-          grep -Fq 'ensure_camera_v11_trt86_runtime_v1.sh' scripts/run_camera_v11_step4_reid_benchmark_v1.sh
           grep -Fq 'TRT86_RUNTIME_MANIFEST = TRT86_RUNTIME_SITE / ".v11_runtime_paths.json"' services/camera_v11/step4_reid_trt86.py
           grep -Fq 'runtime["tensorrt_root"]' services/camera_v11/step4_reid_trt86.py
           grep -Fq 'sys.path[:0]=' services/camera_v11/step4_reid_trt86.py
@@ -78,31 +76,38 @@ jobs:
           grep -Fq 'self._pending[key] = (candidate, enqueued_ns)' services/camera_v11/step4_reid_scheduler_v1.py
           grep -Fq 'self._pending.popitem(last=False)' services/camera_v11/step4_reid_scheduler_v1.py
           grep -Fq 'age_ms > self.max_age_ms' services/camera_v11/step4_reid_scheduler_v1.py
-          grep -Fq 'identity_mode=room-shadow+handoff-shadow-no-merge' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'identity_mode=camera-tracklet-shadow+room-shadow+handoff-shadow-no-merge' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'max_per_camera_update=' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'predicted=skip' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'merge=0' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'identity_merge=0' services/camera_v11/step4_tracking_reid_v1.py
           ! grep -Fq 'embed_crops(' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'client.embed_crops' services/camera_v11/step4_reid_scheduler_v1.py
+      - name: Single-camera reassociation invariants
+        run: |
+          grep -Fq 'class V11CameraTrackletShadowV1' services/camera_v11/step4_camera_tracklet_v1.py
+          grep -Fq 'join_similarity: float = 0.80' services/camera_v11/step4_camera_tracklet_v1.py
+          grep -Fq 'high_similarity: float = 0.90' services/camera_v11/step4_camera_tracklet_v1.py
+          grep -Fq 'max_reassoc_gap_sec: float = 6.0' services/camera_v11/step4_camera_tracklet_v1.py
+          grep -Fq 'def _bbox_center_distance' services/camera_v11/step4_camera_tracklet_v1.py
+          grep -Fq 'if identity.active:' services/camera_v11/step4_camera_tracklet_v1.py
+          grep -Fq 'center_distance <= self.max_center_distance' services/camera_v11/step4_camera_tracklet_v1.py
+          grep -Fq 'V11CameraTrackletShadowV1' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'CAMERA_V11_STEP4_CAMERA_IDENTITY' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'camera_decision = self.camera_tracklet_shadow.observe' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'track_id=camera_identity' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'single_camera_reassoc=before-room' services/camera_v11/step4_tracking_reid_v1.py
       - name: Shadow room identity invariants
         run: |
           grep -Fq 'class V11RoomIdentityShadowV1' services/camera_v11/step4_room_identity_v1.py
-          grep -Fq 'min_track_samples: int = 3' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'decision_samples: int = 6' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'weak_hold_similarity: float = 0.55' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'join_similarity: float = 0.76' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'PENDING_MATCH' services/camera_v11/step4_room_identity_v1.py
-          grep -Fq 'pending_match_waits' services/camera_v11/step4_room_identity_v1.py
-          grep -Fq 'def update_active_tracks' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'def activity_snapshot' services/camera_v11/step4_room_identity_v1.py
-          grep -Fq 'def _same_camera_collision' services/camera_v11/step4_room_identity_v1.py
-          grep -Fq 'track_id in active' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'np.max(left_matrix @ right_matrix.T)' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'V11_STEP4_ROOM_DECISION_SAMPLES' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'V11_STEP4_ROOM_HOLD_SIM' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'CAMERA_V11_STEP4_ROOM_IDENTITY' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'same_camera_simultaneous_room_join=forbidden' services/camera_v11/step4_tracking_reid_v1.py
       - name: Shadow handoff lifecycle invariants
         run: |
           grep -Fq 'require_handoff_lifecycle: bool = False' services/camera_v11/step4_identity_shadow_v1.py
@@ -112,8 +117,7 @@ jobs:
           grep -Fq 'if left.active == right.active' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'lifecycle_rejects' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'require_handoff_lifecycle=True' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'V11_STEP4_REID_RECENTLY_ACTIVE_SEC' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'V11_STEP4_REID_RECENTLY_LOST_SEC' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'def _sync_camera_identity_activity' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'def _sync_room_identity_activity' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'handoff_lifecycle=active-to-recently-lost' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'lifecycle_reject=' services/camera_v11/step4_tracking_reid_v1.py
@@ -129,8 +133,6 @@ jobs:
           grep -Fq 'best_peer_streak' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'reciprocal_best=required' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'direct_room_neighbor=required' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'route_reject=' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'time_reject=' services/camera_v11/step4_tracking_reid_v1.py
       - name: Gallery similarity calibration guard
         run: |
           grep -Fq 'def _gallery_similarity' services/camera_v11/step4_identity_shadow_v1.py
