@@ -71,7 +71,9 @@ class V11ReIDSchedulerV1:
         self.client_factory = client_factory
 
         self._cv = threading.Condition()
-        self._pending: OrderedDict[tuple[str, str], ReIDCandidate] = OrderedDict()
+        self._pending: OrderedDict[
+            tuple[str, str], tuple[ReIDCandidate, int]
+        ] = OrderedDict()
         self._stop = False
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -108,23 +110,24 @@ class V11ReIDSchedulerV1:
     def submit(self, candidate: ReIDCandidate) -> bool:
         if candidate.crop_bgr.size == 0:
             return False
+        enqueued_ns = time.monotonic_ns()
         with self._cv:
             if self._stop or self._fatal:
                 return False
             key = candidate.key
             if key in self._pending:
-                self._pending[key] = candidate
+                self._pending[key] = (candidate, enqueued_ns)
                 self.replaced += 1
             else:
                 if len(self._pending) >= self.max_pending:
                     self._pending.popitem(last=False)
                     self.overflow_drops += 1
-                self._pending[key] = candidate
+                self._pending[key] = (candidate, enqueued_ns)
             self.submitted += 1
             self._cv.notify()
             return True
 
-    def _take_batch(self) -> list[ReIDCandidate]:
+    def _take_batch(self) -> list[tuple[ReIDCandidate, int]]:
         with self._cv:
             while not self._stop and not self._pending:
                 self._cv.wait(timeout=0.25)
@@ -141,14 +144,14 @@ class V11ReIDSchedulerV1:
                 return []
 
             now_ns = time.monotonic_ns()
-            batch: list[ReIDCandidate] = []
+            batch: list[tuple[ReIDCandidate, int]] = []
             while self._pending and len(batch) < self.max_batch:
-                _key, candidate = self._pending.popitem(last=False)
+                _key, (candidate, enqueued_ns) = self._pending.popitem(last=False)
                 age_ms = max(0.0, (now_ns - candidate.captured_ns) / 1_000_000.0)
                 if age_ms > self.max_age_ms:
                     self.stale_drops += 1
                     continue
-                batch.append(candidate)
+                batch.append((candidate, enqueued_ns))
             return batch
 
     def _run(self) -> None:
@@ -157,33 +160,34 @@ class V11ReIDSchedulerV1:
             client = self.client_factory()
             self._ready.set()
             while True:
-                batch = self._take_batch()
-                if not batch:
+                batch_rows = self._take_batch()
+                if not batch_rows:
                     with self._cv:
                         if self._stop:
                             break
                     continue
 
+                batch_started_ns = time.monotonic_ns()
+                candidates = [row[0] for row in batch_rows]
                 started = time.perf_counter()
-                embeddings, stages = client.embed_crops([row.crop_bgr for row in batch])
+                embeddings, stages = client.embed_crops([row.crop_bgr for row in candidates])
                 wall_ms = (time.perf_counter() - started) * 1000.0
                 infer_ms = float(stages.get("inference_ms", 0.0))
-                now_ns = time.monotonic_ns()
 
                 with self._cv:
                     self.batch_count += 1
-                    self.batch_hist[len(batch)] = self.batch_hist.get(len(batch), 0) + 1
+                    self.batch_hist[len(candidates)] = self.batch_hist.get(len(candidates), 0) + 1
                     self.wall_values.append(wall_ms)
                     if infer_ms > 0.0:
                         self.infer_values.append(infer_ms)
 
-                for candidate, embedding in zip(batch, embeddings, strict=True):
-                    queue_wait_ms = max(0.0, (now_ns - candidate.captured_ns) / 1_000_000.0)
+                for (candidate, enqueued_ns), embedding in zip(batch_rows, embeddings, strict=True):
+                    queue_wait_ms = max(0.0, (batch_started_ns - enqueued_ns) / 1_000_000.0)
                     result = ReIDResult(
                         candidate=candidate,
                         embedding=np.asarray(embedding, dtype=np.float32).copy(),
                         queue_wait_ms=queue_wait_ms,
-                        batch_size=len(batch),
+                        batch_size=len(candidates),
                         stages=dict(stages),
                     )
                     with self._cv:
