@@ -19,6 +19,12 @@ CONFLICT_PATTERN='services\.camera_v11\.(step1_|step2_|step3_|step4_)|yolo26_trt
 conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 [[ -z "$conflicts" ]] || fail $'project_gpu_process_alive:\n'"$conflicts"
 
+# Validate the exact isolated Python runtime used by reid_trt86_worker_v11.py.
+# This runs before PowerMizer/telemetry so a broken Python package cannot waste a
+# GPU benchmark run. It repairs only .venv-trt86's NumPy wheel, never /usr/lib.
+bash "$ROOT/scripts/ensure_camera_v11_trt86_runtime_v1.sh" \
+  || fail "trt86_runtime_prepare_failed"
+
 # shellcheck source=/dev/null
 source "$ROOT/scripts/camera_v11_powermizer_keeper_v25.sh"
 telemetry_pid=""
