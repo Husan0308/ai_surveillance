@@ -12,6 +12,10 @@ def fail(message: str) -> int:
     return 1
 
 
+def _shape_tuple(shape) -> tuple[int, ...]:
+    return tuple(int(v) for v in shape)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--onnx", type=Path, required=True)
@@ -48,20 +52,29 @@ def main() -> int:
     out = network.get_output(0)
     input_name = str(inp.name)
     output_name = str(out.name)
-    input_shape = tuple(int(v) for v in inp.shape)
-    output_shape = tuple(int(v) for v in out.shape)
+    parsed_input_shape = _shape_tuple(inp.shape)
+    parsed_output_shape = _shape_tuple(out.shape)
 
-    if len(input_shape) != 4 or tuple(input_shape[1:]) != (3, 256, 128):
-        return fail(f"unexpected_input name={input_name} shape={input_shape}")
-    if len(output_shape) != 2 or int(output_shape[-1]) != 256:
-        return fail(f"unexpected_output name={output_name} shape={output_shape}")
+    if len(parsed_input_shape) != 4 or tuple(parsed_input_shape[1:]) != (3, 256, 128):
+        return fail(f"unexpected_input name={input_name} shape={parsed_input_shape}")
+    if len(parsed_output_shape) != 2 or int(parsed_output_shape[-1]) != 256:
+        return fail(f"unexpected_output name={output_name} shape={parsed_output_shape}")
     if output_name != "fc_pred":
         return fail(f"unexpected_output_name expected=fc_pred got={output_name}")
 
-    # NVIDIA's deployable model supports batching. Make the batch dimension dynamic
-    # explicitly so the Step4 runtime can use batch sizes 1/2/4/8 with one engine.
-    if input_shape[0] != -1:
+    # NVIDIA's deployable ONNX is published with batch=1. TensorRT explicit-batch
+    # networks allow the network input batch dimension to be marked runtime (-1)
+    # before the optimization profile is attached. Step4 needs one engine for
+    # batches 1/2/4/8, so make only N dynamic and keep C/H/W fixed.
+    if parsed_input_shape[0] != -1:
         inp.shape = (-1, 3, 256, 128)
+
+    network_input_shape = _shape_tuple(inp.shape)
+    if network_input_shape != (-1, 3, 256, 128):
+        return fail(
+            f"dynamic_input_shape_not_applied name={input_name} "
+            f"parsed={parsed_input_shape} network={network_input_shape}"
+        )
 
     config = builder.create_builder_config()
     workspace = max(256 << 20, int(float(args.workspace_gib) * (1 << 30)))
@@ -72,20 +85,39 @@ def main() -> int:
     if hasattr(config, "builder_optimization_level"):
         config.builder_optimization_level = max(0, min(5, int(args.optimization_level)))
 
+    min_shape = (1, 3, 256, 128)
+    opt_shape = (4, 3, 256, 128)
+    max_shape = (8, 3, 256, 128)
     profile = builder.create_optimization_profile()
-    if not profile.set_shape(
-        input_name,
-        min=(1, 3, 256, 128),
-        opt=(4, 3, 256, 128),
-        max=(8, 3, 256, 128),
-    ):
-        return fail("profile_set_shape_failed")
-    config.add_optimization_profile(profile)
 
+    # TensorRT 8.6.1 Python IOptimizationProfile.set_shape() returns None on
+    # success. Do NOT boolean-test the return value; validate by reading the
+    # profile back and by checking add_optimization_profile() instead.
+    try:
+        profile.set_shape(input_name, min=min_shape, opt=opt_shape, max=max_shape)
+    except (ValueError, RuntimeError) as exc:
+        return fail(f"profile_set_shape_exception type={type(exc).__name__} detail={exc}")
+
+    try:
+        profile_shapes = tuple(_shape_tuple(v) for v in profile.get_shape(input_name))
+    except Exception as exc:
+        return fail(f"profile_get_shape_exception type={type(exc).__name__} detail={exc}")
+    expected_profile = (min_shape, opt_shape, max_shape)
+    if profile_shapes != expected_profile:
+        return fail(f"profile_shape_mismatch expected={expected_profile} got={profile_shapes}")
+
+    profile_index = int(config.add_optimization_profile(profile))
+    if profile_index < 0:
+        return fail(f"add_optimization_profile_failed profile={profile_shapes}")
+
+    build_output_shape = _shape_tuple(out.shape)
     print(
         "V11_STEP4_REID_BUILD START "
-        f"trt={trt.__version__} onnx={args.onnx} input={input_name}:{tuple(inp.shape)} "
-        f"output={output_name}:{output_shape} profile=1,4,8 precision=fp32 workspace={workspace}",
+        f"trt={trt.__version__} onnx={args.onnx} "
+        f"input={input_name}:{network_input_shape} "
+        f"output={output_name}:{build_output_shape} "
+        f"parsed_input={parsed_input_shape} parsed_output={parsed_output_shape} "
+        f"profile_index={profile_index} profile=1,4,8 precision=fp32 workspace={workspace}",
         flush=True,
     )
 
@@ -107,7 +139,7 @@ def main() -> int:
     output_bindings = []
     for index in range(engine.num_bindings):
         name = engine.get_binding_name(index)
-        shape = tuple(int(v) for v in engine.get_binding_shape(index))
+        shape = _shape_tuple(engine.get_binding_shape(index))
         row = f"{name}:{shape}"
         if engine.binding_is_input(index):
             input_bindings.append(row)
