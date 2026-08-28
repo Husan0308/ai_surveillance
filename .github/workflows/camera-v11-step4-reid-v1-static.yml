@@ -44,10 +44,15 @@ jobs:
       - name: TRT86 runtime isolation guard
         run: |
           grep -Fq 'numpy.core._multiarray_umath' scripts/ensure_camera_v11_trt86_runtime_v1.sh
+          grep -Fq 'artifacts/reid/python_trt86_site' scripts/ensure_camera_v11_trt86_runtime_v1.sh
           grep -Fq -- '--only-binary=:all:' scripts/ensure_camera_v11_trt86_runtime_v1.sh
           grep -Fq -- '--ignore-installed' scripts/ensure_camera_v11_trt86_runtime_v1.sh
+          grep -Fq -- '--target "$tmp"' scripts/ensure_camera_v11_trt86_runtime_v1.sh
           grep -Fq 'numpy==$NUMPY_VERSION' scripts/ensure_camera_v11_trt86_runtime_v1.sh
           grep -Fq 'ensure_camera_v11_trt86_runtime_v1.sh' scripts/run_camera_v11_step4_reid_benchmark_v1.sh
+          grep -Fq 'TRT86_RUNTIME_SITE = ROOT / "artifacts/reid/python_trt86_site"' services/camera_v11/step4_reid_trt86.py
+          grep -Fq 'sys.path.insert(0,' services/camera_v11/step4_reid_trt86.py
+          grep -Fq "runpy.run_path" services/camera_v11/step4_reid_trt86.py
           ! grep -Fq 'sudo pip' scripts/ensure_camera_v11_trt86_runtime_v1.sh
           ! grep -Fq 'apt install' scripts/ensure_camera_v11_trt86_runtime_v1.sh
       - name: Frozen Step3 guard
