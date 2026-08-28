@@ -89,17 +89,34 @@ jobs:
         run: |
           grep -Fq 'class V11RoomIdentityShadowV1' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'min_track_samples: int = 3' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'decision_samples: int = 6' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'weak_hold_similarity: float = 0.55' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'join_similarity: float = 0.76' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'PENDING_MATCH' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'pending_match_waits' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'def update_active_tracks' services/camera_v11/step4_room_identity_v1.py
+          grep -Fq 'def activity_snapshot' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'def _same_camera_collision' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'track_id in active' services/camera_v11/step4_room_identity_v1.py
           grep -Fq 'np.max(left_matrix @ right_matrix.T)' services/camera_v11/step4_room_identity_v1.py
-          grep -Fq 'AMBIGUOUS_NEW' services/camera_v11/step4_room_identity_v1.py
-          grep -Fq 'V11RoomIdentityShadowV1' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'V11_STEP4_ROOM_DECISION_SAMPLES' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'V11_STEP4_ROOM_HOLD_SIM' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'CAMERA_V11_STEP4_ROOM_IDENTITY' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'camera_id=f"ROOM::{candidate.room_id}"' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'room_identity={room_identity}' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'same_camera_simultaneous_room_join=forbidden' services/camera_v11/step4_tracking_reid_v1.py
+      - name: Shadow handoff lifecycle invariants
+        run: |
+          grep -Fq 'require_handoff_lifecycle: bool = False' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'recently_active_sec: float = 8.0' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'recently_lost_sec: float = 30.0' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'def update_track_activity' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'if left.active == right.active' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'lifecycle_rejects' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'require_handoff_lifecycle=True' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'V11_STEP4_REID_RECENTLY_ACTIVE_SEC' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'V11_STEP4_REID_RECENTLY_LOST_SEC' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'def _sync_room_identity_activity' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'handoff_lifecycle=active-to-recently-lost' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'lifecycle_reject=' services/camera_v11/step4_tracking_reid_v1.py
       - name: Shadow handoff safety invariants
         run: |
           grep -Fq 'min_gallery_samples: int = 3' services/camera_v11/step4_identity_shadow_v1.py
@@ -110,8 +127,6 @@ jobs:
           grep -Fq 'reverse_ranked' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'reciprocal = bool' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'best_peer_streak' services/camera_v11/step4_identity_shadow_v1.py
-          grep -Fq 'V11_STEP4_REID_MIN_GALLERY_SAMPLES' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'V11_STEP4_REID_MIN_CROSS_ROOM_GAP_SEC' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'reciprocal_best=required' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'direct_room_neighbor=required' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'route_reject=' services/camera_v11/step4_tracking_reid_v1.py
