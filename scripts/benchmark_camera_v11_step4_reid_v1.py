@@ -3,8 +3,18 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import sys
 import time
 from pathlib import Path
+
+# This benchmark is intentionally executable as `python scripts/...py` from the
+# repository wrapper. In that launch mode Python prepends scripts/, not the repo
+# root, to sys.path. Bootstrap the repository root before importing `services` so
+# the benchmark is location-stable and does not depend on ambient PYTHONPATH.
+ROOT = Path(__file__).resolve().parents[1]
+root_text = str(ROOT)
+if root_text not in sys.path:
+    sys.path.insert(0, root_text)
 
 import numpy as np
 
@@ -26,7 +36,8 @@ def main() -> int:
     args = parser.parse_args()
     engine = Path(args.engine)
     if not engine.is_absolute():
-        engine = Path.cwd() / engine
+        engine = ROOT / engine
+    engine = engine.resolve()
     if not engine.is_file():
         print(f"V11_STEP4_REID_BENCH RESULT=FAIL reason=engine_missing path={engine}")
         return 2
