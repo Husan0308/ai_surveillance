@@ -18,8 +18,6 @@ fail() {
 command -v flock >/dev/null 2>&1 || fail "flock_missing"
 exec 8>"$STEP3_LOCK"
 flock -n 8 || fail "another_step3_launcher_holds=$STEP3_LOCK"
-# Also hold the frozen Step2 production lock for the whole run so Step2 and Step3
-# cannot accidentally double-open camera/GPU resources.
 exec 7>"$STEP2_LOCK"
 flock -n 7 || fail "step2_or_other_step3_holds=$STEP2_LOCK"
 [[ -n "${DISPLAY:-}" ]] || fail "DISPLAY_empty"
@@ -53,9 +51,9 @@ conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 source "$ROOT/scripts/camera_v11_powermizer_keeper_v25.sh"
 
 # NVIDIA 580 can report a successful GPUPowerMizerMode CLI assignment without
-# actually applying it. With the nvidia-settings GUI kept alive, re-issuing the
-# assignment while CUDA work is active reliably exposes whether the policy took
-# effect. This is bounded and fail-closed: no clock locking or overclocking.
+# actually applying it. Re-issue mode=1 only after live TensorRT inference has
+# definitely started, then verify the real memory clock. This is bounded and
+# fail-closed; no clock locking or overclocking is performed.
 v11_step3_ensure_vram_boost() {
   local minimum_mhz="${V11_POWERMIZER_MIN_MEMORY_MHZ:-3000}"
   local attempts="${V11_STEP3_POWERMIZER_REAPPLY_ATTEMPTS:-20}"
@@ -68,26 +66,18 @@ v11_step3_ensure_vram_boost() {
   [[ -n "${V11_POWERMIZER_KEEPER_PID:-}" ]] && kill -0 "$V11_POWERMIZER_KEEPER_PID" 2>/dev/null || return 1
 
   for attempt in $(seq 1 "$attempts"); do
-    clock="$(v11_powermizer_mem_clock_mhz || true)"
-    if [[ "$clock" =~ ^[0-9]+$ ]] && (( clock >= minimum_mhz )); then
-      printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s minimum_mhz=%s pid=%s reapply_attempt=%s\n' \
-        "$clock" "$minimum_mhz" "$V11_POWERMIZER_KEEPER_PID" "$((attempt - 1))"
-      return 0
-    fi
-
     DISPLAY="$DISPLAY" nvidia-settings -a '[gpu:0]/GPUPowerMizerMode=1' \
       >>"$V11_POWERMIZER_KEEPER_LOG" 2>&1 || true
     sleep "$delay"
+    clock="$(v11_powermizer_mem_clock_mhz || true)"
+    if [[ "$clock" =~ ^[0-9]+$ ]] && (( clock >= minimum_mhz )); then
+      printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s minimum_mhz=%s pid=%s reapply_attempt=%s live_inference=1\n' \
+        "$clock" "$minimum_mhz" "$V11_POWERMIZER_KEEPER_PID" "$attempt"
+      return 0
+    fi
   done
 
-  clock="$(v11_powermizer_mem_clock_mhz || true)"
-  if [[ "$clock" =~ ^[0-9]+$ ]] && (( clock >= minimum_mhz )); then
-    printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s minimum_mhz=%s pid=%s reapply_attempt=%s\n' \
-      "$clock" "$minimum_mhz" "$V11_POWERMIZER_KEEPER_PID" "$attempts"
-    return 0
-  fi
-
-  printf 'CAMERA_V11_POWERMIZER_KEEPER result=FAIL reason=memory_clock_not_boosted_after_reapply memory_mhz=%s minimum_mhz=%s attempts=%s\n' \
+  printf 'CAMERA_V11_POWERMIZER_KEEPER result=FAIL reason=memory_clock_not_boosted_during_live_inference memory_mhz=%s minimum_mhz=%s attempts=%s\n' \
     "${clock:-unknown}" "$minimum_mhz" "$attempts" >&2
   return 1
 }
@@ -135,20 +125,24 @@ export V11_STEP2_TRT86_WORKER="$ROOT/scripts/yolo26_trt86_step2_worker.py"
 "$ROOT/.venv/bin/python" -u -m services.camera_v11.step3_tracking_v2 >"$TRACKER_LOG" 2>&1 &
 tracker_pid=$!
 
-ready=0
-for _ in $(seq 1 300); do
-  if grep -q 'CAMERA_V11_STEP2_WARMUP iterations=10 status=OK' "$TRACKER_LOG"; then
-    ready=1
+# Warmup only proves the engine/context works. It does NOT prove live inference
+# has started because _start_ingest() still opens six detector RTSP streams after
+# warmup. Wait for the first 5-second tracker stats line, which can only appear
+# after ingest + demand scheduling + real detector processing are active.
+live_ready=0
+for _ in $(seq 1 "${V11_STEP3_LIVE_READY_ATTEMPTS:-600}"); do
+  if grep -q '^CAMERA_V11_STEP3_V2_TRACKER ' "$TRACKER_LOG"; then
+    live_ready=1
     break
   fi
   kill -0 "$tracker_pid" 2>/dev/null || break
   sleep 0.1
 done
-(( ready == 1 )) || fail "tracker_detector_warmup_failed"
+(( live_ready == 1 )) || fail "live_inference_not_ready"
 
 v11_step3_ensure_vram_boost || fail "vram_boost_gate"
 
-printf 'CAMERA_V11_STEP3_V2_RUNNING display_pid=%s tracker_pid=%s keeper_pid=%s\n' \
+printf 'CAMERA_V11_STEP3_V2_RUNNING display_pid=%s tracker_pid=%s keeper_pid=%s live_inference=1\n' \
   "$display_pid" "$tracker_pid" "$V11_POWERMIZER_KEEPER_PID"
 
 while kill -0 "$display_pid" 2>/dev/null && kill -0 "$tracker_pid" 2>/dev/null; do
