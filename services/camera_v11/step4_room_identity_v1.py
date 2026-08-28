@@ -45,31 +45,43 @@ class _RoomIdentity:
     embeddings: list[np.ndarray] = field(default_factory=list)
     qualities: list[float] = field(default_factory=list)
     members: dict[tuple[str, str], float] = field(default_factory=dict)
+    active: bool = False
+    active_since: float | None = None
+    inactive_since: float | None = None
 
 
 class V11RoomIdentityShadowV1:
     """Group fragmented local tracks into conservative per-room shadow identities.
 
-    This layer never rewrites Step3 local IDs. An unassigned local track first builds a
-    short ReID gallery. It may join an existing identity only when gallery-max cosine
-    and the runner-up margin are both strong enough. Two simultaneously-active tracks
-    from the same camera are never allowed to join the same room identity.
+    This layer never rewrites Step3 local IDs. A local track first builds a ReID
+    gallery. Borderline cross-camera evidence is allowed to mature for several
+    samples before opening another room identity, while simultaneous same-camera
+    tracks are always kept separate. Activity state is exposed for handoff lifecycle
+    gating but does not change the frozen tracker.
     """
 
     def __init__(
         self,
         *,
         min_track_samples: int = 3,
-        track_gallery_size: int = 4,
+        decision_samples: int = 6,
+        track_gallery_size: int = 6,
         identity_gallery_size: int = 12,
         join_similarity: float = 0.76,
+        weak_hold_similarity: float = 0.55,
         min_margin: float = 0.04,
         ttl_sec: float = 45.0,
     ) -> None:
         self.min_track_samples = max(2, min(6, int(min_track_samples)))
-        self.track_gallery_size = max(self.min_track_samples, min(8, int(track_gallery_size)))
+        self.decision_samples = max(
+            self.min_track_samples, min(10, int(decision_samples))
+        )
+        self.track_gallery_size = max(
+            self.decision_samples, min(12, int(track_gallery_size))
+        )
         self.identity_gallery_size = max(4, min(24, int(identity_gallery_size)))
         self.join_similarity = float(join_similarity)
+        self.weak_hold_similarity = min(self.join_similarity, float(weak_hold_similarity))
         self.min_margin = max(0.0, float(min_margin))
         self.ttl_sec = max(10.0, float(ttl_sec))
         self._lock = threading.RLock()
@@ -83,9 +95,31 @@ class V11RoomIdentityShadowV1:
         self.created = 0
         self.joined = 0
         self.assigned_updates = 0
+        self.pending_match_waits = 0
         self.ambiguous_new = 0
         self.same_camera_collision_rejects = 0
         self.expired = 0
+        self.activations = 0
+        self.deactivations = 0
+
+    def _identity_is_active(self, identity: _RoomIdentity) -> bool:
+        return any(
+            track_id in self._active_by_camera.get(camera_id, set())
+            for camera_id, track_id in identity.members
+        )
+
+    def _refresh_activity(self, now: float) -> None:
+        for identity in self._identities.values():
+            active_now = self._identity_is_active(identity)
+            if active_now and not identity.active:
+                identity.active = True
+                identity.active_since = now
+                identity.inactive_since = None
+                self.activations += 1
+            elif not active_now and identity.active:
+                identity.active = False
+                identity.inactive_since = now
+                self.deactivations += 1
 
     def update_active_tracks(
         self,
@@ -94,9 +128,25 @@ class V11RoomIdentityShadowV1:
         track_ids: set[str] | tuple[str, ...] | list[str],
         captured_at: float | None = None,
     ) -> None:
-        del captured_at
+        now = time.monotonic() if captured_at is None else float(captured_at)
         with self._lock:
             self._active_by_camera[str(camera_id)] = {str(track_id) for track_id in track_ids}
+            self._refresh_activity(now)
+
+    def activity_snapshot(self, captured_at: float | None = None) -> list[dict[str, object]]:
+        now = time.monotonic() if captured_at is None else float(captured_at)
+        with self._lock:
+            self._refresh_activity(now)
+            return [
+                {
+                    "room_id": identity.room_id,
+                    "room_identity": identity.identity_id,
+                    "active": identity.active,
+                    "active_since": identity.active_since,
+                    "inactive_since": identity.inactive_since,
+                }
+                for identity in self._identities.values()
+            ]
 
     @staticmethod
     def _gallery_score(left: list[np.ndarray], right: list[np.ndarray]) -> float:
@@ -120,6 +170,7 @@ class V11RoomIdentityShadowV1:
         number = self._next_by_room.get(room, 1)
         self._next_by_room[room] = number + 1
         identity_id = f"{_room_slug(room)}-R{number:04d}"
+        active = pending.track_id in self._active_by_camera.get(pending.camera_id, set())
         identity = _RoomIdentity(
             room_id=room,
             identity_id=identity_id,
@@ -128,11 +179,16 @@ class V11RoomIdentityShadowV1:
             embeddings=list(pending.embeddings),
             qualities=list(pending.qualities),
             members={pending.key: now},
+            active=active,
+            active_since=now if active else None,
+            inactive_since=None if active else now,
         )
         self._identities[identity_id] = identity
         self._assigned[pending.key] = identity_id
         self._pending.pop(pending.key, None)
         self.created += 1
+        if active:
+            self.activations += 1
         return identity
 
     def _append_identity(
@@ -149,8 +205,6 @@ class V11RoomIdentityShadowV1:
         identity.embeddings.append(embedding)
         identity.qualities.append(quality)
         if len(identity.embeddings) > self.identity_gallery_size:
-            # Retain a mixture of recent and high-quality viewpoints rather than only
-            # the latest frame. This keeps room identities useful after a camera turn.
             rows = list(zip(identity.embeddings, identity.qualities))
             recent = rows[-max(2, self.identity_gallery_size // 2) :]
             older = rows[: -len(recent)] if len(rows) > len(recent) else []
@@ -160,14 +214,10 @@ class V11RoomIdentityShadowV1:
             identity.qualities = [row[1] for row in kept]
 
     def _expire(self, now: float) -> None:
+        self._refresh_activity(now)
         stale_ids: list[str] = []
         for identity_id, identity in self._identities.items():
-            if now - identity.last_seen <= self.ttl_sec:
-                continue
-            if any(
-                track_id in self._active_by_camera.get(camera_id, set())
-                for camera_id, track_id in identity.members
-            ):
+            if now - identity.last_seen <= self.ttl_sec or identity.active:
                 continue
             stale_ids.append(identity_id)
         for identity_id in stale_ids:
@@ -216,6 +266,7 @@ class V11RoomIdentityShadowV1:
                         quality=quality,
                         now=now,
                     )
+                    self._refresh_activity(now)
                     self.assigned_updates += 1
                     return {
                         "state": "EXISTING",
@@ -280,6 +331,7 @@ class V11RoomIdentityShadowV1:
                         now=now,
                     )
                 self._pending.pop(key, None)
+                self._refresh_activity(now)
                 self.joined += 1
                 return {
                     "state": "JOIN",
@@ -288,6 +340,28 @@ class V11RoomIdentityShadowV1:
                     "margin": margin,
                     "samples": len(identity.embeddings),
                     "members": len(identity.members),
+                    "collision_rejects": collision_rejects,
+                }
+
+            # Do not permanently split a cross-camera track on only three samples.
+            # Borderline evidence often improves as viewpoint/pose changes. Same-camera
+            # collisions are intentionally not held because simultaneous tracks from
+            # one camera represent different physical people.
+            should_hold = bool(
+                ranked
+                and collision_rejects == 0
+                and best_score >= self.weak_hold_similarity
+                and len(pending.embeddings) < self.decision_samples
+            )
+            if should_hold:
+                self.pending_match_waits += 1
+                return {
+                    "state": "PENDING_MATCH",
+                    "room_identity": "",
+                    "score": best_score,
+                    "margin": margin,
+                    "samples": len(pending.embeddings),
+                    "members": 0,
                     "collision_rejects": collision_rejects,
                 }
 
@@ -307,6 +381,7 @@ class V11RoomIdentityShadowV1:
 
     def snapshot(self) -> dict[str, int]:
         with self._lock:
+            self._refresh_activity(time.monotonic())
             return {
                 "room_identities": len(self._identities),
                 "assigned_tracks": len(self._assigned),
@@ -315,7 +390,10 @@ class V11RoomIdentityShadowV1:
                 "created": self.created,
                 "joined": self.joined,
                 "assigned_updates": self.assigned_updates,
+                "pending_match_waits": self.pending_match_waits,
                 "ambiguous_new": self.ambiguous_new,
                 "collision_rejects": self.same_camera_collision_rejects,
                 "expired": self.expired,
+                "activations": self.activations,
+                "deactivations": self.deactivations,
             }
