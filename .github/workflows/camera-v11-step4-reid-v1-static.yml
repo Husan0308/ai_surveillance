@@ -17,7 +17,16 @@ jobs:
           python -m py_compile \
             services/camera_v11/step4_reid_trt86.py \
             scripts/reid_trt86_worker_v11.py \
-            scripts/benchmark_camera_v11_step4_reid_v1.py
+            scripts/benchmark_camera_v11_step4_reid_v1.py \
+            scripts/build_camera_v11_step4_reid_trt86.py
+      - name: Check Step4 shell syntax
+        run: |
+          bash -n scripts/prepare_camera_v11_step4_reid_v1.sh
+          bash -n scripts/run_camera_v11_step4_reid_benchmark_v1.sh
+          grep -q 'api.ngc.nvidia.com.*reidentificationnet.*deployable_v1.2.*resnet50_market1501_aicity156.onnx' \
+            scripts/prepare_camera_v11_step4_reid_v1.sh
+          grep -q 'prepare_camera_v11_step4_reid_v1.sh' \
+            scripts/run_camera_v11_step4_reid_benchmark_v1.sh
       - name: Frozen Step3 guard
         run: |
           git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
