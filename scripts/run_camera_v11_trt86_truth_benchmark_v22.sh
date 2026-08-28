@@ -20,7 +20,7 @@ command -v sha256sum >/dev/null 2>&1 || fail "sha256sum_missing"
 
 # This diagnostic must start from an idle project state. Do not kill anything
 # automatically: showing the exact conflict is safer than terminating unrelated work.
-CONFLICT_PATTERN='services\.camera_v11\.(step1_|step2_|step3_)|yolo26_trt86_step2_worker\.py|probe_camera_v11_trt86_b1_precision\.py|build_yolo26s_b1_.*trt86\.py'
+CONFLICT_PATTERN='services\\.camera_v11\\.(step1_|step2_|step3_)|yolo26_trt86_step2_worker\\.py|probe_camera_v11_trt86_b1_precision\\.py|build_yolo26s_b1_.*trt86\\.py'
 conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 [[ -z "$conflicts" ]] || fail $'project_gpu_process_alive:\n'"$conflicts"
 
@@ -28,7 +28,13 @@ engine_sha="$(sha256sum "$ENGINE" | awk '{print $1}')"
 printf 'V11_TRT86_TRUTH_START engine=%s sha256=%s out=%s\n' "$ENGINE" "$engine_sha" "$OUT"
 {
   printf '%s\n' '=== NVIDIA SNAPSHOT ==='
-  nvidia-smi --query-gpu=name,driver_version,pstate,clocks.current.sm,clocks.current.memory,clocks.max.sm,clocks.max.memory,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,pci.link.gen.current,pci.link.width.current,persistence_mode --format=csv
+  # Keep the core snapshot authoritative. PCIe link fields are diagnostic-only and
+  # vary across nvidia-smi releases, so failure to expose them must not abort the benchmark.
+  nvidia-smi --query-gpu=name,driver_version,pstate,clocks.current.sm,clocks.current.memory,clocks.max.sm,clocks.max.memory,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,persistence_mode --format=csv
+  printf '%s\n' '=== PCIE SNAPSHOT (OPTIONAL) ==='
+  if ! nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current --format=csv; then
+    printf '%s\n' 'V11_TRT86_PCIE_SNAPSHOT status=SKIP reason=query_not_supported'
+  fi
   printf '%s\n' '=== TRT PYTHON ==='
   "$PY" - <<'PY'
 import sys
