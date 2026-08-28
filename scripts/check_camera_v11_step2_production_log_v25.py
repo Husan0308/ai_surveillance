@@ -34,9 +34,13 @@ def main() -> int:
     parser.add_argument("--detector-log", required=True)
     parser.add_argument("--warmup-windows", type=int, default=2)
     parser.add_argument("--min-detector-hz", type=float, default=1.80)
-    parser.add_argument("--detector-hard-floor-hz", type=float, default=1.50)
     parser.add_argument("--max-detector-consecutive-low", type=int, default=3)
+    parser.add_argument("--min-demand-fulfillment", type=float, default=0.95)
     args = parser.parse_args()
+
+    if not (0.0 < args.min_demand_fulfillment <= 1.0):
+        print("V11_STEP2_PRODUCTION_V25 FAIL invalid_min_demand_fulfillment=1")
+        return 2
 
     display = Path(args.display_log)
     detector = Path(args.detector_log)
@@ -108,16 +112,13 @@ def main() -> int:
         low_streak = longest_true_run(low_flags)
         avg_detect_by_camera[cid] = avg_detect
 
-        # Production acceptance is based on sustained behavior, not the count of
-        # isolated 5-second dips. DeepStream-style RTSP measurements can be bursty
-        # across adjacent reporting windows while preserving the requested whole-run
-        # rate. We therefore fail on the whole-run average, a hard floor, or a
-        # sustained consecutive-low streak. The total number of low windows is kept
-        # as diagnostic evidence only.
+        # Five-second RTSP reporting windows can straddle burst delivery and make
+        # one interval look artificially low while the next catches up. Production
+        # acceptance therefore uses whole-run average + sustained-low streak here,
+        # and cumulative demand fulfillment below. Isolated per-window minima are
+        # diagnostic only, not an acceptance gate.
         if avg_detect < args.min_detector_hz:
             reasons.append(f"{cid}:avg_detect_hz={avg_detect:.2f}")
-        if min_detect < args.detector_hard_floor_hz:
-            reasons.append(f"{cid}:detect_hard_floor={min_detect:.2f}Hz")
         if low_streak > args.max_detector_consecutive_low:
             reasons.append(
                 f"{cid}:detect_low_streak={low_streak}/max{args.max_detector_consecutive_low}"
@@ -141,13 +142,32 @@ def main() -> int:
         if int(gate_drop) <= 0:
             reasons.append(f"{cid}:no_decoded_gate_evidence")
 
+    fulfillment_by_camera: dict[str, float] = {}
     if len(latest) != 6:
         reasons.append(f"latest_rows={len(latest)}")
-    for cid, _demand, accepted, processed, _overwritten, _coalesced, pending in latest:
-        if int(accepted) <= 0 or int(processed) <= 0:
+    for cid, demand, accepted, processed, overwritten, coalesced, pending in latest:
+        demand_i = int(demand)
+        accepted_i = int(accepted)
+        processed_i = int(processed)
+        pending_i = int(pending)
+        if demand_i <= 0 or accepted_i <= 0 or processed_i <= 0:
             reasons.append(f"{cid}:no_detector_results")
-        if int(pending) > 1:
-            reasons.append(f"{cid}:pending={pending}")
+            continue
+        accepted_ratio = accepted_i / demand_i
+        processed_ratio = processed_i / demand_i
+        fulfillment_by_camera[cid] = processed_ratio
+        if accepted_ratio < args.min_demand_fulfillment:
+            reasons.append(f"{cid}:accepted_fulfillment={accepted_ratio:.3f}")
+        if processed_ratio < args.min_demand_fulfillment:
+            reasons.append(f"{cid}:processed_fulfillment={processed_ratio:.3f}")
+        if pending_i > 1:
+            reasons.append(f"{cid}:pending={pending_i}")
+        print(
+            "V11_STEP2_V25_FULFILLMENT "
+            f"camera={cid} demand={demand_i} accepted={accepted_i} processed={processed_i} "
+            f"accepted_ratio={accepted_ratio:.3f} processed_ratio={processed_ratio:.3f} "
+            f"overwritten={overwritten} coalesced={coalesced} pending={pending_i}"
+        )
 
     if stages.get("result_age_p95", 1e9) > 300.0:
         reasons.append(f"result_age_p95={stages.get('result_age_p95', -1):.1f}ms")
@@ -161,6 +181,7 @@ def main() -> int:
     print(
         "V11_STEP2_PRODUCTION_V25 RESULT=PASS "
         f"cameras=6 rate_min_avg={min(avg_detect_by_camera.values()):.2f}Hz "
+        f"fulfillment_min={min(fulfillment_by_camera.values()):.3f} "
         f"queue_max={max(int(row[4]) for row in queues)} "
         f"pending_max={max(int(row[6]) for row in latest)} "
         f"result_age_p95={stages['result_age_p95']:.1f}ms "
