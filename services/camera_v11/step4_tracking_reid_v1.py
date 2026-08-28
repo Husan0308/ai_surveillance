@@ -14,6 +14,7 @@ from .step2_production_fp32 import _pct
 from .step3_tracking_v2 import V11Step3TrackingV2
 from .step4_identity_shadow_v1 import V11CrossCameraIdentityShadowV1
 from .step4_reid_scheduler_v1 import ReIDCandidate, ReIDResult, V11ReIDSchedulerV1
+from .step4_room_identity_v1 import V11RoomIdentityShadowV1
 
 ROOT = Path(__file__).resolve().parents[2]
 FROZEN_STEP3_SHA = "d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51"
@@ -39,7 +40,7 @@ def _camera_layout() -> tuple[dict[str, str], dict[str, set[str]]]:
 
 
 class V11Step4TrackingReIDV1(V11Step3TrackingV2):
-    """Frozen Step3 plus asynchronous, bounded, calibration-first cross-camera ReID."""
+    """Frozen Step3 plus async ReID, shadow room identities and shadow handoff matching."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -77,6 +78,18 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             * 1_000_000_000.0
         )
 
+        self.room_identity_shadow = V11RoomIdentityShadowV1(
+            min_track_samples=int(os.environ.get("V11_STEP4_ROOM_MIN_TRACK_SAMPLES", "3")),
+            track_gallery_size=int(os.environ.get("V11_STEP4_ROOM_TRACK_GALLERY", "4")),
+            identity_gallery_size=int(os.environ.get("V11_STEP4_ROOM_ID_GALLERY", "12")),
+            join_similarity=float(os.environ.get("V11_STEP4_ROOM_JOIN_SIM", "0.76")),
+            min_margin=float(os.environ.get("V11_STEP4_ROOM_JOIN_MARGIN", "0.04")),
+            ttl_sec=float(os.environ.get("V11_STEP4_ROOM_TTL_SEC", "45")),
+        )
+
+        # Cross-room matcher now sees stable room identities instead of fragile local
+        # CAMxx-Txxxxx fragments. Synthetic camera_id=ROOM::<room> intentionally makes
+        # all identities from the same room invisible to this handoff layer.
         self.identity_shadow = V11CrossCameraIdentityShadowV1(
             gallery_size=int(os.environ.get("V11_STEP4_REID_GALLERY_SIZE", "4")),
             ttl_sec=float(os.environ.get("V11_STEP4_REID_SHADOW_TTL_SEC", "30")),
@@ -111,7 +124,8 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             f"frozen_step3_sha={FROZEN_STEP3_SHA} reid=trt86-resnet50 scheduler=async-thread "
             f"max_batch={self.reid_scheduler.max_batch} max_wait_ms={self.reid_scheduler.max_wait_ms:.1f} "
             f"pending_max={self.reid_scheduler.max_pending} pending_policy=per-track-latest-overwrite "
-            "display_blocking=0 detector_blocking=0 frame_queue=0 identity_mode=shadow-no-merge",
+            "display_blocking=0 detector_blocking=0 frame_queue=0 "
+            "identity_mode=room-shadow+handoff-shadow-no-merge",
             flush=True,
         )
         print(
@@ -119,14 +133,17 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             f"refresh={self.reid_refresh_sec:.2f}s min_score={self.reid_min_score:.2f} "
             f"min_crop={self.reid_min_width}x{self.reid_min_height} "
             f"max_per_camera_update={self.reid_max_per_update} predicted=skip "
+            f"room_track_samples={self.room_identity_shadow.min_track_samples} "
+            f"room_join_sim={self.room_identity_shadow.join_similarity:.2f} "
+            f"room_join_margin={self.room_identity_shadow.min_margin:.2f} "
             f"gallery_min={self.identity_shadow.min_gallery_samples} "
             f"candidate_votes={self.identity_shadow.candidate_votes} "
             f"strong_votes={self.identity_shadow.strong_votes} "
             f"cross_room_gap={self.identity_shadow.min_cross_room_gap_sec:.2f}s "
             f"room_graph={topology_text or 'none'} "
             "similarity=gallery-max prototype=telemetry reciprocal_best=required "
-            "direct_room_neighbor=required confirmed_tracks_only=1 stale_policy=drop "
-            "no_global_id_mutation=1",
+            "direct_room_neighbor=required same_camera_simultaneous_room_join=forbidden "
+            "confirmed_tracks_only=1 stale_policy=drop no_global_id_mutation=1",
             flush=True,
         )
 
@@ -203,31 +220,79 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
         self.track_recovered[cid] += int(update.recovered)
         self.track_removed[cid] += int(update.removed)
         self.latest_track_ids[cid] = ids
+
+        active_ids = {
+            snapshot.track_id
+            for snapshot in update.snapshots
+            if snapshot.confirmed and not snapshot.predicted and snapshot.since_detection_sec <= 0.25
+        }
+        self.room_identity_shadow.update_active_tracks(
+            camera_id=cid,
+            track_ids=active_ids,
+            captured_at=captured_ns / 1_000_000_000.0,
+        )
         self._schedule_reid(cid, update.snapshots, captured_ns)
+
+    @staticmethod
+    def _peer_room(synthetic_camera: str) -> str:
+        prefix = "ROOM::"
+        return synthetic_camera[len(prefix) :] if synthetic_camera.startswith(prefix) else synthetic_camera
 
     def _on_reid_result(self, result: ReIDResult) -> None:
         candidate = result.candidate
-        decision = self.identity_shadow.observe(
+        captured_at = candidate.captured_ns / 1_000_000_000.0
+
+        room_decision = self.room_identity_shadow.observe(
             camera_id=candidate.camera_id,
             track_id=candidate.track_id,
             room_id=candidate.room_id,
             embedding=result.embedding,
             quality=candidate.quality,
-            captured_at=candidate.captured_ns / 1_000_000_000.0,
+            captured_at=captured_at,
+        )
+        room_state = str(room_decision["state"])
+        room_identity = str(room_decision["room_identity"])
+        if room_state in {"NEW", "JOIN", "AMBIGUOUS_NEW"}:
+            print(
+                "CAMERA_V11_STEP4_ROOM_IDENTITY "
+                f"room={candidate.room_id} room_identity={room_identity} event={room_state} "
+                f"camera={candidate.camera_id} track={candidate.track_id} "
+                f"score={float(room_decision['score']):.4f} margin={float(room_decision['margin']):.4f} "
+                f"samples={int(room_decision['samples'])} members={int(room_decision['members'])} "
+                f"collision_rejects={int(room_decision['collision_rejects'])} merge=0",
+                flush=True,
+            )
+        if not room_identity:
+            return
+
+        decision = self.identity_shadow.observe(
+            camera_id=f"ROOM::{candidate.room_id}",
+            track_id=room_identity,
+            room_id=candidate.room_id,
+            embedding=result.embedding,
+            quality=candidate.quality,
+            captured_at=captured_at,
         )
         state = str(decision["state"])
         reason = str(decision["reason"])
-        peer = (str(decision["candidate_camera"]), str(decision["candidate_track"]))
-        key = candidate.key
-        signature = (state, peer[0], peer[1])
+        peer_synthetic_camera = str(decision["candidate_camera"])
+        peer_room_identity = str(decision["candidate_track"])
+        peer_room = self._peer_room(peer_synthetic_camera)
+        key = (candidate.room_id, room_identity)
+        signature = (state, peer_room, peer_room_identity)
         with self.reid_result_lock:
             previous = self.reid_last_match.get(key)
             self.reid_last_match[key] = signature
 
-        same_room = bool(decision["same_room"])
-        if peer[0] and not same_room:
+        if peer_room_identity:
             score = float(decision["score"])
-            probe_signature = (peer[0], peer[1], state, reason, int(score * 20.0))
+            probe_signature = (
+                peer_room,
+                peer_room_identity,
+                state,
+                reason,
+                int(score * 20.0),
+            )
             emit_probe = False
             with self.reid_result_lock:
                 previous_probe = self.reid_last_crossroom_probe.get(key)
@@ -244,8 +309,9 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
                 print(
                     "CAMERA_V11_STEP4_REID_CROSSROOM_PROBE "
                     f"camera={candidate.camera_id} track={candidate.track_id} "
-                    f"peer_camera={peer[0]} peer_track={peer[1]} state={state} reason={reason} "
-                    f"gallery_score={score:.4f} "
+                    f"room={candidate.room_id} room_identity={room_identity} "
+                    f"peer_room={peer_room} peer_room_identity={peer_room_identity} "
+                    f"state={state} reason={reason} gallery_score={score:.4f} "
                     f"prototype_score={float(decision['prototype_score']):.4f} "
                     f"margin={float(decision['margin']):.4f} "
                     f"samples={int(decision['gallery_samples'])} "
@@ -261,12 +327,12 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             gap_sec = float(decision["cross_room_gap_sec"])
             print(
                 "CAMERA_V11_STEP4_REID_MATCH "
-                f"mode=shadow camera={candidate.camera_id} track={candidate.track_id} "
-                f"peer_camera={peer[0]} peer_track={peer[1]} state={state} "
+                f"mode=room-handoff-shadow camera={candidate.camera_id} track={candidate.track_id} "
+                f"room={candidate.room_id} room_identity={room_identity} "
+                f"peer_room={peer_room} peer_room_identity={peer_room_identity} state={state} "
                 f"score={float(decision['score']):.4f} "
                 f"prototype_score={float(decision['prototype_score']):.4f} "
                 f"margin={float(decision['margin']):.4f} "
-                f"same_room={int(same_room)} "
                 f"samples={int(decision['gallery_samples'])} peer_samples={int(decision['peer_samples'])} "
                 f"reciprocal={int(bool(decision['reciprocal']))} "
                 f"votes={int(decision['consistency_votes'])} "
@@ -279,6 +345,7 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
         super()._print_stats()
         scheduler = self.reid_scheduler.snapshot()
         shadow = self.identity_shadow.snapshot()
+        room = self.room_identity_shadow.snapshot()
         batch_hist = scheduler["batch_hist"]
         rows = [
             f"{camera.camera_id}:submitted={self.reid_submitted_by_camera[camera.camera_id]}"
@@ -297,7 +364,11 @@ class V11Step4TrackingReIDV1(V11Step3TrackingV2):
             + f" crop_copy_p95={_pct(self.reid_crop_copy_values, 0.95):.3f}ms"
             + f" skip_predicted={self.reid_skip_predicted} skip_score={self.reid_skip_score}"
             + f" skip_size={self.reid_skip_size} worker_errors={scheduler['worker_errors']}"
-            + f" shadow_tracks={shadow['tracks']} observations={shadow['observations']}"
+            + f" room_ids={room['room_identities']} room_assigned={room['assigned_tracks']}"
+            + f" room_pending={room['pending_tracks']} room_created={room['created']}"
+            + f" room_joined={room['joined']} room_ambiguous_new={room['ambiguous_new']}"
+            + f" room_collision_reject={room['collision_rejects']} room_expired={room['expired']}"
+            + f" handoff_tracks={shadow['tracks']} handoff_observations={shadow['observations']}"
             + f" weak={shadow['weak']} candidates={shadow['candidates']} strong={shadow['strong']}"
             + f" ambiguous={shadow['ambiguous']} insufficient={shadow['insufficient_samples']}"
             + f" topology_reject={shadow['topology_rejects']}"
