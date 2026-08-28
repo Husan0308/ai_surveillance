@@ -94,14 +94,22 @@ jobs:
           grep -Fq 'candidate_votes: int = 2' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'strong_votes: int = 3' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'min_cross_room_gap_sec: float = 1.5' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'allowed_room_transitions: dict[str, set[str]] | None = None' services/camera_v11/step4_identity_shadow_v1.py
+          grep -Fq 'right.room_id not in allowed' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'reverse_ranked' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'reciprocal = bool' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'best_peer_streak' services/camera_v11/step4_identity_shadow_v1.py
           grep -Fq 'V11_STEP4_REID_MIN_GALLERY_SAMPLES' services/camera_v11/step4_tracking_reid_v1.py
           grep -Fq 'V11_STEP4_REID_MIN_CROSS_ROOM_GAP_SEC' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'reciprocal_best=required' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'topology_reject=' services/camera_v11/step4_tracking_reid_v1.py
-          grep -Fq 'nonreciprocal=' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'allowed_room_transitions=self.reid_room_neighbors' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'reciprocal_best=required direct_room_neighbor=required' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'route_reject=' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'time_reject=' services/camera_v11/step4_tracking_reid_v1.py
+          grep -Fq 'reid_topology:' config/cameras.yaml
+          grep -Fq 'room_neighbors:' config/cameras.yaml
+          grep -Fq 'Entrance:' config/cameras.yaml
+          grep -Fq 'Main Rooms:' config/cameras.yaml
+          grep -Fq 'Devs:' config/cameras.yaml
       - name: Frozen Step3 guard
         run: |
           git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
