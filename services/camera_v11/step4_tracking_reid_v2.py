@@ -5,6 +5,7 @@ import signal
 
 from .step4_identity_shadow_v1 import V11CrossCameraIdentityShadowV1
 from .step4_reid_scheduler_v1 import ReIDResult
+from .step4_room_evidence_v1 import V11RoomEvidenceWriterV1
 from .step4_tracking_reid_v1 import V11Step4TrackingReIDV1
 
 
@@ -68,6 +69,21 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
         self.reid_last_crossroom_probe.clear()
         self.reid_crossroom_probe_count = 0
 
+        self.room_evidence = V11RoomEvidenceWriterV1(
+            os.environ.get("V11_STEP4_ROOM_EVIDENCE_DIR", ""),
+            max_per_member=int(os.environ.get("V11_STEP4_ROOM_EVIDENCE_MAX_PER_MEMBER", "4")),
+            min_interval_sec=float(os.environ.get("V11_STEP4_ROOM_EVIDENCE_INTERVAL_SEC", "0.75")),
+        )
+        self.room_evidence_members: dict[str, set[tuple[str, str]]] = {}
+        if self.room_evidence.enabled:
+            print(
+                "CAMERA_V11_STEP4_ROOM_EVIDENCE_READY "
+                f"dir={self.room_evidence.root} "
+                f"max_per_member={self.room_evidence.max_per_member} "
+                "policy=fused-room-only jpeg_quality=95",
+                flush=True,
+            )
+
         print(
             "CAMERA_V11_STEP4_HANDOFF_V2 "
             "source=camera-tracklet cross_room_only=1 room_identity_dependency=0 "
@@ -109,6 +125,33 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
         # Room identity lifecycle is already maintained internally by the room layer.
         del captured_at
 
+    def _capture_room_evidence(
+        self,
+        *,
+        candidate,
+        camera_identity: str,
+        room_identity: str,
+    ) -> None:
+        if not self.room_evidence.enabled or not room_identity:
+            return
+        member = (candidate.camera_id, camera_identity)
+        members = self.room_evidence_members.setdefault(room_identity, set())
+        members.add(member)
+        saved = self.room_evidence.capture_room(
+            room_id=candidate.room_id,
+            room_identity=room_identity,
+            members=members,
+            current_member=member,
+        )
+        if saved:
+            folder = self.room_evidence.root / room_identity if self.room_evidence.root else "-"
+            print(
+                "CAMERA_V11_STEP4_ROOM_EVIDENCE_SAVE "
+                f"room={candidate.room_id} room_identity={room_identity} "
+                f"folder={folder} saved={','.join(saved)} members={len(members)}",
+                flush=True,
+            )
+
     def _on_reid_result(self, result: ReIDResult) -> None:
         candidate = result.candidate
         captured_at = candidate.captured_ns / 1_000_000_000.0
@@ -140,6 +183,14 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
         if not camera_identity:
             return
 
+        self.room_evidence.remember(
+            camera_id=candidate.camera_id,
+            camera_identity=camera_identity,
+            local_track=candidate.track_id,
+            crop_bgr=candidate.crop_bgr,
+            captured_ns=candidate.captured_ns,
+        )
+
         # Room grouping remains independent. A missing/split Room ID must never
         # suppress a valid cross-room peer-tracklet handoff.
         room_decision = self.room_identity_shadow.observe(
@@ -161,6 +212,12 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
                 f"samples={int(room_decision['samples'])} members={int(room_decision['members'])} "
                 f"collision_rejects={int(room_decision['collision_rejects'])} merge=0",
                 flush=True,
+            )
+        if room_identity:
+            self._capture_room_evidence(
+                candidate=candidate,
+                camera_identity=camera_identity,
+                room_identity=room_identity,
             )
         self._sync_camera_identity_activity(captured_at)
 
