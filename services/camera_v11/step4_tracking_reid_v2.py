@@ -39,9 +39,6 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
     def __init__(self) -> None:
         super().__init__()
 
-        # Replace the V1 room-ID handoff matcher before the run starts. Camera
-        # tracklet IDs are the stable peer-tracklet primitive; room identity remains
-        # an independent grouping layer and no longer gates handoff evidence.
         self.identity_shadow = _V11CameraTrackletHandoffShadow(
             gallery_size=int(os.environ.get("V11_STEP4_REID_GALLERY_SIZE", "4")),
             ttl_sec=float(os.environ.get("V11_STEP4_REID_SHADOW_TTL_SEC", "30")),
@@ -73,14 +70,27 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
             os.environ.get("V11_STEP4_ROOM_EVIDENCE_DIR", ""),
             max_per_member=int(os.environ.get("V11_STEP4_ROOM_EVIDENCE_MAX_PER_MEMBER", "4")),
             min_interval_sec=float(os.environ.get("V11_STEP4_ROOM_EVIDENCE_INTERVAL_SEC", "0.75")),
+            cache_per_member=int(os.environ.get("V11_STEP4_ROOM_EVIDENCE_CACHE_PER_MEMBER", "6")),
+            suspect_score=float(os.environ.get("V11_STEP4_ROOM_EVIDENCE_SUSPECT_SCORE", "0.60")),
+            audit_max_score=float(os.environ.get("V11_STEP4_ROOM_EVIDENCE_AUDIT_MAX", "0.68")),
+            audit_top2_mean=float(os.environ.get("V11_STEP4_ROOM_EVIDENCE_AUDIT_TOP2", "0.62")),
+            audit_min_support=int(os.environ.get("V11_STEP4_ROOM_EVIDENCE_AUDIT_SUPPORT", "2")),
         )
         self.room_evidence_members: dict[str, set[tuple[str, str]]] = {}
+        self.room_evidence_last_audit: dict[
+            tuple[str, str, str], tuple[str, int, int]
+        ] = {}
         if self.room_evidence.enabled:
             print(
                 "CAMERA_V11_STEP4_ROOM_EVIDENCE_READY "
                 f"dir={self.room_evidence.root} "
                 f"max_per_member={self.room_evidence.max_per_member} "
-                "policy=fused-room-only jpeg_quality=95",
+                f"cache_per_member={self.room_evidence.cache_per_member} "
+                f"suspect_score={self.room_evidence.suspect_score:.2f} "
+                f"audit_max={self.room_evidence.audit_max_score:.2f} "
+                f"audit_top2={self.room_evidence.audit_top2_mean:.2f} "
+                f"audit_support={self.room_evidence.audit_min_support} "
+                "policy=fused-room-only+multishot-audit jpeg_quality=95",
                 flush=True,
             )
 
@@ -100,9 +110,6 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
             camera_id = str(row["camera_id"])
             camera_identity = str(row["camera_identity"])
             active = bool(row["active"])
-
-            # The peer handoff lifecycle must follow canonical camera-tracklet state,
-            # not fragile Step3 local T-IDs and not room-cluster activity.
             self.identity_shadow.update_track_activity(
                 camera_id=camera_id,
                 track_id=camera_identity,
@@ -112,7 +119,6 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
             if active:
                 active_by_camera.setdefault(camera_id, set()).add(camera_identity)
 
-        # Keep V1 room grouping alive for same-room telemetry/corroboration only.
         for camera in self.cameras:
             self.room_identity_shadow.update_active_tracks(
                 camera_id=camera.camera_id,
@@ -121,8 +127,6 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
             )
 
     def _sync_room_identity_activity(self, captured_at: float) -> None:
-        # Deliberately do not feed ROOM::<room> identities into the peer matcher.
-        # Room identity lifecycle is already maintained internally by the room layer.
         del captured_at
 
     def _capture_room_evidence(
@@ -137,18 +141,43 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
         member = (candidate.camera_id, camera_identity)
         members = self.room_evidence_members.setdefault(room_identity, set())
         members.add(member)
-        saved = self.room_evidence.capture_room(
+        outcome = self.room_evidence.capture_room(
             room_id=candidate.room_id,
             room_identity=room_identity,
             members=members,
             current_member=member,
         )
+        saved = list(outcome.get("saved", []))
+        audits = list(outcome.get("audits", []))
+        folder = self.room_evidence.root / room_identity if self.room_evidence.root else "-"
         if saved:
-            folder = self.room_evidence.root / room_identity if self.room_evidence.root else "-"
             print(
                 "CAMERA_V11_STEP4_ROOM_EVIDENCE_SAVE "
                 f"room={candidate.room_id} room_identity={room_identity} "
                 f"folder={folder} saved={','.join(saved)} members={len(members)}",
+                flush=True,
+            )
+        for audit in audits:
+            left = audit["left"]
+            right = audit["right"]
+            key = (room_identity, str(left), str(right))
+            signature = (
+                str(audit["status"]),
+                int(float(audit["max"]) * 1000.0),
+                int(float(audit["top2_mean"]) * 1000.0),
+            )
+            if self.room_evidence_last_audit.get(key) == signature:
+                continue
+            self.room_evidence_last_audit[key] = signature
+            print(
+                "CAMERA_V11_STEP4_ROOM_EVIDENCE_AUDIT "
+                f"room={candidate.room_id} room_identity={room_identity} "
+                f"left={left[0]}/{left[1]} right={right[0]}/{right[1]} "
+                f"status={audit['status']} max={float(audit['max']):.4f} "
+                f"top2_mean={float(audit['top2_mean']):.4f} "
+                f"median={float(audit['median']):.4f} "
+                f"support={int(audit['support'])}/{int(audit['pairs'])} "
+                f"folder={folder} comparison=comparison.jpg",
                 flush=True,
             )
 
@@ -188,11 +217,11 @@ class V11Step4TrackingReIDV2(V11Step4TrackingReIDV1):
             camera_identity=camera_identity,
             local_track=candidate.track_id,
             crop_bgr=candidate.crop_bgr,
+            embedding=result.embedding,
+            quality=candidate.quality,
             captured_ns=candidate.captured_ns,
         )
 
-        # Room grouping remains independent. A missing/split Room ID must never
-        # suppress a valid cross-room peer-tracklet handoff.
         room_decision = self.room_identity_shadow.observe(
             camera_id=candidate.camera_id,
             track_id=camera_identity,
