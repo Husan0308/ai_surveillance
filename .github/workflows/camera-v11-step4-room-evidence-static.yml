@@ -22,11 +22,17 @@ jobs:
           grep -Fq 'class V11RoomEvidenceWriterV1' services/camera_v11/step4_room_evidence_v1.py
           grep -Fq 'if not self.enabled or len(members) < 2:' services/camera_v11/step4_room_evidence_v1.py
           grep -Fq 'max_per_member: int = 4' services/camera_v11/step4_room_evidence_v1.py
-          grep -Fq 'cv2.imwrite' services/camera_v11/step4_room_evidence_v1.py
-          grep -Fq 'manifest.tsv' services/camera_v11/step4_room_evidence_v1.py
+          grep -Fq 'embedding: np.ndarray' services/camera_v11/step4_room_evidence_v1.py
+          grep -Fq 'pair_scores.tsv' services/camera_v11/step4_room_evidence_v1.py
+          grep -Fq 'audit.tsv' services/camera_v11/step4_room_evidence_v1.py
+          grep -Fq 'comparison.jpg' services/camera_v11/step4_room_evidence_v1.py
+          grep -Fq 'top2_mean' services/camera_v11/step4_room_evidence_v1.py
+          grep -Fq 'SUSPECT' services/camera_v11/step4_room_evidence_v1.py
           grep -Fq 'V11_STEP4_ROOM_EVIDENCE_DIR' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'V11_STEP4_ROOM_EVIDENCE_SUSPECT_SCORE' services/camera_v11/step4_tracking_reid_v2.py
           grep -Fq 'CAMERA_V11_STEP4_ROOM_EVIDENCE_SAVE' services/camera_v11/step4_tracking_reid_v2.py
-          grep -Fq 'self.room_evidence.remember' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'CAMERA_V11_STEP4_ROOM_EVIDENCE_AUDIT' services/camera_v11/step4_tracking_reid_v2.py
+          grep -Fq 'embedding=result.embedding' services/camera_v11/step4_tracking_reid_v2.py
           grep -Fq 'self.room_evidence.capture_room' services/camera_v11/step4_tracking_reid_v2.py
       - name: Frozen Step3 guard
         run: |
