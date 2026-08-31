@@ -1,0 +1,59 @@
+name: Camera V11 Step4 ReID Quality V1 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step4-crosscamera-reid-v1-20260828
+
+jobs:
+  reid-quality-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compile quality gate
+        run: |
+          python -m py_compile \
+            services/camera_v11/step4_reid_quality_diversity_v1.py \
+            services/camera_v11/step4_tracking_reid_v3.py
+          bash -n scripts/run_camera_v11_step4_tracking_reid_v1.sh
+
+      - name: Quality gate invariants
+        run: |
+          grep -Fq 'class V11ReIDQualityDiversityGateV1' services/camera_v11/step4_reid_quality_diversity_v1.py
+          grep -Fq 'cv2.Laplacian' services/camera_v11/step4_reid_quality_diversity_v1.py
+          grep -Fq 'reject_edge_contacts: int = 2' services/camera_v11/step4_reid_quality_diversity_v1.py
+          grep -Fq 'duplicate_cosine: float = 0.975' services/camera_v11/step4_reid_quality_diversity_v1.py
+          grep -Fq 'bootstrap_samples: int = 3' services/camera_v11/step4_reid_quality_diversity_v1.py
+          grep -Fq 'len(gallery.embeddings) < self.bootstrap_samples' services/camera_v11/step4_reid_quality_diversity_v1.py
+          grep -Fq 'self.duplicate_drops += 1' services/camera_v11/step4_reid_quality_diversity_v1.py
+          grep -Fq 'downstream_gallery_update=0' services/camera_v11/step4_tracking_reid_v3.py
+          grep -Fq 'CAMERA_V11_STEP4_REID_GATE' services/camera_v11/step4_tracking_reid_v3.py
+          grep -Fq 'services.camera_v11.step4_tracking_reid_v3' scripts/run_camera_v11_step4_tracking_reid_v1.sh
+          grep -Fq 'quality_gate=1 diversity_gate=1' scripts/run_camera_v11_step4_tracking_reid_v1.sh
+
+      - name: Latency safety invariants
+        run: |
+          grep -Fq 'self.reid_scheduler.submit(candidate)' services/camera_v11/step4_tracking_reid_v3.py
+          grep -Fq 'eligible[: self.reid_max_per_update]' services/camera_v11/step4_tracking_reid_v3.py
+          grep -Fq 'max_batch=2' services/camera_v11/step4_reid_scheduler_v1.py
+          grep -Fq 'OrderedDict' services/camera_v11/step4_reid_scheduler_v1.py
+          ! grep -Fq 'embed_crops(' services/camera_v11/step4_tracking_reid_v3.py
+          ! grep -Fq 'cudaDeviceSynchronize' services/camera_v11/step4_tracking_reid_v3.py
+
+      - name: Frozen Step3 guard
+        run: |
+          git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
+            services/camera_v11/step1_cam02_lowlat_v7.py \
+            services/camera_v11/step1_independent_egl_v4.py \
+            services/camera_v11/step2_production_fp32.py \
+            services/camera_v11/step2_production_fp32_v12.py \
+            services/camera_v11/step2_production_fp32_v13.py \
+            services/camera_v11/step2_production_fp32_v18.py \
+            services/camera_v11/step2_trt86.py \
+            services/camera_v11/step3_tracker_v2.py \
+            services/camera_v11/step3_tracking_v2.py \
+            scripts/run_camera_v11_step3_tracker_v2.sh \
+            scripts/check_camera_v11_step3_tracker_v2_log.py
