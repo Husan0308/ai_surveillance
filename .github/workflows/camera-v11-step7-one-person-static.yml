@@ -19,9 +19,16 @@ jobs:
       - name: Compile Step7 files
         run: |
           python -m py_compile \
+            services/camera_v11/step4_reid_gallery_recent_runtime_v1.py \
+            services/camera_v11/step4_reid_pair_runtime_v1.py \
             scripts/check_camera_v11_step7_cam01_cam04_one_person_v1.py \
             scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py
           bash -n scripts/run_camera_v11_step7_cam01_cam04_one_person_acceptance_v1.sh
+      - name: Guard bounded recent gallery wiring
+        run: |
+          grep -q 'class V11Step4ReIDPairRuntimeV1(V11Step4ReIDGalleryRecentRuntimeV1)' services/camera_v11/step4_reid_pair_runtime_v1.py
+          grep -q 'self.reid_gallery.cleanup_expired(int(captured_ns))' services/camera_v11/step4_reid_gallery_recent_runtime_v1.py
+          ! grep -q 'self.reid_gallery.touch_active' services/camera_v11/step4_reid_gallery_recent_runtime_v1.py
       - name: Run Step7 checker tests
         run: python scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py
       - name: Frozen Step1-3 guard
