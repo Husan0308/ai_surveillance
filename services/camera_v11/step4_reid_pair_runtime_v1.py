@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from .step4_reid_gallery_runtime_v1 import V11Step4ReIDGalleryRuntimeV1
+from .step4_reid_gallery_recent_runtime_v1 import V11Step4ReIDGalleryRecentRuntimeV1
 from .step4_reid_pair_shadow_cached_v2 import V11GalleryPairShadowWorkerCachedV2
 from .step4_reid_scheduler_v1 import ReIDResultV1
 
@@ -32,7 +32,7 @@ def load_camera_rooms_v1(
     return {camera_id: rooms[camera_id] for camera_id in camera_ids}
 
 
-class V11Step4ReIDPairRuntimeV1(V11Step4ReIDGalleryRuntimeV1):
+class V11Step4ReIDPairRuntimeV1(V11Step4ReIDGalleryRecentRuntimeV1):
     """Step 2 galleries plus asynchronous, diagnostics-only multi-shot scoring."""
 
     def __init__(self) -> None:
@@ -68,6 +68,7 @@ class V11Step4ReIDPairRuntimeV1(V11Step4ReIDGalleryRuntimeV1):
             "reciprocal=0 one_to_one=0 room_id_assignment=0 global_id=0 "
             "provisional_confirmed=0 face=0 cross_room_handoff=0 "
             "candidate_scope=active-recent-cross-camera max_candidates=24 "
+            "gallery_retention=bounded-recent-12s active_set_immediate_delete=0 "
             "evidence_cache=shared-validated-gallery-matrix-v2 "
             "priority=CAM-01+CAM-04",
             flush=True,
