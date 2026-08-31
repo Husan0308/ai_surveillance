@@ -43,24 +43,44 @@ def _matrix(
     *,
     expected_dimension: int,
 ) -> np.ndarray:
-    if len(gallery) > 8:
-        raise ValueError(f"gallery exceeds capacity: {len(gallery)}>8")
-    if not gallery:
+    """Build one float64 matrix with bulk validation and no per-row copies.
+
+    The scorer's numerical contract remains float64.  The old implementation
+    converted, validated, copied, and finally stacked every row separately.
+    Here we allocate the final matrix once, fill it, then validate finiteness
+    and L2 norms in vectorized NumPy operations.  This keeps the same accepted
+    input semantics while reducing Python/allocation overhead in the shadow
+    worker hot path.
+    """
+
+    count = len(gallery)
+    if count > 8:
+        raise ValueError(f"gallery exceeds capacity: {count}>8")
+    if count == 0:
         return np.empty((0, expected_dimension), dtype=np.float64)
-    rows = []
+
+    rows = np.empty((count, expected_dimension), dtype=np.float64)
     for index, embedding in enumerate(gallery):
-        vector = np.asarray(embedding, dtype=np.float64).reshape(-1)
+        vector = np.asarray(embedding).reshape(-1)
         if vector.size != expected_dimension:
             raise ValueError(
                 f"embedding[{index}] dimension={vector.size}, expected={expected_dimension}"
             )
-        if not np.isfinite(vector).all():
-            raise ValueError(f"embedding[{index}] is non-finite")
-        norm = float(np.linalg.norm(vector))
-        if not math.isfinite(norm) or abs(norm - 1.0) > 1e-3:
-            raise ValueError(f"embedding[{index}] is not L2-normalized norm={norm}")
-        rows.append(vector.copy())
-    return np.stack(rows, axis=0)
+        rows[index] = vector
+
+    finite_rows = np.all(np.isfinite(rows), axis=1)
+    if not finite_rows.all():
+        index = int(np.flatnonzero(~finite_rows)[0])
+        raise ValueError(f"embedding[{index}] is non-finite")
+
+    norms = np.linalg.norm(rows, axis=1)
+    invalid_norms = (~np.isfinite(norms)) | (np.abs(norms - 1.0) > 1e-3)
+    if invalid_norms.any():
+        index = int(np.flatnonzero(invalid_norms)[0])
+        raise ValueError(
+            f"embedding[{index}] is not L2-normalized norm={float(norms[index])}"
+        )
+    return rows
 
 
 def _top_mean(sorted_descending: np.ndarray, count: int) -> float:
@@ -116,7 +136,9 @@ def score_gallery_pair_v1(
     }
     top3_mean = _top_mean(ordered, 3)
     median_best = float(np.median(all_best))
-    p75 = float(np.percentile(flat, 75))
+    median_score, p75, p90 = (
+        float(value) for value in np.percentile(flat, (50.0, 75.0, 90.0))
+    )
     max_score = float(ordered[0])
     robust_score = (
         0.40 * top3_mean
@@ -146,10 +168,10 @@ def score_gallery_pair_v1(
         top2_mean=_top_mean(ordered, 2),
         top3_mean=top3_mean,
         top5_mean=_top_mean(ordered, 5),
-        median_score=float(np.median(flat)),
+        median_score=median_score,
         mean_score=float(np.mean(flat)),
         p75_score=p75,
-        p90_score=float(np.percentile(flat, 90)),
+        p90_score=p90,
         support_ge_050=supports[0.50],
         support_ge_055=supports[0.55],
         support_ge_060=supports[0.60],
