@@ -49,6 +49,7 @@ class V11ReIDQualityDiversityGateV1:
     This layer is intentionally conservative and shadow-safe:
     - it never changes detector/tracker IDs;
     - severe crop defects are rejected before GPU ReID work;
+    - bootstrap samples are preserved so downstream identity state can initialize;
     - near-duplicate embeddings do not repeatedly pollute downstream galleries;
     - a materially higher-quality duplicate replaces the nearest stored sample.
     """
@@ -64,6 +65,7 @@ class V11ReIDQualityDiversityGateV1:
         duplicate_cosine: float = 0.975,
         replace_quality_gain: float = 0.08,
         gallery_size: int = 8,
+        bootstrap_samples: int = 3,
     ) -> None:
         self.min_quality = max(0.05, min(0.90, float(min_quality)))
         self.min_blur = max(0.0, float(min_blur))
@@ -72,7 +74,8 @@ class V11ReIDQualityDiversityGateV1:
         self.reject_edge_contacts = max(1, min(4, int(reject_edge_contacts)))
         self.duplicate_cosine = max(0.85, min(0.9999, float(duplicate_cosine)))
         self.replace_quality_gain = max(0.0, min(0.50, float(replace_quality_gain)))
-        self.gallery_size = max(2, min(16, int(gallery_size)))
+        self.gallery_size = max(3, min(16, int(gallery_size)))
+        self.bootstrap_samples = max(1, min(self.gallery_size, int(bootstrap_samples)))
 
         self._lock = threading.RLock()
         self._galleries: dict[tuple[str, str], _DiverseGallery] = {}
@@ -85,6 +88,7 @@ class V11ReIDQualityDiversityGateV1:
         self.reject_quality = 0
         self.embedding_checked = 0
         self.embedding_accepted = 0
+        self.bootstrap_accepted = 0
         self.duplicate_drops = 0
         self.duplicate_replacements = 0
         self.crop_gate_ms: deque[float] = deque(maxlen=2048)
@@ -200,11 +204,21 @@ class V11ReIDQualityDiversityGateV1:
         with self._lock:
             self.embedding_checked += 1
             gallery = self._galleries.setdefault(key, _DiverseGallery())
-            if not gallery.embeddings:
+
+            # Bootstrap first: downstream camera/room identity layers require
+            # multiple samples before they can make any stable decision. Do not let
+            # a stationary person get stuck forever because their first frames look
+            # intentionally similar.
+            if len(gallery.embeddings) < self.bootstrap_samples:
+                nearest = -1.0
+                if gallery.embeddings:
+                    nearest = max(float(np.dot(vector, old)) for old in gallery.embeddings)
+                    self.nearest_cos_values.append(nearest)
                 gallery.embeddings.append(vector)
                 gallery.qualities.append(float(quality))
                 self.embedding_accepted += 1
-                return True, "first", -1.0
+                self.bootstrap_accepted += 1
+                return True, "bootstrap", nearest
 
             scores = [float(np.dot(vector, old)) for old in gallery.embeddings]
             nearest_index = int(np.argmax(scores))
@@ -224,8 +238,8 @@ class V11ReIDQualityDiversityGateV1:
 
             if len(gallery.embeddings) >= self.gallery_size:
                 # Prefer diversity: replace the stored sample that is most redundant
-                # with the rest, but only if the new sample is not lower quality by a
-                # large amount. This keeps gallery size bounded and avoids FIFO churn.
+                # with the rest, but only if the new sample is not materially lower
+                # quality. This keeps gallery size bounded and avoids FIFO churn.
                 matrix = np.stack(gallery.embeddings, axis=0)
                 similarities = matrix @ matrix.T
                 np.fill_diagonal(similarities, -1.0)
@@ -255,6 +269,7 @@ class V11ReIDQualityDiversityGateV1:
                 "reject_quality": self.reject_quality,
                 "embedding_checked": self.embedding_checked,
                 "embedding_accepted": self.embedding_accepted,
+                "bootstrap_accepted": self.bootstrap_accepted,
                 "duplicate_drops": self.duplicate_drops,
                 "duplicate_replacements": self.duplicate_replacements,
                 "gate_p50_ms": _pct(self.crop_gate_ms, 0.50),
