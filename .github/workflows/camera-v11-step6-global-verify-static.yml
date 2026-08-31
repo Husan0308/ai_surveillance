@@ -1,0 +1,35 @@
+name: camera-v11-step6-global-verify-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step4-crosscamera-reid-v1-20260828
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile Step6 files
+        run: |
+          python -m py_compile \
+            services/camera_v11/step6_global_shadow_hysteresis_v1.py \
+            services/camera_v11/step6_step5_worker_tap_v1.py \
+            services/camera_v11/step6_global_shadow_runtime_v1.py \
+            scripts/test_camera_v11_step6_global_shadow_hysteresis_v1.py \
+            scripts/check_camera_v11_step6_global_shadow_v1_log.py
+          bash -n scripts/run_camera_v11_step5_global_shadow_v1.sh
+          bash -n scripts/run_camera_v11_step6_global_shadow_v1.sh
+          bash -n scripts/run_camera_v11_step6_global_shadow_acceptance_v1.sh
+      - name: Run Step5 state tests
+        run: python scripts/test_camera_v11_step5_global_shadow_v1.py
+      - name: Run Step6 hysteresis tests
+        run: python scripts/test_camera_v11_step6_global_shadow_hysteresis_v1.py
+      - name: Frozen Step1-3 guard
+        run: python scripts/check_camera_v11_frozen_step123_guard.py
