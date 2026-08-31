@@ -11,8 +11,9 @@ MATCH_LOG="${V11_STEP5_GLOBAL_LOG:-/tmp/CAMERA_V11_STEP5_GLOBAL.log}"
 PAIR_TSV="${V11_STEP4_PAIR_TSV:-$ROOT/artifacts/reid/step4_pair_scores_v1.tsv}"
 MATCH_TSV="${V11_STEP4_MATCH_TSV:-$ROOT/artifacts/reid/step4_same_room_matches_v1.tsv}"
 GLOBAL_TSV="${V11_STEP5_GLOBAL_TSV:-$ROOT/artifacts/reid/step5_global_shadow_v1.tsv}"
+RUNTIME_MODULE="${V11_STEP5_RUNTIME_MODULE:-services.camera_v11.step5_global_shadow_runtime_v1}"
 DETECTOR_ENGINE="$ROOT/artifacts/yolo26s_trt86/yolo26s-672x384-b1-fp32-trt86.engine"
-REID_ENGINE="$ROOT/artifacts/reid/resnet50_market1501_aicity156_b1-8_fp32_trt86.engine"
+REID_ENGINE="$ROOT/artifacts/reid/resnet50_market1501_aicity156_b1-8_fp32-trt86.engine"
 TRT_PY="$ROOT/.venv-trt86/bin/python"
 REID_WORKER="$ROOT/scripts/reid_trt86_worker_v11.py"
 REID_MANIFEST="$ROOT/artifacts/reid/python_trt86_site/.v11_runtime_paths.json"
@@ -43,7 +44,7 @@ flock -n 7 || fail "step2_or_step3_holds=$STEP2_LOCK"
 "$ROOT/.venv/bin/python" "$ROOT/scripts/check_camera_v11_frozen_step123_guard.py" \
   || fail "frozen_step123_guard"
 
-CONFLICT_PATTERN='services\.camera_v11\.(step1_cam02_lowlat_v7|step2_production_fp32(_v[0-9]+)?|step3_tracking_v[0-9]+|step4_reid_(quality|gallery|pair|same_room)_runtime_v[0-9]+|step5_global_shadow_runtime_v[0-9]+)|yolo26_trt86_step2_worker\.py|reid_trt86_worker_v11\.py'
+CONFLICT_PATTERN='services\.camera_v11\.(step1_cam02_lowlat_v7|step2_production_fp32(_v[0-9]+)?|step3_tracking_v[0-9]+|step4_reid_(quality|gallery|pair|same_room)_runtime_v[0-9]+|step5_global_shadow_runtime_v[0-9]+|step6_global_shadow_runtime_v[0-9]+)|yolo26_trt86_step2_worker\.py|reid_trt86_worker_v11\.py'
 conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 [[ -z "$conflicts" ]] || fail $'conflicting_camera_or_trt_process:\n'"$conflicts"
 if pgrep -x nvidia-settings >/dev/null 2>&1; then
@@ -119,8 +120,8 @@ printf 'CAMERA_V11_STEP5_GLOBAL_SHADOW_NATURAL_PRIME peak_memory_mhz=%s peak_sm_
 (( peak_mem >= minimum_mhz )) || fail "natural_prime_memory_clock_${peak_mem}_min_${minimum_mhz}"
 printf 'CAMERA_V11_STEP5_GLOBAL_SHADOW_NATURAL_PRIME result=PASS active_memory_mhz=%s active_sm_mhz=%s peak_gpu_util=%s\n' \
   "$peak_mem" "$peak_sm" "$peak_util"
-printf 'CAMERA_V11_STEP5_GLOBAL_SHADOW_PREFLIGHT result=PASS frozen_sha=%s reid_engine=%s precision=fp32 pair_tsv=%s match_tsv=%s global_tsv=%s power_policy=natural-floating active_prime_gate=hard\n' \
-  "d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51" "$REID_ENGINE" "$PAIR_TSV" "$MATCH_TSV" "$GLOBAL_TSV"
+printf 'CAMERA_V11_STEP5_GLOBAL_SHADOW_PREFLIGHT result=PASS frozen_sha=%s reid_engine=%s precision=fp32 pair_tsv=%s match_tsv=%s global_tsv=%s power_policy=natural-floating active_prime_gate=hard runtime_module=%s\n' \
+  "d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51" "$REID_ENGINE" "$PAIR_TSV" "$MATCH_TSV" "$GLOBAL_TSV" "$RUNTIME_MODULE"
 
 bash "$ROOT/scripts/run_camera_v11_step1_v7.sh" >"$DISPLAY_LOG" 2>&1 &
 display_pid=$!
@@ -149,7 +150,7 @@ export MKL_NUM_THREADS=1
 export V11_STEP4_MATCH_CPU="${V11_STEP5_MATCH_CPU:-11}"
 
 taskset -c "${V11_STEP5_RUNTIME_CPUS:-0-10}" \
-  "$ROOT/.venv/bin/python" -u -m services.camera_v11.step5_global_shadow_runtime_v1 \
+  "$ROOT/.venv/bin/python" -u -m "$RUNTIME_MODULE" \
   >"$MATCH_LOG" 2>&1 &
 match_pid=$!
 
@@ -170,8 +171,8 @@ done
 
 runtime_sample="$(nvidia-smi --query-gpu=pstate,clocks.current.sm,clocks.current.memory,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1 || true)"
 printf 'CAMERA_V11_STEP5_GLOBAL_SHADOW_RUNTIME_CLOCK sample=%q diagnostic_only=1\n' "$runtime_sample"
-printf 'CAMERA_V11_STEP5_GLOBAL_SHADOW_RUNNING display_pid=%s runtime_pid=%s camera_queue=0 reid_sync=0 matcher_async=1 state_async=1 production_global_id=0 room_id=0 face=0 handoff=0\n' \
-  "$display_pid" "$match_pid"
+printf 'CAMERA_V11_STEP5_GLOBAL_SHADOW_RUNNING display_pid=%s runtime_pid=%s camera_queue=0 reid_sync=0 matcher_async=1 state_async=1 production_global_id=0 room_id=0 face=0 handoff=0 runtime_module=%s\n' \
+  "$display_pid" "$match_pid" "$RUNTIME_MODULE"
 while kill -0 "$display_pid" 2>/dev/null && kill -0 "$match_pid" 2>/dev/null; do
   sleep 1
 done
