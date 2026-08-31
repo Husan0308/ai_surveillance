@@ -1,0 +1,43 @@
+name: Camera V11 Devs Mesh Calibration V2 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step4-crosscamera-reid-v1-20260828
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compile mesh calibration
+        run: |
+          python -m py_compile scripts/calibrate_camera_v11_room_pair_mesh_v2.py
+          bash -n scripts/run_camera_v11_devs_cam01_cam04_mesh_calibration_v2.sh
+      - name: Mesh calibration invariants
+        run: |
+          grep -Fq 'cv2.Subdiv2D' scripts/calibrate_camera_v11_room_pair_mesh_v2.py
+          grep -Fq 'cv2.getAffineTransform' scripts/calibrate_camera_v11_room_pair_mesh_v2.py
+          grep -Fq 'VALIDATION' scripts/calibrate_camera_v11_room_pair_mesh_v2.py
+          grep -Fq 'V11_CAM_PAIR_MESH_METRICS' scripts/calibrate_camera_v11_room_pair_mesh_v2.py
+          grep -Fq 'all_validation_inside_mesh' scripts/calibrate_camera_v11_room_pair_mesh_v2.py
+          grep -Fq 'CAM-01' scripts/run_camera_v11_devs_cam01_cam04_mesh_calibration_v2.sh
+          grep -Fq 'CAM-04' scripts/run_camera_v11_devs_cam01_cam04_mesh_calibration_v2.sh
+          grep -Fq 'capture_camera_v11_pair_frames.py' scripts/run_camera_v11_devs_cam01_cam04_mesh_calibration_v2.sh
+          grep -Fq 'devs_cam01_cam04_floor_mesh_v2.json' scripts/run_camera_v11_devs_cam01_cam04_mesh_calibration_v2.sh
+      - name: Frozen Step3 guard
+        run: |
+          git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
+            services/camera_v11/step1_cam02_lowlat_v7.py \
+            services/camera_v11/step1_independent_egl_v4.py \
+            services/camera_v11/step2_production_fp32.py \
+            services/camera_v11/step2_production_fp32_v12.py \
+            services/camera_v11/step2_production_fp32_v13.py \
+            services/camera_v11/step2_production_fp32_v18.py \
+            services/camera_v11/step2_trt86.py \
+            services/camera_v11/step3_tracker_v2.py \
+            services/camera_v11/step3_tracking_v2.py \
+            scripts/run_camera_v11_step3_tracker_v2.sh \
+            scripts/check_camera_v11_step3_tracker_v2_log.py
