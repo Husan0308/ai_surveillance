@@ -3,20 +3,16 @@ from __future__ import annotations
 import csv
 import time
 
+from .step4_reid_pair_score_cache_v1 import score_gallery_pair_step3_cached_v1
 from .step4_reid_pair_shadow_v1 import V11GalleryPairShadowWorkerV1
-from .step4_reid_same_room_evidence_padded_v1 import (
-    score_gallery_matrix_step3_padded_exact_v1,
-)
 
 
 class V11GalleryPairShadowWorkerCachedV2(V11GalleryPairShadowWorkerV1):
-    """Step-3 shadow scorer reusing the validated Step-4 gallery-matrix cache.
+    """Step-3 shadow scorer that publishes exact reusable pair evidence.
 
-    This preserves the authoritative Step-3 score formula exactly while avoiding
-    repeated embedding conversion, finite/norm checks, copies and stacking for
-    every candidate pair.  Using the same cache as the Step-4 same-room matcher
-    also primes gallery matrices before the matcher runs, reducing duplicate CPU
-    work without changing thresholds or identity semantics.
+    The authoritative Step-3 scorer still runs on every cache miss.  Results are
+    keyed by immutable gallery sample fingerprints so the later Step-4 matcher can
+    consume the exact same GalleryPairScoreV1 instead of recomputing it.
     """
 
     def _score_cycle(self) -> None:
@@ -33,10 +29,7 @@ class V11GalleryPairShadowWorkerCachedV2(V11GalleryPairShadowWorkerV1):
                     self.different_room_pairs += 1
 
             started_ns = time.perf_counter_ns()
-            score = score_gallery_matrix_step3_padded_exact_v1(
-                (first,),
-                (second,),
-            )[(0, 0)]
+            score = score_gallery_pair_step3_cached_v1(first, second)
             elapsed_ms = (time.perf_counter_ns() - started_ns) / 1_000_000.0
 
             with self._cv:
