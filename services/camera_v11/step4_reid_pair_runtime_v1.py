@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from .step4_reid_gallery_runtime_v1 import V11Step4ReIDGalleryRuntimeV1
-from .step4_reid_pair_shadow_v1 import V11GalleryPairShadowWorkerV1
+from .step4_reid_pair_shadow_cached_v2 import V11GalleryPairShadowWorkerCachedV2
 from .step4_reid_scheduler_v1 import ReIDResultV1
 
 
@@ -49,7 +49,7 @@ class V11Step4ReIDPairRuntimeV1(V11Step4ReIDGalleryRuntimeV1):
             "V11_STEP4_PAIR_TSV", str(ROOT / "artifacts/reid/step4_pair_scores_v1.tsv")
         ).strip()
         self.pair_tsv_path = None if tsv_setting.lower() in ("", "0", "off", "none") else tsv_setting
-        self.pair_worker = V11GalleryPairShadowWorkerV1(
+        self.pair_worker = V11GalleryPairShadowWorkerCachedV2(
             self.reid_gallery.gallery_views,
             self.pair_camera_rooms,
             tsv_path=self.pair_tsv_path,
@@ -68,6 +68,7 @@ class V11Step4ReIDPairRuntimeV1(V11Step4ReIDGalleryRuntimeV1):
             "reciprocal=0 one_to_one=0 room_id_assignment=0 global_id=0 "
             "provisional_confirmed=0 face=0 cross_room_handoff=0 "
             "candidate_scope=active-recent-cross-camera max_candidates=24 "
+            "evidence_cache=shared-validated-gallery-matrix-v2 "
             "priority=CAM-01+CAM-04",
             flush=True,
         )
