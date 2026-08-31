@@ -85,7 +85,7 @@ def main() -> int:
         "--engine",
         type=Path,
         default=root
-        / "artifacts/reid/resnet50_market1501_aicity156_b1-8_fp32_trt86.engine",
+        / "artifacts/reid/resnet50_market1501_aicity156_b1-8_fp32-trt86.engine",
     )
     parser.add_argument("--workspace-mib", type=int, default=1024)
     args = parser.parse_args()
