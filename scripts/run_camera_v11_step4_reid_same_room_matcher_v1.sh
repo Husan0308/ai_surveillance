@@ -48,14 +48,15 @@ conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 source "$ROOT/scripts/camera_v11_powermizer_keeper_v25.sh"
 display_pid=""
 match_pid=""
+prime_pid=""
 cleaned=0
 cleanup() {
   (( cleaned == 1 )) && return 0
   cleaned=1
-  for pid in "$match_pid" "$display_pid"; do
+  for pid in "$match_pid" "$display_pid" "$prime_pid"; do
     [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && kill -TERM "$pid" 2>/dev/null || true
   done
-  for pid in "$match_pid" "$display_pid"; do
+  for pid in "$match_pid" "$display_pid" "$prime_pid"; do
     [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
   done
   v11_powermizer_stop || true
@@ -76,17 +77,48 @@ printf 'CAMERA_V11_STEP4_REID_MATCH_POWER_PRIME phase=baseline start=1\n'
   || fail "power_prime_baseline_failed"
 v11_powermizer_start || fail "powermizer_keeper_start"
 sleep 1
-printf 'CAMERA_V11_STEP4_REID_MATCH_POWER_PRIME phase=gui_held start=1\n'
-"$TRT_PY" "$PRIME_SCRIPT" --engine "$DETECTOR_ENGINE" --warmup 30 --iterations 100 \
-  >>"$V11_POWERMIZER_KEEPER_LOG" 2>&1 \
-  || fail "power_prime_gui_held_failed"
-clock="$(v11_powermizer_mem_clock_mhz || true)"
+
+# NVIDIA clocks are dynamic: an idle GPU may return to its low memory clock as
+# soon as the prime workload exits.  Validate that the VRAM clock actually
+# boosted *while the TensorRT prime is active*, rather than sampling only after
+# the workload has already finished and potentially down-clocked.
 minimum_mhz="${V11_POWERMIZER_MIN_MEMORY_MHZ:-3000}"
-if [[ ! "$clock" =~ ^[0-9]+$ ]] || (( clock < minimum_mhz )); then
-  fail "vram_startup_prime_gate memory_mhz=${clock:-unknown} minimum_mhz=$minimum_mhz"
+[[ "$minimum_mhz" =~ ^[0-9]+$ ]] || fail "invalid_min_memory_mhz=$minimum_mhz"
+peak_clock=0
+last_clock=""
+samples=0
+printf 'CAMERA_V11_STEP4_REID_MATCH_POWER_PRIME phase=gui_held start=1 monitor=active_workload\n'
+"$TRT_PY" "$PRIME_SCRIPT" --engine "$DETECTOR_ENGINE" --warmup 30 --iterations 100 \
+  >>"$V11_POWERMIZER_KEEPER_LOG" 2>&1 &
+prime_pid=$!
+while kill -0 "$prime_pid" 2>/dev/null; do
+  clock="$(v11_powermizer_mem_clock_mhz || true)"
+  if [[ "$clock" =~ ^[0-9]+$ ]]; then
+    last_clock="$clock"
+    (( samples += 1 ))
+    if (( clock > peak_clock )); then
+      peak_clock="$clock"
+    fi
+  fi
+  sleep 0.02
+done
+set +e
+wait "$prime_pid"
+prime_status=$?
+set -e
+prime_pid=""
+(( prime_status == 0 )) || fail "power_prime_gui_held_failed status=$prime_status"
+# One post-run sample is diagnostic only; the pass/fail gate intentionally uses
+# the peak observed while the workload was alive.
+post_clock="$(v11_powermizer_mem_clock_mhz || true)"
+if (( samples <= 0 )); then
+  fail "vram_startup_prime_gate no_clock_samples minimum_mhz=$minimum_mhz"
 fi
-printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s minimum_mhz=%s pid=%s source=v24-continuous-prime\n' \
-  "$clock" "$minimum_mhz" "$V11_POWERMIZER_KEEPER_PID"
+if (( peak_clock < minimum_mhz )); then
+  fail "vram_startup_prime_gate peak_memory_mhz=$peak_clock last_active_mhz=${last_clock:-unknown} post_memory_mhz=${post_clock:-unknown} minimum_mhz=$minimum_mhz samples=$samples"
+fi
+printf 'CAMERA_V11_POWERMIZER_KEEPER result=BOOST_OK memory_mhz=%s peak_memory_mhz=%s post_memory_mhz=%s minimum_mhz=%s samples=%s pid=%s source=active-prime-peak\n' \
+  "$peak_clock" "$peak_clock" "${post_clock:-unknown}" "$minimum_mhz" "$samples" "$V11_POWERMIZER_KEEPER_PID"
 printf 'CAMERA_V11_STEP4_REID_MATCH_PREFLIGHT result=PASS frozen_sha=%s reid_engine=%s precision=fp32 pair_tsv=%s match_tsv=%s\n' \
   "d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51" "$REID_ENGINE" "$PAIR_TSV" "$MATCH_TSV"
 
@@ -114,7 +146,8 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export V11_STEP4_MATCH_CPU="${V11_STEP4_MATCH_CPU:-11}"
 
-taskset -c "${V11_STEP4_MATCH_RUNTIME_CPUS:-0-10}"   "$ROOT/.venv/bin/python" -u -m services.camera_v11.step4_reid_same_room_runtime_v1 \
+taskset -c "${V11_STEP4_MATCH_RUNTIME_CPUS:-0-10}" \
+  "$ROOT/.venv/bin/python" -u -m services.camera_v11.step4_reid_same_room_runtime_v1 \
   >"$MATCH_LOG" 2>&1 &
 match_pid=$!
 
