@@ -67,6 +67,13 @@ class V11Step4ReIDSameRoomRuntimeV1(V11Step4ReIDPairRuntimeV1):
             min_cycle_interval_sec=2.0,
             affinity_cpu=affinity_cpu,
         )
+        # Step3 and Step4 used to be independently notified by the same ReID
+        # completion. Their separate 2-second cadence clocks could drift, causing
+        # Step4 to see a new gallery fingerprint before Step3 had published the
+        # exact score for it. Make Step3 the producer clock: the matcher wakes only
+        # after a Step3 score cycle has completed publishing cache evidence.
+        self.pair_worker.set_scores_published_callback(self.match_worker.notify)
+
         self.match_closed = False
         thresholds = (
             f"robust={config.min_robust_score if config.min_robust_score is not None else 'off'},"
@@ -81,6 +88,7 @@ class V11Step4ReIDSameRoomRuntimeV1(V11Step4ReIDPairRuntimeV1):
             "assignment_eligible_only=1 one_to_one=1 deterministic=1 "
             "worker=one async=1 dirty_slot=latest-only cadence=2.0s camera_queue=0 "
             "phase_delay=100ms evidence_cache=shared-step3-pair-score-v3 lookup_only=1 "
+            "trigger=step3_evidence_cycle_complete "
             "camera_display_block=0 tracker_mutation=0 local_track_id_mutation=0 "
             "global_id=0 room_id=0 face=0 handoff=0 hysteresis=0 identity_state=0",
             flush=True,
@@ -97,8 +105,10 @@ class V11Step4ReIDSameRoomRuntimeV1(V11Step4ReIDPairRuntimeV1):
         )
 
     def _on_reid_result(self, result: ReIDResultV1) -> None:
+        # super() updates the gallery and wakes the Step3 pair scorer. Step4 is
+        # intentionally *not* woken here; it is notified by the Step3 completion
+        # callback above, after exact pair evidence has been published.
         super()._on_reid_result(result)
-        self.match_worker.notify()
 
     def _print_match_stats(self) -> None:
         row = self.match_worker.snapshot()
