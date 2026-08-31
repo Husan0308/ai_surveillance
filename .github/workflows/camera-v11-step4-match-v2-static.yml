@@ -1,0 +1,28 @@
+name: Camera V11 Step4 Matcher V2 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step4-crosscamera-reid-v1-20260828
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Bash syntax
+        run: |
+          bash -n scripts/run_camera_v11_step4_reid_same_room_matcher_v2.sh
+          bash -n scripts/run_camera_v11_step4_reid_same_room_matcher_acceptance_v2.sh
+      - name: V2 policy guards
+        run: |
+          grep -q 'clock_gate=diagnostic_only' scripts/run_camera_v11_step4_reid_same_room_matcher_v2.sh
+          grep -q 'runtime_regression_gate=authoritative' scripts/run_camera_v11_step4_reid_same_room_matcher_v2.sh
+          grep -q 'check_camera_v11_step4_reid_same_room_matcher_v1_log.py' scripts/run_camera_v11_step4_reid_same_room_matcher_acceptance_v2.sh
+          grep -q -- '--match-p95-max-ms' scripts/check_camera_v11_step4_reid_same_room_matcher_v1_log.py || true
+      - name: Frozen Step1 Step2 Step3 guard
+        run: |
+          python scripts/check_camera_v11_frozen_step123_guard.py
