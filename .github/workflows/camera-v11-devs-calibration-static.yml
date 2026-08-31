@@ -14,13 +14,23 @@ jobs:
           fetch-depth: 0
       - name: Compile calibration tool
         run: |
-          python -m py_compile scripts/calibrate_camera_v11_room_pair.py
+          python -m py_compile \
+            scripts/capture_camera_v11_pair_frames.py \
+            scripts/calibrate_camera_v11_room_pair.py
           bash -n scripts/run_camera_v11_devs_cam01_cam04_calibration_v1.sh
       - name: Calibration invariants
         run: |
           grep -Fq 'cv2.findHomography(points_b, points_a, cv2.RANSAC' scripts/calibrate_camera_v11_room_pair.py
           grep -Fq 'cv2.perspectiveTransform' scripts/calibrate_camera_v11_room_pair.py
           grep -Fq 'V11_CAM_PAIR_CALIB RESULT=' scripts/calibrate_camera_v11_room_pair.py
+          grep -Fq 'load_settings(config_path)' scripts/capture_camera_v11_pair_frames.py
+          grep -Fq 'OPENCV_FFMPEG_CAPTURE_OPTIONS' scripts/capture_camera_v11_pair_frames.py
+          grep -Fq 'quote(camera.username, safe="")' scripts/capture_camera_v11_pair_frames.py
+          grep -Fq 'quote(camera.password or "", safe="")' scripts/capture_camera_v11_pair_frames.py
+          grep -Fq 'Never include authenticated RTSP URI/password' scripts/capture_camera_v11_pair_frames.py
+          grep -Fq 'capture_camera_v11_pair_frames.py' scripts/run_camera_v11_devs_cam01_cam04_calibration_v1.sh
+          grep -Fq -- '--frame-a "$FRAME_A"' scripts/run_camera_v11_devs_cam01_cam04_calibration_v1.sh
+          grep -Fq -- '--frame-b "$FRAME_B"' scripts/run_camera_v11_devs_cam01_cam04_calibration_v1.sh
           grep -Fq 'CAM-01' scripts/run_camera_v11_devs_cam01_cam04_calibration_v1.sh
           grep -Fq 'CAM-04' scripts/run_camera_v11_devs_cam01_cam04_calibration_v1.sh
           grep -Fq 'devs_cam01_cam04_floor_v1.json' scripts/run_camera_v11_devs_cam01_cam04_calibration_v1.sh
