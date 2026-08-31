@@ -5,7 +5,7 @@ import signal
 
 from .step4_reid_pair_runtime_v1 import ROOT, V11Step4ReIDPairRuntimeV1
 from .step4_reid_same_room_matcher_v1 import SameRoomMatcherConfigV1
-from .step4_reid_same_room_shadow_v1 import V11SameRoomMatcherShadowWorkerV1
+from .step4_reid_same_room_shadow_cached_v2 import V11SameRoomMatcherShadowWorkerCachedV2
 from .step4_reid_scheduler_v1 import ReIDResultV1
 
 
@@ -46,8 +46,8 @@ class V11Step4ReIDSameRoomRuntimeV1(V11Step4ReIDPairRuntimeV1):
         )
 
         # Step 4 live acceptance intentionally validates only the first same-room
-        # pair.  Entrance and Main Rooms remain untouched until their dedicated
-        # later steps.  The matcher implementation itself stays generic.
+        # pair. Entrance and Main Rooms remain untouched until their dedicated
+        # later steps. The matcher implementation itself stays generic.
         match_camera_rooms = {
             camera_id: self.pair_camera_rooms[camera_id]
             for camera_id in ("CAM-01", "CAM-04")
@@ -58,7 +58,7 @@ class V11Step4ReIDSameRoomRuntimeV1(V11Step4ReIDPairRuntimeV1):
         if len(set(match_camera_rooms.values())) != 1:
             raise ValueError("CAM-01 and CAM-04 must belong to the same room")
 
-        self.match_worker = V11SameRoomMatcherShadowWorkerV1(
+        self.match_worker = V11SameRoomMatcherShadowWorkerCachedV2(
             self.reid_gallery.gallery_views,
             match_camera_rooms,
             tsv_path=self.match_tsv_path,
@@ -80,7 +80,7 @@ class V11Step4ReIDSameRoomRuntimeV1(V11Step4ReIDPairRuntimeV1):
             "reciprocal_before_proposal=1 assignment=scipy_linear_sum_assignment_maximize "
             "assignment_eligible_only=1 one_to_one=1 deterministic=1 "
             "worker=one async=1 dirty_slot=latest-only cadence=2.0s camera_queue=0 "
-            "phase_delay=100ms "
+            "phase_delay=100ms evidence_cache=shared-step3-pair-score-v2 "
             "camera_display_block=0 tracker_mutation=0 local_track_id_mutation=0 "
             "global_id=0 room_id=0 face=0 handoff=0 hysteresis=0 identity_state=0",
             flush=True,
