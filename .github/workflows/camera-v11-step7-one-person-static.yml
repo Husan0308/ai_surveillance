@@ -1,0 +1,28 @@
+name: camera-v11-step7-one-person-static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step4-crosscamera-reid-v1-20260828
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile Step7 files
+        run: |
+          python -m py_compile \
+            scripts/check_camera_v11_step7_cam01_cam04_one_person_v1.py \
+            scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py
+          bash -n scripts/run_camera_v11_step7_cam01_cam04_one_person_acceptance_v1.sh
+      - name: Run Step7 checker tests
+        run: python scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py
+      - name: Frozen Step1-3 guard
+        run: python scripts/check_camera_v11_frozen_step123_guard.py
