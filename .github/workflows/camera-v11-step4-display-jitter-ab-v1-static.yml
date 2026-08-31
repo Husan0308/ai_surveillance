@@ -1,0 +1,45 @@
+name: Camera V11 Step4 Display Jitter AB V1 Static
+
+on:
+  push:
+    branches:
+      - rebuild/service-architecture-v11-clean-step4-crosscamera-reid-v1-20260828
+
+jobs:
+  display-jitter-ab-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compile transport A/B
+        run: |
+          python -m py_compile services/camera_v11/step4_display_jitter_ab_v1.py
+          bash -n scripts/run_camera_v11_step4_display_jitter_ab_v1.sh
+          bash -n scripts/run_camera_v11_step4_tracking_reid_v1.sh
+
+      - name: A/B invariants
+        run: |
+          grep -Fq 'class V11Step4DisplayJitterABV1(V11Step1Cam02LowLatV7)' services/camera_v11/step4_display_jitter_ab_v1.py
+          grep -Fq 'V11_STEP4_UDP_CAMERAS", "CAM-01,CAM-03"' services/camera_v11/step4_display_jitter_ab_v1.py
+          grep -Fq '"protocols", 1 if transport == "udp" else 4' services/camera_v11/step4_display_jitter_ab_v1.py
+          grep -Fq '"select-rtp-protocol", 4 if transport == "tcp" else 0' services/camera_v11/step4_display_jitter_ab_v1.py
+          grep -Fq 'V11_LOWLAT_CAMERAS="${V11_LOWLAT_CAMERAS:-CAM-02}"' scripts/run_camera_v11_step4_display_jitter_ab_v1.sh
+          grep -Fq 'DISPLAY_RUNNER="${V11_STEP4_DISPLAY_RUNNER:-$ROOT/scripts/run_camera_v11_step1_v7.sh}"' scripts/run_camera_v11_step4_tracking_reid_v1.sh
+          grep -Fq 'bash "$DISPLAY_RUNNER"' scripts/run_camera_v11_step4_tracking_reid_v1.sh
+
+      - name: Frozen Step3 guard
+        run: |
+          git diff --exit-code d2c9e62f9ed2b5f80dc9a4d496e0fda94afddc51 -- \
+            services/camera_v11/step1_cam02_lowlat_v7.py \
+            services/camera_v11/step1_independent_egl_v4.py \
+            services/camera_v11/step2_production_fp32.py \
+            services/camera_v11/step2_production_fp32_v12.py \
+            services/camera_v11/step2_production_fp32_v13.py \
+            services/camera_v11/step2_production_fp32_v18.py \
+            services/camera_v11/step2_trt86.py \
+            services/camera_v11/step3_tracker_v2.py \
+            services/camera_v11/step3_tracking_v2.py \
+            scripts/run_camera_v11_step3_tracker_v2.sh \
+            scripts/check_camera_v11_step3_tracker_v2_log.py
