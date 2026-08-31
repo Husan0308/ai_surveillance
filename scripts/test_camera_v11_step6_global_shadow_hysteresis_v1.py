@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import unittest
+
+from services.camera_v11.step5_global_shadow_v1 import (
+    CONFIRMED_SHADOW,
+    EXPIRED_SHADOW,
+    GLOBAL_SHADOW_CONFIRM,
+    GLOBAL_SHADOW_CONFLICT,
+    GLOBAL_SHADOW_EXPIRE,
+    GLOBAL_SHADOW_OBSERVE,
+    GlobalShadowEventV1,
+)
+from services.camera_v11.step6_global_shadow_hysteresis_v1 import (
+    CONFLICT_HOLD_SHADOW,
+    EXPIRED_VERIFY_SHADOW,
+    GLOBAL_VERIFY_CONFLICT_PERSISTENT,
+    GLOBAL_VERIFY_HOLD,
+    GLOBAL_VERIFY_PASS,
+    GLOBAL_VERIFY_RECOVER,
+    VERIFIED_SHADOW,
+    VERIFY_PENDING,
+    GlobalShadowHysteresisV1,
+)
+
+
+def event(
+    kind: str,
+    *,
+    shadow_id: str = "GSH-000001",
+    pair: tuple[tuple[str, str], tuple[str, str]] = (
+        ("CAM-01", "CAM-01-T00001"),
+        ("CAM-04", "CAM-04-T00001"),
+    ),
+    state: str = CONFIRMED_SHADOW,
+    score: float = 0.72,
+    timestamp_ns: int = 1,
+) -> GlobalShadowEventV1:
+    (camera_a, track_a), (camera_b, track_b) = pair
+    return GlobalShadowEventV1(
+        timestamp_ns=timestamp_ns,
+        event=kind,
+        shadow_global_id=shadow_id,
+        room="Devs",
+        camera_a=camera_a,
+        track_a=track_a,
+        camera_b=camera_b,
+        track_b=track_b,
+        proposal_count=3,
+        consecutive_count=3,
+        state=state,
+        robust_score=score,
+        status=state,
+    )
+
+
+class Step6GlobalShadowHysteresisTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.machine = GlobalShadowHysteresisV1(
+            verify_clean_observations=3,
+            recover_clean_observations=3,
+            persistent_conflict_observations=3,
+        )
+
+    def confirm(self, shadow_id: str = "GSH-000001") -> None:
+        out = self.machine.observe_step5_event(
+            event(GLOBAL_SHADOW_CONFIRM, shadow_id=shadow_id)
+        )
+        self.assertEqual(1, len(out))
+        self.assertEqual(VERIFY_PENDING, out[0].state)
+
+    def observe(self, shadow_id: str = "GSH-000001", n: int = 1) -> tuple:
+        output = []
+        for index in range(n):
+            output.extend(
+                self.machine.observe_step5_event(
+                    event(
+                        GLOBAL_SHADOW_OBSERVE,
+                        shadow_id=shadow_id,
+                        timestamp_ns=10 + index,
+                    )
+                )
+            )
+        return tuple(output)
+
+    def test_confirm_creates_verify_pending(self) -> None:
+        self.confirm()
+        row = self.machine.records[0]
+        self.assertEqual(VERIFY_PENDING, row.state)
+        self.assertEqual(0, row.clean_observations)
+
+    def test_two_clean_observations_do_not_verify(self) -> None:
+        self.confirm()
+        self.observe(n=2)
+        self.assertEqual(VERIFY_PENDING, self.machine.records[0].state)
+
+    def test_third_clean_observation_verifies(self) -> None:
+        self.confirm()
+        out = self.observe(n=3)
+        self.assertTrue(any(item.event == GLOBAL_VERIFY_PASS for item in out))
+        self.assertEqual(VERIFIED_SHADOW, self.machine.records[0].state)
+
+    def test_conflict_moves_verified_identity_to_hold(self) -> None:
+        self.confirm()
+        self.observe(n=3)
+        out = self.machine.observe_step5_event(
+            event(
+                GLOBAL_SHADOW_CONFLICT,
+                shadow_id="",
+                pair=(
+                    ("CAM-01", "CAM-01-T00001"),
+                    ("CAM-04", "CAM-04-T99999"),
+                ),
+                state="CONFLICT_PENDING",
+            )
+        )
+        self.assertTrue(any(item.event == GLOBAL_VERIFY_HOLD for item in out))
+        self.assertEqual(CONFLICT_HOLD_SHADOW, self.machine.records[0].state)
+        self.assertEqual(0, self.machine.records[0].clean_observations)
+
+    def test_unrelated_conflict_does_not_hold_identity(self) -> None:
+        self.confirm()
+        self.observe(n=3)
+        self.machine.observe_step5_event(
+            event(
+                GLOBAL_SHADOW_CONFLICT,
+                shadow_id="",
+                pair=(
+                    ("CAM-01", "CAM-01-T77777"),
+                    ("CAM-04", "CAM-04-T88888"),
+                ),
+                state="CONFLICT_PENDING",
+            )
+        )
+        self.assertEqual(VERIFIED_SHADOW, self.machine.records[0].state)
+
+    def test_hold_requires_three_clean_observations_to_recover(self) -> None:
+        self.confirm()
+        self.observe(n=3)
+        self.machine.observe_step5_event(
+            event(
+                GLOBAL_SHADOW_CONFLICT,
+                shadow_id="",
+                pair=(
+                    ("CAM-01", "CAM-01-T00001"),
+                    ("CAM-04", "CAM-04-T00002"),
+                ),
+                state="CONFLICT_PENDING",
+            )
+        )
+        self.observe(n=2)
+        self.assertEqual(CONFLICT_HOLD_SHADOW, self.machine.records[0].state)
+        out = self.observe(n=1)
+        self.assertTrue(any(item.event == GLOBAL_VERIFY_RECOVER for item in out))
+        self.assertEqual(VERIFIED_SHADOW, self.machine.records[0].state)
+
+    def test_three_same_conflicts_mark_persistent_without_reassignment(self) -> None:
+        self.confirm()
+        conflict = event(
+            GLOBAL_SHADOW_CONFLICT,
+            shadow_id="",
+            pair=(
+                ("CAM-01", "CAM-01-T00001"),
+                ("CAM-04", "CAM-04-T00002"),
+            ),
+            state="CONFLICT_PENDING",
+        )
+        output = []
+        for _ in range(3):
+            output.extend(self.machine.observe_step5_event(conflict))
+        self.assertTrue(
+            any(item.event == GLOBAL_VERIFY_CONFLICT_PERSISTENT for item in output)
+        )
+        row = self.machine.records[0]
+        self.assertEqual("GSH-000001", row.shadow_global_id)
+        self.assertEqual(CONFLICT_HOLD_SHADOW, row.state)
+
+    def test_different_conflict_pair_resets_conflict_streak(self) -> None:
+        self.confirm()
+        first = event(
+            GLOBAL_SHADOW_CONFLICT,
+            shadow_id="",
+            pair=(
+                ("CAM-01", "CAM-01-T00001"),
+                ("CAM-04", "CAM-04-T00002"),
+            ),
+            state="CONFLICT_PENDING",
+        )
+        second = event(
+            GLOBAL_SHADOW_CONFLICT,
+            shadow_id="",
+            pair=(
+                ("CAM-01", "CAM-01-T00001"),
+                ("CAM-04", "CAM-04-T00003"),
+            ),
+            state="CONFLICT_PENDING",
+        )
+        self.machine.observe_step5_event(first)
+        self.machine.observe_step5_event(first)
+        self.machine.observe_step5_event(second)
+        self.assertEqual(1, self.machine.records[0].conflict_streak)
+
+    def test_expiry_marks_verification_expired(self) -> None:
+        self.confirm()
+        out = self.machine.observe_step5_event(
+            event(
+                GLOBAL_SHADOW_EXPIRE,
+                state=EXPIRED_SHADOW,
+                timestamp_ns=999,
+            )
+        )
+        self.assertEqual(EXPIRED_VERIFY_SHADOW, self.machine.records[0].state)
+        self.assertEqual(1, len(out))
+
+    def test_raw_score_never_controls_verification_threshold(self) -> None:
+        self.machine.observe_step5_event(
+            event(GLOBAL_SHADOW_CONFIRM, score=-1000.0)
+        )
+        for index in range(3):
+            self.machine.observe_step5_event(
+                event(GLOBAL_SHADOW_OBSERVE, score=-1000.0, timestamp_ns=20 + index)
+            )
+        self.assertEqual(VERIFIED_SHADOW, self.machine.records[0].state)
+
+    def test_no_production_identity_mutation_fields_exist(self) -> None:
+        self.confirm()
+        row = self.machine.records[0]
+        self.assertFalse(hasattr(row, "production_global_id"))
+        self.assertFalse(hasattr(row, "room_id"))
+        self.assertFalse(hasattr(row, "tracker_id"))
+
+    def test_snapshot_accounting(self) -> None:
+        self.confirm()
+        self.observe(n=3)
+        snap = self.machine.snapshot()
+        self.assertEqual(1, snap["verify_records_created"])
+        self.assertEqual(1, snap["verify_verified"])
+        self.assertEqual(0, snap["verify_hold"])
+        self.assertLess(float(snap["verify_p95_ms"]), 100.0)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
