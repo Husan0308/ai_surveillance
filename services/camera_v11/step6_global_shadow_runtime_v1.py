@@ -84,6 +84,33 @@ class V11Step6GlobalShadowRuntimeV1(V11Step5GlobalShadowRuntimeV1):
             flush=True,
         )
 
+    def _refresh_native_source_shapes_from_caps(self) -> None:
+        """Record all negotiated native branch sizes without consuming samples.
+
+        The Step4 worker only sees a native sample when a camera has an eligible
+        ReID candidate. Empty/no-eligible cameras therefore used to make the
+        acceptance checker report native_source_shapes<6 even while their native
+        branch was healthy. GstPad current caps are the negotiated stream format,
+        so read width/height from each appsink sink pad instead of depending on a
+        person crop to exist.
+        """
+        for camera_id, sink in self.quality_sinks.items():
+            try:
+                pad = sink.get_static_pad("sink")
+                if pad is None:
+                    continue
+                caps = pad.get_current_caps()
+                if caps is None or caps.is_empty():
+                    continue
+                structure = caps.get_structure(0)
+                width = int(structure.get_value("width"))
+                height = int(structure.get_value("height"))
+                if width > 0 and height > 0:
+                    self.quality_metrics.set_shape(camera_id, width, height)
+            except Exception:
+                # Diagnostic-only metadata refresh must never perturb the hot path.
+                continue
+
     def _print_step6_stats(self) -> None:
         row = self.global_shadow_worker.snapshot()
         print(
@@ -107,10 +134,12 @@ class V11Step6GlobalShadowRuntimeV1(V11Step5GlobalShadowRuntimeV1):
         )
 
     def _print_stats(self) -> None:
+        self._refresh_native_source_shapes_from_caps()
         super()._print_stats()
         self._print_step6_stats()
 
     def _close_global_shadow_worker(self) -> None:
+        self._refresh_native_source_shapes_from_caps()
         was_closed = self.global_shadow_closed
         super()._close_global_shadow_worker()
         if not was_closed:
