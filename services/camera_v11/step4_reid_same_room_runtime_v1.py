@@ -44,9 +44,23 @@ class V11Step4ReIDSameRoomRuntimeV1(V11Step4ReIDPairRuntimeV1):
             if affinity_setting in ("", "off", "none", "disabled")
             else int(affinity_setting)
         )
+
+        # Step 4 live acceptance intentionally validates only the first same-room
+        # pair.  Entrance and Main Rooms remain untouched until their dedicated
+        # later steps.  The matcher implementation itself stays generic.
+        match_camera_rooms = {
+            camera_id: self.pair_camera_rooms[camera_id]
+            for camera_id in ("CAM-01", "CAM-04")
+            if camera_id in self.pair_camera_rooms
+        }
+        if set(match_camera_rooms) != {"CAM-01", "CAM-04"}:
+            raise ValueError("Step4 Devs matcher requires CAM-01 and CAM-04 room metadata")
+        if len(set(match_camera_rooms.values())) != 1:
+            raise ValueError("CAM-01 and CAM-04 must belong to the same room")
+
         self.match_worker = V11SameRoomMatcherShadowWorkerV1(
             self.reid_gallery.gallery_views,
-            self.pair_camera_rooms,
+            match_camera_rooms,
             tsv_path=self.match_tsv_path,
             config=config,
             max_tracks_per_camera=8,
@@ -77,7 +91,7 @@ class V11Step4ReIDSameRoomRuntimeV1(V11Step4ReIDPairRuntimeV1):
             f"matcher_affinity_cpu={affinity_cpu if affinity_cpu is not None else 'off'} "
             "live_threshold_tuning=0 max_tracks_per_camera=8 "
             "rooms=Devs:CAM-01+CAM-04,Entrance:CAM-02+CAM-05,Main_Rooms:CAM-03+CAM-06 "
-            "priority=CAM-01+CAM-04 other_rooms_production=0 "
+            "priority=CAM-01+CAM-04 other_rooms_production=0 active_matcher_pairs=CAM-01+CAM-04 "
             f"tsv={self.match_tsv_path or 'disabled'} raw_embeddings_tsv=0",
             flush=True,
         )
