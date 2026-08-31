@@ -144,18 +144,25 @@ export V11_STEP4_REID_MAX_PENDING="${V11_STEP4_REID_MAX_PENDING:-12}"
 export V11_STEP4_REID_MAX_AGE_MS="${V11_STEP4_REID_MAX_AGE_MS:-300}"
 export V11_STEP4_REID_REFRESH_SEC="${V11_STEP4_REID_REFRESH_SEC:-1.0}"
 export V11_STEP4_REID_MAX_PER_UPDATE="${V11_STEP4_REID_MAX_PER_UPDATE:-2}"
+# Step4 V3 evidence-quality defaults. These do not alter Step3 or global IDs.
+export V11_STEP4_REID_Q_MIN="${V11_STEP4_REID_Q_MIN:-0.34}"
+export V11_STEP4_REID_Q_MIN_BLUR="${V11_STEP4_REID_Q_MIN_BLUR:-18}"
+export V11_STEP4_REID_DIVERSITY_COS="${V11_STEP4_REID_DIVERSITY_COS:-0.975}"
+export V11_STEP4_REID_DIVERSITY_GALLERY="${V11_STEP4_REID_DIVERSITY_GALLERY:-8}"
+export V11_STEP4_REID_DIVERSITY_BOOTSTRAP="${V11_STEP4_REID_DIVERSITY_BOOTSTRAP:-3}"
 
 nvidia-smi \
   --query-gpu=timestamp,pstate,clocks.current.sm,clocks.current.memory,utilization.gpu,utilization.memory,temperature.gpu,power.draw \
   --format=csv,noheader,nounits -lms 500 >"$GPU_LOG" 2>&1 &
 telemetry_pid=$!
 
-"$ROOT/.venv/bin/python" -u -m services.camera_v11.step4_tracking_reid_v2 >"$STEP4_LOG" 2>&1 &
+"$ROOT/.venv/bin/python" -u -m services.camera_v11.step4_tracking_reid_v3 >"$STEP4_LOG" 2>&1 &
 step4_pid=$!
 
 live_ready=0
 for _ in $(seq 1 "${V11_STEP4_LIVE_READY_ATTEMPTS:-900}"); do
   if grep -q '^CAMERA_V11_STEP4_REID ' "$STEP4_LOG" && \
+     grep -q '^CAMERA_V11_STEP4_REID_GATE ' "$STEP4_LOG" && \
      grep -q '^CAMERA_V11_STEP3_V2_TRACKER ' "$STEP4_LOG"; then
     live_ready=1
     break
@@ -165,7 +172,7 @@ for _ in $(seq 1 "${V11_STEP4_LIVE_READY_ATTEMPTS:-900}"); do
 done
 (( live_ready == 1 )) || fail "live_step4_not_ready"
 
-printf 'CAMERA_V11_STEP4_RUNNING display_pid=%s step4_pid=%s telemetry_pid=%s keeper_pid=%s shadow_merge=0\n' \
+printf 'CAMERA_V11_STEP4_RUNNING display_pid=%s step4_pid=%s telemetry_pid=%s keeper_pid=%s shadow_merge=0 quality_gate=1 diversity_gate=1\n' \
   "$display_pid" "$step4_pid" "$telemetry_pid" "$V11_POWERMIZER_KEEPER_PID"
 
 while kill -0 "$display_pid" 2>/dev/null && kill -0 "$step4_pid" 2>/dev/null; do
