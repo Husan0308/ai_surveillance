@@ -38,7 +38,7 @@ jobs:
         run: |
           grep -Fq 'self.reid_scheduler.submit(candidate)' services/camera_v11/step4_tracking_reid_v3.py
           grep -Fq 'eligible[: self.reid_max_per_update]' services/camera_v11/step4_tracking_reid_v3.py
-          grep -Fq 'max_batch=2' services/camera_v11/step4_reid_scheduler_v1.py
+          grep -Fq 'max_batch: int = 2' services/camera_v11/step4_reid_scheduler_v1.py
           grep -Fq 'OrderedDict' services/camera_v11/step4_reid_scheduler_v1.py
           ! grep -Fq 'embed_crops(' services/camera_v11/step4_tracking_reid_v3.py
           ! grep -Fq 'cudaDeviceSynchronize' services/camera_v11/step4_tracking_reid_v3.py
