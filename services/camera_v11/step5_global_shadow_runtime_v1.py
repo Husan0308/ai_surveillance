@@ -39,9 +39,6 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             ),
         )
 
-        # Step4.5: shadow-only same-camera continuity for the Devs pair. This does
-        # not mutate frozen tracker IDs or Step4 matcher rows; it only canonicalizes
-        # MATCH_PROPOSED endpoints before they enter the Step5 state machine.
         self.camera_tracklet_continuity = CameraTrackletContinuityV1(
             self.reid_gallery.gallery_views,
             self._camera_tracklet_active_snapshot,
@@ -61,17 +58,14 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             global_shadow_worker=self.global_shadow_worker,
             camera_tracklet_continuity=self.camera_tracklet_continuity,
         )
-        # Step4 bound the pair-score completion callback to the matcher object that
-        # existed during super().__init__(). Step5 replaces that matcher with the
-        # tapping subclass, so rebind the producer callback to the worker that will
-        # actually be started. Otherwise only close() wakes the new matcher.
         self.pair_worker.set_scores_published_callback(self.match_worker.notify)
         self.global_shadow_closed = False
         print(
             "CAMERA_V11_STEP4_CAMERA_TRACKLET_V1_ARCH "
             "scope=CAM-01+CAM-04 mode=shadow same_camera_reid=1 recent_lost=1 "
-            "simultaneous_stitch=0 reciprocal=1 margin=1 confirm_cycles=2 "
-            "tracker_mutation=0 step4_matcher_mutation=0 production_id_mutation=0",
+            "simultaneous_stitch=0 active_overlap_defer=1 bounded_fallback=1 "
+            "reciprocal=1 margin=1 confirm_cycles=2 tracker_mutation=0 "
+            "step4_matcher_mutation=0 production_id_mutation=0",
             flush=True,
         )
         cfg = self.camera_tracklet_continuity.config
@@ -84,7 +78,8 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             f"min_robust_score={cfg.min_robust_score:.3f} "
             f"min_margin={cfg.min_margin:.3f} "
             f"min_support_ge_065={cfg.min_support_ge_065} "
-            f"confirm_cycles={cfg.confirm_cycles}",
+            f"confirm_cycles={cfg.confirm_cycles} "
+            f"active_overlap_grace_cycles={cfg.active_overlap_grace_cycles}",
             flush=True,
         )
         print(
@@ -92,9 +87,11 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             "mode=shadow input=step4.5_camera_tracklet_MATCH_PROPOSED "
             "reciprocal_required=1 assigned_required=1 "
             "states=PROVISIONAL+CONFIRMED_SHADOW+EXPIRED_SHADOW "
-            "confirm_observations=3 confirm_consecutive=3 different_pair_reuse=0 "
-            "conflict_resolution=0 hysteresis=0 production_global_id=0 room_id=0 "
-            "tracker_mutation=0 face=0 handoff=0 identity_accuracy_proven=0 "
+            "confirm_observations=3 confirm_consecutive=3 "
+            "identity_owner=person track_successor_reuse=1 current_member_per_camera=1 "
+            "historical_aliases=1 same_cycle_overlap_conflict=1 cross_global_merge=0 "
+            "hysteresis=0 production_global_id=0 room_id=0 tracker_mutation=0 "
+            "face=0 handoff=0 identity_accuracy_proven=0 "
             "queue=bounded async=1 matcher_blocking_state_work=0",
             flush=True,
         )
@@ -109,8 +106,6 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
         )
 
     def _camera_tracklet_active_snapshot(self):
-        # Values are immutable frozensets; return a shallow copy so the matcher
-        # thread never iterates a dictionary while the quality thread updates it.
         return {camera: frozenset(tracks) for camera, tracks in self.active_track_ids.items()}
 
     def _print_camera_tracklet_stats(self) -> None:
@@ -121,12 +116,15 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             f"raw_mapped={row['raw_mapped']} "
             f"stitched={row['stitched_total']} "
             f"pending_votes={row['pending_votes']} "
+            f"deferred_allocations={row['deferred_allocations']} "
             f"pending_total={row['pending_total']} "
             f"suppressed={row['suppressed_total']} "
             f"low_score={row['low_score_total']} "
             f"low_margin={row['low_margin_total']} "
             f"nonreciprocal={row['nonreciprocal_total']} "
             f"overlap_reject={row['overlap_reject_total']} "
+            f"active_overlap_deferred={row['active_overlap_deferred_total']} "
+            f"active_overlap_fallback={row['active_overlap_fallback_allocated_total']} "
             f"insufficient={row['insufficient_total']} "
             f"refresh_p50={row['refresh_p50_ms']:.3f}ms "
             f"refresh_p95={row['refresh_p95_ms']:.3f}ms",
