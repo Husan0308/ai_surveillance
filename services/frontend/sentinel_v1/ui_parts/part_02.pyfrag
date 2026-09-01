@@ -1,0 +1,300 @@
+
+    def paintEvent(self, _):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        area = self.rect().adjusted(44, 16, -16, -28); maxv = max([1] + [v for _, vals, _ in self.series for v in vals])
+        p.setFont(QFont("DejaVu Sans Mono", 7));
+        for i in range(5):
+            y = area.bottom() - i*area.height()/4; p.setPen(QColor(C['border'])); p.drawLine(area.left(), int(y), area.right(), int(y))
+            p.setPen(QColor(C['muted'])); p.drawText(2, int(y-8), 36, 16, Qt.AlignRight|Qt.AlignVCenter, str(round(maxv*i/4)))
+        count = max(1, len(self.labels)); group = area.width()/count; bw = min(16, group/(len(self.series)+1))
+        for j, text in enumerate(self.labels):
+            p.setPen(QColor(C['muted'])); p.drawText(QRectF(area.left()+j*group, area.bottom()+5, group, 18), Qt.AlignCenter, text)
+            for k, (_, vals, color) in enumerate(self.series):
+                h = vals[j]/maxv*area.height(); x = area.left()+j*group+(group-len(self.series)*bw)/2+k*bw
+                p.fillRect(QRectF(x, area.bottom()-h, bw-3, h), QColor(color))
+
+
+def panel_layout(panel: Panel, margins=(16, 15, 16, 15), spacing=8):
+    lay = QVBoxLayout(panel); lay.setContentsMargins(*margins); lay.setSpacing(spacing); return lay
+
+
+def make_button(text: str, role: str = "") -> QPushButton:
+    b = QPushButton(text)
+    if role: b.setObjectName(role)
+    b.setCursor(Qt.PointingHandCursor)
+    return b
+
+
+def masked_rtsp(value: str) -> str:
+    """Hide credentials when a user pasted them directly into an RTSP URL."""
+    scheme_end = value.find("://")
+    credential_end = value.find("@", scheme_end + 3)
+    if scheme_end >= 0 and credential_end > scheme_end:
+        return f"{value[:scheme_end + 3]}••••@{value[credential_end + 1:]}"
+    return value
+
+
+def next_person_id() -> str:
+    numbers = [int(person.id[2:]) for person in PEOPLE if person.id.startswith("P-") and person.id[2:].isdigit()]
+    return f"P-{max(numbers, default=999) + 1}"
+
+
+def active_duration_text(entered_at: datetime | None) -> str:
+    if entered_at is None:
+        return "Hisoblanmaydi"
+    seconds = max(0, int((datetime.now().astimezone() - entered_at.astimezone()).total_seconds()))
+    days, seconds = divmod(seconds, 86_400)
+    hours, seconds = divmod(seconds, 3_600)
+    minutes, seconds = divmod(seconds, 60)
+    clock = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{days} kun · {clock}" if days else clock
+
+
+def arrival_time_text(person: Person) -> str:
+    if not person.in_building or person.entered_at is None:
+        return "—"
+    return person.entered_at.astimezone().strftime("%d.%m.%Y · %H:%M:%S")
+
+
+class FullscreenCameraGrid(QDialog):
+    def __init__(self, people, heatmap_enabled=False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sentinel VMS · Cameras")
+        self.setStyleSheet(APP_QSS)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        controls_panel = Panel()
+        controls = QHBoxLayout(controls_panel)
+        controls.setContentsMargins(14, 9, 10, 9)
+        controls.setSpacing(10)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(1)
+        title_box.addWidget(label("LIVE CAMERA GRID", "eyebrow", C["primary"]))
+        title_box.addWidget(label("Barcha kameralar · real-time kuzatuv", "muted"))
+        controls.addLayout(title_box)
+        controls.addStretch()
+
+        inside = [person for person in people if person.in_building]
+        known = sum(person.known for person in inside)
+        unknown = len(inside) - known
+        online = sum(camera.online for camera in CAMERAS)
+        for text, tone in [
+            (f"TOTAL  {len(inside)}", C["primary"]),
+            (f"KNOWN  {known}", C["known"]),
+            (f"UNKNOWN  {unknown}", C["unknown"]),
+            (f"ONLINE  {online}/{len(CAMERAS)}", C["blue"]),
+        ]:
+            badge = label(text)
+            badge.setStyleSheet(
+                f"color:{tone};background:{C['panel2']};border:1px solid {C['border']};"
+                "padding:6px 9px;border-radius:4px;font:9px 'DejaVu Sans Mono';font-weight:700;"
+            )
+            controls.addWidget(badge)
+        self.clock = label("", "mono")
+        self.clock.setMinimumWidth(72)
+        self.clock.setAlignment(Qt.AlignCenter)
+        controls.addWidget(self.clock)
+        close_button = make_button("✕  Fullscreen'dan chiqish")
+        close_button.clicked.connect(self.close)
+        controls.addWidget(close_button)
+        layout.addWidget(controls_panel)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        for index, camera in enumerate(CAMERAS):
+            count = len([person for person in inside if person.room_id == camera.room_id])
+            view = CameraView(
+                camera,
+                people,
+                show_room=True,
+                occupancy=count,
+                display_name=f"CAM-{index + 1:02d}  ·  {camera.name}",
+                heatmap_enabled=heatmap_enabled,
+            )
+            grid.addWidget(view, index // 2, index % 2)
+        for column in range(2):
+            grid.setColumnStretch(column, 1)
+        for row in range(max(1, (len(CAMERAS) + 1) // 2)):
+            grid.setRowStretch(row, 1)
+
+        workspace = QHBoxLayout()
+        workspace.setSpacing(8)
+        workspace.addLayout(grid, 3)
+        activity_panel = Panel()
+        activity_panel.setMinimumWidth(320)
+        activity_layout = panel_layout(activity_panel, (12, 12, 12, 12), 0)
+        activity_head = QHBoxLayout()
+        activity_title = QVBoxLayout()
+        activity_title.setSpacing(2)
+        activity_title.addWidget(label("Kirish / Chiqish", "sectionTitle"))
+        entry_count = sum(event.type == "entry" for event in EVENTS)
+        exit_count = sum(event.type == "exit" for event in EVENTS)
+        activity_title.addWidget(label(f"{entry_count} kirish · {exit_count} chiqish", "muted"))
+        activity_head.addLayout(activity_title)
+        activity_head.addStretch()
+        activity_head.addWidget(label("LIVE", "eyebrow", C["primary"]))
+        activity_layout.addLayout(activity_head)
+        activity_layout.addSpacing(7)
+        people_by_id = {person.id: person for person in people}
+        for event in EVENTS[:6]:
+            activity_layout.addWidget(self.activity_item(event, people_by_id.get(event.person_id)))
+        activity_layout.addStretch()
+        workspace.addWidget(activity_panel, 1)
+        layout.addLayout(workspace, 1)
+        self.clock_timer = QTimer(self)
+        self.clock_timer.setInterval(1000)
+        self.clock_timer.timeout.connect(self.update_clock)
+        self.clock_timer.start()
+        self.update_clock()
+
+    def activity_item(self, event, person):
+        known = bool(person and person.known)
+        tone = C["known"] if known else C["unknown"]
+        item = QFrame()
+        item.setObjectName("fullscreenEvent")
+        item.setStyleSheet(f"QFrame#fullscreenEvent{{border-bottom:1px solid {C['border']};background:transparent;}}")
+        item.setMinimumHeight(70)
+        row = QHBoxLayout(item)
+        row.setContentsMargins(0, 4, 0, 5)
+        row.setSpacing(8)
+        snapshot = EventSnapshot(event, person, size=QSize(96, 54))
+        snapshot.clicked.connect(lambda current=event, identity=person: self.open_snapshot(current, identity))
+        row.addWidget(snapshot)
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        name = person.label if known else "Unknown shaxs"
+        name_label = label(name, "sectionTitle", tone)
+        name_label.setMaximumWidth(165)
+        info.addWidget(name_label)
+        action = "KIRDI" if event.type == "entry" else "CHIQDI"
+        info.addWidget(label(f"{action} · {event.at.astimezone().strftime('%H:%M:%S')}", "mono"))
+        camera_label = label(camera_name(event.camera_id), "muted")
+        camera_label.setMaximumWidth(165)
+        info.addWidget(camera_label)
+        row.addLayout(info, 1)
+        return item
+
+    def open_snapshot(self, event, person):
+        EventSnapshotDialog(event, person, self).exec()
+
+    def update_clock(self):
+        self.clock.setText(datetime.now().astimezone().strftime("%H:%M:%S"))
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Escape, Qt.Key_F11):
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+
+class MonitoringPage(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("pageRoot")
+        self.heatmap_enabled = False
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(22, 10, 22, 12)
+        self.layout.setSpacing(14)
+        inside = [p for p in PEOPLE if p.in_building]
+        known = len([p for p in inside if p.known])
+        unknown = len(inside) - known
+
+        self.camera_grid = QGridLayout()
+        self.camera_grid.setContentsMargins(0, 0, 0, 0)
+        self.camera_grid.setHorizontalSpacing(10)
+        self.camera_grid.setVerticalSpacing(10)
+        self.camera_views = []
+        self.layout.addLayout(self.camera_grid, 3)
+
+        right_column = QVBoxLayout()
+        right_column.setSpacing(10)
+        summary_panel = Panel()
+        summary_panel.setMinimumWidth(320)
+        summary_panel.setFixedHeight(146)
+        summary_layout = panel_layout(summary_panel, (14, 11, 14, 12), 7)
+        summary_top = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        title_box.addWidget(label("PEOPLE INSIDE", "eyebrow", C["primary"]))
+        title_box.addWidget(label("Hozir binodagi odamlar", "muted"))
+        summary_top.addLayout(title_box)
+        summary_top.addStretch()
+        self.total_people_value = label(str(len(inside)), "metric", C["primary"])
+        summary_top.addWidget(self.total_people_value)
+        summary_layout.addLayout(summary_top)
+
+        identity_metrics = QHBoxLayout()
+        identity_metrics.setSpacing(8)
+        self.known_people_value = None
+        self.unknown_people_value = None
+        for heading_text, value, tone in [
+            ("KNOWN", known, C["known"]),
+            ("UNKNOWN", unknown, C["unknown"]),
+        ]:
+            metric = QFrame()
+            metric.setObjectName("identityMetric")
+            metric.setStyleSheet(
+                f"QFrame#identityMetric{{background:{C['panel2']};border:1px solid {C['border']};border-radius:5px;}}"
+            )
+            metric_layout = QHBoxLayout(metric)
+            metric_layout.setContentsMargins(10, 7, 10, 7)
+            metric_layout.addWidget(label(heading_text, "eyebrow"))
+            metric_layout.addStretch()
+            value_label = label(str(value), "sectionTitle", tone)
+            metric_layout.addWidget(value_label)
+            if heading_text == "KNOWN":
+                self.known_people_value = value_label
+            else:
+                self.unknown_people_value = value_label
+            identity_metrics.addWidget(metric, 1)
+        summary_layout.addLayout(identity_metrics)
+        right_column.addWidget(summary_panel)
+
+        recent_panel = Panel()
+        recent_panel.setMinimumWidth(320)
+        recent_layout = panel_layout(recent_panel, (12, 12, 12, 12), 0)
+        recent_head = QHBoxLayout()
+        heading = QVBoxLayout()
+        heading.setSpacing(2)
+        heading.addWidget(label("Recent Entries", "sectionTitle"))
+        heading.addWidget(label("Kirish paytidagi bbox kadrlar", "muted"))
+        recent_head.addLayout(heading)
+        recent_head.addStretch()
+        entry_events = [event for event in EVENTS if event.type == "entry"]
+        recent_head.addWidget(label(f"{len(entry_events)} entry", "mono"))
+        recent_layout.addLayout(recent_head)
+        recent_layout.addSpacing(7)
+        self.recent_entries = QVBoxLayout()
+        self.recent_entries.setSpacing(5)
+        recent_layout.addLayout(self.recent_entries)
+        recent_layout.addStretch()
+        right_column.addWidget(recent_panel, 1)
+        self.layout.addLayout(right_column, 1)
+        self.refresh_cameras()
+        self.refresh_recent_entries()
+
+    def refresh_cameras(self):
+        clear_layout(self.camera_grid)
+        self.camera_views = []
+        inside = [person for person in PEOPLE if person.in_building]
+        known_count = sum(person.known for person in inside)
+        self.total_people_value.setText(str(len(inside)))
+        self.known_people_value.setText(str(known_count))
+        self.unknown_people_value.setText(str(len(inside) - known_count))
+        if not CAMERAS:
+            empty = Panel()
+            empty_layout = panel_layout(empty)
+            message = label("Kamera qo'shilmagan", "title")
+            message.setAlignment(Qt.AlignCenter)
+            hint = label("Settings bo'limidan birinchi kamerani qo'shing.", "muted")
+            hint.setAlignment(Qt.AlignCenter)
+            empty_layout.addStretch()
+            empty_layout.addWidget(message)
+            empty_layout.addWidget(hint)
+            empty_layout.addStretch()
+            self.camera_grid.addWidget(empty, 0, 0, 1, 2)
+            return
+
+        for index, camera in enumerate(CAMERAS):
+            occupancy = len([person for person in inside if person.room_id == camera.room_id])
