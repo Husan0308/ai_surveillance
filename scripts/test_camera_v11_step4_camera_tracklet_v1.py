@@ -21,7 +21,6 @@ from services.camera_v11.step4_reid_same_room_matcher_v1 import (
     SameRoomPairDiagnosticV1,
 )
 
-
 NS = 1_000_000_000
 
 
@@ -117,6 +116,7 @@ class CameraTrackletContinuityTests(unittest.TestCase):
                 min_margin=0.05,
                 min_support_ge_065=3,
                 confirm_cycles=2,
+                active_overlap_grace_cycles=3,
             ),
         )
 
@@ -138,7 +138,6 @@ class CameraTrackletContinuityTests(unittest.TestCase):
         self.resolver.refresh(1, 2 * NS)
         stable = self.resolver.canonical_track_id("CAM-01", "T1")
         self.assertIsNotNone(stable)
-
         new = view("CAM-01", "T2", 2 * NS, mixed(0, 1))
         self.views = [old, new]
         self.active["CAM-01"] = frozenset({"T2"})
@@ -148,29 +147,51 @@ class CameraTrackletContinuityTests(unittest.TestCase):
         self.assertEqual(self.resolver.canonical_track_id("CAM-01", "T2"), stable)
         self.assertEqual(self.resolver.snapshot()["stitched_total"], 1)
 
-    def test_simultaneously_visible_tracks_never_stitch(self) -> None:
+    def test_active_predecessor_race_is_deferred_then_stitched(self) -> None:
         old = view("CAM-01", "T1", 1 * NS, unit(3))
         self.views = [old]
         self.active["CAM-01"] = frozenset({"T1"})
         self.resolver.refresh(1, 2 * NS)
         first = self.resolver.canonical_track_id("CAM-01", "T1")
+        new = view("CAM-01", "T2", 1 * NS + 400_000_000, unit(3))
+        self.views = [old, new]
+        self.active["CAM-01"] = frozenset({"T1", "T2"})
+        self.resolver.refresh(2, 2 * NS + 400_000_000)
+        self.assertIsNone(self.resolver.canonical_track_id("CAM-01", "T2"))
+        self.active["CAM-01"] = frozenset({"T2"})
+        self.resolver.refresh(3, 3 * NS)
+        self.assertIsNone(self.resolver.canonical_track_id("CAM-01", "T2"))
+        self.resolver.refresh(4, 4 * NS)
+        self.assertEqual(self.resolver.canonical_track_id("CAM-01", "T2"), first)
+        self.assertEqual(self.resolver.snapshot()["stitched_total"], 1)
 
+    def test_simultaneously_visible_tracks_never_stitch_and_allocate_after_grace(self) -> None:
+        old = view("CAM-01", "T1", 1 * NS, unit(3))
+        self.views = [old]
+        self.active["CAM-01"] = frozenset({"T1"})
+        self.resolver.refresh(1, 2 * NS)
+        first = self.resolver.canonical_track_id("CAM-01", "T1")
         new = view("CAM-01", "T2", 1 * NS + 300_000_000, unit(3))
         self.views = [old, new]
         self.active["CAM-01"] = frozenset({"T1", "T2"})
-        self.resolver.refresh(2, 2 * NS + 300_000_000)
+        for cycle in (2, 3, 4):
+            self.resolver.refresh(cycle, cycle * NS)
+            self.assertIsNone(self.resolver.canonical_track_id("CAM-01", "T2"))
+        self.resolver.refresh(5, 5 * NS)
         second = self.resolver.canonical_track_id("CAM-01", "T2")
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
         self.assertNotEqual(first, second)
         self.assertEqual(self.resolver.snapshot()["stitched_total"], 0)
+        self.assertEqual(
+            self.resolver.snapshot()["active_overlap_fallback_allocated_total"], 1
+        )
 
     def test_weak_recent_successor_stays_unresolved(self) -> None:
         old = view("CAM-01", "T1", 1 * NS, unit(4))
         self.views = [old]
         self.active["CAM-01"] = frozenset({"T1"})
         self.resolver.refresh(1, 2 * NS)
-
         new = view("CAM-01", "T2", 2 * NS, unit(5))
         self.views = [old, new]
         self.active["CAM-01"] = frozenset({"T2"})
