@@ -45,6 +45,8 @@ fi
 git cat-file -e "${FROZEN_STEP2_SHA}^{commit}" 2>/dev/null || fail "frozen_step2_sha_missing_locally"
 git merge-base --is-ancestor "$FROZEN_STEP2_SHA" HEAD || fail "branch_not_based_on_frozen_step2"
 
+# Keep the accepted Step3 launcher's frozen Step1/Step2 contract. Step3 files are
+# intentionally newer than FROZEN_STEP2_SHA, so they must not be compared to it.
 git diff --quiet "$FROZEN_STEP2_SHA" -- \
   services/camera_v11/step1_cam02_lowlat_v7.py \
   services/camera_v11/step1_independent_egl_v4.py \
@@ -53,8 +55,6 @@ git diff --quiet "$FROZEN_STEP2_SHA" -- \
   services/camera_v11/step2_production_fp32_v13.py \
   services/camera_v11/step2_production_fp32_v18.py \
   services/camera_v11/step2_trt86.py \
-  services/camera_v11/step3_tracker_v2.py \
-  services/camera_v11/step3_tracking_v2.py \
   scripts/yolo26_trt86_step2_worker.py \
   scripts/run_camera_v11_step1_v7.sh \
   scripts/camera_v11_powermizer_keeper_v25.sh \
