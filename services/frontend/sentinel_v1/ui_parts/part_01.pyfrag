@@ -1,0 +1,220 @@
+        scaled = self.live_image.scaled(rect.size().toSize(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if scaled.isNull():
+            return False
+        painter.fillRect(rect, QColor("#05080b"))
+        x = rect.left() + (rect.width() - scaled.width()) / 2.0
+        y = rect.top() + (rect.height() - scaled.height()) / 2.0
+        painter.drawImage(QRectF(x, y, scaled.width(), scaled.height()), scaled)
+        return True
+
+    def sizeHint(self):
+        return QSize(380, 214)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, _):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        p.setPen(QPen(QColor(C['border']), 1)); p.setBrush(QColor(C['panel'])); p.drawRoundedRect(rect, 6, 6)
+        p.save(); p.setClipRect(rect)
+        live_drawn = bool(self.realtime_camera_id) and self._draw_live_frame(p, rect)
+        if not live_drawn:
+            radial = QRadialGradient(rect.center(), max(rect.width(), rect.height()) * .65)
+            radial.setColorAt(0, QColor("#27323e")); radial.setColorAt(1, QColor("#0c1218"))
+            p.fillRect(rect, radial)
+            p.setPen(QPen(QColor(255,255,255,8), 1))
+            for y in range(4, self.height(), 4): p.drawLine(0, y, self.width(), y)
+        if self.camera.online and not self.realtime_camera_id:
+            occupants = [x for x in self.people if x.in_building and x.room_id == self.camera.room_id and self.camera.id in x.cameras][:4]
+            if self.heatmap_enabled:
+                for i, person in enumerate(occupants):
+                    seed = (person.hue + i * 37) % 100
+                    x = (8 + (seed * 7) % 62) / 100 * rect.width()
+                    y = (14 + (seed * 3) % 46) / 100 * rect.height()
+                    w = (16 + seed % 8) / 100 * rect.width()
+                    h = (30 + seed % 12) / 100 * rect.height()
+                    center = QRectF(x, y, w, h).center()
+                    radius = max(55.0, min(rect.width(), rect.height()) * .24)
+                    heat = QRadialGradient(center, radius)
+                    heat.setColorAt(0.0, QColor(240, 65, 55, 185))
+                    heat.setColorAt(0.28, QColor(255, 150, 30, 145))
+                    heat.setColorAt(0.58, QColor(255, 225, 55, 80))
+                    heat.setColorAt(1.0, QColor(255, 225, 55, 0))
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(heat)
+                    p.drawEllipse(QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2))
+            for i, person in enumerate(occupants):
+                seed = (person.hue + i * 37) % 100
+                x = (8 + (seed * 7) % 62) / 100 * rect.width(); y = (14 + (seed * 3) % 46) / 100 * rect.height()
+                w = (16 + seed % 8) / 100 * rect.width(); h = (30 + seed % 12) / 100 * rect.height()
+                tone = QColor(C['known'] if person.known else C['unknown'])
+                p.setPen(QPen(tone, 2)); p.setBrush(Qt.NoBrush); p.drawRect(QRectF(x, y, w, h))
+                fm = p.fontMetrics(); tw = fm.horizontalAdvance(person.label) + 8
+                p.fillRect(QRectF(x, max(28, y-18), tw, 17), tone)
+                p.setPen(QColor(C['bg'])); p.setFont(QFont("DejaVu Sans Mono", 7)); p.drawText(QRectF(x+4, max(28, y-18), tw, 17), Qt.AlignVCenter, person.label)
+        connecting = (
+            self.camera.enabled
+            and not self.camera.online
+            and self.camera.last_error == "Ulanish kutilmoqda"
+        )
+        if not self.camera.online:
+            p.fillRect(rect, QColor(9,13,18,190)); p.setPen(QColor(C['offline'])); p.setFont(QFont("DejaVu Sans Mono", 10, QFont.Bold))
+            status_tone = C['blue'] if connecting else C['offline']
+            p.setPen(QColor(status_tone))
+            p.drawText(
+                QRectF(0, rect.height()/2-28, rect.width(), 20),
+                Qt.AlignCenter,
+                "◌  ULANMOQDA" if connecting else "▱  OFFLINE",
+            )
+            p.setPen(QColor(C['muted'])); p.setFont(QFont("DejaVu Sans", 8)); p.drawText(QRectF(30, rect.height()/2, rect.width()-60, 35), Qt.AlignHCenter|Qt.TextWordWrap, self.camera.last_error or "")
+        p.setFont(QFont("DejaVu Sans", 9, QFont.Bold)); p.setPen(QColor(C['text']))
+        camera_title = (
+            f"{self.realtime_camera_id}  ·  {self.camera.name}"
+            if self.realtime_camera_id
+            else (self.display_name or self.camera.name)
+        )
+        title_width = max(60, self.width() - 105)
+        camera_title = p.fontMetrics().elidedText(camera_title, Qt.ElideRight, title_width)
+        p.drawText(QRectF(12, 7, title_width, 20), Qt.AlignVCenter | Qt.AlignLeft, camera_title)
+        if self.show_room:
+            p.setFont(QFont("DejaVu Sans Mono", 7)); p.setPen(QColor(C['muted'])); p.drawText(12, 38, room_name(self.camera.room_id))
+        dot = QColor(C['known'] if self.camera.online else (C['blue'] if connecting else C['offline'])); p.setPen(Qt.NoPen); p.setBrush(dot); p.drawEllipse(self.width()-77, 13, 7, 7)
+        p.setPen(QColor(C['muted'])); p.drawText(self.width()-65, 21, f"{self.camera.fps:.1f} fps" if self.camera.online else ("kutish" if connecting else "0.0 fps"))
+        occupancy_value = self.live_object_count if self.realtime_camera_id else self.occupancy
+        if occupancy_value is not None:
+            badge = QRectF(10, self.height() - 31, 54, 21)
+            p.setPen(QPen(QColor(C['border']), 1))
+            p.setBrush(QColor(8, 14, 20, 220))
+            p.drawRoundedRect(badge, 5, 5)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(C['primary']))
+            p.drawEllipse(QRectF(17, self.height() - 25, 6, 6))
+            p.drawRoundedRect(QRectF(15, self.height() - 18, 10, 5), 2, 2)
+            p.setPen(QColor(C['text']))
+            p.setFont(QFont("DejaVu Sans Mono", 8, QFont.Bold))
+            p.drawText(QRectF(29, self.height() - 31, 28, 21), Qt.AlignVCenter, str(occupancy_value))
+        p.restore()
+
+    def closeEvent(self, event):
+        if self.live_reader is not None:
+            self.live_reader.close()
+        super().closeEvent(event)
+
+
+class EventSnapshot(QWidget):
+    clicked = Signal()
+
+    def __init__(self, event, person=None, expanded=False, size=None, parent=None):
+        super().__init__(parent)
+        self.event_data = event
+        self.person = person
+        self.expanded = expanded
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Rasmni katta ko'rish")
+        if expanded:
+            self.setMinimumSize(720, 405)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        else:
+            self.setFixedSize(size or QSize(152, 86))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        frame = QRectF(self.rect().adjusted(1, 1, -1, -1))
+        clip = QPainterPath()
+        clip.addRoundedRect(frame, 6, 6)
+        painter.save()
+        painter.setClipPath(clip)
+
+        snapshot = QPixmap(self.event_data.snapshot_path) if self.event_data.snapshot_path else QPixmap()
+        if not snapshot.isNull():
+            scaled = snapshot.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            source_x = max(0, (scaled.width() - self.width()) // 2)
+            source_y = max(0, (scaled.height() - self.height()) // 2)
+            painter.drawPixmap(self.rect(), scaled, QRect(source_x, source_y, self.width(), self.height()))
+        else:
+            gradient = QRadialGradient(frame.width() * .52, frame.height() * .34, frame.width() * .8)
+            gradient.setColorAt(0, QColor("#34414d"))
+            gradient.setColorAt(1, QColor("#0b1117"))
+            painter.fillRect(frame, gradient)
+            painter.setPen(QPen(QColor(255, 255, 255, 12), 1))
+            for y in range(4, self.height(), 5):
+                painter.drawLine(0, y, self.width(), y)
+            painter.setPen(QPen(QColor(255, 255, 255, 18), 1))
+            painter.drawLine(0, int(self.height() * .76), self.width(), int(self.height() * .76))
+
+        x, y, width, height = self.event_data.bbox
+        bbox = QRectF(
+            frame.left() + x * frame.width(),
+            frame.top() + y * frame.height(),
+            width * frame.width(),
+            height * frame.height(),
+        )
+        known = bool(self.person and self.person.known)
+        tone = QColor(C["known"] if known else C["unknown"])
+
+        if snapshot.isNull():
+            silhouette = QColor(174, 185, 194, 115)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(silhouette)
+            head_size = min(bbox.width() * .45, bbox.height() * .22)
+            painter.drawEllipse(QRectF(bbox.center().x() - head_size / 2, bbox.top() + bbox.height() * .08, head_size, head_size))
+            body = QRectF(bbox.left() + bbox.width() * .2, bbox.top() + bbox.height() * .31, bbox.width() * .6, bbox.height() * .58)
+            painter.drawRoundedRect(body, body.width() * .22, body.width() * .22)
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(tone, 2 if not self.expanded else 3))
+        painter.drawRect(bbox)
+
+        identity = self.person.label if known else "UNKNOWN"
+        font_size = 7 if not self.expanded else 11
+        painter.setFont(QFont("DejaVu Sans Mono", font_size, QFont.Bold))
+        text_width = painter.fontMetrics().horizontalAdvance(identity) + (8 if not self.expanded else 14)
+        tag_height = 16 if not self.expanded else 25
+        tag_y = max(frame.top() + 4, bbox.top() - tag_height)
+        tag = QRectF(bbox.left(), tag_y, min(text_width, frame.right() - bbox.left()), tag_height)
+        painter.fillRect(tag, tone)
+        painter.setPen(QColor(C["bg"]))
+        painter.drawText(tag.adjusted(4, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft, identity)
+
+        painter.setFont(QFont("DejaVu Sans Mono", 7 if not self.expanded else 9))
+        painter.setPen(QColor(235, 241, 246, 205))
+        painter.drawText(7, self.height() - 8, self.event_data.at.astimezone().strftime("%H:%M:%S"))
+        if self.expanded:
+            painter.drawText(
+                QRectF(8, 8, self.width() - 16, 20),
+                Qt.AlignRight | Qt.AlignVCenter,
+                camera_name(self.event_data.camera_id),
+            )
+        else:
+            painter.drawText(QRectF(0, 0, self.width() - 7, self.height() - 6), Qt.AlignRight | Qt.AlignBottom, "⛶")
+        painter.restore()
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(C["border"]), 1))
+        painter.drawRoundedRect(frame, 6, 6)
+
+
+class EventSnapshotDialog(QDialog):
+    def __init__(self, event, person=None, parent=None):
+        super().__init__(parent)
+        known = bool(person and person.known)
+        identity = person.label if known else "Unknown shaxs"
+        self.setWindowTitle(f"Kamera snapshot · {identity}")
+        self.resize(1000, 640)
+        self.setMinimumSize(820, 520)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        header = QHBoxLayout()
+        heading = QVBoxLayout()
+        heading.addWidget(label(identity, "title"))
