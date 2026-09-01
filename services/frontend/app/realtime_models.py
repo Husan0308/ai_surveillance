@@ -35,6 +35,20 @@ class CameraMetadata:
     tracks: tuple[TrackRow, ...] = field(default_factory=tuple)
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+
+
 def parse_camera_rows(payload: dict[str, Any]) -> list[CameraRow]:
     raw = payload.get("cameras", [])
     if not isinstance(raw, list):
@@ -52,11 +66,14 @@ def parse_camera_rows(payload: dict[str, Any]) -> list[CameraRow]:
             CameraRow(
                 camera_id=camera_id,
                 online=bool(item.get("online", False)),
-                fps=float(item.get("fps") or 0.0),
-                width=max(1, int(item.get("width") or 1)),
-                height=max(1, int(item.get("height") or 1)),
+                fps=max(0.0, _safe_float(item.get("fps"))),
+                width=max(1, _safe_int(item.get("width"), 1)),
+                height=max(1, _safe_int(item.get("height"), 1)),
                 last_error=str(item.get("last_error") or ""),
-                stream_url=str(item.get("stream_url") or f"/api/v1/cameras/{camera_id}/stream.mjpg"),
+                stream_url=str(
+                    item.get("stream_url")
+                    or f"/api/v1/cameras/{camera_id}/stream.mjpg"
+                ),
             )
         )
     return out
@@ -68,6 +85,7 @@ def parse_track_message(payload: dict[str, Any]) -> tuple[str, CameraMetadata] |
     camera_id = str(payload.get("camera_id", "")).strip()
     if not camera_id:
         return None
+
     tracks: list[TrackRow] = []
     raw_tracks = payload.get("tracks", [])
     if isinstance(raw_tracks, list):
@@ -79,7 +97,7 @@ def parse_track_message(payload: dict[str, Any]) -> tuple[str, CameraMetadata] |
                 continue
             try:
                 values = tuple(float(v) for v in bbox)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
             if values[2] <= values[0] or values[3] <= values[1]:
                 continue
@@ -87,17 +105,18 @@ def parse_track_message(payload: dict[str, Any]) -> tuple[str, CameraMetadata] |
                 TrackRow(
                     track_id=str(item.get("track_id", "")).strip() or "T-?",
                     state=str(item.get("state", "tracked")),
-                    confidence=float(item.get("confidence") or 0.0),
+                    confidence=max(0.0, min(1.0, _safe_float(item.get("confidence")))),
                     bbox_xyxy=values,
                 )
             )
+
     meta = CameraMetadata(
-        frame_seq=max(0, int(payload.get("frame_seq") or 0)),
-        timestamp_ns=max(0, int(payload.get("timestamp_ns") or 0)),
-        source_width=max(1, int(payload.get("source_width") or 1)),
-        source_height=max(1, int(payload.get("source_height") or 1)),
+        frame_seq=max(0, _safe_int(payload.get("frame_seq"))),
+        timestamp_ns=max(0, _safe_int(payload.get("timestamp_ns"))),
+        source_width=max(1, _safe_int(payload.get("source_width"), 1)),
+        source_height=max(1, _safe_int(payload.get("source_height"), 1)),
         online=bool(payload.get("online", False)),
-        fps=float(payload.get("fps") or 0.0),
+        fps=max(0.0, _safe_float(payload.get("fps"))),
         last_error=str(payload.get("last_error") or ""),
         tracks=tuple(tracks),
     )
