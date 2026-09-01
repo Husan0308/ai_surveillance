@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+
+# When this file is executed directly with
+#   python scripts/test_camera_v11_bbox_overlay_v1.py
+# Python places the scripts/ directory at sys.path[0], not the repository root.
+# Add the repo root explicitly so project packages such as services.* resolve
+# without requiring callers to set PYTHONPATH manually.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from services.camera_v11.bbox_overlay_ipc_v1 import (
     BboxStateReader,
