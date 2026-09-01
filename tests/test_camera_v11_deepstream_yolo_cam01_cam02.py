@@ -142,6 +142,29 @@ def test_checker_accepts_stable_two_camera_log(tmp_path: Path) -> None:
     assert "RESULT=PASS" in result.stdout
 
 
+def test_checker_accepts_one_transient_14_8fps_bucket(tmp_path: Path) -> None:
+    body = ARCH + THREAD + START
+    cam02_render = [16.4, 16.4, 16.4, 16.4, 14.8]
+    for value in cam02_render:
+        body += stat("CAM-01", render_fps=18.4, render_gap_p95_ms=101.2)
+        body += stat("CAM-02", render_fps=value, render_gap_p95_ms=140.3)
+    result = run_checker(tmp_path, body)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "render_min=14.80" in result.stdout
+    assert "render_median=16.40" in result.stdout
+
+
+def test_checker_rejects_sustained_low_render_fps(tmp_path: Path) -> None:
+    body = ARCH + THREAD + START
+    cam02_render = [16.4, 16.4, 14.8, 14.6, 14.7]
+    for value in cam02_render:
+        body += stat("CAM-01")
+        body += stat("CAM-02", render_fps=value)
+    result = run_checker(tmp_path, body)
+    assert result.returncode == 1
+    assert "CAM-02:render_low_streak=3>1" in result.stdout or "CAM-02:render_fps_median=14.80<15.00" in result.stdout
+
+
 def test_checker_accepts_later_person_and_expiry_for_one_camera(tmp_path: Path) -> None:
     body = ARCH + THREAD + START
     for index in range(5):
