@@ -5,7 +5,7 @@ import signal
 
 from .bbox_overlay_ipc_v1 import BboxStateWriter, local_track_number
 from .bbox_single_target_lock_v1 import SingleTargetBboxLockV1, SingleTargetLockConfigV1
-from .step3_tracker_v2 import V11PerCameraTrackerV2
+from .step3_single_occupant_tracker_v1 import V11SingleOccupantTrackerV1
 from .step3_tracking_v2 import V11Step3TrackingV2
 
 
@@ -17,16 +17,14 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 class V11Step3BboxPublisherV1(V11Step3TrackingV2):
-    """Accepted V11 detector path plus conservative bbox-only tracker publishing.
+    """Accepted V11 detector path plus one-person conservative bbox publishing.
 
-    The frozen Step3 implementation is not edited. This bbox-only runtime replaces
-    only its per-camera tracker instances with a stricter birth/recovery policy for
-    the current one-person acceptance stage.
-
-    Low-confidence detector boxes still remain available to recover an existing
-    track. A *new* local track, however, requires stronger confidence and three hits.
-    Recently-lost confirmed tracks are retained longer so a brief miss is more likely
-    to recover the existing local identity instead of minting another one.
+    Frozen Step3 files are left untouched. This bbox-only runtime swaps only the
+    per-camera tracker instances. Existing ByteTrack-style low-confidence recovery
+    remains active, but once one confirmed person exists in a camera, unmatched boxes
+    cannot mint another local ID until the confirmed occupant has been absent for a
+    bounded grace period. During uncertainty the display holds/blanks rather than
+    showing a second false-positive box.
     """
 
     def __init__(self) -> None:
@@ -34,8 +32,8 @@ class V11Step3BboxPublisherV1(V11Step3TrackingV2):
 
         camera_ids = [camera.camera_id for camera in self.cameras]
 
-        # Keep detector floor/cadence unchanged. Tighten only NEW-track admission and
-        # extend bounded recovery of an already-confirmed person.
+        # Detector floor/cadence stay unchanged. These knobs affect only NEW-track
+        # admission and recovery of the already-confirmed one-person target.
         self.fp_new_track_conf = float(os.environ.get("V11_BBOX_NEW_TRACK_CONF", "0.50"))
         self.fp_confirm_hits = int(os.environ.get("V11_BBOX_TRACK_CONFIRM_HITS", "3"))
         self.fp_tentative_ttl_sec = float(os.environ.get("V11_BBOX_TENTATIVE_TTL_SEC", "1.60"))
@@ -43,8 +41,11 @@ class V11Step3BboxPublisherV1(V11Step3TrackingV2):
         self.fp_shadow_sec = float(os.environ.get("V11_BBOX_TRACK_SHADOW_SEC", "1.20"))
         self.fp_max_lost_sec = float(os.environ.get("V11_BBOX_TRACK_MAX_LOST_SEC", "4.50"))
         self.fp_low_recovery_sec = float(os.environ.get("V11_BBOX_LOW_RECOVERY_SEC", "2.50"))
+        self.fp_single_occupant_block_sec = float(
+            os.environ.get("V11_BBOX_SINGLE_OCCUPANT_BLOCK_SEC", "4.50")
+        )
 
-        self.tracker = V11PerCameraTrackerV2(
+        self.tracker = V11SingleOccupantTrackerV1(
             camera_ids,
             new_track_thresh=self.fp_new_track_conf,
             confirm_hits=self.fp_confirm_hits,
@@ -53,8 +54,10 @@ class V11Step3BboxPublisherV1(V11Step3TrackingV2):
             shadow_sec=self.fp_shadow_sec,
             max_lost_sec=self.fp_max_lost_sec,
             low_recovery_sec=self.fp_low_recovery_sec,
+            single_occupant_block_sec=self.fp_single_occupant_block_sec,
         )
 
+        self.confirmed_ids_seen: dict[str, set[str]] = {cid: set() for cid in camera_ids}
         self.bbox_writer = BboxStateWriter()
         self.bbox_writer.reset()
         self.bbox_publish_ok = 0
@@ -84,8 +87,8 @@ class V11Step3BboxPublisherV1(V11Step3TrackingV2):
         )
         print(
             "CAMERA_V11_BBOX_PUBLISHER_ARCH base=step3-v2 detector_changed=0 "
-            "tracker_core_changed=0 tracker_policy=fp-guard-v2 ipc=atomic-tmpfs "
-            "latest_only=1 queue=0 reid=0 global_id=0 "
+            "tracker_core_changed=0 tracker_policy=single-occupant-fp-guard-v3 "
+            "ipc=atomic-tmpfs latest_only=1 queue=0 reid=0 global_id=0 "
             f"single_target={int(self.single_target.config.enabled)}",
             flush=True,
         )
@@ -98,6 +101,7 @@ class V11Step3BboxPublisherV1(V11Step3TrackingV2):
             f"shadow={self.fp_shadow_sec:.2f}s "
             f"max_lost={self.fp_max_lost_sec:.2f}s "
             f"low_recovery={self.fp_low_recovery_sec:.2f}s "
+            f"single_occupant_block={self.fp_single_occupant_block_sec:.2f}s "
             "detector_low=0.18 detector_high=0.30 low_boxes_can_update=1",
             flush=True,
         )
@@ -133,6 +137,8 @@ class V11Step3BboxPublisherV1(V11Step3TrackingV2):
 
         raw_tracks = []
         for snapshot in update.snapshots:
+            if snapshot.confirmed and snapshot.state != "removed":
+                self.confirmed_ids_seen[cid].add(str(snapshot.track_id))
             if not snapshot.confirmed or snapshot.state == "removed":
                 continue
             try:
@@ -187,6 +193,12 @@ class V11Step3BboxPublisherV1(V11Step3TrackingV2):
                 f"hold_outputs={row['hold_outputs']} suppressed={row['suppressed']} "
                 f"input_max={row['input_max']} output_max={row['output_max']} "
                 f"violations={row['violations']}",
+                flush=True,
+            )
+            print(
+                "CAMERA_V11_BBOX_FP_TRACKER "
+                f"camera={cid} confirmed_total={len(self.confirmed_ids_seen[cid])} "
+                f"blocked_new={self.tracker.blocked_new_total(cid)}",
                 flush=True,
             )
 
