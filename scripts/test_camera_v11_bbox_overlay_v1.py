@@ -22,6 +22,34 @@ from services.camera_v11.bbox_overlay_ipc_v1 import (
     predict_bbox_norm,
     tracker_box_to_display,
 )
+from services.camera_v11.bbox_single_target_lock_v1 import (
+    SingleTargetBboxLockV1,
+    SingleTargetLockConfigV1,
+)
+
+
+def _track(
+    track_id: str,
+    *,
+    hits: int = 3,
+    score: float = 0.90,
+    bbox: tuple[float, float, float, float] = (0.10, 0.10, 0.40, 0.80),
+    predicted: bool = False,
+    state: str = "tracked",
+    since_detection: float = 0.0,
+) -> dict[str, object]:
+    return {
+        "track_id": track_id,
+        "local_id": int(track_id.rsplit("T", 1)[-1]),
+        "state": state,
+        "predicted": predicted,
+        "confidence": score,
+        "hits": hits,
+        "age_sec": 2.0,
+        "bbox_norm": list(bbox),
+        "velocity_norm_s": [0.0, 0.0, 0.0, 0.0],
+        "since_detection_sec": since_detection,
+    }
 
 
 class BboxOverlayV1Tests(unittest.TestCase):
@@ -100,6 +128,68 @@ class BboxOverlayV1Tests(unittest.TestCase):
                 "CAM-01", now_ns=captured_ns + 1_500_000_000, stale_sec=1.1, width=640, height=360
             )
             self.assertEqual(stale, [])
+
+    def test_single_target_lock_suppresses_competing_boxes(self) -> None:
+        gate = SingleTargetBboxLockV1(SingleTargetLockConfigV1(acquire_updates=2))
+        t0 = 1_000_000_000
+        person = _track("CAM-01-T00001", hits=2, score=0.82)
+        ghost = _track("CAM-01-T00002", hits=2, score=0.35, bbox=(0.72, 0.15, 0.82, 0.45))
+
+        # Require repeated clean evidence before the first visible lock.
+        self.assertEqual(gate.select("CAM-01", [person, ghost], t0), [])
+        selected = gate.select("CAM-01", [person, ghost], t0 + 500_000_000)
+        self.assertEqual([row["track_id"] for row in selected], ["CAM-01-T00001"])
+
+        # Once locked, even a later high-score competing box must be suppressed.
+        louder_ghost = _track("CAM-01-T00002", hits=10, score=0.99, bbox=(0.65, 0.10, 0.88, 0.70))
+        selected = gate.select("CAM-01", [person, louder_ghost], t0 + 1_000_000_000)
+        self.assertEqual([row["track_id"] for row in selected], ["CAM-01-T00001"])
+        stats = gate.stats("CAM-01")
+        self.assertEqual(stats["output_max"], 1)
+        self.assertEqual(stats["violations"], 0)
+        self.assertGreater(stats["suppressed"], 0)
+
+    def test_spatial_successor_handoff_is_repeated_and_one_box_only(self) -> None:
+        gate = SingleTargetBboxLockV1(
+            SingleTargetLockConfigV1(acquire_updates=2, handoff_updates=2, hold_sec=1.10)
+        )
+        t0 = 2_000_000_000
+        person = _track("CAM-04-T00010", hits=2, bbox=(0.20, 0.10, 0.50, 0.85))
+        gate.select("CAM-04", [person], t0)
+        gate.select("CAM-04", [person], t0 + 500_000_000)
+
+        successor = _track("CAM-04-T00018", hits=3, bbox=(0.22, 0.10, 0.52, 0.85))
+        first = gate.select("CAM-04", [successor], t0 + 900_000_000)
+        # One successor observation cannot steal the lock; the old target is held.
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["track_id"], "CAM-04-T00010")
+
+        second = gate.select("CAM-04", [successor], t0 + 1_000_000_000)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0]["track_id"], "CAM-04-T00018")
+        stats = gate.stats("CAM-04")
+        self.assertEqual(stats["handoff"], 1)
+        self.assertEqual(stats["output_max"], 1)
+
+    def test_far_false_positive_cannot_steal_locked_target(self) -> None:
+        gate = SingleTargetBboxLockV1(
+            SingleTargetLockConfigV1(acquire_updates=2, hold_sec=1.10, release_sec=1.60)
+        )
+        t0 = 3_000_000_000
+        person = _track("CAM-01-T00007", hits=2, bbox=(0.15, 0.10, 0.45, 0.85))
+        gate.select("CAM-01", [person], t0)
+        gate.select("CAM-01", [person], t0 + 500_000_000)
+
+        far = _track("CAM-01-T00099", hits=20, score=0.99, bbox=(0.75, 0.10, 0.95, 0.60))
+        held = gate.select("CAM-01", [far], t0 + 1_000_000_000)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(held[0]["track_id"], "CAM-01-T00007")
+
+        # After hold expires but before release, show nothing rather than switching
+        # to the far false positive.
+        blank = gate.select("CAM-01", [far], t0 + 1_800_000_000)
+        self.assertEqual(blank, [])
+        self.assertEqual(gate.stats("CAM-01")["violations"], 0)
 
 
 if __name__ == "__main__":
