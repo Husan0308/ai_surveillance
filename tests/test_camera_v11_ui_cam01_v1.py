@@ -40,17 +40,25 @@ def test_base_six_camera_runtime_is_only_subclassed() -> None:
     assert "Step2TRT86Client()" in base
 
 
-def test_full_sentinel_ui_is_preserved_and_only_first_camera_is_live() -> None:
+def test_full_sentinel_ui_is_preserved_and_cam01_is_live_at_view_boundary() -> None:
     source = "".join(path.read_text() for path in sorted(UI_PARTS.glob("part_*.pyfrag")))
+    wrapper = UI.read_text()
     data = DATA.read_text()
-    for name in ("MonitoringPage", "PeoplePage", "EventsPage", "RoomsPage", "SettingsPage", "FullscreenCameraGrid"):
+    for name in (
+        "MonitoringPage", "PeoplePage", "EventsPage", "RoomsPage", "SettingsPage",
+        "FullscreenCameraGrid", "EnrollmentPage", "EnrollmentDialog", "CameraDialog",
+        "PersonProfileDialog", "EventSnapshotDialog",
+    ):
         assert f"class {name}" in source
-    assert source.count("realtime_camera_id=LIVE_PREVIEW_CAMERA if index == 0 else None") == 2
+    assert 'getattr(camera, "id", None) == LIVE_PREVIEW_CAMERA' in wrapper
+    assert "CameraView.__init__ = _camera_view_init_cam01_live" in wrapper
     assert "if self.camera.online and not self.realtime_camera_id" in source
     assert "Deterministic demo data" in data and "CAMERA_ROWS" in data
 
 
 def test_ui_never_opens_rtsp_or_runs_inference() -> None:
     source = "".join(path.read_text() for path in sorted(UI_PARTS.glob("part_*.pyfrag"))).lower()
+    wrapper = UI.read_text().lower()
     for forbidden in ("cv2.videocapture", "rtspsrc", "nvurisrcbin", "tensorrt"):
         assert forbidden not in source
+        assert forbidden not in wrapper
