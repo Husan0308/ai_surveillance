@@ -35,16 +35,11 @@ def main() -> int:
         [
             sys.executable,
             str(ROOT / "scripts/check_camera_v11_step4_reid_same_room_matcher_v1_log.py"),
-            "--display-log",
-            str(args.display_log),
-            "--match-log",
-            str(args.match_log),
-            "--pair-tsv",
-            str(args.pair_tsv),
-            "--match-tsv",
-            str(args.match_tsv),
-            "--warmup-windows",
-            str(args.warmup_windows),
+            "--display-log", str(args.display_log),
+            "--match-log", str(args.match_log),
+            "--pair-tsv", str(args.pair_tsv),
+            "--match-tsv", str(args.match_tsv),
+            "--warmup-windows", str(args.warmup_windows),
         ],
         cwd=ROOT,
         text=True,
@@ -61,12 +56,13 @@ def main() -> int:
         text = ""
     else:
         text = args.match_log.read_text(encoding="utf-8", errors="replace")
+
     for marker in (
         "CAMERA_V11_STEP5_GLOBAL_SHADOW_V1_ARCH",
-        "mode=shadow input=step4_MATCH_PROPOSED",
+        "mode=shadow input=step4.5_camera_tracklet_MATCH_PROPOSED",
         "confirm_observations=3 confirm_consecutive=3",
-        "different_pair_reuse=0",
-        "conflict_resolution=0 hysteresis=0",
+        "identity_owner=person track_successor_reuse=1 current_member_per_camera=1",
+        "historical_aliases=1 same_cycle_overlap_conflict=1 cross_global_merge=0",
         "production_global_id=0 room_id=0",
         "face=0 handoff=0 identity_accuracy_proven=0",
         "queue=bounded async=1 matcher_blocking_state_work=0",
@@ -86,18 +82,9 @@ def main() -> int:
     counters = {name: int(value) for name, value in INTEGER.findall(final_line)}
     timings = {name: float(value) for name, value in MILLISECOND.findall(final_line)}
     required = (
-        "created",
-        "provisional",
-        "confirmed",
-        "observations",
-        "conflicts",
-        "expired",
-        "active",
-        "member_tracks",
-        "queue_pending",
-        "queue_dropped",
-        "events_written",
-        "worker_errors",
+        "created", "provisional", "confirmed", "observations", "conflicts",
+        "expired", "active", "member_tracks", "queue_pending", "queue_dropped",
+        "events_written", "worker_errors",
     )
     for name in required:
         if name not in counters:
@@ -140,9 +127,7 @@ def main() -> int:
     if any("embedding" in name.lower() for name in TSV_COLUMNS):
         reasons.append("raw_embedding_column_forbidden")
     if counters.get("events_written", -1) != len(rows):
-        reasons.append(
-            f"events_written={counters.get('events_written', -1)}/tsv_rows={len(rows)}"
-        )
+        reasons.append(f"events_written={counters.get('events_written', -1)}/tsv_rows={len(rows)}")
     if rows and not all(row.get("room") == "Devs" for row in rows):
         reasons.append("unexpected_room_in_step5_tsv")
     if any(row.get("event") == "GLOBAL_SHADOW_CONFIRM" for row in rows):
@@ -162,6 +147,7 @@ def main() -> int:
         f"observations={observations} conflicts={counters['conflicts']} "
         f"expired={counters['expired']} active={active} member_tracks={counters['member_tracks']} "
         f"state_p50={timings['state_p50']:.3f}ms state_p95={timings['state_p95']:.3f}ms "
+        "track_successor_reuse=1 current_member_per_camera=1 "
         "production_global_id=0 room_id=0 face=0 handoff=0 identity_accuracy_proven=0"
     )
     return 0
