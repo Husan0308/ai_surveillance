@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from services.camera_v11.step4_reid_camera_tracklet_v1 import (
     CameraTrackletConfigV1,
