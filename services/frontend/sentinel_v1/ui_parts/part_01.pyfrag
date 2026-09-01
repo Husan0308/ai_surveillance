@@ -1,3 +1,5 @@
+        if self.live_image.isNull():
+            return False
         scaled = self.live_image.scaled(rect.size().toSize(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if scaled.isNull():
             return False
@@ -218,3 +220,21 @@ class EventSnapshotDialog(QDialog):
         header = QHBoxLayout()
         heading = QVBoxLayout()
         heading.addWidget(label(identity, "title"))
+        heading.addWidget(label(f"{camera_name(event.camera_id)} · {room_name(event.room_id)} · {fmt(event.at)}", "mono"))
+        header.addLayout(heading)
+        header.addStretch()
+        badge = label("KNOWN" if known else "UNKNOWN")
+        tone = C["known"] if known else C["unknown"]
+        badge.setStyleSheet(f"background:{tone};color:{C['bg']};padding:5px 9px;border-radius:4px;font:9px 'DejaVu Sans Mono';")
+        header.addWidget(badge)
+        root.addLayout(header)
+
+        root.addWidget(EventSnapshot(event, person, expanded=True), 1)
+        hint = label("Yopish uchun ESC tugmasini bosing.", "muted")
+        hint.setAlignment(Qt.AlignCenter)
+        root.addWidget(hint)
+
+
+class BarChart(QWidget):
+    def __init__(self, series: list[tuple[str, list[int], str]], labels: list[str], parent=None):
+        super().__init__(parent); self.series = series; self.labels = labels; self.setMinimumHeight(220)
