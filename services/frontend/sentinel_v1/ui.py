@@ -9,11 +9,12 @@ _parts_dir = _Path(__file__).with_name("ui_parts")
 _source = "".join(path.read_text(encoding="utf-8") for path in sorted(_parts_dir.glob("part_*.pyfrag")))
 exec(compile(_source, str(_parts_dir / "sentinel_ui_combined.py"), "exec"), globals(), globals())
 
-# Keep the supplied page/widget construction untouched.  CAM-01 becomes real at
+# Keep the supplied page/widget construction untouched. CAM-01 becomes real at
 # the CameraView boundary itself, so every place that already creates a CAM-01
 # view (Monitoring, fullscreen and expand dialog) consumes the same latest-only
 # preview without changing any page layout or opening another RTSP session.
 _camera_view_init = CameraView.__init__
+
 
 def _camera_view_init_cam01_live(
     self,
@@ -40,6 +41,33 @@ def _camera_view_init_cam01_live(
         parent=parent,
     )
 
+
+# PySide6 QRect.size() returns QSize directly. The original supplied live-preview
+# helper called .toSize() unconditionally, which only makes sense for QSizeF and
+# raises during paintEvent on current PySide6 builds. Keep the original painting
+# contract but normalize both QSize and QSizeF safely so paintEvent completes and
+# its QPainter save()/restore() pair remains balanced.
+def _camera_view_draw_live_frame_qsize_safe(self, painter, rect):
+    if self.live_image.isNull():
+        return False
+    target_size = rect.size()
+    if hasattr(target_size, "toSize"):
+        target_size = target_size.toSize()
+    scaled = self.live_image.scaled(
+        target_size,
+        Qt.KeepAspectRatio,
+        Qt.SmoothTransformation,
+    )
+    if scaled.isNull():
+        return False
+    painter.fillRect(rect, QColor("#05080b"))
+    x = rect.left() + (rect.width() - scaled.width()) / 2.0
+    y = rect.top() + (rect.height() - scaled.height()) / 2.0
+    painter.drawImage(QRectF(x, y, scaled.width(), scaled.height()), scaled)
+    return True
+
+
 CameraView.__init__ = _camera_view_init_cam01_live
+CameraView._draw_live_frame = _camera_view_draw_live_frame_qsize_safe
 
 del _source, _parts_dir, _Path
