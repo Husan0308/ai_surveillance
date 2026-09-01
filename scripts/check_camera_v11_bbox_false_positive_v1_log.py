@@ -28,13 +28,14 @@ def parse_kv(line: str) -> dict[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check that the bbox-only one-person run does not mint/display excess tracks"
+        description="Check one-person bbox run for source-track churn and display false positives"
     )
     parser.add_argument("--log", type=Path, default=Path("/tmp/CAMERA_V11_BBOX_TRACKER.log"))
     parser.add_argument("--required-cameras", default="CAM-01,CAM-04")
-    parser.add_argument("--max-created-per-camera", type=int, default=4)
+    parser.add_argument("--max-created-per-1000-updates", type=float, default=4.0)
+    parser.add_argument("--max-acquire-per-1000-updates", type=float, default=3.0)
     parser.add_argument("--max-visible-per-camera", type=int, default=2)
-    parser.add_argument("--max-suppressed-per-update", type=float, default=0.35)
+    parser.add_argument("--max-suppressed-per-update", type=float, default=0.20)
     args = parser.parse_args()
 
     if not args.log.is_file():
@@ -85,13 +86,17 @@ def main() -> int:
         try:
             new_track_conf = float(policy.get("new_track_conf", "0"))
             confirm_hits = int(policy.get("confirm_hits", "0"))
+            max_lost = float(policy.get("max_lost", "0").rstrip("s"))
         except ValueError:
             new_track_conf = 0.0
             confirm_hits = 0
-        if new_track_conf < 0.35:
+            max_lost = 0.0
+        if new_track_conf < 0.45:
             reasons.append(f"new_track_conf_too_low={new_track_conf:.2f}")
         if confirm_hits < 3:
             reasons.append(f"confirm_hits_too_low={confirm_hits}")
+        if max_lost < 4.0:
+            reasons.append(f"max_lost_too_short={max_lost:.2f}")
 
     for camera in required:
         tracker = latest_tracker.get(camera)
@@ -109,6 +114,7 @@ def main() -> int:
         try:
             acquired = int(lock.get("acquired", "0"))
             handoff = int(lock.get("handoff", "0"))
+            released = int(lock.get("released", "0"))
             suppressed = int(lock.get("suppressed", "0"))
             output_max = int(lock.get("output_max", "999"))
             violations = int(lock.get("violations", "999"))
@@ -116,17 +122,26 @@ def main() -> int:
             reasons.append(f"{camera}:malformed_lock_marker")
             continue
 
-        suppression_ratio = suppressed / max(1, updates)
+        denom = max(1, updates)
+        created_per_1000 = 1000.0 * created / denom
+        acquire_per_1000 = 1000.0 * acquired / denom
+        suppression_ratio = suppressed / denom
         summaries.append(
-            f"{camera}:updates={updates},created={created},peak_visible={peak_visible},"
-            f"suppressed={suppressed},suppressed_per_update={suppression_ratio:.3f},"
-            f"acquired={acquired},handoff={handoff}"
+            f"{camera}:updates={updates},created={created},created_per_1000={created_per_1000:.2f},"
+            f"peak_visible={peak_visible},suppressed={suppressed},suppressed_per_update={suppression_ratio:.3f},"
+            f"acquired={acquired},acquire_per_1000={acquire_per_1000:.2f},handoff={handoff},released={released}"
         )
 
         if acquired + handoff < 1:
             reasons.append(f"{camera}:target_not_acquired")
-        if created > args.max_created_per_camera:
-            reasons.append(f"{camera}:created={created}>{args.max_created_per_camera}")
+        if created_per_1000 > args.max_created_per_1000_updates:
+            reasons.append(
+                f"{camera}:created_per_1000={created_per_1000:.2f}>{args.max_created_per_1000_updates:.2f}"
+            )
+        if acquire_per_1000 > args.max_acquire_per_1000_updates:
+            reasons.append(
+                f"{camera}:acquire_per_1000={acquire_per_1000:.2f}>{args.max_acquire_per_1000_updates:.2f}"
+            )
         if peak_visible > args.max_visible_per_camera:
             reasons.append(f"{camera}:peak_visible={peak_visible}>{args.max_visible_per_camera}")
         if suppression_ratio > args.max_suppressed_per_update:
@@ -154,8 +169,11 @@ def main() -> int:
 
     print(
         "V11_BBOX_FALSE_POSITIVE_CHECK RESULT=PASS "
-        f"required={','.join(required) or 'any'} max_created={args.max_created_per_camera} "
-        f"max_visible={args.max_visible_per_camera} max_suppressed_per_update={args.max_suppressed_per_update:.3f} "
+        f"required={','.join(required) or 'any'} "
+        f"max_created_per_1000={args.max_created_per_1000_updates:.2f} "
+        f"max_acquire_per_1000={args.max_acquire_per_1000_updates:.2f} "
+        f"max_visible={args.max_visible_per_camera} "
+        f"max_suppressed_per_update={args.max_suppressed_per_update:.3f} "
         f"details={summary_text} publisher_errors={publisher_errors}"
     )
     return 0
