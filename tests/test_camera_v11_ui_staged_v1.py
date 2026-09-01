@@ -25,6 +25,7 @@ ALL_CAMERAS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
 STAGES = (
     ALL_CAMERAS[:3],
     ALL_CAMERAS[:4],
+    ALL_CAMERAS[:5],
 )
 
 
