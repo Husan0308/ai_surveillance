@@ -15,10 +15,10 @@ class V11Step8TwoPersonDebugRuntimeV1(V11Step6GlobalShadowRuntimeV1):
     """Step6 runtime plus a debug-only CAM-01/CAM-04 bbox preview.
 
     The preview reuses the detector's already-copied BGR frames and the tracker
-    snapshots produced by the normal hot path. It opens no extra RTSP streams,
-    runs no extra detector/ReID inference, owns no frame backlog, and never mutates
-    tracker/global-identity state. It exists only to make the manual Step8 ground
-    truth test observable.
+    state produced by the normal hot path. It opens no extra RTSP streams, runs no
+    extra detector/ReID inference, owns no frame backlog, and never mutates tracker
+    or global-identity state. It exists only to make the manual Step8 ground-truth
+    test observable.
     """
 
     DEBUG_CAMERAS = ("CAM-01", "CAM-04")
@@ -50,7 +50,7 @@ class V11Step8TwoPersonDebugRuntimeV1(V11Step6GlobalShadowRuntimeV1):
         print(
             "CAMERA_V11_STEP8_DEBUG_BBOX_V1 "
             f"enabled={int(self.debug_bbox_enabled)} cameras=CAM-01+CAM-04 "
-            "source=existing_detector_bgr tracker_snapshot=existing no_extra_rtsp=1 "
+            "source=existing_detector_bgr tracker_snapshot=read-only no_extra_rtsp=1 "
             "extra_inference=0 queue=latest-only global_state_mutation=0",
             flush=True,
         )
@@ -129,7 +129,6 @@ class V11Step8TwoPersonDebugRuntimeV1(V11Step6GlobalShadowRuntimeV1):
                     shadow_id = record.shadow_global_id
                     break
         except Exception:
-            # Debug-only read races must never perturb the identity worker.
             return stable_text, shadow_id, verify_state
 
         if shadow_id != "GSH-pending":
@@ -141,6 +140,30 @@ class V11Step8TwoPersonDebugRuntimeV1(V11Step6GlobalShadowRuntimeV1):
             except Exception:
                 verify_state = ""
         return stable_text, shadow_id, verify_state
+
+    def _snapshot_from_current_tracker(self, cid: str, track_ids: tuple[str, ...], captured_ns: int):
+        """Read back exactly the renderable IDs Step4 just produced, without update()."""
+        camera_tracker = self.tracker.trackers.get(cid)
+        if camera_tracker is None:
+            return ()
+        timestamp = int(captured_ns) / 1_000_000_000.0
+        try:
+            rows = {track.track_id: track for track in camera_tracker._tracks}
+        except Exception:
+            return ()
+        snapshots = []
+        for track_id in track_ids:
+            track = rows.get(track_id)
+            if track is None or track.status == "removed":
+                continue
+            predicted = track.status == "lost"
+            try:
+                snapshots.append(
+                    camera_tracker._snapshot(track, timestamp, predicted=predicted)
+                )
+            except Exception:
+                continue
+        return tuple(snapshots)
 
     def _draw_debug_frame(self, cid: str, snapshots) -> None:
         cv2 = self.debug_cv2
@@ -241,34 +264,28 @@ class V11Step8TwoPersonDebugRuntimeV1(V11Step6GlobalShadowRuntimeV1):
         if result != self.Gst.FlowReturn.OK:
             self.debug_errors += 1
 
-    def _consume_tracking(self, cid: str, boxes: list[list[float]], captured_ns: int) -> None:
-        # Keep Step3's frozen tracker behavior exactly; this subclass only retains
-        # the returned snapshots long enough to draw a debug frame.
-        update = self.tracker.update(cid, boxes, captured_ns)
-        self.stage_values["tracker"].append(float(update.step_ms))
-        ids = tuple(snapshot.track_id for snapshot in update.snapshots)
-        if len(ids) != len(set(ids)):
-            self.track_duplicate_errors += 1
-        prefix = f"{cid}-T"
-        self.track_prefix_errors += sum(1 for track_id in ids if not track_id.startswith(prefix))
-        self.track_updates[cid] += 1
-        self.track_created[cid] += int(update.created)
-        self.track_recovered[cid] += int(update.recovered)
-        self.track_removed[cid] += int(update.removed)
-        self.latest_track_ids[cid] = ids
-
-        if self.debug_bbox_enabled and cid in self.DEBUG_CAMERAS:
-            try:
-                self._draw_debug_frame(cid, tuple(update.snapshots))
-                self._push_debug_wall()
-            except Exception as exc:
-                self.debug_errors += 1
-                if self.debug_errors <= 3:
-                    print(
-                        "CAMERA_V11_STEP8_DEBUG_ERROR "
-                        f"camera={cid} error={type(exc).__name__}:{exc}",
-                        flush=True,
-                    )
+    def _quality_track_update(
+        self, camera_id: str, track_ids: tuple[str, ...], captured_ns: int
+    ) -> None:
+        # Preserve every Step4/Step5/Step6 hook first. The preview then reads the
+        # already-updated tracker state without calling update() a second time.
+        super()._quality_track_update(camera_id, track_ids, captured_ns)
+        if not self.debug_bbox_enabled or camera_id not in self.DEBUG_CAMERAS:
+            return
+        try:
+            snapshots = self._snapshot_from_current_tracker(
+                camera_id, tuple(track_ids), int(captured_ns)
+            )
+            self._draw_debug_frame(camera_id, snapshots)
+            self._push_debug_wall()
+        except Exception as exc:
+            self.debug_errors += 1
+            if self.debug_errors <= 3:
+                print(
+                    "CAMERA_V11_STEP8_DEBUG_ERROR "
+                    f"camera={camera_id} error={type(exc).__name__}:{exc}",
+                    flush=True,
+                )
 
     def _print_stats(self) -> None:
         super()._print_stats()
