@@ -19,6 +19,9 @@ class V11MonitoringTrackerRuntime(V11Step3TrackingV2):
 
     def __init__(self) -> None:
         super().__init__()
+        self.monitor_stale_sec = max(
+            0.6, float(os.environ.get("ML_V11_MONITOR_STALE_SEC", "1.50"))
+        )
         self._monitor_lock = threading.Lock()
         self._monitor_seq = 0
         self._monitor_rows: dict[str, dict[str, Any]] = {
@@ -104,17 +107,22 @@ class V11MonitoringTrackerRuntime(V11Step3TrackingV2):
             metric = metrics_by_id.get(cid, {})
             width = max(1, int(metric.get("width") or 672))
             height = max(1, int(metric.get("height") or 384))
+            online = bool(metric.get("online", False))
             row = rows[cid]
             age_sec = (
                 max(0.0, (now_ns - row["timestamp_ns"]) / 1_000_000_000.0)
                 if row["timestamp_ns"] > 0
-                else 0.0
+                else float("inf")
             )
+            stale = (not online) or age_sec > self.monitor_stale_sec
+
             # Read-only bounded extrapolation makes the overlay move between the
-            # sparse 2 Hz detector updates without creating a second tracker.
-            predict_dt = min(0.45, age_sec)
+            # sparse 2 Hz detector updates without creating a second tracker. If
+            # the tracker publisher stalls, old boxes are removed instead of
+            # being frozen indefinitely on a still-live video stream.
+            predict_dt = min(0.45, age_sec) if not stale else 0.0
             tracks: list[dict[str, Any]] = []
-            for track in row["tracks"]:
+            for track in (() if stale else row["tracks"]):
                 norm = self._predict_bbox_norm(track, predict_dt)
                 # The V11 detector canvas is 672x384 with the real 16:9 content
                 # occupying rows 3..380 (378 px). Remove that detector padding
@@ -128,7 +136,9 @@ class V11MonitoringTrackerRuntime(V11Step3TrackingV2):
                         "track_id": track["track_id"],
                         "class_name": "person",
                         "confidence": float(track["confidence"]),
-                        "state": "predicted" if predict_dt > 0.075 or track.get("predicted") else track["state"],
+                        "state": "predicted"
+                        if predict_dt > 0.075 or track.get("predicted")
+                        else track["state"],
                         "bbox_xyxy": [
                             x1n * width,
                             y1n * height,
@@ -144,9 +154,11 @@ class V11MonitoringTrackerRuntime(V11Step3TrackingV2):
                     "timestamp_ns": int(row["timestamp_ns"]),
                     "source_width": width,
                     "source_height": height,
-                    "online": bool(metric.get("online", False)),
+                    "online": online,
                     "fps": float(metric.get("fps") or 0.0),
                     "last_error": metric.get("last_error"),
+                    "metadata_age_ms": None if age_sec == float("inf") else age_sec * 1000.0,
+                    "stale": stale,
                     "tracks": tracks,
                 }
             )
@@ -162,7 +174,11 @@ class V11MonitoringTrackerService:
     """Lifecycle wrapper so FastAPI can own the V11 tracker without blocking."""
 
     def __init__(self) -> None:
-        self.enabled = os.getenv("ML_V11_TRACKING_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+        self.enabled = os.getenv("ML_V11_TRACKING_ENABLED", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }
         self._thread: threading.Thread | None = None
         self._runtime: V11MonitoringTrackerRuntime | None = None
         self._lock = threading.Lock()
@@ -171,7 +187,11 @@ class V11MonitoringTrackerService:
     def start(self) -> None:
         if not self.enabled or (self._thread and self._thread.is_alive()):
             return
-        self._thread = threading.Thread(target=self._run, name="v11-monitoring-tracker", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run,
+            name="v11-monitoring-tracker",
+            daemon=True,
+        )
         self._thread.start()
 
     def _run(self) -> None:
@@ -231,8 +251,14 @@ class V11MonitoringTrackerService:
                         "online": bool(metric.get("online", False)),
                         "fps": float(metric.get("fps") or 0.0),
                         "last_error": error or metric.get("last_error"),
+                        "metadata_age_ms": None,
+                        "stale": True,
                         "tracks": [],
                     }
                 )
-            return {"type": "monitoring", "generated_ns": time.monotonic_ns(), "items": items}
+            return {
+                "type": "monitoring",
+                "generated_ns": time.monotonic_ns(),
+                "items": items,
+            }
         return runtime.monitoring_snapshot(camera_metrics)
