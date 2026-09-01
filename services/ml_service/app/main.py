@@ -9,21 +9,25 @@ from fastapi.responses import StreamingResponse
 
 from services.ml_service.app.config import load_settings
 from services.ml_service.app.deepstream.pipeline import DeepStreamRuntime
+from services.ml_service.app.v11_monitoring import V11MonitoringTrackerService
 
 settings = load_settings()
 runtime = DeepStreamRuntime(settings)
+tracker_service = V11MonitoringTrackerService()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     runtime.start()
+    tracker_service.start()
     try:
         yield
     finally:
+        tracker_service.stop()
         runtime.stop()
 
 
-app = FastAPI(title="AI Surveillance ML Service", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="AI Surveillance ML Service", version="0.4.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -35,6 +39,7 @@ def health() -> dict:
         "camera_count": snapshot.camera_count,
         "online_camera_count": snapshot.online_camera_count,
         "last_error": snapshot.last_error,
+        "tracking": tracker_service.status(),
     }
 
 
@@ -42,6 +47,11 @@ def health() -> dict:
 def cameras() -> dict:
     rows = runtime.camera_metrics()
     return {"count": len(rows), "cameras": rows}
+
+
+@app.get("/tracks")
+def tracks() -> dict:
+    return tracker_service.snapshot(runtime.camera_metrics())
 
 
 @app.get("/video/{camera_id}")
@@ -70,7 +80,11 @@ def video(camera_id: str):
     return StreamingResponse(
         stream(),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
