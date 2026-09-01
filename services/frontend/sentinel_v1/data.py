@@ -1,9 +1,9 @@
 """Sentinel VMS UI state for the staged real-camera rollout.
 
-Camera demo rows are intentionally removed.  During the CAM-01 milestone the UI
-contains exactly one runtime-backed camera card, CAM-01.  Other demo domains
-(people/events/rooms) remain temporarily so the rest of the supplied interface
-is preserved while cameras are replaced one by one.
+Camera demo rows are intentionally removed. During this milestone the UI
+contains exactly two runtime-backed camera cards, CAM-01 and CAM-02. Other demo
+domains (people/events/rooms) remain temporarily so the rest of the supplied
+interface is preserved while cameras are replaced one by one.
 """
 
 from __future__ import annotations
@@ -85,9 +85,9 @@ ROOMS = [
 ]
 
 
-# Camera cards are now authoritative runtime cards, not demo RTSP rows.
+# Camera cards are authoritative runtime cards, not demo RTSP rows.
 # Add the next real camera here only after its pipeline milestone passes.
-RUNTIME_CAMERA_IDS = ("CAM-01",)
+RUNTIME_CAMERA_IDS = ("CAM-01", "CAM-02")
 
 
 def _runtime_camera(camera_id: str) -> Camera:
@@ -111,8 +111,8 @@ def load_cameras() -> None:
     """Apply saved settings only to staged runtime cameras.
 
     Legacy demo ids such as cam-1..cam-6 are deliberately ignored so an old
-    cameras.json cannot resurrect demo camera cards or hide the real CAM-01
-    preview card.
+    cameras.json cannot resurrect demo camera cards or hide the real runtime
+    preview cards.
     """
     if not CAMERAS_FILE.exists():
         return
@@ -137,7 +137,6 @@ def load_cameras() -> None:
             camera.fps = 0.0
             camera.last_error = "Ulanish kutilmoqda" if camera.enabled else "Kamera o'chirilgan"
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-        # A damaged settings file must not prevent the VMS interface from opening.
         return
 
 
@@ -235,7 +234,6 @@ def build_events() -> list[Event]:
         nonlocal event_number
         action = "binoga kirdi" if kind == "entry" else "binodan chiqdi"
         identity = person.label if person.known else f"Unknown shaxs ({person.label})"
-        # Normalized coordinates are replaced by the detector's real bbox in production.
         bbox_x = 0.18 + (bbox_seed * 17 % 32) / 100
         bbox = (bbox_x, 0.13, 0.24, 0.74)
         result.append(Event(
@@ -250,8 +248,6 @@ def build_events() -> list[Event]:
         entry_at = DAY0 + timedelta(minutes=rng.randrange(15, 125))
         add_event(person, "entry", entry_at, entry_camera, index * 2)
 
-        # One person represents one visit: no repeated detections become new events.
-        # People still in the building have no exit event yet.
         if not person.in_building:
             exit_camera = rng.choice(available)
             visit_minutes = rng.randrange(45, 151)
