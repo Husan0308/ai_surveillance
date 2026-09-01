@@ -47,6 +47,11 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             affinity_cpu=old.affinity_cpu,
             global_shadow_worker=self.global_shadow_worker,
         )
+        # Step4 bound the pair-score completion callback to the matcher object that
+        # existed during super().__init__(). Step5 replaces that matcher with the
+        # tapping subclass, so rebind the producer callback to the worker that will
+        # actually be started. Otherwise only close() wakes the new matcher.
+        self.pair_worker.set_scores_published_callback(self.match_worker.notify)
         self.global_shadow_closed = False
         print(
             "CAMERA_V11_STEP5_GLOBAL_SHADOW_V1_ARCH "
