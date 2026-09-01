@@ -20,6 +20,11 @@ fail() {
 [[ "$DURATION" =~ ^[1-9][0-9]*$ ]] || fail "invalid_duration"
 (( DURATION >= 75 )) || fail "duration_must_be_at_least_75_seconds"
 
+# This is intentionally a Devs-only ground-truth run with exactly one physical
+# person. Do not require unrelated Entrance/Main-room pair evidence in the generic
+# Step3 pair checker; every other pair-score invariant remains enabled.
+export V11_STEP4_PAIR_REQUIRE_DIFFERENT_ROOM=0
+
 mkdir -p "$OUT"
 printf '%s\n' \
   'V11_STEP7_CAM01_CAM04_ONE_PERSON_V1 READY' \
