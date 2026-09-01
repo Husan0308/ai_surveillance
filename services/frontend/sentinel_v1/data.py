@@ -1,4 +1,10 @@
-"""Deterministic demo data mirrored from the Sentinel VMS web source."""
+"""Sentinel VMS UI state for the staged real-camera rollout.
+
+Camera demo rows are intentionally removed.  During the CAM-01 milestone the UI
+contains exactly one runtime-backed camera card, CAM-01.  Other demo domains
+(people/events/rooms) remain temporarily so the rest of the supplied interface
+is preserved while cameras are replaced one by one.
+"""
 
 from __future__ import annotations
 
@@ -79,62 +85,57 @@ ROOMS = [
 ]
 
 
-CAMERA_ROWS = [
-    ("cam-1", "Kirish eshigi", "lobby", True, 24.6),
-    ("cam-2", "Lobbi janubi", "lobby", True, 25.1),
-    ("cam-3", "Ofis koridori", "office", True, 22.8),
-    ("cam-4", "Ofis ochiq zona", "office", False, 0.0),
-    ("cam-5", "Ombor kirishi", "warehouse", True, 19.4),
-    ("cam-6", "Ombor tokchalari", "warehouse", True, 20.2),
-]
+# Camera cards are now authoritative runtime cards, not demo RTSP rows.
+# Add the next real camera here only after its pipeline milestone passes.
+RUNTIME_CAMERA_IDS = ("CAM-01",)
 
 
-CAMERAS: list[Camera] = []
-for i, (cam_id, name, room_id, online, fps) in enumerate(CAMERA_ROWS):
-    CAMERAS.append(
-        Camera(
-            cam_id,
-            name,
-            room_id,
-            f"rtsp://192.168.10.{11 + i}:554/stream1",
-            online,
-            fps,
-            last_error=None if online else "RTSP timeout (10s) — qayta ulanmoqda",
-            frame_age=40 + i * 12 if online else 98_000,
-            queue=(i % 3) + 1 if online else 0,
-            dropped=12 * (i + 1) if online else 4210,
-            reconnects=i if online else 37,
-            latency=28 + i * 6 if online else 0,
-        )
+def _runtime_camera(camera_id: str) -> Camera:
+    return Camera(
+        id=camera_id,
+        name=camera_id,
+        room_id="",
+        rtsp="",
+        online=False,
+        fps=0.0,
+        enabled=True,
+        last_error="Ulanish kutilmoqda",
     )
 
 
+CAMERAS: list[Camera] = [_runtime_camera(camera_id) for camera_id in RUNTIME_CAMERA_IDS]
 CAMERAS_FILE = Path(__file__).with_name("cameras.json")
 
 
 def load_cameras() -> None:
-    """Load locally saved camera settings, keeping demo cameras as a safe fallback."""
+    """Apply saved settings only to staged runtime cameras.
+
+    Legacy demo ids such as cam-1..cam-6 are deliberately ignored so an old
+    cameras.json cannot resurrect demo camera cards or hide the real CAM-01
+    preview card.
+    """
     if not CAMERAS_FILE.exists():
         return
     try:
         rows = json.loads(CAMERAS_FILE.read_text(encoding="utf-8"))
-        loaded = []
-        for row in rows:
-            loaded.append(
-                Camera(
-                    id=str(row["id"]),
-                    name=str(row["name"]),
-                    room_id=str(row.get("room_id", "")).strip(),
-                    rtsp=str(row["rtsp"]),
-                    online=False,
-                    fps=0.0,
-                    enabled=bool(row.get("enabled", True)),
-                    last_error="Ulanish kutilmoqda" if row.get("enabled", True) else "Kamera o'chirilgan",
-                    username=str(row.get("username", "")),
-                    password=str(row.get("password", "")),
-                )
-            )
-        CAMERAS[:] = loaded
+        rows_by_id = {
+            str(row.get("id", "")).strip(): row
+            for row in rows
+            if isinstance(row, dict)
+        }
+        for camera in CAMERAS:
+            row = rows_by_id.get(camera.id)
+            if not row:
+                continue
+            camera.name = str(row.get("name", camera.name)).strip() or camera.name
+            camera.room_id = str(row.get("room_id", camera.room_id)).strip()
+            camera.rtsp = str(row.get("rtsp", camera.rtsp)).strip()
+            camera.enabled = bool(row.get("enabled", camera.enabled))
+            camera.username = str(row.get("username", camera.username))
+            camera.password = str(row.get("password", camera.password))
+            camera.online = False
+            camera.fps = 0.0
+            camera.last_error = "Ulanish kutilmoqda" if camera.enabled else "Kamera o'chirilgan"
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         # A damaged settings file must not prevent the VMS interface from opening.
         return
@@ -161,8 +162,12 @@ def save_cameras() -> None:
 
 
 def next_camera_id() -> str:
-    numbers = [int(camera.id[4:]) for camera in CAMERAS if camera.id.startswith("cam-") and camera.id[4:].isdigit()]
-    return f"cam-{max(numbers, default=0) + 1}"
+    numbers: list[int] = []
+    for camera in CAMERAS:
+        value = camera.id.upper()
+        if value.startswith("CAM-") and value[4:].isdigit():
+            numbers.append(int(value[4:]))
+    return f"CAM-{max(numbers, default=0) + 1:02d}"
 
 
 load_cameras()
