@@ -12,11 +12,15 @@ class ApiClient(QObject):
     cameras_received = Signal(dict)
     request_failed = Signal(str, str)
 
-    def __init__(self, base_url: str, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        manager: QNetworkAccessManager,
+        parent: QObject | None = None,
+    ) -> None:
         super().__init__(parent)
         self.base_url = base_url.rstrip("/")
-        self.manager = QNetworkAccessManager(self)
-        self.manager.setTransferTimeout(2500)
+        self.manager = manager
         self._inflight: set[str] = set()
 
     def refresh_all(self) -> None:
@@ -27,10 +31,10 @@ class ApiClient(QObject):
     def _get(self, request_name: str, path: str) -> None:
         if request_name in self._inflight:
             return
-
         self._inflight.add(request_name)
         request = QNetworkRequest(QUrl(f"{self.base_url}{path}"))
         request.setRawHeader(b"Accept", b"application/json")
+        request.setTransferTimeout(2500)
         reply = self.manager.get(request)
         reply.setProperty("request_name", request_name)
         reply.finished.connect(lambda r=reply: self._on_finished(r))
@@ -41,12 +45,10 @@ class ApiClient(QObject):
             if reply.error() != QNetworkReply.NetworkError.NoError:
                 self.request_failed.emit(request_name, reply.errorString())
                 return
-
             payload = bytes(reply.readAll()).decode("utf-8")
             data = json.loads(payload)
             if not isinstance(data, dict):
                 raise ValueError("API response must be a JSON object")
-
             if request_name == "api_health":
                 self.api_health_received.emit(data)
             elif request_name == "ml_health":
