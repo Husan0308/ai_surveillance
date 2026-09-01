@@ -29,6 +29,29 @@ class Step7RuntimeWiringTests(unittest.TestCase):
             "services/camera_v11/step6_global_shadow_runtime_v1.py"
         )
 
+    def test_step5_instantiates_and_routes_camera_tracklet_continuity(self) -> None:
+        text = (
+            ROOT / "services/camera_v11/step5_global_shadow_runtime_v1.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("self.camera_tracklet_continuity = CameraTrackletContinuityV1(", text)
+        self.assertIn("camera_tracklet_continuity=self.camera_tracklet_continuity", text)
+        self.assertIn("tracker_mutation=0", text)
+
+    def test_step6_preserves_same_continuity_object_in_final_matcher(self) -> None:
+        text = (
+            ROOT / "services/camera_v11/step6_global_shadow_runtime_v1.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("camera_tracklet_continuity=self.camera_tracklet_continuity", text)
+        self.assertIn("camera_tracklet_continuity=step4.5_enabled", text)
+
+    def test_step5_tap_suppresses_unresolved_raw_fragment(self) -> None:
+        text = (
+            ROOT / "services/camera_v11/step5_same_room_shadow_tap_v1.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("proposal = self.camera_tracklet_continuity.canonicalize_proposal(row)", text)
+        self.assertIn("if proposal is not None:", text)
+        self.assertIn("self.camera_tracklet_continuity.refresh", text)
+
     def test_pair_checker_defaults_strict_but_supports_devs_scope(self) -> None:
         text = (
             ROOT / "scripts/check_camera_v11_step4_reid_pair_scorer_v1_log.py"
