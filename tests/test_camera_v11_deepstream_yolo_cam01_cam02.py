@@ -88,7 +88,8 @@ def test_padding_mapping_matches_cam01_contract() -> None:
         640,
         360,
     )
-    assert mapped == pytest.approx([[0.0, 0.0, 640.0, 360.0, 0.8]])
+    assert len(mapped) == 1
+    assert mapped[0] == pytest.approx([0.0, 0.0, 640.0, 360.0, 0.8])
 
 
 def test_snapshot_is_immutable() -> None:
@@ -110,7 +111,7 @@ def test_runtime_uses_one_source_per_camera_and_one_shared_worker() -> None:
     assert '"max-buffers", 1' in source
     assert 'appsink.connect("new-sample"' not in source
     assert "cv2.VideoCapture" not in source
-    assert "ffmpeg" in source  # architecture marker explicitly asserts ffmpeg=0
+    assert "ffmpeg" in source
     assert "subprocess.Popen" not in source
 
 
