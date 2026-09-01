@@ -13,12 +13,7 @@ from .step4_reid_pair_scorer_v1 import GalleryPairScoreV1, score_gallery_pair_v1
 
 @dataclass(frozen=True)
 class DirectGlobalReIDConfigV1:
-    """Conservative direct local-track -> persistent-global ReID association.
-
-    This deliberately does not depend on the Step4 same-room pair matcher, floor
-    calibration, CT stitching, or the Step5 pair-owned state machine.  A local
-    track is compared directly with a bounded appearance memory for each person.
-    """
+    """Conservative direct local-track -> persistent-global ReID association."""
 
     scoped_cameras: tuple[str, ...] = ("CAM-01", "CAM-04")
     min_track_samples: int = 3
@@ -27,6 +22,7 @@ class DirectGlobalReIDConfigV1:
     min_median_best: float = 0.70
     min_support_ge_070: int = 3
     min_margin: float = 0.06
+    plausible_existing_score: float = 0.55
     confirm_evidence: int = 2
     new_identity_evidence: int = 2
     recent_age_sec: float = 12.0
@@ -45,10 +41,13 @@ class DirectGlobalReIDConfigV1:
             "min_top3_mean",
             "min_median_best",
             "min_margin",
+            "plausible_existing_score",
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ValueError(f"invalid {name}")
+        if self.plausible_existing_score >= self.min_robust_score:
+            raise ValueError("plausible_existing_score must be below min_robust_score")
         if self.min_support_ge_070 < 1:
             raise ValueError("min_support_ge_070 must be positive")
         if self.recent_age_sec <= 0 or self.global_memory_sec <= 0:
@@ -110,7 +109,8 @@ class DirectGlobalReIDResolverV1:
     - no cross-global merges;
     - no forced match when evidence is weak or ambiguous;
     - a lost/recreated local track can re-associate to historical global memory;
-    - only accepted tracks are allowed to update global appearance memory.
+    - ambiguous evidence remains pending instead of spawning duplicate identities;
+    - only accepted tracks update global appearance memory.
     """
 
     def __init__(self, config: DirectGlobalReIDConfigV1 | None = None) -> None:
@@ -130,6 +130,7 @@ class DirectGlobalReIDResolverV1:
         self.no_match_total = 0
         self.low_score_total = 0
         self.low_margin_total = 0
+        self.ambiguous_pending_total = 0
         self.same_camera_reject_total = 0
         self.active_collision_repairs = 0
 
@@ -145,19 +146,29 @@ class DirectGlobalReIDResolverV1:
             return list(samples)
         ordered = sorted(
             samples,
-            key=lambda row: (-float(row.quality_score), -int(row.timestamp_ns), int(row.sample_sequence)),
+            key=lambda row: (
+                -float(row.quality_score),
+                -int(row.timestamp_ns),
+                int(row.sample_sequence),
+            ),
         )
         selected = [ordered[0]]
         remaining = ordered[1:]
         while remaining and len(selected) < 8:
             def utility(row: GallerySampleV1) -> tuple[float, float, int]:
-                nearest = max(float(np.dot(row.embedding, pick.embedding)) for pick in selected)
+                nearest = max(
+                    float(np.dot(row.embedding, pick.embedding)) for pick in selected
+                )
                 diversity = max(0.0, 1.0 - nearest)
-                value = 0.70 * diversity + 0.30 * max(0.0, min(1.0, float(row.quality_score)))
+                value = 0.70 * diversity + 0.30 * max(
+                    0.0, min(1.0, float(row.quality_score))
+                )
                 return (value, float(row.quality_score), int(row.timestamp_ns))
-            best = max(remaining, key=utility)
-            selected.append(best)
-            remaining.remove(best)
+
+            best_index = max(
+                range(len(remaining)), key=lambda index: utility(remaining[index])
+            )
+            selected.append(remaining.pop(best_index))
         return selected
 
     def _add_samples(self, record: _GlobalIdentityV1, view: GalleryViewV1) -> None:
@@ -171,9 +182,17 @@ class DirectGlobalReIDResolverV1:
             changed = True
         if changed:
             record.samples = self._representative_samples(record.samples)
-            record.sample_sequences = {int(row.sample_sequence) for row in record.samples}
+            record.sample_sequences = {
+                int(row.sample_sequence) for row in record.samples
+            }
 
-    def _bind(self, key: tuple[str, str], global_id: str, view: GalleryViewV1, now_ns: int) -> bool:
+    def _bind(
+        self,
+        key: tuple[str, str],
+        global_id: str,
+        view: GalleryViewV1,
+        now_ns: int,
+    ) -> bool:
         camera_id, local_track_id = key
         record = self._globals[global_id]
         current = record.current_members.get(camera_id)
@@ -182,11 +201,15 @@ class DirectGlobalReIDResolverV1:
         self._track_to_global[key] = global_id
         record.current_members[camera_id] = local_track_id
         record.aliases.add(key)
-        record.last_seen_ns = max(record.last_seen_ns, int(now_ns), int(view.last_seen_ns))
+        record.last_seen_ns = max(
+            record.last_seen_ns, int(now_ns), int(view.last_seen_ns)
+        )
         self._add_samples(record, view)
         return True
 
-    def _create(self, views: tuple[GalleryViewV1, ...], now_ns: int, decision: str) -> str:
+    def _create(
+        self, views: tuple[GalleryViewV1, ...], now_ns: int, decision: str
+    ) -> str:
         global_id = self._new_id()
         record = _GlobalIdentityV1(global_id, int(now_ns), int(now_ns))
         self._globals[global_id] = record
@@ -197,7 +220,9 @@ class DirectGlobalReIDResolverV1:
             self.paired_create_total += 1
         for view in views:
             self._decisions.append(
-                DirectGlobalDecisionV1(view.camera_id, view.local_track_id, global_id, decision)
+                DirectGlobalDecisionV1(
+                    view.camera_id, view.local_track_id, global_id, decision
+                )
             )
         return global_id
 
@@ -230,8 +255,10 @@ class DirectGlobalReIDResolverV1:
         vote.last_signature = signature
         return vote.count
 
-    def _repair_active_collisions(self, active: dict[str, frozenset[str]]) -> None:
-        for global_id, record in self._globals.items():
+    def _repair_active_collisions(
+        self, active: dict[str, frozenset[str]]
+    ) -> None:
+        for record in self._globals.values():
             for camera_id in tuple(record.current_members):
                 member = record.current_members[camera_id]
                 if member not in active.get(camera_id, frozenset()):
@@ -246,15 +273,21 @@ class DirectGlobalReIDResolverV1:
             if len(keys) <= 1:
                 continue
             record = self._globals.get(global_id)
-            keep_track = record.current_members.get(camera_id) if record is not None else None
-            keep = next((key for key in keys if key[1] == keep_track), sorted(keys)[0])
+            keep_track = (
+                record.current_members.get(camera_id) if record is not None else None
+            )
+            keep = next(
+                (key for key in keys if key[1] == keep_track), sorted(keys)[0]
+            )
             for key in keys:
                 if key == keep:
                     continue
                 self._track_to_global.pop(key, None)
                 self.active_collision_repairs += 1
                 self._decisions.append(
-                    DirectGlobalDecisionV1(key[0], key[1], "", "same_camera_collision_split")
+                    DirectGlobalDecisionV1(
+                        key[0], key[1], "", "same_camera_collision_split"
+                    )
                 )
 
     def _candidate_globals(
@@ -267,10 +300,16 @@ class DirectGlobalReIDResolverV1:
         camera_id = str(view.camera_id)
         track_id = str(view.local_track_id)
         for global_id, record in self._globals.items():
-            if int(now_ns) - int(record.last_seen_ns) > int(self.config.global_memory_sec * 1e9):
+            if int(now_ns) - int(record.last_seen_ns) > int(
+                self.config.global_memory_sec * 1e9
+            ):
                 continue
             current = record.current_members.get(camera_id)
-            if current is not None and current != track_id and current in active.get(camera_id, frozenset()):
+            if (
+                current is not None
+                and current != track_id
+                and current in active.get(camera_id, frozenset())
+            ):
                 self.same_camera_reject_total += 1
                 continue
             if len(record.samples) < 3:
@@ -286,41 +325,73 @@ class DirectGlobalReIDResolverV1:
         view: GalleryViewV1,
         active: dict[str, frozenset[str]],
         now_ns: int,
-    ) -> bool:
+    ) -> str:
+        """Return bound, blocked, or none.
+
+        blocked means an existing identity is appearance-plausible but evidence is
+        not yet safe enough.  Such a track must remain pending; creating a second
+        GID here is exactly how one physical person acquires repeated identities.
+        """
         key = _key(view)
         ranked = self._candidate_globals(view, active, now_ns)
         if not ranked:
-            return False
+            return "none"
         best_value, best_id, best_score = ranked[0]
         second_value = ranked[1][0] if len(ranked) > 1 else None
         margin = None if second_value is None else best_value - second_value
+
         if not self._quality_ok(best_score):
             self.low_score_total += 1
             self.no_match_total += 1
             self._decisions.append(
-                DirectGlobalDecisionV1(key[0], key[1], "", "no_match_low_score", best_value, margin)
+                DirectGlobalDecisionV1(
+                    key[0],
+                    key[1],
+                    "",
+                    "no_match_low_score",
+                    best_value,
+                    margin,
+                )
             )
-            return False
+            if best_value >= self.config.plausible_existing_score:
+                self.ambiguous_pending_total += 1
+                return "blocked"
+            return "none"
+
         if margin is not None and margin < self.config.min_margin:
             self.low_margin_total += 1
             self.no_match_total += 1
+            self.ambiguous_pending_total += 1
             self._decisions.append(
-                DirectGlobalDecisionV1(key[0], key[1], "", "no_match_ambiguous", best_value, margin)
+                DirectGlobalDecisionV1(
+                    key[0],
+                    key[1],
+                    "",
+                    "no_match_ambiguous",
+                    best_value,
+                    margin,
+                )
             )
-            return False
-        count = self._advance_vote(self._match_votes, key, best_id, _signature(view))
+            return "blocked"
+
+        count = self._advance_vote(
+            self._match_votes, key, best_id, _signature(view)
+        )
         if count < self.config.confirm_evidence:
-            return False
+            self.ambiguous_pending_total += 1
+            return "blocked"
         if not self._bind(key, best_id, view, now_ns):
             self.same_camera_reject_total += 1
-            return False
+            return "blocked"
         self.reassociated_total += 1
         self._match_votes.pop(key, None)
         self._new_votes.pop(key, None)
         self._decisions.append(
-            DirectGlobalDecisionV1(key[0], key[1], best_id, "reassociate", best_value, margin)
+            DirectGlobalDecisionV1(
+                key[0], key[1], best_id, "reassociate", best_value, margin
+            )
         )
-        return True
+        return "bound"
 
     def _try_pair_unknowns(
         self,
@@ -366,9 +437,15 @@ class DirectGlobalReIDResolverV1:
             score = scores[(i, j)]
             if not self._quality_ok(score):
                 continue
-            row_margin = None if len(ranked) < 2 else best_value - ranked[1][0]
-            col_margin = None if len(reverse) < 2 else best_value - reverse[1][0]
-            margins = [value for value in (row_margin, col_margin) if value is not None]
+            row_margin = (
+                None if len(ranked) < 2 else best_value - ranked[1][0]
+            )
+            col_margin = (
+                None if len(reverse) < 2 else best_value - reverse[1][0]
+            )
+            margins = [
+                value for value in (row_margin, col_margin) if value is not None
+            ]
             margin = min(margins) if margins else None
             if margin is not None and margin < self.config.min_margin:
                 continue
@@ -381,7 +458,9 @@ class DirectGlobalReIDResolverV1:
                 max(_signature(first)[1], _signature(second)[1]),
                 len(first.samples) + len(second.samples),
             )
-            count = self._advance_vote(self._pair_votes, pair_key, "pair", signature)
+            count = self._advance_vote(
+                self._pair_votes, pair_key, "pair", signature
+            )
             if count < self.config.confirm_evidence:
                 continue
             self._create((first, second), now_ns, "paired_create")
@@ -418,8 +497,6 @@ class DirectGlobalReIDResolverV1:
             self._repair_active_collisions(active)
             by_key = {_key(view): view for view in eligible}
 
-            # Preserve already-owned active tracks and safely enrich only their
-            # established identity memory.
             for key, view in by_key.items():
                 global_id = self._track_to_global.get(key)
                 if global_id is None or global_id not in self._globals:
@@ -428,66 +505,78 @@ class DirectGlobalReIDResolverV1:
                 current = record.current_members.get(key[0])
                 if current is None or current == key[1]:
                     record.current_members[key[0]] = key[1]
-                    record.last_seen_ns = max(record.last_seen_ns, current_ns, int(view.last_seen_ns))
+                    record.last_seen_ns = max(
+                        record.last_seen_ns, current_ns, int(view.last_seen_ns)
+                    )
                     self._add_samples(record, view)
 
-            unknown = [view for view in eligible if _key(view) not in self._track_to_global]
+            unknown = [
+                view
+                for view in eligible
+                if _key(view) not in self._track_to_global
+            ]
 
-            # First reuse persistent identities. This is what keeps one physical
-            # person on the same GID across local tracker/CT fragmentation.
-            remaining: list[GalleryViewV1] = []
+            safe_for_new: list[GalleryViewV1] = []
             for view in unknown:
-                if not self._try_existing(view, active, current_ns):
-                    remaining.append(view)
+                status = self._try_existing(view, active, current_ns)
+                if status == "none":
+                    safe_for_new.append(view)
 
-            # When the same previously-unseen person first appears in both cameras,
-            # create one GID for the reciprocal pair instead of two camera IDs.
-            paired = self._try_pair_unknowns(remaining, current_ns)
+            paired = self._try_pair_unknowns(safe_for_new, current_ns)
 
-            # A person visible in only one camera still needs an identity. Delay
-            # creation for two independent gallery evidence updates so transient
-            # false tracks do not instantly become global people.
-            for view in remaining:
+            for view in safe_for_new:
                 key = _key(view)
                 if key in paired or key in self._track_to_global:
                     continue
                 signature = _signature(view)
-                count = self._advance_vote(self._new_votes, key, "new", signature)
+                count = self._advance_vote(
+                    self._new_votes, key, "new", signature
+                )
                 if count < self.config.new_identity_evidence:
                     continue
                 self._create((view,), current_ns, "single_camera_create")
                 self._new_votes.pop(key, None)
 
-            # Keep identities persistent, but remove only active membership when a
-            # local track disappears. Historical aliases and appearance remain.
             for record in self._globals.values():
                 for camera_id in tuple(record.current_members):
                     local_track_id = record.current_members[camera_id]
-                    if local_track_id not in active.get(camera_id, frozenset()):
+                    if local_track_id not in active.get(
+                        camera_id, frozenset()
+                    ):
                         record.current_members.pop(camera_id, None)
 
             return tuple(self._decisions[start_decisions:])
 
-    def global_for_track(self, camera_id: str, local_track_id: str) -> str | None:
+    def global_for_track(
+        self, camera_id: str, local_track_id: str
+    ) -> str | None:
         with self._lock:
-            return self._track_to_global.get((str(camera_id), str(local_track_id)))
+            return self._track_to_global.get(
+                (str(camera_id), str(local_track_id))
+            )
 
     def records(self) -> tuple[dict[str, object], ...]:
         with self._lock:
             return tuple(
                 {
                     "global_id": record.global_id,
-                    "current_members": dict(sorted(record.current_members.items())),
+                    "current_members": dict(
+                        sorted(record.current_members.items())
+                    ),
                     "aliases": tuple(sorted(record.aliases)),
                     "samples": len(record.samples),
                     "last_seen_ns": record.last_seen_ns,
                 }
-                for record in sorted(self._globals.values(), key=lambda row: row.global_id)
+                for record in sorted(
+                    self._globals.values(), key=lambda row: row.global_id
+                )
             )
 
     def snapshot(self) -> dict[str, int]:
         with self._lock:
-            active_members = sum(len(row.current_members) for row in self._globals.values())
+            active_members = sum(
+                len(row.current_members) for row in self._globals.values()
+            )
             return {
                 "global_ids": len(self._globals),
                 "active_members": active_members,
@@ -497,6 +586,7 @@ class DirectGlobalReIDResolverV1:
                 "no_match_total": self.no_match_total,
                 "low_score_total": self.low_score_total,
                 "low_margin_total": self.low_margin_total,
+                "ambiguous_pending_total": self.ambiguous_pending_total,
                 "same_camera_reject_total": self.same_camera_reject_total,
                 "active_collision_repairs": self.active_collision_repairs,
             }
