@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-export V11_STEP5_RUNTIME_MODULE="services.camera_v11.step6_global_shadow_runtime_v1"
+export V11_STEP5_RUNTIME_MODULE="${V11_STEP6_RUNTIME_MODULE:-services.camera_v11.step6_global_shadow_runtime_v1}"
 export V11_STEP5_DISPLAY_LOG="${V11_STEP6_DISPLAY_LOG:-/tmp/CAMERA_V11_STEP6_GLOBAL_DISPLAY.log}"
 export V11_STEP5_GLOBAL_LOG="${V11_STEP6_GLOBAL_LOG:-/tmp/CAMERA_V11_STEP6_GLOBAL.log}"
 export V11_STEP5_POWER_LOG="${V11_STEP6_POWER_LOG:-/tmp/CAMERA_V11_STEP6_POWER_V1.log}"
