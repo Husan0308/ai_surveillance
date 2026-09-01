@@ -7,6 +7,7 @@ from pathlib import Path
 
 TRACKER_PREFIX = "CAMERA_V11_STEP3_V2_TRACKER "
 LOCK_PREFIX = "CAMERA_V11_BBOX_SINGLE_TARGET "
+FP_TRACKER_PREFIX = "CAMERA_V11_BBOX_FP_TRACKER "
 POLICY_PREFIX = "CAMERA_V11_BBOX_FP_GUARD_POLICY "
 PUBLISHER_PREFIX = "CAMERA_V11_BBOX_PUBLISHER "
 CAMERA_RE = re.compile(
@@ -28,13 +29,14 @@ def parse_kv(line: str) -> dict[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check one-person bbox run for source-track churn and display false positives"
+        description="Check one-person bbox run for confirmed-track churn and display false positives"
     )
     parser.add_argument("--log", type=Path, default=Path("/tmp/CAMERA_V11_BBOX_TRACKER.log"))
     parser.add_argument("--required-cameras", default="CAM-01,CAM-04")
-    parser.add_argument("--max-created-per-1000-updates", type=float, default=4.0)
-    parser.add_argument("--max-acquire-per-1000-updates", type=float, default=3.0)
-    parser.add_argument("--max-visible-per-camera", type=int, default=2)
+    parser.add_argument("--rate-denominator-floor", type=int, default=500)
+    parser.add_argument("--max-excess-confirmed-per-1000", type=float, default=4.0)
+    parser.add_argument("--max-excess-acquire-per-1000", type=float, default=3.0)
+    parser.add_argument("--max-visible-per-camera", type=int, default=1)
     parser.add_argument("--max-suppressed-per-update", type=float, default=0.20)
     args = parser.parse_args()
 
@@ -45,6 +47,7 @@ def main() -> int:
     latest_tracker: dict[str, dict[str, int | str]] = {}
     max_visible: dict[str, int] = {}
     latest_lock: dict[str, dict[str, str]] = {}
+    latest_fp_tracker: dict[str, dict[str, str]] = {}
     policy: dict[str, str] | None = None
     publisher_errors: int | None = None
 
@@ -67,6 +70,11 @@ def main() -> int:
             camera = row.get("camera")
             if camera:
                 latest_lock[camera] = row
+        elif raw.startswith(FP_TRACKER_PREFIX):
+            row = parse_kv(raw)
+            camera = row.get("camera")
+            if camera:
+                latest_fp_tracker[camera] = row
         elif raw.startswith(POLICY_PREFIX):
             policy = parse_kv(raw)
         elif raw.startswith(PUBLISHER_PREFIX):
@@ -87,29 +95,37 @@ def main() -> int:
             new_track_conf = float(policy.get("new_track_conf", "0"))
             confirm_hits = int(policy.get("confirm_hits", "0"))
             max_lost = float(policy.get("max_lost", "0").rstrip("s"))
+            occupant_block = float(policy.get("single_occupant_block", "0").rstrip("s"))
         except ValueError:
             new_track_conf = 0.0
             confirm_hits = 0
             max_lost = 0.0
+            occupant_block = 0.0
         if new_track_conf < 0.45:
             reasons.append(f"new_track_conf_too_low={new_track_conf:.2f}")
         if confirm_hits < 3:
             reasons.append(f"confirm_hits_too_low={confirm_hits}")
         if max_lost < 4.0:
             reasons.append(f"max_lost_too_short={max_lost:.2f}")
+        if occupant_block < 4.0:
+            reasons.append(f"single_occupant_block_too_short={occupant_block:.2f}")
 
     for camera in required:
         tracker = latest_tracker.get(camera)
         lock = latest_lock.get(camera)
+        fp_tracker = latest_fp_tracker.get(camera)
         if tracker is None:
             reasons.append(f"{camera}:tracker_marker_missing")
             continue
         if lock is None:
             reasons.append(f"{camera}:lock_marker_missing")
             continue
+        if fp_tracker is None:
+            reasons.append(f"{camera}:fp_tracker_marker_missing")
+            continue
 
         updates = int(tracker["updates"])
-        created = int(tracker["created"])
+        probation_births = int(tracker["created"])
         peak_visible = max_visible.get(camera, int(tracker["visible"]))
         try:
             acquired = int(lock.get("acquired", "0"))
@@ -118,35 +134,48 @@ def main() -> int:
             suppressed = int(lock.get("suppressed", "0"))
             output_max = int(lock.get("output_max", "999"))
             violations = int(lock.get("violations", "999"))
+            confirmed_total = int(fp_tracker.get("confirmed_total", "0"))
+            blocked_new = int(fp_tracker.get("blocked_new", "0"))
         except ValueError:
-            reasons.append(f"{camera}:malformed_lock_marker")
+            reasons.append(f"{camera}:malformed_marker")
             continue
 
-        denom = max(1, updates)
-        created_per_1000 = 1000.0 * created / denom
-        acquire_per_1000 = 1000.0 * acquired / denom
-        suppression_ratio = suppressed / denom
+        rate_denom = max(args.rate_denominator_floor, updates, 1)
+        suppression_denom = max(1, updates)
+        excess_confirmed = max(0, confirmed_total - 1)
+        excess_acquired = max(0, acquired - 1)
+        excess_confirmed_per_1000 = 1000.0 * excess_confirmed / rate_denom
+        excess_acquire_per_1000 = 1000.0 * excess_acquired / rate_denom
+        suppression_ratio = suppressed / suppression_denom
+
         summaries.append(
-            f"{camera}:updates={updates},created={created},created_per_1000={created_per_1000:.2f},"
-            f"peak_visible={peak_visible},suppressed={suppressed},suppressed_per_update={suppression_ratio:.3f},"
-            f"acquired={acquired},acquire_per_1000={acquire_per_1000:.2f},handoff={handoff},released={released}"
+            f"{camera}:updates={updates},probation_births={probation_births},"
+            f"confirmed_total={confirmed_total},excess_confirmed_per_1000={excess_confirmed_per_1000:.2f},"
+            f"blocked_new={blocked_new},peak_visible={peak_visible},suppressed={suppressed},"
+            f"suppressed_per_update={suppression_ratio:.3f},acquired={acquired},"
+            f"excess_acquire_per_1000={excess_acquire_per_1000:.2f},handoff={handoff},released={released}"
         )
 
+        if confirmed_total < 1:
+            reasons.append(f"{camera}:no_confirmed_target")
         if acquired + handoff < 1:
             reasons.append(f"{camera}:target_not_acquired")
-        if created_per_1000 > args.max_created_per_1000_updates:
+        if excess_confirmed_per_1000 > args.max_excess_confirmed_per_1000:
             reasons.append(
-                f"{camera}:created_per_1000={created_per_1000:.2f}>{args.max_created_per_1000_updates:.2f}"
+                f"{camera}:excess_confirmed_per_1000={excess_confirmed_per_1000:.2f}>"
+                f"{args.max_excess_confirmed_per_1000:.2f}"
             )
-        if acquire_per_1000 > args.max_acquire_per_1000_updates:
+        if excess_acquire_per_1000 > args.max_excess_acquire_per_1000:
             reasons.append(
-                f"{camera}:acquire_per_1000={acquire_per_1000:.2f}>{args.max_acquire_per_1000_updates:.2f}"
+                f"{camera}:excess_acquire_per_1000={excess_acquire_per_1000:.2f}>"
+                f"{args.max_excess_acquire_per_1000:.2f}"
             )
         if peak_visible > args.max_visible_per_camera:
             reasons.append(f"{camera}:peak_visible={peak_visible}>{args.max_visible_per_camera}")
         if suppression_ratio > args.max_suppressed_per_update:
             reasons.append(
-                f"{camera}:suppressed_per_update={suppression_ratio:.3f}>{args.max_suppressed_per_update:.3f}"
+                f"{camera}:suppressed_per_update={suppression_ratio:.3f}>"
+                f"{args.max_suppressed_per_update:.3f}"
             )
         if output_max > 1:
             reasons.append(f"{camera}:output_max={output_max}")
@@ -169,9 +198,9 @@ def main() -> int:
 
     print(
         "V11_BBOX_FALSE_POSITIVE_CHECK RESULT=PASS "
-        f"required={','.join(required) or 'any'} "
-        f"max_created_per_1000={args.max_created_per_1000_updates:.2f} "
-        f"max_acquire_per_1000={args.max_acquire_per_1000_updates:.2f} "
+        f"required={','.join(required) or 'any'} rate_floor={args.rate_denominator_floor} "
+        f"max_excess_confirmed_per_1000={args.max_excess_confirmed_per_1000:.2f} "
+        f"max_excess_acquire_per_1000={args.max_excess_acquire_per_1000:.2f} "
         f"max_visible={args.max_visible_per_camera} "
         f"max_suppressed_per_update={args.max_suppressed_per_update:.3f} "
         f"details={summary_text} publisher_errors={publisher_errors}"
