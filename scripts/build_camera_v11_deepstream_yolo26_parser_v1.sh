@@ -50,14 +50,29 @@ g++ -std=c++17 -O2 -fPIC -shared \
   -o "$PARSER_OUT"
 
 read -r -a PKG_FLAGS <<<"$(pkg-config --cflags --libs gstreamer-1.0 glib-2.0)"
-gcc -std=c11 -O2 -fPIC -shared \
-  -I"$DS_ROOT/sources/includes" \
-  -L"$DS_ROOT/lib" \
-  -Wl,-rpath,"$DS_ROOT/lib" \
-  "$META_SRC" \
-  -o "$META_OUT" \
-  "${PKG_FLAGS[@]}" \
-  -lnvds_meta -lnvdsgst_meta
+META_BASE=(
+  gcc -std=c11 -O2 -fPIC -shared
+  -I"$DS_ROOT/sources/includes"
+  -L"$DS_ROOT/lib"
+  -Wl,-rpath,"$DS_ROOT/lib"
+  "$META_SRC"
+  -o "$META_OUT"
+  "${PKG_FLAGS[@]}"
+)
+
+meta_ok=0
+for libs in "-lnvds_meta -lnvdsgst_meta" "-lnvds_meta" "-lnvdsgst_meta -lnvds_meta"; do
+  read -r -a EXTRA_LIBS <<<"$libs"
+  rm -f "$META_OUT"
+  if "${META_BASE[@]}" "${EXTRA_LIBS[@]}"; then
+    meta_ok=1
+    break
+  fi
+done
+(( meta_ok == 1 )) || {
+  echo "V11_DS_YOLO_BUILD RESULT=FAIL reason=metadata_helper_link_failed" >&2
+  exit 1
+}
 
 [[ -s "$PARSER_OUT" && -s "$META_OUT" ]] || {
   echo "V11_DS_YOLO_BUILD RESULT=FAIL reason=library_missing" >&2
