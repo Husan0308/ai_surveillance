@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import subprocess
 import sys
@@ -30,6 +31,16 @@ COUNTERS = (
 )
 
 
+def _env_truthy(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--display-log", required=True, type=Path)
@@ -41,6 +52,12 @@ def main() -> int:
     if not args.display_log.is_file() or not args.pair_log.is_file():
         print("V11_STEP4_REID_PAIR_SCORER_V1 RESULT=FAIL reasons=missing_log")
         return 2
+
+    # General Step3 acceptance remains strict and expects both same-room and
+    # different-room diagnostics. The dedicated Step7 CAM-01/CAM-04 one-person
+    # run intentionally contains no unrelated people in the other rooms, so its
+    # wrapper can disable only this unrelated context requirement via environment.
+    require_different_room = _env_truthy("V11_STEP4_PAIR_REQUIRE_DIFFERENT_ROOM", "1")
 
     root = ROOT
     reasons: list[str] = []
@@ -120,7 +137,7 @@ def main() -> int:
         )
     if same_room <= 0:
         reasons.append("no_same_room_pairs")
-    if different_room <= 0:
+    if require_different_room and different_room <= 0:
         reasons.append("no_different_room_pairs")
     if invalid != 0:
         reasons.append(f"pairs_invalid={invalid}")
@@ -158,13 +175,18 @@ def main() -> int:
             reasons.append("raw_embedding_column_forbidden")
 
     if reasons:
-        print("V11_STEP4_REID_PAIR_SCORER_V1 RESULT=FAIL reasons=" + ";".join(reasons))
+        print(
+            "V11_STEP4_REID_PAIR_SCORER_V1 RESULT=FAIL reasons="
+            + ";".join(reasons)
+            + f" different_room_required={int(require_different_room)}"
+        )
         return 1
     print(
         "V11_STEP4_REID_PAIR_SCORER_V1 RESULT=PASS "
         f"pairs_considered={considered} pairs_scored={scored} "
         f"pairs_insufficient={insufficient} pairs_invalid=0 "
         f"same_room_pairs={same_room} different_room_pairs={different_room} "
+        f"different_room_required={int(require_different_room)} "
         f"score_p50={timings['score_p50']:.3f}ms "
         f"score_p95={timings['score_p95']:.3f}ms "
         f"tsv_rows={len(tsv_rows)} cam01_cam04=1 "
