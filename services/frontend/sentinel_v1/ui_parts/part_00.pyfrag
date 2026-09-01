@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+from datetime import datetime
+import os
+import time
+
+from PySide6.QtCore import QDate, Qt, QRect, QRectF, QSize, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
+from PySide6.QtWidgets import (
+    QApplication, QButtonGroup, QCalendarWidget, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QStackedWidget, QTextEdit, QToolButton,
+    QVBoxLayout, QWidget,
+)
+
+from .data import (
+    CAMERAS, EVENTS, PEOPLE, ROOMS, TYPE_LABEL, Camera, Person, camera_name, fmt,
+    next_camera_id, room_name, save_cameras,
+)
+from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameReader
+
+LIVE_PREVIEW_CAMERA = os.environ.get("SENTINEL_LIVE_PREVIEW_CAMERA", "CAM-01").strip() or "CAM-01"
+LIVE_PREVIEW_PATH = os.environ.get("V11_UI_PREVIEW_PATH", "/dev/shm/v11_ui_preview_cam01_v1.bin")
+
+
+C = {
+    "bg": "#090d12", "sidebar": "#0b1118", "panel": "#0e151d", "panel2": "#111b25",
+    "border": "#22303e", "text": "#e7edf3", "muted": "#7e8c99", "primary": "#39d9c5",
+    "known": "#3ddc97", "unknown": "#f6b94b", "offline": "#f06464", "blue": "#65a8ff",
+    "violet": "#a78bfa", "field": "#0b1219",
+}
+
+
+APP_QSS = f"""
+* {{ color: {C['text']}; font-family: 'DejaVu Sans'; font-size: 12px; }}
+QMainWindow, QWidget#root, QWidget#pageRoot, QScrollArea, QScrollArea > QWidget > QWidget {{ background: {C['bg']}; }}
+QFrame#sidebar {{ background: {C['sidebar']}; border-right: 1px solid {C['border']}; }}
+QFrame#header {{ background: {C['bg']}; border-bottom: 1px solid {C['border']}; }}
+QFrame#panel {{ background: {C['panel']}; border: 1px solid {C['border']}; border-radius: 6px; }}
+QLabel#title {{ font-size: 18px; font-weight: 700; }}
+QLabel#subtitle, QLabel#muted {{ color: {C['muted']}; }}
+QLabel#eyebrow {{ color: {C['muted']}; font-family: 'DejaVu Sans Mono'; font-size: 10px; letter-spacing: 1px; }}
+QLabel#brand {{ font-size: 14px; font-weight: 700; letter-spacing: 1px; }}
+QLabel#metric {{ font-size: 29px; font-weight: 700; }}
+QLabel#sectionTitle {{ font-size: 14px; font-weight: 700; }}
+QLabel#mono {{ color: {C['muted']}; font-family: 'DejaVu Sans Mono'; font-size: 10px; }}
+QPushButton {{ background: transparent; border: 1px solid {C['border']}; border-radius: 5px; padding: 7px 11px; }}
+QPushButton:hover {{ background: {C['panel2']}; }}
+QPushButton:checked {{ background: {C['panel2']}; color: {C['text']}; }}
+QPushButton#primary {{ background: {C['primary']}; border-color: {C['primary']}; color: #07110f; font-weight: 700; }}
+QPushButton#primary:hover {{ background: #52e5d3; }}
+QPushButton#secondary {{ background: {C['panel2']}; }}
+QPushButton#ghost {{ border-color: transparent; color: {C['muted']}; }}
+QPushButton#cameraSelect {{ background: {C['field']}; text-align: left; padding: 5px 8px; }}
+QPushButton#cameraSelect:hover {{ background: {C['panel2']}; }}
+QPushButton#cameraSelect:checked {{ background: #14242d; border-color: {C['primary']}; color: {C['primary']}; }}
+QPushButton#nav {{ text-align: left; border: 0; border-radius: 5px; padding: 9px 12px; color: #9ca9b4; }}
+QPushButton#nav:hover {{ background: #111c26; color: {C['text']}; }}
+QPushButton#nav:checked {{ background: #14242d; color: {C['primary']}; }}
+QToolButton {{ background: transparent; border: 1px solid {C['border']}; border-radius: 5px; padding: 7px; }}
+QToolButton:hover {{ background: {C['panel2']}; }}
+QToolButton:checked {{ background: #14242d; border-color: {C['primary']}; color: {C['primary']}; }}
+QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {{ background: {C['field']}; border: 1px solid {C['border']}; border-radius: 5px; padding: 7px 9px; selection-background-color: {C['primary']}; selection-color: #07110f; }}
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit, QTextEdit:focus {{ border-color: {C['primary']}; }}
+QComboBox::drop-down {{ border: 0; width: 22px; }}
+QComboBox QAbstractItemView {{ background: {C['panel']}; border: 1px solid {C['border']}; selection-background-color: {C['panel2']}; }}
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: #283743; border-radius: 4px; min-height: 35px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QProgressBar {{ background: {C['panel2']}; border: 0; border-radius: 3px; height: 6px; text-align: center; color: transparent; }}
+QProgressBar::chunk {{ background: {C['primary']}; border-radius: 3px; }}
+QTableWidget {{ background: {C['panel']}; alternate-background-color: #101923; border: 1px solid {C['border']}; gridline-color: {C['border']}; selection-background-color: #17313a; }}
+QHeaderView::section {{ background: {C['panel2']}; color: {C['muted']}; border: 0; border-bottom: 1px solid {C['border']}; padding: 9px; font-family: 'DejaVu Sans Mono'; font-size: 10px; }}
+QDialog {{ background: {C['bg']}; }}
+"""
+
+
+def clear_layout(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget():
+            item.widget().hide()
+            item.widget().deleteLater()
+        elif item.layout():
+            clear_layout(item.layout())
+
+
+def label(text: str, role: str | None = None, color: str | None = None) -> QLabel:
+    w = QLabel(text)
+    if role:
+        w.setObjectName(role)
+    if color:
+        w.setStyleSheet(f"color:{color};")
+    return w
+
+
+class Panel(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("panel")
+
+
+class ScrollPage(QScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.body = QWidget()
+        self.body.setObjectName("pageRoot")
+        self.layout = QVBoxLayout(self.body)
+        self.layout.setContentsMargins(24, 22, 24, 28)
+        self.layout.setSpacing(16)
+        self.setWidget(self.body)
+
+
+class StatCard(Panel):
+    def __init__(self, heading: str, value: str, tone: str = "text", hint: str = ""):
+        super().__init__()
+        self.setMinimumHeight(120)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 15, 16, 14)
+        lay.setSpacing(5)
+        lay.addWidget(label(heading.upper(), "eyebrow"))
+        lay.addWidget(label(str(value), "metric", C[tone]))
+        if hint:
+            lay.addWidget(label(hint, "muted"))
+        lay.addStretch()
+
+
+class FaceAvatar(QWidget):
+    def __init__(self, person, size=64, presence_tone=False):
+        super().__init__()
+        self.person = person
+        self.presence_tone = presence_tone
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        photo = QPixmap(self.person.profile_image) if self.person.profile_image else QPixmap()
+        if not photo.isNull():
+            clip = QPainterPath()
+            clip.addRoundedRect(QRectF(self.rect().adjusted(0, 0, -1, -1)), 6, 6)
+            p.save()
+            p.setClipPath(clip)
+            scaled = photo.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            source_x = max(0, (scaled.width() - self.width()) // 2)
+            source_y = max(0, (scaled.height() - self.height()) // 2)
+            p.drawPixmap(self.rect(), scaled, QRect(source_x, source_y, self.width(), self.height()))
+            p.restore()
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(C['border']), 1))
+            p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 6, 6)
+        else:
+            c1 = QColor.fromHsl(self.person.hue, 115, 90)
+            c2 = QColor.fromHsl((self.person.hue + 60) % 360, 100, 35)
+            g = QRadialGradient(self.width() * .3, self.height() * .2, self.width())
+            g.setColorAt(0, c1); g.setColorAt(1, c2)
+            p.setBrush(g); p.setPen(QPen(QColor(C['border']), 1)); p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 6, 6)
+            initials = "".join(x[0] for x in self.person.label.replace("_", " ").split()[:2]).upper()
+            p.setPen(QColor(235, 240, 245, 220)); p.setFont(QFont("DejaVu Sans", max(10, self.width() // 4), QFont.Bold))
+            p.drawText(self.rect(), Qt.AlignCenter, initials)
+        tone = (
+            C['known'] if self.person.in_building else C['unknown']
+        ) if self.presence_tone else (
+            C['known'] if self.person.known else C['unknown']
+        )
+        p.setPen(Qt.NoPen); p.setBrush(QColor(tone))
+        p.drawRect(0, self.height()-4, self.width(), 4)
+
+
+class CameraView(Panel):
+    clicked = Signal()
+
+    def __init__(
+        self,
+        camera,
+        people=None,
+        show_room=True,
+        occupancy=None,
+        display_name=None,
+        heatmap_enabled=False,
+        realtime_camera_id=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.camera = camera
+        self.people = people or []
+        self.show_room = show_room
+        self.occupancy = occupancy
+        self.display_name = display_name
+        self.heatmap_enabled = heatmap_enabled
+        self.realtime_camera_id = realtime_camera_id
+        self.live_reader = PreviewFrameReader(LIVE_PREVIEW_PATH) if realtime_camera_id else None
+        self.live_image = QImage()
+        self.live_sequence = -1
+        self.live_last_frame_mono = 0.0
+        self.live_object_count = 0
+        self.live_timer = None
+        if self.live_reader is not None:
+            self.camera.online = False
+            self.camera.fps = 0.0
+            self.camera.last_error = "Ulanish kutilmoqda"
+            self.live_timer = QTimer(self)
+            self.live_timer.setInterval(33)
+            self.live_timer.timeout.connect(self._poll_live_preview)
+            self.live_timer.start()
+        self.setMinimumSize(220, 145)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Kamerani katta ko'rish")
+
+    def _poll_live_preview(self):
+        if self.live_reader is None:
+            return
+        now = time.monotonic()
+        frame = self.live_reader.read_latest()
+        if frame is not None and frame.sequence != self.live_sequence:
+            image = QImage(
+                frame.payload, frame.width, frame.height, frame.stride, QImage.Format_RGB32
+            ).copy()
+            if not image.isNull():
+                self.live_image = image
+                self.live_sequence = frame.sequence
+                self.live_last_frame_mono = now
+                self.live_object_count = frame.object_count
+                self.camera.online = True
+                self.camera.fps = frame.fps
+                self.camera.last_error = None
+                self.update()
+                return
+        if self.live_last_frame_mono <= 0.0 or (now - self.live_last_frame_mono) > 1.20:
+            if self.camera.online or self.camera.last_error != "Ulanish kutilmoqda":
+                self.camera.online = False
+                self.camera.fps = 0.0
+                self.camera.last_error = "Ulanish kutilmoqda"
+                self.update()
+
+    def _draw_live_frame(self, painter, rect):
+        if self.live_image.isNull():
+            return False
