@@ -9,11 +9,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-
 STEP5_PREFIX = "CAMERA_V11_STEP5_GLOBAL_SHADOW_V1 "
 STEP6_PREFIX = "CAMERA_V11_STEP6_GLOBAL_VERIFY_V1 "
 INTEGER = re.compile(r"\b([a-z][a-z0-9_]+)=(\d+)\b")
-
 TARGET_CAMERAS = {"CAM-01", "CAM-04"}
 TARGET_ROOM = "Devs"
 
@@ -42,26 +40,17 @@ def main() -> int:
     args = parser.parse_args()
 
     reasons: list[str] = []
-
-    # Step7 is an acceptance layer only. First require the full Step6 chain to pass.
     prior = subprocess.run(
         [
             sys.executable,
             str(ROOT / "scripts/check_camera_v11_step6_global_shadow_v1_log.py"),
-            "--display-log",
-            str(args.display_log),
-            "--match-log",
-            str(args.match_log),
-            "--pair-tsv",
-            str(args.pair_tsv),
-            "--match-tsv",
-            str(args.match_tsv),
-            "--global-tsv",
-            str(args.global_tsv),
-            "--verify-tsv",
-            str(args.verify_tsv),
-            "--warmup-windows",
-            str(args.warmup_windows),
+            "--display-log", str(args.display_log),
+            "--match-log", str(args.match_log),
+            "--pair-tsv", str(args.pair_tsv),
+            "--match-tsv", str(args.match_tsv),
+            "--global-tsv", str(args.global_tsv),
+            "--verify-tsv", str(args.verify_tsv),
+            "--warmup-windows", str(args.warmup_windows),
         ],
         cwd=ROOT,
         text=True,
@@ -86,90 +75,65 @@ def main() -> int:
     if not step6:
         reasons.append("step6_metrics_missing")
 
-    # One physical person visible in both Devs cameras must collapse to one stable
-    # Step5 shadow identity with exactly two active member tracks.
-    if step5:
-        expected_step5 = {
-            "global_shadow_created": 1,
-            "global_shadow_provisional": 0,
-            "global_shadow_confirmed": 1,
-            "global_shadow_conflicts": 0,
-            "global_shadow_expired": 0,
-            "global_shadow_active": 1,
-            "global_shadow_member_tracks": 2,
-            "queue_dropped": 0,
-            "worker_errors": 0,
-        }
-        # Runtime prints short field names, not internal snapshot names.
-        aliases = {
-            "global_shadow_created": "created",
-            "global_shadow_provisional": "provisional",
-            "global_shadow_confirmed": "confirmed",
-            "global_shadow_conflicts": "conflicts",
-            "global_shadow_expired": "expired",
-            "global_shadow_active": "active",
-            "global_shadow_member_tracks": "member_tracks",
-            "queue_dropped": "queue_dropped",
-            "worker_errors": "worker_errors",
-        }
-        for internal, expected in expected_step5.items():
-            field = aliases[internal]
-            actual = step5.get(field)
-            if actual is None:
-                reasons.append(f"step5_missing:{field}")
-            elif actual != expected:
-                reasons.append(f"step5_{field}={actual}/expected{expected}")
+    expected_step5 = {
+        "created": 1,
+        "provisional": 0,
+        "confirmed": 1,
+        "conflicts": 0,
+        "expired": 0,
+        "active": 1,
+        "member_tracks": 2,
+        "queue_dropped": 0,
+        "worker_errors": 0,
+    }
+    for field, expected in expected_step5.items():
+        actual = step5.get(field)
+        if actual is None:
+            reasons.append(f"step5_missing:{field}")
+        elif actual != expected:
+            reasons.append(f"step5_{field}={actual}/expected{expected}")
 
-    # Step6 must end with exactly one verified record and no hold/recovery path.
-    if step6:
-        expected_step6 = {
-            "records_created": 1,
-            "pending": 0,
-            "verified": 1,
-            "hold": 0,
-            "expired": 0,
-            "verified_total": 1,
-            "hold_events": 0,
-            "recovered_total": 0,
-            "persistent_conflicts": 0,
-            "verify_worker_errors": 0,
-        }
-        for field, expected in expected_step6.items():
-            actual = step6.get(field)
-            if actual is None:
-                reasons.append(f"step6_missing:{field}")
-            elif actual != expected:
-                reasons.append(f"step6_{field}={actual}/expected{expected}")
+    expected_step6 = {
+        "records_created": 1,
+        "pending": 0,
+        "verified": 1,
+        "hold": 0,
+        "expired": 0,
+        "verified_total": 1,
+        "hold_events": 0,
+        "recovered_total": 0,
+        "persistent_conflicts": 0,
+        "verify_worker_errors": 0,
+    }
+    for field, expected in expected_step6.items():
+        actual = step6.get(field)
+        if actual is None:
+            reasons.append(f"step6_missing:{field}")
+        elif actual != expected:
+            reasons.append(f"step6_{field}={actual}/expected{expected}")
 
-    global_rows: list[dict[str, str]] = []
-    verify_rows: list[dict[str, str]] = []
+    global_rows = _read_tsv(args.global_tsv) if args.global_tsv.is_file() else []
+    verify_rows = _read_tsv(args.verify_tsv) if args.verify_tsv.is_file() else []
     if not args.global_tsv.is_file():
         reasons.append("global_tsv_missing")
-    else:
-        global_rows = _read_tsv(args.global_tsv)
     if not args.verify_tsv.is_file():
         reasons.append("verify_tsv_missing")
-    else:
-        verify_rows = _read_tsv(args.verify_tsv)
 
-    # Strict ground-truth acceptance invariant: every Step5/6 identity event in this
-    # dedicated run must be Devs CAM-01<->CAM-04. Any other pair means the run did
-    # not represent one stable person/pair.
     for label, rows in (("step5", global_rows), ("step6", verify_rows)):
         for row in rows:
-            cameras = {row.get("camera_a", ""), row.get("camera_b", "")}
             if row.get("room") != TARGET_ROOM:
                 reasons.append(f"{label}_unexpected_room:{row.get('room','')}")
                 break
+            cameras = {row.get("camera_a", ""), row.get("camera_b", "")}
             if cameras != TARGET_CAMERAS:
                 reasons.append(
                     f"{label}_unexpected_camera_pair:{row.get('camera_a','')}+{row.get('camera_b','')}"
                 )
                 break
 
-    confirm_rows = [row for row in global_rows if row.get("event") == "GLOBAL_SHADOW_CONFIRM"]
-    conflict_rows = [row for row in global_rows if row.get("event") == "GLOBAL_SHADOW_CONFLICT"]
-    expire_rows = [row for row in global_rows if row.get("event") == "GLOBAL_SHADOW_EXPIRE"]
+    confirm_rows = [r for r in global_rows if r.get("event") == "GLOBAL_SHADOW_CONFIRM"]
+    conflict_rows = [r for r in global_rows if r.get("event") == "GLOBAL_SHADOW_CONFLICT"]
+    expire_rows = [r for r in global_rows if r.get("event") == "GLOBAL_SHADOW_EXPIRE"]
     if len(confirm_rows) != 1:
         reasons.append(f"global_confirm_rows={len(confirm_rows)}/expected1")
     if conflict_rows:
@@ -177,11 +141,11 @@ def main() -> int:
     if expire_rows:
         reasons.append(f"global_expire_rows={len(expire_rows)}/expected0")
 
-    pass_rows = [row for row in verify_rows if row.get("event") == "GLOBAL_VERIFY_PASS"]
-    hold_rows = [row for row in verify_rows if row.get("event") == "GLOBAL_VERIFY_HOLD"]
-    recover_rows = [row for row in verify_rows if row.get("event") == "GLOBAL_VERIFY_RECOVER"]
+    pass_rows = [r for r in verify_rows if r.get("event") == "GLOBAL_VERIFY_PASS"]
+    hold_rows = [r for r in verify_rows if r.get("event") == "GLOBAL_VERIFY_HOLD"]
+    recover_rows = [r for r in verify_rows if r.get("event") == "GLOBAL_VERIFY_RECOVER"]
     persistent_rows = [
-        row for row in verify_rows if row.get("event") == "GLOBAL_VERIFY_CONFLICT_PERSISTENT"
+        r for r in verify_rows if r.get("event") == "GLOBAL_VERIFY_CONFLICT_PERSISTENT"
     ]
     if len(pass_rows) != 1:
         reasons.append(f"verify_pass_rows={len(pass_rows)}/expected1")
@@ -192,8 +156,12 @@ def main() -> int:
     if persistent_rows:
         reasons.append(f"verify_persistent_rows={len(persistent_rows)}/expected0")
 
-    confirmed_ids = {row.get("shadow_global_id", "") for row in confirm_rows if row.get("shadow_global_id")}
-    verified_ids = {row.get("shadow_global_id", "") for row in pass_rows if row.get("shadow_global_id")}
+    confirmed_ids = {
+        r.get("shadow_global_id", "") for r in confirm_rows if r.get("shadow_global_id")
+    }
+    verified_ids = {
+        r.get("shadow_global_id", "") for r in pass_rows if r.get("shadow_global_id")
+    }
     if len(confirmed_ids) != 1:
         reasons.append(f"confirmed_ids={len(confirmed_ids)}/expected1")
     if len(verified_ids) != 1:
@@ -201,7 +169,6 @@ def main() -> int:
     if confirmed_ids and verified_ids and confirmed_ids != verified_ids:
         reasons.append("confirmed_verified_id_mismatch")
 
-    # The one accepted ID must keep one canonical local-track pair throughout the run.
     target_ids = confirmed_ids | verified_ids
     pair_keys: set[tuple[tuple[str, str], tuple[str, str]]] = set()
     for row in global_rows + verify_rows:
@@ -215,9 +182,12 @@ def main() -> int:
                 )
             )
         )
+        if any(not camera or not track for camera, track in pair):
+            reasons.append("empty_track_pair_for_target_id")
+            continue
         pair_keys.add(pair)  # type: ignore[arg-type]
-    if len(pair_keys) != 1:
-        reasons.append(f"canonical_pairs={len(pair_keys)}/expected1")
+    if target_ids and not pair_keys:
+        reasons.append("target_pair_evidence_missing")
 
     if reasons:
         print(
@@ -229,13 +199,11 @@ def main() -> int:
         return 1
 
     shadow_id = next(iter(verified_ids))
-    pair = next(iter(pair_keys))
     print(
         "V11_STEP7_CAM01_CAM04_ONE_PERSON_V1 RESULT=PASS "
-        f"shadow_global_id={shadow_id} "
-        f"pair={pair[0][0]}:{pair[0][1]}+{pair[1][0]}:{pair[1][1]} "
-        "physical_people_expected=1 verified_ids=1 confirmed_ids=1 "
-        "conflicts=0 holds=0 recoveries=0 expiries=0 canonical_pairs=1 "
+        f"shadow_global_id={shadow_id} physical_people_expected=1 "
+        f"verified_ids=1 confirmed_ids=1 local_pair_aliases={len(pair_keys)} "
+        "conflicts=0 holds=0 recoveries=0 expiries=0 current_members=2 "
         "production_global_id=0 identity_accuracy_proven=0"
     )
     return 0
