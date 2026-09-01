@@ -23,10 +23,10 @@ LIVE_PREVIEW_CAMERAS = tuple(
 _camera_view_init = CameraView.__init__
 
 
-def _preview_path_for_camera(camera_id: str) -> str:
+def _preview_path_for_camera(camera_id: str, _env=_os.environ) -> str:
     env_key = f"V11_UI_PREVIEW_PATH_{camera_id.upper().replace('-', '')}"
     slug = camera_id.lower().replace("-", "")
-    return _os.environ.get(env_key, f"/dev/shm/v11_ui_preview_{slug}_v1.bin")
+    return _env.get(env_key, f"/dev/shm/v11_ui_preview_{slug}_v1.bin")
 
 
 def _camera_view_init_staged_live(
@@ -45,9 +45,6 @@ def _camera_view_init_staged_live(
     if selected_live_id is None and camera_id in LIVE_PREVIEW_CAMERAS:
         selected_live_id = camera_id
 
-    # Build the supplied widget normally first, but do not let its single-path
-    # legacy live-preview hook create the reader. Multi-camera preview readers
-    # are attached below using one SHM path per runtime camera.
     _camera_view_init(
         self,
         camera,
@@ -78,8 +75,6 @@ def _camera_view_init_staged_live(
     self.live_timer.start()
 
 
-# PySide6 QRect.size() returns QSize directly. Normalize both QSize/QSizeF safely
-# so a paint exception cannot leave QPainter save()/restore() unbalanced.
 def _camera_view_draw_live_frame_qsize_safe(self, painter, rect):
     if self.live_image.isNull():
         return False
