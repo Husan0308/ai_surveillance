@@ -142,11 +142,13 @@ def main() -> int:
         stale = int(number(latest, "stale_expirations", -1))
         worker_alive = int(number(latest, "worker_alive", 0))
         thread_alive = int(number(latest, "detector_thread_alive", 0))
-        copy_errors = int(number(latest, "copy_errors", 999))
-        infer_errors = int(number(latest, "infer_errors", 999))
-        meta_errors = int(number(latest, "meta_errors", 999))
-        warnings = int(number(latest, "warnings", 999))
-        pipeline_errors = int(number(latest, "pipeline_errors", 999))
+        # Error counters are cumulative in a live process. Reject any observed
+        # nonzero value instead of allowing a later clean row to hide a fault.
+        copy_errors = max(int(number(row, "copy_errors", 999)) for row in rows)
+        infer_errors = max(int(number(row, "infer_errors", 999)) for row in rows)
+        meta_errors = max(int(number(row, "meta_errors", 999)) for row in rows)
+        warnings = max(int(number(row, "warnings", 999)) for row in rows)
+        pipeline_errors = max(int(number(row, "pipeline_errors", 999)) for row in rows)
         infer_p95 = number(latest, "infer_p95_ms")
 
         if source_min < args.min_source_fps:

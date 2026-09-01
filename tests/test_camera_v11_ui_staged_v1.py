@@ -26,6 +26,7 @@ STAGES = (
     ALL_CAMERAS[:3],
     ALL_CAMERAS[:4],
     ALL_CAMERAS[:5],
+    ALL_CAMERAS[:6],
 )
 
 
