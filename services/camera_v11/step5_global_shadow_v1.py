@@ -82,12 +82,16 @@ class GlobalShadowEventV1:
 
 
 class GlobalShadowStateMachineV1:
-    """Conservative Step5-only shadow lifecycle over Step4 match proposals.
+    """Conservative Step5 shadow lifecycle over Step4 match proposals.
 
-    This state machine never mutates tracker IDs, Room IDs, UI IDs or production
-    Global IDs. A shadow ID is bound to exactly one canonical same-room pair.
-    Different pairs that touch an already-owned local track are surfaced as
-    CONFLICT_PENDING and are intentionally left unresolved for Step6.
+    A shadow identity represents a physical-person hypothesis, not an immutable
+    pair of local tracker IDs. Step4/4.5 may fragment a person's local track, so
+    Step5 lets a new local member replace the current member for that camera when
+    the other endpoint already anchors the proposal to one existing shadow ID.
+
+    Safety stays strict: two different owners conflict; a same-cycle unknown
+    same-camera replacement conflicts; historical aliases cannot immediately
+    steal current ownership back; Step5 never merges two global identities.
     """
 
     def __init__(
@@ -104,14 +108,15 @@ class GlobalShadowStateMachineV1:
             1, int(expire_provisional_after_missed_cycles)
         )
         self.max_records = max(8, int(max_records))
-
         self._next_id = 1
         self._records: dict[str, ShadowGlobalIdentityV1] = {}
-        self._pair_to_active_id: dict[PairKeyV1, str] = {}
         self._member_to_active_id: dict[TrackKeyV1, str] = {}
+        self._alias_to_active_id: dict[TrackKeyV1, str] = {}
+        self._aliases_by_active_id: dict[str, set[TrackKeyV1]] = {}
+        self._member_last_seen_cycle: dict[TrackKeyV1, int] = {}
         self._cycle = 0
+        self._seen_shadow_ids_this_cycle: set[str] = set()
         self._seen_pairs_this_cycle: set[PairKeyV1] = set()
-
         self.global_shadow_created = 0
         self.global_shadow_observations = 0
         self.global_shadow_confirmed_total = 0
@@ -133,6 +138,7 @@ class GlobalShadowStateMachineV1:
         if self._cycle and cycle <= self._cycle:
             raise ValueError("cycles must be strictly increasing")
         self._cycle = cycle
+        self._seen_shadow_ids_this_cycle = set()
         self._seen_pairs_this_cycle = set()
 
     def _allocate_id(self) -> str:
@@ -147,10 +153,7 @@ class GlobalShadowStateMachineV1:
         if len(self._records) < self.max_records:
             return
         expired = sorted(
-            (
-                record.updated_at_ns,
-                shadow_id,
-            )
+            (record.updated_at_ns, shadow_id)
             for shadow_id, record in self._records.items()
             if record.state == EXPIRED_SHADOW
         )
@@ -195,6 +198,109 @@ class GlobalShadowStateMachineV1:
             status=status,
         )
 
+    @staticmethod
+    def _current_member_for_camera(
+        record: ShadowGlobalIdentityV1, camera: str
+    ) -> TrackKeyV1 | None:
+        camera = str(camera)
+        for member in record.pair_key:
+            if member[0] == camera:
+                return member
+        return None
+
+    def _remember_alias(self, shadow_id: str, member: TrackKeyV1) -> None:
+        owner = self._alias_to_active_id.get(member)
+        if owner is not None and owner != shadow_id:
+            raise RuntimeError("local track alias already owned by another shadow identity")
+        self._alias_to_active_id[member] = shadow_id
+        self._aliases_by_active_id.setdefault(shadow_id, set()).add(member)
+
+    def _replace_current_member(
+        self, record: ShadowGlobalIdentityV1, member: TrackKeyV1
+    ) -> None:
+        shadow_id = record.shadow_global_id
+        camera = member[0]
+        current = self._current_member_for_camera(record, camera)
+        if current is None:
+            raise RuntimeError("Step5 V1 cannot expand a two-camera identity to a new camera")
+        if current == member:
+            self._remember_alias(shadow_id, member)
+            self._member_to_active_id[member] = shadow_id
+            return
+        if self._member_to_active_id.get(current) == shadow_id:
+            self._member_to_active_id.pop(current, None)
+        updated = [member if item[0] == camera else item for item in record.pair_key]
+        record.pair_key = tuple(sorted(updated))  # type: ignore[assignment]
+        self._remember_alias(shadow_id, member)
+        self._member_to_active_id[member] = shadow_id
+
+    def _create_record(
+        self,
+        *,
+        cycle: int,
+        timestamp_ns: int,
+        room: str,
+        pair_key: PairKeyV1,
+        score: float | None,
+    ) -> ShadowGlobalIdentityV1:
+        shadow_id = self._allocate_id()
+        record = ShadowGlobalIdentityV1(
+            shadow_global_id=shadow_id,
+            room=room,
+            pair_key=pair_key,
+            created_at_ns=timestamp_ns,
+            updated_at_ns=timestamp_ns,
+            state=PROVISIONAL,
+            proposal_count=1,
+            consecutive_count=1,
+            missed_cycles=0,
+            first_score=score,
+            last_score=score,
+            best_score=score,
+            last_observed_cycle=int(cycle),
+        )
+        self._records[shadow_id] = record
+        for member in pair_key:
+            self._remember_alias(shadow_id, member)
+            self._member_to_active_id[member] = shadow_id
+            self._member_last_seen_cycle[member] = int(cycle)
+        self._seen_shadow_ids_this_cycle.add(shadow_id)
+        self._seen_pairs_this_cycle.add(pair_key)
+        self.global_shadow_created += 1
+        self.global_shadow_observations += 1
+        return record
+
+    def _expire_record(self, record: ShadowGlobalIdentityV1) -> None:
+        shadow_id = record.shadow_global_id
+        for member in record.pair_key:
+            if self._member_to_active_id.get(member) == shadow_id:
+                self._member_to_active_id.pop(member, None)
+        for alias in self._aliases_by_active_id.pop(shadow_id, set()):
+            if self._alias_to_active_id.get(alias) == shadow_id:
+                self._alias_to_active_id.pop(alias, None)
+            self._member_last_seen_cycle.pop(alias, None)
+
+    def _conflict(
+        self,
+        *,
+        timestamp_ns: int,
+        pair_key: PairKeyV1,
+        room: str,
+        score: float | None,
+    ) -> tuple[GlobalShadowEventV1, ...]:
+        self.global_shadow_conflicts += 1
+        return (
+            self._event(
+                timestamp_ns,
+                GLOBAL_SHADOW_CONFLICT,
+                None,
+                pair_key,
+                room,
+                score,
+                CONFLICT_PENDING,
+            ),
+        )
+
     def observe_proposal(
         self,
         *,
@@ -217,71 +323,86 @@ class GlobalShadowStateMachineV1:
             if status != "MATCH_PROPOSED" or not reciprocal or not assigned:
                 return ()
             score = self._score(robust_score)
-            pair_key = canonical_pair_v1(camera_a, track_a, camera_b, track_b)
-            if pair_key in self._seen_pairs_this_cycle:
-                return ()
-            self._seen_pairs_this_cycle.add(pair_key)
+            raw_pair = canonical_pair_v1(camera_a, track_a, camera_b, track_b)
             timestamp_ns = int(timestamp_ns)
             room = str(room)
-
-            active_id = self._pair_to_active_id.get(pair_key)
-            if active_id is None:
-                owners = {
-                    self._member_to_active_id[member]
-                    for member in pair_key
-                    if member in self._member_to_active_id
-                }
-                if owners:
-                    self.global_shadow_conflicts += 1
-                    return (
-                        self._event(
-                            timestamp_ns,
-                            GLOBAL_SHADOW_CONFLICT,
-                            None,
-                            pair_key,
-                            room,
-                            score,
-                            CONFLICT_PENDING,
-                        ),
-                    )
-
-                shadow_id = self._allocate_id()
-                record = ShadowGlobalIdentityV1(
-                    shadow_global_id=shadow_id,
-                    room=room,
-                    pair_key=pair_key,
-                    created_at_ns=timestamp_ns,
-                    updated_at_ns=timestamp_ns,
-                    state=PROVISIONAL,
-                    proposal_count=1,
-                    consecutive_count=1,
-                    missed_cycles=0,
-                    first_score=score,
-                    last_score=score,
-                    best_score=score,
-                    last_observed_cycle=int(cycle),
+            owners = {
+                self._alias_to_active_id[member]
+                for member in raw_pair
+                if member in self._alias_to_active_id
+            }
+            if len(owners) > 1:
+                return self._conflict(
+                    timestamp_ns=timestamp_ns, pair_key=raw_pair, room=room, score=score
                 )
-                self._records[shadow_id] = record
-                self._pair_to_active_id[pair_key] = shadow_id
-                for member in pair_key:
-                    self._member_to_active_id[member] = shadow_id
-                self.global_shadow_created += 1
-                self.global_shadow_observations += 1
+            if not owners:
+                if raw_pair in self._seen_pairs_this_cycle:
+                    return ()
+                record = self._create_record(
+                    cycle=int(cycle),
+                    timestamp_ns=timestamp_ns,
+                    room=room,
+                    pair_key=raw_pair,
+                    score=score,
+                )
                 return (
                     self._event(
                         timestamp_ns,
                         GLOBAL_SHADOW_CREATE,
                         record,
-                        pair_key,
+                        record.pair_key,
                         room,
                         score,
                         PROVISIONAL,
                     ),
                 )
 
-            record = self._records[active_id]
-            if record.state == EXPIRED_SHADOW:
-                raise RuntimeError("expired shadow identity remained in active pair map")
+            shadow_id = next(iter(owners))
+            record = self._records.get(shadow_id)
+            if record is None or record.state == EXPIRED_SHADOW:
+                raise RuntimeError("active local-track alias points to missing/expired shadow")
+            if record.room != room:
+                return self._conflict(
+                    timestamp_ns=timestamp_ns, pair_key=raw_pair, room=room, score=score
+                )
+
+            replacements: list[TrackKeyV1] = []
+            for member in raw_pair:
+                camera = member[0]
+                current = self._current_member_for_camera(record, camera)
+                if current is None:
+                    return self._conflict(
+                        timestamp_ns=timestamp_ns, pair_key=raw_pair, room=room, score=score
+                    )
+                if member == current:
+                    continue
+                member_owner = self._alias_to_active_id.get(member)
+                if member_owner == shadow_id:
+                    current_last_seen = self._member_last_seen_cycle.get(current, -1)
+                    if current_last_seen >= int(cycle) - 1:
+                        return ()
+                    replacements.append(member)
+                    continue
+                if member_owner is not None:
+                    return self._conflict(
+                        timestamp_ns=timestamp_ns, pair_key=raw_pair, room=room, score=score
+                    )
+                if self._member_last_seen_cycle.get(current) == int(cycle):
+                    return self._conflict(
+                        timestamp_ns=timestamp_ns, pair_key=raw_pair, room=room, score=score
+                    )
+                replacements.append(member)
+
+            for member in replacements:
+                self._replace_current_member(record, member)
+            effective_pair = record.pair_key
+            if effective_pair in self._seen_pairs_this_cycle:
+                return ()
+            self._seen_pairs_this_cycle.add(effective_pair)
+            self._seen_shadow_ids_this_cycle.add(shadow_id)
+            for member in effective_pair:
+                self._member_last_seen_cycle[member] = int(cycle)
+
             record.proposal_count += 1
             record.consecutive_count = (
                 record.consecutive_count + 1
@@ -303,7 +424,7 @@ class GlobalShadowStateMachineV1:
                     timestamp_ns,
                     GLOBAL_SHADOW_OBSERVE,
                     record,
-                    pair_key,
+                    effective_pair,
                     room,
                     score,
                     record.state,
@@ -322,7 +443,7 @@ class GlobalShadowStateMachineV1:
                         timestamp_ns,
                         GLOBAL_SHADOW_CONFIRM,
                         record,
-                        pair_key,
+                        effective_pair,
                         room,
                         score,
                         CONFIRMED_SHADOW,
@@ -332,7 +453,9 @@ class GlobalShadowStateMachineV1:
         finally:
             self.state_ms.append((time.perf_counter_ns() - started_ns) / 1_000_000.0)
 
-    def end_cycle(self, *, cycle: int, timestamp_ns: int) -> tuple[GlobalShadowEventV1, ...]:
+    def end_cycle(
+        self, *, cycle: int, timestamp_ns: int
+    ) -> tuple[GlobalShadowEventV1, ...]:
         started_ns = time.perf_counter_ns()
         try:
             if int(cycle) != self._cycle:
@@ -343,7 +466,7 @@ class GlobalShadowStateMachineV1:
                 record = self._records[shadow_id]
                 if record.state == EXPIRED_SHADOW:
                     continue
-                if record.pair_key in self._seen_pairs_this_cycle:
+                if shadow_id in self._seen_shadow_ids_this_cycle:
                     continue
                 record.missed_cycles += 1
                 record.consecutive_count = 0
@@ -354,10 +477,7 @@ class GlobalShadowStateMachineV1:
                     >= self.expire_provisional_after_missed_cycles
                 ):
                     record.state = EXPIRED_SHADOW
-                    self._pair_to_active_id.pop(record.pair_key, None)
-                    for member in record.pair_key:
-                        if self._member_to_active_id.get(member) == shadow_id:
-                            self._member_to_active_id.pop(member, None)
+                    self._expire_record(record)
                     self.global_shadow_expired += 1
                     events.append(
                         self._event(
