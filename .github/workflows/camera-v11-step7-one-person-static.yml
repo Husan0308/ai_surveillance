@@ -16,15 +16,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check numpy scipy
       - name: Compile Step7 files
         run: |
           python -m py_compile \
+            services/camera_v11/step4_reid_camera_tracklet_v1.py \
             services/camera_v11/step4_reid_gallery_recent_runtime_v1.py \
             services/camera_v11/step4_reid_pair_runtime_v1.py \
+            services/camera_v11/step5_same_room_shadow_tap_v1.py \
             services/camera_v11/step5_global_shadow_runtime_v1.py \
             services/camera_v11/step6_global_shadow_runtime_v1.py \
             scripts/check_camera_v11_step4_reid_pair_scorer_v1_log.py \
             scripts/check_camera_v11_step7_cam01_cam04_one_person_v1.py \
+            scripts/test_camera_v11_step4_camera_tracklet_v1.py \
             scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py \
             scripts/test_camera_v11_step7_runtime_wiring_v1.py
           bash -n scripts/run_camera_v11_step7_cam01_cam04_one_person_acceptance_v1.sh
@@ -33,6 +38,15 @@ jobs:
           grep -q 'class V11Step4ReIDPairRuntimeV1(V11Step4ReIDGalleryRecentRuntimeV1)' services/camera_v11/step4_reid_pair_runtime_v1.py
           grep -q 'self.reid_gallery.cleanup_expired(int(captured_ns))' services/camera_v11/step4_reid_gallery_recent_runtime_v1.py
           ! grep -q 'self.reid_gallery.touch_active' services/camera_v11/step4_reid_gallery_recent_runtime_v1.py
+      - name: Guard Step4.5 camera tracklet wiring
+        run: |
+          grep -q 'class CameraTrackletContinuityV1' services/camera_v11/step4_reid_camera_tracklet_v1.py
+          grep -q 'scoped_cameras: frozenset\[str\] = frozenset({"CAM-01", "CAM-04"})' services/camera_v11/step4_reid_camera_tracklet_v1.py
+          grep -q 'camera_tracklet_continuity=self.camera_tracklet_continuity' services/camera_v11/step5_global_shadow_runtime_v1.py
+          grep -q 'camera_tracklet_continuity=self.camera_tracklet_continuity' services/camera_v11/step6_global_shadow_runtime_v1.py
+          grep -q 'proposal = self.camera_tracklet_continuity.canonicalize_proposal(row)' services/camera_v11/step5_same_room_shadow_tap_v1.py
+      - name: Run Step4.5 camera tracklet tests
+        run: python scripts/test_camera_v11_step4_camera_tracklet_v1.py
       - name: Run Step7 checker tests
         run: python scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py
       - name: Run Step7 wiring regression tests
