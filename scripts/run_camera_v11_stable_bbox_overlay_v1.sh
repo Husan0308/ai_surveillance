@@ -68,6 +68,7 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
   services/camera_v11/step3_bbox_publish_v1.py \
   scripts/test_camera_v11_bbox_overlay_v1.py \
   scripts/check_camera_v11_bbox_single_target_v1_log.py \
+  scripts/check_camera_v11_bbox_false_positive_v1_log.py \
   || fail "python_compile_failed"
 "$APP_PY" scripts/test_camera_v11_bbox_overlay_v1.py >/tmp/CAMERA_V11_BBOX_UNIT.log 2>&1 \
   || { cat /tmp/CAMERA_V11_BBOX_UNIT.log >&2; fail "bbox_unit_tests_failed"; }
@@ -147,11 +148,18 @@ export V11_LOWLAT_CAMERAS="${V11_LOWLAT_CAMERAS:-CAM-02}"
 export V11_BBOX_STATE_PATH="$STATE_PATH"
 export V11_BBOX_STALE_SEC="${V11_BBOX_STALE_SEC:-1.10}"
 
-# Single-person validation gate. This changes display selection only; detector and
-# tracker continue seeing every detection exactly as before.
+# False-positive guard. Keep the detector's 0.18/0.30 low/high split unchanged so a
+# weak detection can still preserve an existing track. Only NEW local-track creation
+# and activation are stricter.
+export V11_BBOX_NEW_TRACK_CONF="${V11_BBOX_NEW_TRACK_CONF:-0.38}"
+export V11_BBOX_TRACK_CONFIRM_HITS="${V11_BBOX_TRACK_CONFIRM_HITS:-3}"
+export V11_BBOX_TENTATIVE_TTL_SEC="${V11_BBOX_TENTATIVE_TTL_SEC:-1.40}"
+export V11_BBOX_DUPLICATE_IOU="${V11_BBOX_DUPLICATE_IOU:-0.62}"
+
+# Single-person validation gate.
 export V11_BBOX_SINGLE_TARGET="${V11_BBOX_SINGLE_TARGET:-1}"
 export V11_BBOX_LOCK_ACQUIRE_UPDATES="${V11_BBOX_LOCK_ACQUIRE_UPDATES:-2}"
-export V11_BBOX_LOCK_MIN_HITS="${V11_BBOX_LOCK_MIN_HITS:-2}"
+export V11_BBOX_LOCK_MIN_HITS="${V11_BBOX_LOCK_MIN_HITS:-$V11_BBOX_TRACK_CONFIRM_HITS}"
 export V11_BBOX_LOCK_MIN_CONF="${V11_BBOX_LOCK_MIN_CONF:-0.30}"
 export V11_BBOX_LOCK_MIN_AREA="${V11_BBOX_LOCK_MIN_AREA:-0.008}"
 export V11_BBOX_LOCK_HOLD_SEC="${V11_BBOX_LOCK_HOLD_SEC:-1.10}"
@@ -160,9 +168,9 @@ export V11_BBOX_LOCK_HANDOFF_SEC="${V11_BBOX_LOCK_HANDOFF_SEC:-1.35}"
 export V11_BBOX_LOCK_HANDOFF_UPDATES="${V11_BBOX_LOCK_HANDOFF_UPDATES:-2}"
 export V11_BBOX_CHECK_CAMERAS="${V11_BBOX_CHECK_CAMERAS:-CAM-01,CAM-04}"
 
-printf 'CAMERA_V11_BBOX_PREFLIGHT result=PASS frozen_step2_sha=%s display_log=%s tracker_log=%s state=%s single_target=%s min_conf=%s\n' \
+printf 'CAMERA_V11_BBOX_PREFLIGHT result=PASS frozen_step2_sha=%s display_log=%s tracker_log=%s state=%s single_target=%s new_track_conf=%s confirm_hits=%s\n' \
   "$FROZEN_STEP2_SHA" "$DISPLAY_LOG" "$TRACKER_LOG" "$STATE_PATH" \
-  "$V11_BBOX_SINGLE_TARGET" "$V11_BBOX_LOCK_MIN_CONF"
+  "$V11_BBOX_SINGLE_TARGET" "$V11_BBOX_NEW_TRACK_CONF" "$V11_BBOX_TRACK_CONFIRM_HITS"
 
 "$TRT_PY" -u -m services.camera_v11.step1_bbox_overlay_v1 >"$DISPLAY_LOG" 2>&1 &
 display_pid=$!
@@ -192,7 +200,8 @@ live_ready=0
 for _ in $(seq 1 "${V11_BBOX_LIVE_READY_ATTEMPTS:-600}"); do
   if grep -q '^CAMERA_V11_STEP3_V2_TRACKER ' "$TRACKER_LOG" && \
      grep -q '^CAMERA_V11_BBOX_PUBLISHER ' "$TRACKER_LOG" && \
-     grep -q '^CAMERA_V11_BBOX_SINGLE_TARGET ' "$TRACKER_LOG"; then
+     grep -q '^CAMERA_V11_BBOX_SINGLE_TARGET ' "$TRACKER_LOG" && \
+     grep -q '^CAMERA_V11_BBOX_FP_GUARD_POLICY ' "$TRACKER_LOG"; then
     live_ready=1
     break
   fi
@@ -200,15 +209,18 @@ for _ in $(seq 1 "${V11_BBOX_LIVE_READY_ATTEMPTS:-600}"); do
   sleep 0.1
 done
 (( live_ready == 1 )) || {
-  tail -n 140 "$TRACKER_LOG" >&2 || true
+  tail -n 160 "$TRACKER_LOG" >&2 || true
   tail -n 80 "$DISPLAY_LOG" >&2 || true
   fail "live_bbox_metadata_not_ready"
 }
 
-printf 'CAMERA_V11_BBOX_RUNNING display_pid=%s tracker_pid=%s state=%s labels=0 reid=0 global_id=0 single_target=%s\n' \
-  "$display_pid" "$tracker_pid" "$STATE_PATH" "$V11_BBOX_SINGLE_TARGET"
+printf 'CAMERA_V11_BBOX_RUNNING display_pid=%s tracker_pid=%s state=%s labels=0 reid=0 global_id=0 single_target=%s fp_guard=1 new_track_conf=%s confirm_hits=%s\n' \
+  "$display_pid" "$tracker_pid" "$STATE_PATH" "$V11_BBOX_SINGLE_TARGET" \
+  "$V11_BBOX_NEW_TRACK_CONF" "$V11_BBOX_TRACK_CONFIRM_HITS"
 printf 'CAMERA_V11_BBOX_HINT log_command="tail -f %s %s"\n' "$DISPLAY_LOG" "$TRACKER_LOG"
 printf 'CAMERA_V11_BBOX_HINT checker="%s scripts/check_camera_v11_bbox_single_target_v1_log.py --log %s --required-cameras %s"\n' \
+  "$APP_PY" "$TRACKER_LOG" "$V11_BBOX_CHECK_CAMERAS"
+printf 'CAMERA_V11_BBOX_HINT fp_checker="%s scripts/check_camera_v11_bbox_false_positive_v1_log.py --log %s --required-cameras %s"\n' \
   "$APP_PY" "$TRACKER_LOG" "$V11_BBOX_CHECK_CAMERAS"
 
 while kill -0 "$display_pid" 2>/dev/null && kill -0 "$tracker_pid" 2>/dev/null; do
