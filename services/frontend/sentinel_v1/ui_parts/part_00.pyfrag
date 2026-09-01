@@ -62,7 +62,7 @@ QToolButton {{ background: transparent; border: 1px solid {C['border']}; border-
 QToolButton:hover {{ background: {C['panel2']}; }}
 QToolButton:checked {{ background: #14242d; border-color: {C['primary']}; color: {C['primary']}; }}
 QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {{ background: {C['field']}; border: 1px solid {C['border']}; border-radius: 5px; padding: 7px 9px; selection-background-color: {C['primary']}; selection-color: #07110f; }}
-QLineEdit:focus, QComboBox:focus, QPlainTextEdit, QTextEdit:focus {{ border-color: {C['primary']}; }}
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{ border-color: {C['primary']}; }}
 QComboBox::drop-down {{ border: 0; width: 22px; }}
 QComboBox QAbstractItemView {{ background: {C['panel']}; border: 1px solid {C['border']}; selection-background-color: {C['panel2']}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
@@ -238,5 +238,3 @@ class CameraView(Panel):
                 self.update()
 
     def _draw_live_frame(self, painter, rect):
-        if self.live_image.isNull():
-            return False
