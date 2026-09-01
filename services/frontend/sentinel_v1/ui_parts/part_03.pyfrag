@@ -1,0 +1,300 @@
+            view = CameraView(
+                camera,
+                PEOPLE,
+                show_room=True,
+                occupancy=occupancy,
+                display_name=f"CAM-{index + 1:02d}  ·  {camera.name}",
+                heatmap_enabled=self.heatmap_enabled,
+            )
+            view.clicked.connect(lambda selected=camera: self.expand(selected))
+            self.camera_views.append(view)
+            self.camera_grid.addWidget(view, index // 2, index % 2)
+        for column in range(2):
+            self.camera_grid.setColumnStretch(column, 1)
+        for row in range(max(1, (len(CAMERAS) + 1) // 2)):
+            self.camera_grid.setRowStretch(row, 1)
+
+    def open_fullscreen_grid(self):
+        dialog = FullscreenCameraGrid(PEOPLE, self.heatmap_enabled, self)
+        dialog.showFullScreen()
+        dialog.exec()
+
+    def set_heatmap_enabled(self, enabled):
+        self.heatmap_enabled = enabled
+        for view in self.camera_views:
+            view.heatmap_enabled = enabled
+            view.update()
+
+    def refresh_recent_entries(self):
+        clear_layout(self.recent_entries)
+        people_by_id = {person.id: person for person in PEOPLE}
+        entry_events = [event for event in EVENTS if event.type == "entry"]
+        for event in entry_events[:6]:
+            self.recent_entries.addWidget(self.recent_entry(event, people_by_id.get(event.person_id)))
+
+    def recent_entry(self, event, person):
+        known = bool(person and person.known)
+        tone = C["known"] if known else C["unknown"]
+        item = QFrame()
+        item.setObjectName("recentEntry")
+        item.setStyleSheet(f"QFrame#recentEntry{{border-bottom:1px solid {C['border']};background:transparent;}}")
+        item.setMinimumHeight(72)
+        row = QHBoxLayout(item)
+        row.setContentsMargins(0, 4, 0, 5)
+        row.setSpacing(9)
+        snapshot = EventSnapshot(event, person, size=QSize(104, 59))
+        snapshot.clicked.connect(lambda current=event, identity=person: self.open_entry_snapshot(current, identity))
+        row.addWidget(snapshot)
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        name = person.label if known else "Unknown shaxs"
+        name_label = label(name, "sectionTitle", tone)
+        name_label.setMaximumWidth(175)
+        info.addWidget(name_label)
+        identity_label = "KNOWN" if known else "UNKNOWN"
+        info.addWidget(label(f"{identity_label} · {event.at.astimezone().strftime('%H:%M:%S')}", "mono"))
+        camera_label = label(camera_name(event.camera_id), "muted")
+        camera_label.setMaximumWidth(175)
+        info.addWidget(camera_label)
+        row.addLayout(info, 1)
+        return item
+
+    def open_entry_snapshot(self, event, person):
+        EventSnapshotDialog(event, person, self).exec()
+
+    def expand(self, cam):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(cam.name)
+        dlg.resize(980, 600)
+        lay = QVBoxLayout(dlg)
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.addWidget(label(cam.name, "title"))
+        title_box.addWidget(label(f"{room_name(cam.room_id)} · {cam.rtsp}", "mono"))
+        header.addLayout(title_box)
+        header.addStretch()
+        state = label("ONLINE" if cam.online else ("ULANMOQDA" if cam.enabled else "OFFLINE"))
+        state_tone = C["known"] if cam.online else (C["blue"] if cam.enabled else C["offline"])
+        state.setStyleSheet(f"color:{state_tone};border:1px solid {state_tone};padding:5px 8px;border-radius:4px;")
+        header.addWidget(state)
+        lay.addLayout(header)
+        lay.addWidget(CameraView(cam, PEOPLE, show_room=True, heatmap_enabled=self.heatmap_enabled), 1)
+        dlg.exec()
+
+
+class PersonProfileDialog(QDialog):
+    def __init__(self, person: Person, parent=None):
+        super().__init__(parent)
+        self.person = person
+        self.setWindowTitle(f"Profil · {person.label}")
+        self.setMinimumWidth(600)
+        self.resize(680, 470)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 20, 22, 20)
+        root.setSpacing(14)
+
+        hero = Panel()
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(18, 18, 18, 18)
+        hero_layout.setSpacing(18)
+        hero_layout.addWidget(FaceAvatar(person, 118, presence_tone=True))
+        identity = QVBoxLayout()
+        identity.setSpacing(5)
+        identity.addWidget(label("RO'YXATDAN O'TGAN SHAXS", "eyebrow", C["known"]))
+        identity.addWidget(label(person.label, "title"))
+        identity.addWidget(label(person.id, "mono"))
+        self.status = label("")
+        identity.addWidget(self.status, 0, Qt.AlignLeft)
+        identity.addStretch()
+        hero_layout.addLayout(identity, 1)
+        root.addWidget(hero)
+
+        details = Panel()
+        details_layout = panel_layout(details, (18, 16, 18, 16), 10)
+        details_layout.addWidget(label("Profil ma'lumotlari", "sectionTitle"))
+        cameras = ", ".join(camera_name(item) for item in person.cameras) or "Kuzatuv hali yo'q"
+        details_grid = QGridLayout()
+        details_grid.setHorizontalSpacing(24)
+        details_grid.setVerticalSpacing(10)
+        detail_rows = [
+            ("Kelgan vaqti", arrival_time_text(person)),
+            ("Active davomiyligi", active_duration_text(person.entered_at) if person.in_building else "Hisoblanmaydi"),
+            ("Birinchi kuzatuv", fmt(person.first_seen)),
+            ("Oxirgi kuzatuv", fmt(person.last_seen)),
+            ("Joriy holat", room_name(person.room_id) if person.in_building else "Ofisda emas"),
+            ("Ko'ringan kameralar", cameras),
+            ("Profil izohi", person.note or "Izoh kiritilmagan"),
+        ]
+        for row_index, (caption, value) in enumerate(detail_rows):
+            details_grid.addWidget(label(caption, "muted"), row_index, 0, Qt.AlignTop)
+            value_label = label(value, "mono")
+            value_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+            value_label.setWordWrap(row_index >= 5)
+            details_grid.addWidget(value_label, row_index, 1)
+            details_grid.setRowMinimumHeight(row_index, 26 if row_index < 5 else 38)
+            if row_index == 0:
+                self.arrival_value = value_label
+            elif row_index == 1:
+                self.duration_value = value_label
+            elif row_index == 4:
+                self.place_value = value_label
+        details_grid.setColumnStretch(1, 1)
+        details_layout.addLayout(details_grid)
+        root.addWidget(details)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.button(QDialogButtonBox.Close).setText("Yopish")
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        self.presence_timer = QTimer(self)
+        self.presence_timer.setInterval(1000)
+        self.presence_timer.timeout.connect(self.refresh_presence)
+        self.presence_timer.start()
+        self.refresh_presence()
+
+    def refresh_presence(self):
+        active = self.person.in_building
+        if active and self.person.entered_at is None:
+            self.person.entered_at = datetime.now().astimezone()
+        elif not active:
+            self.person.entered_at = None
+        tone = C["known"] if active else C["unknown"]
+        self.status.setText("ACTIVE · OFISDA" if active else "ACTIVE EMAS · KELMAGAN")
+        self.status.setStyleSheet(
+            f"background:{tone};color:{C['bg']};padding:4px 8px;border-radius:4px;font:9px 'DejaVu Sans Mono';"
+        )
+        self.arrival_value.setText(arrival_time_text(self.person))
+        self.duration_value.setText(active_duration_text(self.person.entered_at) if active else "Hisoblanmaydi")
+        self.place_value.setText(room_name(self.person.room_id) if active else "Ofisda emas")
+
+
+class PeoplePage(ScrollPage):
+    people_changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        header = QHBoxLayout()
+        heading = QVBoxLayout()
+        heading.addWidget(label("Known shaxslar", "sectionTitle"))
+        heading.addWidget(label("Ro'yxatdan o'tgan shaxslar va ularning profil ma'lumotlari.", "muted"))
+        header.addLayout(heading)
+        header.addStretch()
+        enroll = make_button("＋  Yangi shaxs qo'shish", "primary")
+        enroll.clicked.connect(self.open_enrollment)
+        header.addWidget(enroll)
+        self.layout.addLayout(header)
+
+        tools = Panel()
+        tools_layout = QHBoxLayout(tools)
+        tools_layout.setContentsMargins(14, 10, 14, 10)
+        self.total = label("", "sectionTitle")
+        tools_layout.addWidget(self.total)
+        tools_layout.addStretch()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Ism bo'yicha qidirish")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMaximumWidth(340)
+        self.search.textChanged.connect(self.rebuild)
+        tools_layout.addWidget(self.search)
+        self.layout.addWidget(tools)
+
+        self.grid = QGridLayout()
+        self.grid.setSpacing(12)
+        self.layout.addLayout(self.grid)
+        self.layout.addStretch()
+        self.presence_widgets = []
+        self.rebuild()
+        self.presence_timer = QTimer(self)
+        self.presence_timer.setInterval(1000)
+        self.presence_timer.timeout.connect(self.refresh_presence)
+        self.presence_timer.start()
+
+    def rebuild(self):
+        clear_layout(self.grid)
+        self.presence_widgets = []
+        query = self.search.text().strip().casefold() if hasattr(self, "search") else ""
+        known_people = [person for person in PEOPLE if person.known]
+        items = [person for person in known_people if query in person.label.casefold()]
+        self.total.setText(f"{len(known_people)} ta Known profil")
+        if not items:
+            empty = Panel()
+            empty_layout = panel_layout(empty, (18, 28, 18, 28), 5)
+            empty_title = label("Profil topilmadi" if query else "Known profil hali yo'q", "sectionTitle")
+            empty_title.setAlignment(Qt.AlignCenter)
+            empty_hint = label("Qidiruvni o'zgartiring." if query else "Yangi shaxs qo'shish orqali birinchi profilni yarating.", "muted")
+            empty_hint.setAlignment(Qt.AlignCenter)
+            empty_layout.addWidget(empty_title)
+            empty_layout.addWidget(empty_hint)
+            self.grid.addWidget(empty, 0, 0, 1, 3)
+            return
+        for index, person in enumerate(items):
+            self.grid.addWidget(self.person_card(person), index // 3, index % 3)
+        for column in range(3):
+            self.grid.setColumnStretch(column, 1)
+
+    def person_card(self, person: Person) -> Panel:
+        card = Panel()
+        card.setMinimumWidth(290)
+        card.setMinimumHeight(250)
+        layout = panel_layout(card, (14, 14, 14, 14), 10)
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        top.addWidget(FaceAvatar(person, 78, presence_tone=True))
+        identity = QVBoxLayout()
+        identity.setSpacing(4)
+        identity.addWidget(label(person.label, "sectionTitle"))
+        identity.addWidget(label(person.id, "mono"))
+        badge = label("")
+        identity.addWidget(badge, 0, Qt.AlignLeft)
+        identity.addStretch()
+        top.addLayout(identity, 1)
+        layout.addLayout(top)
+
+        presence = QGridLayout()
+        presence.setHorizontalSpacing(10)
+        presence.setVerticalSpacing(6)
+        arrival_value = label("", "mono")
+        arrival_value.setAlignment(Qt.AlignRight)
+        duration_value = label("", "mono")
+        duration_value.setAlignment(Qt.AlignRight)
+        place_value = label("", "mono")
+        place_value.setAlignment(Qt.AlignRight)
+        for row_index, (caption, value_widget) in enumerate([
+            ("Kelgan vaqti", arrival_value),
+            ("Active vaqt", duration_value),
+            ("Joylashuvi", place_value),
+        ]):
+            presence.addWidget(label(caption, "muted"), row_index, 0)
+            presence.addWidget(value_widget, row_index, 1)
+        presence.setColumnStretch(1, 1)
+        layout.addLayout(presence)
+        profile = make_button("Profilni ochish  →", "secondary")
+        profile.clicked.connect(lambda _, item=person: self.open_profile(item))
+        layout.addWidget(profile)
+        self.presence_widgets.append((person, card, badge, arrival_value, duration_value, place_value))
+        self.update_presence_widget(self.presence_widgets[-1])
+        return card
+
+    def update_presence_widget(self, widgets):
+        person, card, badge, arrival_value, duration_value, place_value = widgets
+        active = person.in_building
+        if active and person.entered_at is None:
+            person.entered_at = datetime.now().astimezone()
+        elif not active:
+            person.entered_at = None
+        tone = C["known"] if active else C["unknown"]
+        badge.setText("ACTIVE · OFISDA" if active else "ACTIVE EMAS · KELMAGAN")
+        badge.setStyleSheet(
+            f"background:{tone};color:{C['bg']};padding:3px 7px;border-radius:3px;font:8px 'DejaVu Sans Mono';"
+        )
+        card.setStyleSheet(
+            f"QFrame#panel{{background:{C['panel']};border:1px solid {C['border']};"
+            f"border-bottom:3px solid {tone};border-radius:6px;}}"
+        )
+        arrival_value.setText(arrival_time_text(person))
+        duration_value.setText(active_duration_text(person.entered_at) if active else "Hisoblanmaydi")
+        place_value.setText(room_name(person.room_id) if active else "Ofisda emas")
+        duration_value.setStyleSheet(f"color:{tone};font:10px 'DejaVu Sans Mono';font-weight:700;")
+
+    def refresh_presence(self):
+        for widgets in self.presence_widgets:
