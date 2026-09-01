@@ -61,6 +61,7 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 "$APP_PY" -m py_compile \
   services/camera_v11/bbox_overlay_ipc_v1.py \
   services/camera_v11/bbox_single_target_lock_v1.py \
+  services/camera_v11/step3_single_occupant_tracker_v1.py \
   services/camera_v11/step3_bbox_publish_v1.py \
   scripts/test_camera_v11_bbox_overlay_v1.py \
   scripts/check_camera_v11_bbox_single_target_v1_log.py \
@@ -141,8 +142,9 @@ export V11_LOWLAT_CAMERAS="${V11_LOWLAT_CAMERAS:-CAM-02}"
 export V11_BBOX_STATE_PATH="$STATE_PATH"
 export V11_BBOX_STALE_SEC="${V11_BBOX_STALE_SEC:-1.10}"
 
-# v2 false-positive guard: do not raise the detector floor. New births are strict;
-# already-confirmed identities receive a longer bounded recovery window.
+# One-person false-positive guard. The detector's low/high split remains unchanged;
+# low-confidence boxes can recover the locked person. Only creation of a second local
+# ID is blocked while the confirmed occupant is still within the grace window.
 export V11_BBOX_NEW_TRACK_CONF="${V11_BBOX_NEW_TRACK_CONF:-0.50}"
 export V11_BBOX_TRACK_CONFIRM_HITS="${V11_BBOX_TRACK_CONFIRM_HITS:-3}"
 export V11_BBOX_TENTATIVE_TTL_SEC="${V11_BBOX_TENTATIVE_TTL_SEC:-1.60}"
@@ -150,6 +152,7 @@ export V11_BBOX_DUPLICATE_IOU="${V11_BBOX_DUPLICATE_IOU:-0.60}"
 export V11_BBOX_TRACK_SHADOW_SEC="${V11_BBOX_TRACK_SHADOW_SEC:-1.20}"
 export V11_BBOX_TRACK_MAX_LOST_SEC="${V11_BBOX_TRACK_MAX_LOST_SEC:-4.50}"
 export V11_BBOX_LOW_RECOVERY_SEC="${V11_BBOX_LOW_RECOVERY_SEC:-2.50}"
+export V11_BBOX_SINGLE_OCCUPANT_BLOCK_SEC="${V11_BBOX_SINGLE_OCCUPANT_BLOCK_SEC:-4.50}"
 
 export V11_BBOX_SINGLE_TARGET="${V11_BBOX_SINGLE_TARGET:-1}"
 export V11_BBOX_LOCK_ACQUIRE_UPDATES="${V11_BBOX_LOCK_ACQUIRE_UPDATES:-2}"
@@ -166,10 +169,10 @@ export V11_BBOX_LOCK_HANDOFF_MIN_AREA_RATIO="${V11_BBOX_LOCK_HANDOFF_MIN_AREA_RA
 export V11_BBOX_LOCK_HANDOFF_MAX_AREA_RATIO="${V11_BBOX_LOCK_HANDOFF_MAX_AREA_RATIO:-2.80}"
 export V11_BBOX_CHECK_CAMERAS="${V11_BBOX_CHECK_CAMERAS:-CAM-01,CAM-04}"
 
-printf 'CAMERA_V11_BBOX_PREFLIGHT result=PASS frozen_step2_sha=%s display_log=%s tracker_log=%s state=%s single_target=%s new_track_conf=%s confirm_hits=%s max_lost=%s release=%s\n' \
+printf 'CAMERA_V11_BBOX_PREFLIGHT result=PASS frozen_step2_sha=%s display_log=%s tracker_log=%s state=%s single_target=%s new_track_conf=%s confirm_hits=%s max_lost=%s occupant_block=%s release=%s\n' \
   "$FROZEN_STEP2_SHA" "$DISPLAY_LOG" "$TRACKER_LOG" "$STATE_PATH" \
   "$V11_BBOX_SINGLE_TARGET" "$V11_BBOX_NEW_TRACK_CONF" "$V11_BBOX_TRACK_CONFIRM_HITS" \
-  "$V11_BBOX_TRACK_MAX_LOST_SEC" "$V11_BBOX_LOCK_RELEASE_SEC"
+  "$V11_BBOX_TRACK_MAX_LOST_SEC" "$V11_BBOX_SINGLE_OCCUPANT_BLOCK_SEC" "$V11_BBOX_LOCK_RELEASE_SEC"
 
 "$TRT_PY" -u -m services.camera_v11.step1_bbox_overlay_v1 >"$DISPLAY_LOG" 2>&1 &
 display_pid=$!
@@ -200,7 +203,8 @@ for _ in $(seq 1 "${V11_BBOX_LIVE_READY_ATTEMPTS:-600}"); do
   if grep -q '^CAMERA_V11_STEP3_V2_TRACKER ' "$TRACKER_LOG" && \
      grep -q '^CAMERA_V11_BBOX_PUBLISHER ' "$TRACKER_LOG" && \
      grep -q '^CAMERA_V11_BBOX_SINGLE_TARGET ' "$TRACKER_LOG" && \
-     grep -q '^CAMERA_V11_BBOX_FP_GUARD_POLICY ' "$TRACKER_LOG"; then
+     grep -q '^CAMERA_V11_BBOX_FP_GUARD_POLICY ' "$TRACKER_LOG" && \
+     grep -q '^CAMERA_V11_BBOX_FP_TRACKER ' "$TRACKER_LOG"; then
     live_ready=1
     break
   fi
@@ -208,14 +212,14 @@ for _ in $(seq 1 "${V11_BBOX_LIVE_READY_ATTEMPTS:-600}"); do
   sleep 0.1
 done
 (( live_ready == 1 )) || {
-  tail -n 160 "$TRACKER_LOG" >&2 || true
+  tail -n 180 "$TRACKER_LOG" >&2 || true
   tail -n 80 "$DISPLAY_LOG" >&2 || true
   fail "live_bbox_metadata_not_ready"
 }
 
-printf 'CAMERA_V11_BBOX_RUNNING display_pid=%s tracker_pid=%s state=%s labels=0 reid=0 global_id=0 single_target=%s fp_guard=2 new_track_conf=%s confirm_hits=%s\n' \
+printf 'CAMERA_V11_BBOX_RUNNING display_pid=%s tracker_pid=%s state=%s labels=0 reid=0 global_id=0 single_target=%s fp_guard=3 new_track_conf=%s confirm_hits=%s occupant_block=%s\n' \
   "$display_pid" "$tracker_pid" "$STATE_PATH" "$V11_BBOX_SINGLE_TARGET" \
-  "$V11_BBOX_NEW_TRACK_CONF" "$V11_BBOX_TRACK_CONFIRM_HITS"
+  "$V11_BBOX_NEW_TRACK_CONF" "$V11_BBOX_TRACK_CONFIRM_HITS" "$V11_BBOX_SINGLE_OCCUPANT_BLOCK_SEC"
 printf 'CAMERA_V11_BBOX_HINT log_command="tail -f %s %s"\n' "$DISPLAY_LOG" "$TRACKER_LOG"
 printf 'CAMERA_V11_BBOX_HINT checker="%s scripts/check_camera_v11_bbox_single_target_v1_log.py --log %s --required-cameras %s"\n' \
   "$APP_PY" "$TRACKER_LOG" "$V11_BBOX_CHECK_CAMERAS"
