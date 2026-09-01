@@ -21,8 +21,12 @@ jobs:
           python -m py_compile \
             services/camera_v11/step4_reid_gallery_recent_runtime_v1.py \
             services/camera_v11/step4_reid_pair_runtime_v1.py \
+            services/camera_v11/step5_global_shadow_runtime_v1.py \
+            services/camera_v11/step6_global_shadow_runtime_v1.py \
+            scripts/check_camera_v11_step4_reid_pair_scorer_v1_log.py \
             scripts/check_camera_v11_step7_cam01_cam04_one_person_v1.py \
-            scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py
+            scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py \
+            scripts/test_camera_v11_step7_runtime_wiring_v1.py
           bash -n scripts/run_camera_v11_step7_cam01_cam04_one_person_acceptance_v1.sh
       - name: Guard bounded recent gallery wiring
         run: |
@@ -31,5 +35,7 @@ jobs:
           ! grep -q 'self.reid_gallery.touch_active' services/camera_v11/step4_reid_gallery_recent_runtime_v1.py
       - name: Run Step7 checker tests
         run: python scripts/test_camera_v11_step7_cam01_cam04_one_person_v1.py
+      - name: Run Step7 wiring regression tests
+        run: python scripts/test_camera_v11_step7_runtime_wiring_v1.py
       - name: Frozen Step1-3 guard
         run: python scripts/check_camera_v11_frozen_step123_guard.py
