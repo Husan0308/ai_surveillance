@@ -57,6 +57,7 @@ class V11Step6GlobalShadowRuntimeV1(V11Step5GlobalShadowRuntimeV1):
             phase_delay_sec=old_match.phase_delay_sec,
             affinity_cpu=old_match.affinity_cpu,
             global_shadow_worker=self.global_shadow_worker,
+            camera_tracklet_continuity=self.camera_tracklet_continuity,
         )
         # Step6 replaces the Step5 matcher again so the Step3 pair-score producer
         # must be rebound once more to the final matcher object that run() starts.
@@ -68,6 +69,7 @@ class V11Step6GlobalShadowRuntimeV1(V11Step5GlobalShadowRuntimeV1):
         print(
             "CAMERA_V11_STEP6_GLOBAL_VERIFY_V1_ARCH "
             "mode=shadow input=step5_shadow_events same_room_pair=CAM-01+CAM-04 "
+            "camera_tracklet_continuity=step4.5_enabled "
             "verification=time_consistency+conflict_hysteresis "
             "verify_clean_observations=3 recover_clean_observations=3 "
             "persistent_conflict_observations=3 conflict_action=hold_no_reassign "
