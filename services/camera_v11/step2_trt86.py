@@ -95,6 +95,9 @@ class Step2TRT86Client:
                 text=True,
                 bufsize=1,
                 env=child_env,
+                # The application owns terminal signals and performs the worker's
+                # ordered JSON shutdown; do not deliver Ctrl+C to both processes.
+                start_new_session=True,
             )
             ready = _read_json(self.process, 30.0)
             if ready.get("type") != "ready":

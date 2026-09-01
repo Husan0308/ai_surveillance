@@ -8,7 +8,8 @@ import yaml
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-load_dotenv(PROJECT_ROOT / ".env", override=False)
+ENV_FILE = Path(os.getenv("V11_ENV_FILE", str(PROJECT_ROOT / ".env"))).expanduser()
+load_dotenv(ENV_FILE, override=False)
 
 MAX_CAMERAS = 16
 
