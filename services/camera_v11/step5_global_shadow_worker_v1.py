@@ -53,6 +53,7 @@ class _ProposalV1:
     cycle: int
     timestamp_ns: int
     row: SameRoomPairDiagnosticV1
+    active_camera_members: tuple[tuple[str, str], ...] = ()
 
 
 class V11GlobalShadowWorkerV1:
@@ -118,8 +119,14 @@ class V11GlobalShadowWorkerV1:
         cycle: int,
         timestamp_ns: int,
         row: SameRoomPairDiagnosticV1,
+        active_camera_members: tuple[tuple[str, str], ...] = (),
     ) -> None:
-        self._put(_ProposalV1(int(cycle), int(timestamp_ns), row))
+        canonical_active = tuple(
+            sorted((str(camera), str(track)) for camera, track in active_camera_members)
+        )
+        self._put(
+            _ProposalV1(int(cycle), int(timestamp_ns), row, canonical_active)
+        )
 
     def enqueue_cycle_end(self, cycle: int, timestamp_ns: int) -> None:
         self._put(_CycleEndV1(int(cycle), int(timestamp_ns)))
@@ -186,6 +193,7 @@ class V11GlobalShadowWorkerV1:
                         reciprocal=bool(row.reciprocal),
                         assigned=bool(row.assigned),
                         status=row.status,
+                        active_camera_members=item.active_camera_members,
                     )
                 elif isinstance(item, _CycleEndV1):
                     events = self.machine.end_cycle(

@@ -44,8 +44,17 @@ class V11SameRoomMatcherShadowWorkerStep5TapV1(
         result = super()._tsv_row(timestamp_ns, cycle, row, stability)
         if row.status == MATCH_PROPOSED and row.reciprocal and row.assigned:
             proposal = row
+            active_camera_members: tuple[tuple[str, str], ...] = ()
             if self.camera_tracklet_continuity is not None:
                 proposal = self.camera_tracklet_continuity.canonicalize_proposal(row)
+                active_camera_members = tuple(
+                    self.camera_tracklet_continuity.active_camera_members()
+                )
             if proposal is not None:
-                self.global_shadow_worker.enqueue_proposal(cycle, timestamp_ns, proposal)
+                self.global_shadow_worker.enqueue_proposal(
+                    cycle,
+                    timestamp_ns,
+                    proposal,
+                    active_camera_members=active_camera_members,
+                )
         return result

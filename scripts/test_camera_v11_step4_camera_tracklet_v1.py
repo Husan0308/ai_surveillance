@@ -20,6 +20,11 @@ from services.camera_v11.step4_reid_same_room_matcher_v1 import (
     MATCH_PROPOSED,
     SameRoomPairDiagnosticV1,
 )
+from services.camera_v11.step5_global_shadow_v1 import (
+    CONFIRMED_SHADOW,
+    GLOBAL_SHADOW_AMBIGUITY,
+    GlobalShadowStateMachineV1,
+)
 
 NS = 1_000_000_000
 
@@ -146,6 +151,9 @@ class CameraTrackletContinuityTests(unittest.TestCase):
         self.resolver.refresh(3, 4 * NS)
         self.assertEqual(self.resolver.canonical_track_id("CAM-01", "T2"), stable)
         self.assertEqual(self.resolver.snapshot()["stitched_total"], 1)
+        diagnostic_events = {row.event for row in self.resolver.diagnostics()}
+        self.assertIn("successor_reid_score", diagnostic_events)
+        self.assertIn("successor_margin", diagnostic_events)
 
     def test_active_predecessor_race_is_deferred_then_stitched(self) -> None:
         old = view("CAM-01", "T1", 1 * NS, unit(3))
@@ -186,6 +194,134 @@ class CameraTrackletContinuityTests(unittest.TestCase):
         self.assertEqual(
             self.resolver.snapshot()["active_overlap_fallback_allocated_total"], 1
         )
+        snapshot = self.resolver.snapshot()
+        self.assertGreater(snapshot["successor_rejected_active_predecessor"], 0)
+        self.assertIn(
+            "successor_rejected_active_predecessor",
+            {row.event for row in self.resolver.diagnostics()},
+        )
+
+    def test_reappearing_predecessor_splits_previously_stitched_collision(self) -> None:
+        old = view("CAM-01", "T00036", 1 * NS, mixed(12, 13))
+        self.views = [old]
+        self.active["CAM-01"] = frozenset({"T00036"})
+        self.resolver.refresh(1, 2 * NS)
+        predecessor_ct = self.resolver.canonical_track_id("CAM-01", "T00036")
+
+        successor = view("CAM-01", "T00038", 2 * NS, mixed(12, 13))
+        self.views = [old, successor]
+        self.active["CAM-01"] = frozenset({"T00038"})
+        self.resolver.refresh(2, 3 * NS)
+        self.resolver.refresh(3, 4 * NS)
+        self.assertEqual(
+            self.resolver.canonical_track_id("CAM-01", "T00038"),
+            predecessor_ct,
+        )
+
+        # This is the live failure shape: a predecessor that looked lost when the
+        # successor was accepted becomes active again while the successor remains.
+        self.active["CAM-01"] = frozenset({"T00036", "T00038"})
+        self.resolver.refresh(4, 5 * NS)
+        recovered_ct = self.resolver.canonical_track_id("CAM-01", "T00036")
+        successor_ct = self.resolver.canonical_track_id("CAM-01", "T00038")
+        self.assertIsNotNone(recovered_ct)
+        self.assertIsNotNone(successor_ct)
+        self.assertNotEqual(recovered_ct, successor_ct)
+        snapshot = self.resolver.snapshot()
+        self.assertEqual(snapshot["same_camera_active_ct_collision"], 1)
+        self.assertIn(
+            "same_camera_active_ct_collision",
+            {row.event for row in self.resolver.diagnostics()},
+        )
+
+    def test_similar_clothing_crossing_never_shares_ct_or_global_shadow(self) -> None:
+        # Both people are intentionally near-identical in appearance. Simultaneous
+        # activity, not a lower appearance threshold, must keep them independent.
+        person_a = mixed(20, 21, 0.10)
+        person_b = mixed(20, 21, 0.11)
+        self.views = [
+            view("CAM-01", "A1", 1 * NS, person_a),
+            view("CAM-01", "B1", 1 * NS, person_b),
+            view("CAM-04", "A4", 1 * NS, person_a),
+            view("CAM-04", "B4", 1 * NS, person_b),
+        ]
+        self.active["CAM-01"] = frozenset({"A1", "B1"})
+        self.active["CAM-04"] = frozenset({"A4", "B4"})
+        self.resolver.refresh(1, 2 * NS)
+        a1_ct = self.resolver.canonical_track_id("CAM-01", "A1")
+        b1_ct = self.resolver.canonical_track_id("CAM-01", "B1")
+        a4_ct = self.resolver.canonical_track_id("CAM-04", "A4")
+        b4_ct = self.resolver.canonical_track_id("CAM-04", "B4")
+        self.assertNotEqual(a1_ct, b1_ct)
+        self.assertNotEqual(a4_ct, b4_ct)
+
+        machine = GlobalShadowStateMachineV1()
+        correct = (proposal("A1", "A4"), proposal("B1", "B4"))
+        for cycle in (1, 2, 3):
+            machine.begin_cycle(cycle)
+            for raw_row in correct:
+                row = self.resolver.canonicalize_proposal(raw_row)
+                self.assertIsNotNone(row)
+                assert row is not None
+                machine.observe_proposal(
+                    cycle=cycle,
+                    timestamp_ns=cycle,
+                    room=row.room,
+                    camera_a=row.camera_a,
+                    track_a=row.track_a,
+                    camera_b=row.camera_b,
+                    track_b=row.track_b,
+                    robust_score=row.robust_score,
+                    reciprocal=row.reciprocal,
+                    assigned=row.assigned,
+                    status=row.status,
+                    active_camera_members=tuple(
+                        self.resolver.active_camera_members()
+                    ),
+                )
+            machine.end_cycle(cycle=cycle, timestamp_ns=cycle)
+        self.assertEqual(len(machine.records), 2)
+        self.assertTrue(all(row.state == CONFIRMED_SHADOW for row in machine.records))
+        owner_by_member = {
+            member: record.shadow_global_id
+            for record in machine.records
+            for member in record.members
+        }
+        self.assertNotEqual(
+            owner_by_member[("CAM-01", str(a1_ct))],
+            owner_by_member[("CAM-01", str(b1_ct))],
+        )
+
+        machine.begin_cycle(4)
+        crossing_events = []
+        for raw_row in (proposal("A1", "B4"), proposal("B1", "A4")):
+            row = self.resolver.canonicalize_proposal(raw_row)
+            assert row is not None
+            crossing_events.extend(
+                machine.observe_proposal(
+                    cycle=4,
+                    timestamp_ns=4,
+                    room=row.room,
+                    camera_a=row.camera_a,
+                    track_a=row.track_a,
+                    camera_b=row.camera_b,
+                    track_b=row.track_b,
+                    robust_score=row.robust_score,
+                    reciprocal=row.reciprocal,
+                    assigned=row.assigned,
+                    status=row.status,
+                    active_camera_members=tuple(
+                        self.resolver.active_camera_members()
+                    ),
+                )
+            )
+        machine.end_cycle(cycle=4, timestamp_ns=4)
+        self.assertTrue(crossing_events)
+        self.assertTrue(
+            all(row.event == GLOBAL_SHADOW_AMBIGUITY for row in crossing_events)
+        )
+        self.assertEqual(len(machine.records), 2)
+        self.assertEqual(machine.snapshot()["global_shadow_conflicts"], 0)
 
     def test_weak_recent_successor_stays_unresolved(self) -> None:
         old = view("CAM-01", "T1", 1 * NS, unit(4))

@@ -216,6 +216,44 @@ class Step5GlobalShadowTests(unittest.TestCase):
             (("CAM-01", "A1"), ("CAM-04", "B1")),
         )
 
+    def test_active_current_member_rejects_second_same_camera_member(self) -> None:
+        self.confirm_pair(
+            (1, 2, 3), a=("CAM-01", "A1"), b=("CAM-04", "A4")
+        )
+        for cycle in (4, 5):
+            self.machine.begin_cycle(cycle)
+            events = self.machine.observe_proposal(
+                cycle=cycle,
+                timestamp_ns=cycle,
+                room="Devs",
+                camera_a="CAM-01",
+                track_a="A2",
+                camera_b="CAM-04",
+                track_b="A4",
+                robust_score=0.99,
+                reciprocal=True,
+                assigned=True,
+                status="MATCH_PROPOSED",
+                active_camera_members=(
+                    ("CAM-01", "A1"),
+                    ("CAM-01", "A2"),
+                    ("CAM-04", "A4"),
+                ),
+            )
+            self.machine.end_cycle(cycle=cycle, timestamp_ns=cycle)
+            self.assertEqual(events[0].event, GLOBAL_SHADOW_AMBIGUITY)
+            self.assertEqual(
+                events[0].decision, "global_same_camera_member_reject"
+            )
+        self.assertEqual(
+            self.machine.records[0].pair_key,
+            (("CAM-01", "A1"), ("CAM-04", "A4")),
+        )
+        snapshot = self.machine.snapshot()
+        self.assertEqual(snapshot["global_same_camera_member_reject"], 2)
+        self.assertEqual(snapshot["global_shadow_successor_attaches"], 0)
+        self.assertEqual(snapshot["global_shadow_conflicts"], 0)
+
     def test_crossing_noise_between_two_owners_never_merges_or_conflicts(self) -> None:
         self.confirm_two_people()
         events = self.observe(4, a=("CAM-01", "A1"), b=("CAM-04", "B4"))

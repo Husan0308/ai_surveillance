@@ -148,6 +148,7 @@ class GlobalShadowStateMachineV1:
         self.global_shadow_conflicts = 0
         self.global_shadow_ambiguities = 0
         self.global_shadow_successor_attaches = 0
+        self.global_same_camera_member_reject = 0
         self.global_shadow_expired = 0
         self.state_ms: deque[float] = deque(maxlen=4096)
 
@@ -426,6 +427,7 @@ class GlobalShadowStateMachineV1:
         reciprocal: bool,
         assigned: bool,
         status: str,
+        active_camera_members: tuple[TrackKeyV1, ...] = (),
     ) -> tuple[GlobalShadowEventV1, ...]:
         started_ns = time.perf_counter_ns()
         try:
@@ -437,6 +439,10 @@ class GlobalShadowStateMachineV1:
             raw_pair = canonical_pair_v1(camera_a, track_a, camera_b, track_b)
             timestamp_ns = int(timestamp_ns)
             room = str(room)
+            active_members = {
+                (str(camera), str(track))
+                for camera, track in active_camera_members
+            }
             owners = {
                 self._alias_to_active_id[member]
                 for member in raw_pair
@@ -524,6 +530,17 @@ class GlobalShadowStateMachineV1:
                     )
                 if member == current:
                     continue
+                if current in active_members:
+                    self.global_same_camera_member_reject += 1
+                    return self._no_action(
+                        timestamp_ns=timestamp_ns,
+                        pair_key=raw_pair,
+                        room=room,
+                        score=score,
+                        decision="global_same_camera_member_reject",
+                        record=record,
+                        ambiguity=True,
+                    )
                 member_owner = self._alias_to_active_id.get(member)
                 if member_owner == shadow_id:
                     current_last_seen = self._member_last_seen_cycle.get(current, -1)
@@ -745,6 +762,7 @@ class GlobalShadowStateMachineV1:
             "global_shadow_conflicts": self.global_shadow_conflicts,
             "global_shadow_ambiguities": self.global_shadow_ambiguities,
             "global_shadow_successor_attaches": self.global_shadow_successor_attaches,
+            "global_same_camera_member_reject": self.global_same_camera_member_reject,
             "global_shadow_expired": self.global_shadow_expired,
             "global_shadow_active": provisional + confirmed,
             "global_shadow_member_tracks": len(self._member_to_active_id),

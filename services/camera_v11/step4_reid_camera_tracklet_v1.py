@@ -62,6 +62,19 @@ class _ContinuityVoteV1:
     best_score: float = -1.0
 
 
+@dataclass(frozen=True)
+class CameraTrackletDiagnosticV1:
+    timestamp_ns: int
+    cycle: int
+    event: str
+    camera_id: str
+    raw_track_id: str
+    stable_id: str
+    predecessor_track_id: str = ""
+    successor_reid_score: float | None = None
+    successor_margin: float | None = None
+
+
 class CameraTrackletContinuityV1:
     """Shadow-only same-camera local-ID stitcher before Step5 Global Shadow.
 
@@ -91,6 +104,7 @@ class CameraTrackletContinuityV1:
         self._lock = threading.RLock()
         self._next_id: dict[str, int] = {}
         self._raw_to_stable: dict[tuple[str, str], str] = {}
+        self._raw_mapping_cycle: dict[tuple[str, str], int] = {}
         self._stable: dict[str, _StableCameraTrackletV1] = {}
         self._votes: dict[tuple[str, str, str], _ContinuityVoteV1] = {}
         self._deferred_first_cycle: dict[tuple[str, str], int] = {}
@@ -106,6 +120,12 @@ class CameraTrackletContinuityV1:
         self.insufficient_total = 0
         self.active_overlap_deferred_total = 0
         self.active_overlap_fallback_allocated_total = 0
+        self.same_camera_active_ct_collision = 0
+        self.successor_rejected_active_predecessor = 0
+        self.successor_reid_score: float | None = None
+        self.successor_margin: float | None = None
+        self._active_camera_members: frozenset[tuple[str, str]] = frozenset()
+        self._diagnostics: deque[CameraTrackletDiagnosticV1] = deque(maxlen=256)
 
     @staticmethod
     def _pct(values: deque[float], quantile: float) -> float:
@@ -118,7 +138,9 @@ class CameraTrackletContinuityV1:
         )
         return float(ordered[index])
 
-    def _allocate(self, camera_id: str, raw_track_id: str, now_ns: int) -> str:
+    def _allocate(
+        self, camera_id: str, raw_track_id: str, now_ns: int, cycle: int
+    ) -> str:
         key = (camera_id, raw_track_id)
         existing = self._raw_to_stable.get(key)
         if existing is not None:
@@ -135,9 +157,92 @@ class CameraTrackletContinuityV1:
         )
         self._stable[stable_id] = record
         self._raw_to_stable[key] = stable_id
+        self._raw_mapping_cycle[key] = int(cycle)
         self._deferred_first_cycle.pop(key, None)
         self.created_total += 1
         return stable_id
+
+    def _diagnose(
+        self,
+        *,
+        timestamp_ns: int,
+        cycle: int,
+        event: str,
+        camera_id: str,
+        raw_track_id: str,
+        stable_id: str,
+        predecessor_track_id: str = "",
+        successor_reid_score: float | None = None,
+        successor_margin: float | None = None,
+    ) -> None:
+        self._diagnostics.append(
+            CameraTrackletDiagnosticV1(
+                timestamp_ns=int(timestamp_ns),
+                cycle=int(cycle),
+                event=str(event),
+                camera_id=str(camera_id),
+                raw_track_id=str(raw_track_id),
+                stable_id=str(stable_id),
+                predecessor_track_id=str(predecessor_track_id),
+                successor_reid_score=successor_reid_score,
+                successor_margin=successor_margin,
+            )
+        )
+
+    @staticmethod
+    def _active_predecessor(
+        record: _StableCameraTrackletV1,
+        raw_track_id: str,
+        active: frozenset[str],
+    ) -> str | None:
+        candidates = sorted(
+            member
+            for member in record.raw_members
+            if member != raw_track_id and member in active
+        )
+        return candidates[0] if candidates else None
+
+    def _repair_active_collisions(
+        self,
+        *,
+        cycle: int,
+        now_ns: int,
+        active_snapshot: Mapping[str, frozenset[str]],
+    ) -> None:
+        grouped: dict[tuple[str, str], list[str]] = {}
+        for (camera_id, raw_track_id), stable_id in self._raw_to_stable.items():
+            if raw_track_id in active_snapshot.get(camera_id, frozenset()):
+                grouped.setdefault((camera_id, stable_id), []).append(raw_track_id)
+        for (camera_id, stable_id), raw_members in sorted(grouped.items()):
+            if len(raw_members) < 2:
+                continue
+            ordered = sorted(
+                raw_members,
+                key=lambda raw: (
+                    self._raw_mapping_cycle.get((camera_id, raw), 0),
+                    raw,
+                ),
+            )
+            keeper = ordered[0]
+            for raw_track_id in ordered[1:]:
+                self.same_camera_active_ct_collision += 1
+                self._diagnose(
+                    timestamp_ns=now_ns,
+                    cycle=cycle,
+                    event="same_camera_active_ct_collision",
+                    camera_id=camera_id,
+                    raw_track_id=raw_track_id,
+                    stable_id=stable_id,
+                    predecessor_track_id=keeper,
+                )
+                record = self._stable[stable_id]
+                record.raw_members.discard(raw_track_id)
+                self._raw_to_stable.pop((camera_id, raw_track_id), None)
+                self._raw_mapping_cycle.pop((camera_id, raw_track_id), None)
+                for vote_key in list(self._votes):
+                    if vote_key[:2] == (camera_id, raw_track_id):
+                        self._votes.pop(vote_key, None)
+                self._allocate(camera_id, raw_track_id, now_ns, cycle)
 
     @staticmethod
     def _latest_sample_ns(view: GalleryViewV1) -> int:
@@ -186,19 +291,7 @@ class CameraTrackletContinuityV1:
             if gap_ns < -int(cfg.max_overlap_sec * 1e9):
                 self.overlap_reject_total += 1
                 continue
-            visually_fresh_active = False
-            fresh_cutoff = int(cfg.visually_active_sec * 1e9)
-            for raw_member in record.raw_members:
-                if raw_member not in active:
-                    continue
-                member_view = views_by_key.get((camera_id, raw_member))
-                if member_view is None:
-                    continue
-                member_last = self._latest_sample_ns(member_view)
-                if member_last and new_first - member_last <= fresh_cutoff:
-                    visually_fresh_active = True
-                    break
-            if visually_fresh_active:
+            if self._active_predecessor(record, str(new_view.local_track_id), active):
                 blocked_by_active_predecessor = True
                 continue
             candidates.append((record, samples))
@@ -239,6 +332,11 @@ class CameraTrackletContinuityV1:
         }
         with self._lock:
             cfg = self.config
+            self._repair_active_collisions(
+                cycle=int(cycle),
+                now_ns=current_ns,
+                active_snapshot=active_snapshot,
+            )
             seen_vote_keys: set[tuple[str, str, str]] = set()
             for camera_id in sorted(cfg.scoped_cameras):
                 active = active_snapshot.get(camera_id, frozenset())
@@ -272,14 +370,23 @@ class CameraTrackletContinuityV1:
                         unresolved_for_scoring.append(view)
                         continue
                     if active_blocked[raw_track_id]:
+                        self.successor_rejected_active_predecessor += 1
+                        self._diagnose(
+                            timestamp_ns=current_ns,
+                            cycle=cycle,
+                            event="successor_rejected_active_predecessor",
+                            camera_id=camera_id,
+                            raw_track_id=raw_track_id,
+                            stable_id="",
+                        )
                         if self._should_defer_active_overlap(
                             camera_id, raw_track_id, int(cycle)
                         ):
                             continue
                         self.active_overlap_fallback_allocated_total += 1
-                        self._allocate(camera_id, raw_track_id, current_ns)
+                        self._allocate(camera_id, raw_track_id, current_ns, cycle)
                         continue
-                    self._allocate(camera_id, raw_track_id, current_ns)
+                    self._allocate(camera_id, raw_track_id, current_ns, cycle)
                 if not unresolved_for_scoring:
                     continue
 
@@ -319,6 +426,34 @@ class CameraTrackletContinuityV1:
                     reciprocal = bool(reverse and reverse[0][1] == raw_track_id)
                     reverse_second = reverse[1][0] if len(reverse) > 1 else None
                     score = scores[(raw_track_id, stable_id)]
+                    margins = [
+                        best_score - competitor
+                        for competitor in (second_score, reverse_second)
+                        if competitor is not None
+                    ]
+                    minimum_margin = min(margins) if margins else None
+                    self.successor_reid_score = float(best_score)
+                    self.successor_margin = minimum_margin
+                    self._diagnose(
+                        timestamp_ns=current_ns,
+                        cycle=cycle,
+                        event="successor_reid_score",
+                        camera_id=camera_id,
+                        raw_track_id=raw_track_id,
+                        stable_id=stable_id,
+                        successor_reid_score=float(best_score),
+                        successor_margin=minimum_margin,
+                    )
+                    self._diagnose(
+                        timestamp_ns=current_ns,
+                        cycle=cycle,
+                        event="successor_margin",
+                        camera_id=camera_id,
+                        raw_track_id=raw_track_id,
+                        stable_id=stable_id,
+                        successor_reid_score=float(best_score),
+                        successor_margin=minimum_margin,
+                    )
                     if not reciprocal:
                         self.nonreciprocal_total += 1
                         self.pending_total += 1
@@ -352,9 +487,29 @@ class CameraTrackletContinuityV1:
                         self.pending_total += 1
                         continue
                     record = self._stable[stable_id]
+                    active_predecessor = self._active_predecessor(
+                        record, raw_track_id, active
+                    )
+                    if active_predecessor is not None:
+                        self.successor_rejected_active_predecessor += 1
+                        self._diagnose(
+                            timestamp_ns=current_ns,
+                            cycle=cycle,
+                            event="successor_rejected_active_predecessor",
+                            camera_id=camera_id,
+                            raw_track_id=raw_track_id,
+                            stable_id=stable_id,
+                            predecessor_track_id=active_predecessor,
+                            successor_reid_score=float(best_score),
+                            successor_margin=minimum_margin,
+                        )
+                        self._votes.pop(vote_key, None)
+                        self.pending_total += 1
+                        continue
                     record.raw_members.add(raw_track_id)
                     record.updated_ns = current_ns
                     self._raw_to_stable[(camera_id, raw_track_id)] = stable_id
+                    self._raw_mapping_cycle[(camera_id, raw_track_id)] = int(cycle)
                     self._deferred_first_cycle.pop((camera_id, raw_track_id), None)
                     self.stitched_total += 1
 
@@ -367,6 +522,13 @@ class CameraTrackletContinuityV1:
                     camera_id, frozenset()
                 ):
                     self._deferred_first_cycle.pop(key, None)
+            active_members = set()
+            for camera_id, raw_tracks in active_snapshot.items():
+                for raw_track_id in raw_tracks:
+                    stable_id = self._raw_to_stable.get((camera_id, raw_track_id))
+                    if stable_id is not None:
+                        active_members.add((camera_id, stable_id))
+            self._active_camera_members = frozenset(active_members)
             self.refresh_ms.append(
                 (time.perf_counter_ns() - started) / 1_000_000.0
             )
@@ -392,6 +554,14 @@ class CameraTrackletContinuityV1:
             return row
         return replace(row, track_a=track_a, track_b=track_b)
 
+    def active_camera_members(self) -> frozenset[tuple[str, str]]:
+        with self._lock:
+            return self._active_camera_members
+
+    def diagnostics(self) -> tuple[CameraTrackletDiagnosticV1, ...]:
+        with self._lock:
+            return tuple(self._diagnostics)
+
     def snapshot(self) -> dict[str, int | float]:
         with self._lock:
             return {
@@ -409,6 +579,10 @@ class CameraTrackletContinuityV1:
                 "insufficient_total": self.insufficient_total,
                 "active_overlap_deferred_total": self.active_overlap_deferred_total,
                 "active_overlap_fallback_allocated_total": self.active_overlap_fallback_allocated_total,
+                "same_camera_active_ct_collision": self.same_camera_active_ct_collision,
+                "successor_reid_score": self.successor_reid_score or 0.0,
+                "successor_margin": self.successor_margin or 0.0,
+                "successor_rejected_active_predecessor": self.successor_rejected_active_predecessor,
                 "refresh_p50_ms": self._pct(self.refresh_ms, 0.50),
                 "refresh_p95_ms": self._pct(self.refresh_ms, 0.95),
             }
