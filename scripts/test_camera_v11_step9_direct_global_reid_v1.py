@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from services.camera_v11.step4_reid_gallery_v1 import GallerySampleV1, GalleryViewV1
 from services.camera_v11.step9_direct_global_reid_v1 import (
@@ -115,8 +121,6 @@ class DirectGlobalReIDV1Tests(unittest.TestCase):
         resolver.resolve((view("CAM-01", "A1", 0, 3, 1), view("CAM-01", "B1", 1, 3, 101)), active, now_ns=3_000_000_000)
         resolver.resolve((view("CAM-01", "A1", 0, 4, 1), view("CAM-01", "B1", 1, 4, 101)), active, now_ns=4_000_000_000)
 
-        # A third track halfway between the two identities should not be forced
-        # onto either GID when the row margin is tiny.
         vector = np.zeros(DIM, dtype=np.float32)
         vector[0] = 1.0
         vector[4] = 1.0
