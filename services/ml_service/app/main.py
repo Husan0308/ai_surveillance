@@ -13,11 +13,14 @@ from services.ml_service.app.v11_monitoring import V11MonitoringTrackerService
 
 settings = load_settings()
 runtime = DeepStreamRuntime(settings)
-tracker_service = V11MonitoringTrackerService()
+tracker_service = V11MonitoringTrackerService(runtime)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # DeepStreamRuntime is the ONLY RTSP/NVDEC owner. The monitoring detector/
+    # tracker reads its latest-frame stores and therefore creates zero extra
+    # camera connections or decode pipelines.
     runtime.start()
     tracker_service.start()
     try:
@@ -27,7 +30,7 @@ async def lifespan(_app: FastAPI):
         runtime.stop()
 
 
-app = FastAPI(title="AI Surveillance ML Service", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="AI Surveillance ML Service", version="0.4.1", lifespan=lifespan)
 
 
 @app.get("/health")
