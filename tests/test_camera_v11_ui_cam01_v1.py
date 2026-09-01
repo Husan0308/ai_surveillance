@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameReader, PreviewFrameWriter
+from services.frontend.sentinel_v1.data import CAMERAS
 
 RUNTIME = ROOT / "services/camera_v11/deepstream_trt86_multi_ui_cam01_v1.py"
 BASE_RUNTIME = ROOT / "services/camera_v11/deepstream_trt86_multi_v1.py"
@@ -40,10 +41,19 @@ def test_base_six_camera_runtime_is_only_subclassed() -> None:
     assert "Step2TRT86Client()" in base
 
 
+def test_camera_demo_rows_removed_and_only_cam01_is_staged() -> None:
+    data = DATA.read_text()
+    assert [camera.id for camera in CAMERAS] == ["CAM-01"]
+    assert 'RUNTIME_CAMERA_IDS = ("CAM-01",)' in data
+    assert "CAMERA_ROWS" not in data
+    assert '"cam-1"' not in data
+    assert '"cam-6"' not in data
+    assert "Legacy demo ids such as cam-1..cam-6 are deliberately ignored" in data
+
+
 def test_full_sentinel_ui_is_preserved_and_cam01_is_live_at_view_boundary() -> None:
     source = "".join(path.read_text() for path in sorted(UI_PARTS.glob("part_*.pyfrag")))
     wrapper = UI.read_text()
-    data = DATA.read_text()
     for name in (
         "MonitoringPage", "PeoplePage", "EventsPage", "RoomsPage", "SettingsPage",
         "FullscreenCameraGrid", "EnrollmentPage", "EnrollmentDialog", "CameraDialog",
@@ -53,7 +63,6 @@ def test_full_sentinel_ui_is_preserved_and_cam01_is_live_at_view_boundary() -> N
     assert 'getattr(camera, "id", None) == LIVE_PREVIEW_CAMERA' in wrapper
     assert "CameraView.__init__ = _camera_view_init_cam01_live" in wrapper
     assert "if self.camera.online and not self.realtime_camera_id" in source
-    assert "Deterministic demo data" in data and "CAMERA_ROWS" in data
 
 
 def test_ui_never_opens_rtsp_or_runs_inference() -> None:
