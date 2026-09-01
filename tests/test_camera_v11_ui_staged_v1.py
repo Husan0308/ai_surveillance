@@ -24,6 +24,7 @@ FROZEN_BASE_SHA256 = "5372d7e64b7bed43aabf7947f404973e310138629ecbb8f176b67b5967
 ALL_CAMERAS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
 STAGES = (
     ALL_CAMERAS[:3],
+    ALL_CAMERAS[:4],
 )
 
 
