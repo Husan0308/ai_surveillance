@@ -41,17 +41,19 @@ def test_base_six_camera_runtime_is_only_subclassed() -> None:
     assert "Step2TRT86Client()" in base
 
 
-def test_camera_demo_rows_removed_and_only_cam01_is_staged() -> None:
+def test_camera_demo_rows_stay_removed_and_cam01_remains_first_runtime_card() -> None:
     data = DATA.read_text()
-    assert [camera.id for camera in CAMERAS] == ["CAM-01"]
-    assert 'RUNTIME_CAMERA_IDS = ("CAM-01",)' in data
+    ids = [camera.id for camera in CAMERAS]
+    assert ids and ids[0] == "CAM-01"
+    assert all(camera_id.startswith("CAM-") for camera_id in ids)
+    assert "RUNTIME_CAMERA_IDS" in data
     assert "CAMERA_ROWS" not in data
     assert '"cam-1"' not in data
     assert '"cam-6"' not in data
     assert "Legacy demo ids such as cam-1..cam-6 are deliberately ignored" in data
 
 
-def test_full_sentinel_ui_is_preserved_and_cam01_is_live_at_view_boundary() -> None:
+def test_full_sentinel_ui_is_preserved_and_cam01_stays_live_at_view_boundary() -> None:
     source = "".join(path.read_text() for path in sorted(UI_PARTS.glob("part_*.pyfrag")))
     wrapper = UI.read_text()
     for name in (
@@ -60,8 +62,9 @@ def test_full_sentinel_ui_is_preserved_and_cam01_is_live_at_view_boundary() -> N
         "PersonProfileDialog", "EventSnapshotDialog",
     ):
         assert f"class {name}" in source
-    assert 'getattr(camera, "id", None) == LIVE_PREVIEW_CAMERA' in wrapper
-    assert "CameraView.__init__ = _camera_view_init_cam01_live" in wrapper
+    assert "LIVE_PREVIEW_CAMERAS" in wrapper
+    assert "CAM-01" in wrapper
+    assert "CameraView.__init__ = _camera_view_init_staged_live" in wrapper
     assert "if self.camera.online and not self.realtime_camera_id" in source
 
 
