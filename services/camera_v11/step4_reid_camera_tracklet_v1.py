@@ -23,6 +23,7 @@ class CameraTrackletConfigV1:
     min_margin: float = 0.05
     min_support_ge_065: int = 3
     confirm_cycles: int = 2
+    active_overlap_grace_cycles: int = 3
 
     def __post_init__(self) -> None:
         if not self.scoped_cameras:
@@ -41,6 +42,8 @@ class CameraTrackletConfigV1:
             raise ValueError("min_support_ge_065 must be positive")
         if self.confirm_cycles < 1:
             raise ValueError("confirm_cycles must be positive")
+        if self.active_overlap_grace_cycles < 1:
+            raise ValueError("active_overlap_grace_cycles must be positive")
 
 
 @dataclass
@@ -67,6 +70,12 @@ class CameraTrackletContinuityV1:
     reciprocal best match to a recently-lost predecessor, the appearance score
     and margin gates pass, and the evidence repeats across consecutive matcher
     cycles. Simultaneously visible tracks are never stitched.
+
+    A newly-created raw tracker ID is intentionally left unresolved for a small,
+    bounded number of matcher cycles when the only plausible predecessor is still
+    visually active. This closes the race where the old T-ID is active on the
+    first cycle, a fresh stable ID is allocated immediately, and that raw ID can
+    never be reconsidered for continuity after the predecessor disappears.
     """
 
     def __init__(
@@ -84,8 +93,8 @@ class CameraTrackletContinuityV1:
         self._raw_to_stable: dict[tuple[str, str], str] = {}
         self._stable: dict[str, _StableCameraTrackletV1] = {}
         self._votes: dict[tuple[str, str, str], _ContinuityVoteV1] = {}
+        self._deferred_first_cycle: dict[tuple[str, str], int] = {}
         self.refresh_ms: deque[float] = deque(maxlen=2048)
-
         self.created_total = 0
         self.stitched_total = 0
         self.pending_total = 0
@@ -95,6 +104,8 @@ class CameraTrackletContinuityV1:
         self.nonreciprocal_total = 0
         self.overlap_reject_total = 0
         self.insufficient_total = 0
+        self.active_overlap_deferred_total = 0
+        self.active_overlap_fallback_allocated_total = 0
 
     @staticmethod
     def _pct(values: deque[float], quantile: float) -> float:
@@ -124,6 +135,7 @@ class CameraTrackletContinuityV1:
         )
         self._stable[stable_id] = record
         self._raw_to_stable[key] = stable_id
+        self._deferred_first_cycle.pop(key, None)
         self.created_total += 1
         return stable_id
 
@@ -154,10 +166,13 @@ class CameraTrackletContinuityV1:
         new_view: GalleryViewV1,
         active: frozenset[str],
         views_by_key: dict[tuple[str, str], GalleryViewV1],
-    ) -> list[tuple[_StableCameraTrackletV1, tuple[GallerySampleV1, ...]]]:
+    ) -> tuple[
+        list[tuple[_StableCameraTrackletV1, tuple[GallerySampleV1, ...]]], bool
+    ]:
         cfg = self.config
         new_first = self._first_sample_ns(new_view)
         candidates: list[tuple[_StableCameraTrackletV1, tuple[GallerySampleV1, ...]]] = []
+        blocked_by_active_predecessor = False
         for record in self._stable.values():
             if record.camera_id != camera_id:
                 continue
@@ -171,7 +186,6 @@ class CameraTrackletContinuityV1:
             if gap_ns < -int(cfg.max_overlap_sec * 1e9):
                 self.overlap_reject_total += 1
                 continue
-
             visually_fresh_active = False
             fresh_cutoff = int(cfg.visually_active_sec * 1e9)
             for raw_member in record.raw_members:
@@ -185,9 +199,10 @@ class CameraTrackletContinuityV1:
                     visually_fresh_active = True
                     break
             if visually_fresh_active:
+                blocked_by_active_predecessor = True
                 continue
             candidates.append((record, samples))
-        return candidates
+        return candidates, blocked_by_active_predecessor
 
     @staticmethod
     def _score(
@@ -197,6 +212,19 @@ class CameraTrackletContinuityV1:
             [sample.embedding for sample in new_view.samples[-8:]],
             [sample.embedding for sample in predecessor_samples[-8:]],
         )
+
+    def _should_defer_active_overlap(
+        self, camera_id: str, raw_track_id: str, cycle: int
+    ) -> bool:
+        key = (camera_id, raw_track_id)
+        first = self._deferred_first_cycle.setdefault(key, int(cycle))
+        age = int(cycle) - int(first)
+        if age < self.config.active_overlap_grace_cycles:
+            self.active_overlap_deferred_total += 1
+            self.pending_total += 1
+            return True
+        self._deferred_first_cycle.pop(key, None)
+        return False
 
     def refresh(self, cycle: int, now_ns: int | None = None) -> None:
         started = time.perf_counter_ns()
@@ -209,7 +237,6 @@ class CameraTrackletContinuityV1:
         views_by_key = {
             (str(view.camera_id), str(view.local_track_id)): view for view in views
         }
-
         with self._lock:
             cfg = self.config
             seen_vote_keys: set[tuple[str, str, str]] = set()
@@ -226,22 +253,38 @@ class CameraTrackletContinuityV1:
                 new_views.sort(key=lambda view: str(view.local_track_id))
                 if not new_views:
                     continue
-
                 candidate_map: dict[
                     str, list[tuple[_StableCameraTrackletV1, tuple[GallerySampleV1, ...]]]
-                ] = {
-                    str(view.local_track_id): self._candidate_records(
+                ] = {}
+                active_blocked: dict[str, bool] = {}
+                for view in new_views:
+                    raw_track_id = str(view.local_track_id)
+                    candidates, blocked = self._candidate_records(
                         camera_id, view, active, views_by_key
                     )
-                    for view in new_views
-                }
-                if not any(candidate_map.values()):
-                    for view in new_views:
-                        self._allocate(camera_id, str(view.local_track_id), current_ns)
+                    candidate_map[raw_track_id] = candidates
+                    active_blocked[raw_track_id] = blocked
+
+                unresolved_for_scoring: list[GalleryViewV1] = []
+                for view in new_views:
+                    raw_track_id = str(view.local_track_id)
+                    if candidate_map[raw_track_id]:
+                        unresolved_for_scoring.append(view)
+                        continue
+                    if active_blocked[raw_track_id]:
+                        if self._should_defer_active_overlap(
+                            camera_id, raw_track_id, int(cycle)
+                        ):
+                            continue
+                        self.active_overlap_fallback_allocated_total += 1
+                        self._allocate(camera_id, raw_track_id, current_ns)
+                        continue
+                    self._allocate(camera_id, raw_track_id, current_ns)
+                if not unresolved_for_scoring:
                     continue
 
                 scores: dict[tuple[str, str], GalleryPairScoreV1] = {}
-                for view in new_views:
+                for view in unresolved_for_scoring:
                     raw_track_id = str(view.local_track_id)
                     for record, predecessor_samples in candidate_map[raw_track_id]:
                         score = self._score(view, predecessor_samples)
@@ -264,7 +307,7 @@ class CameraTrackletContinuityV1:
                 for values in column_rank.values():
                     values.sort(key=lambda item: (-item[0], item[1]))
 
-                for view in new_views:
+                for view in unresolved_for_scoring:
                     raw_track_id = str(view.local_track_id)
                     ranked = row_rank.get(raw_track_id, [])
                     if not ranked:
@@ -297,7 +340,6 @@ class CameraTrackletContinuityV1:
                         self.low_margin_total += 1
                         self.pending_total += 1
                         continue
-
                     vote_key = (camera_id, raw_track_id, stable_id)
                     seen_vote_keys.add(vote_key)
                     vote = self._votes.setdefault(vote_key, _ContinuityVoteV1())
@@ -309,16 +351,22 @@ class CameraTrackletContinuityV1:
                     if vote.consecutive < cfg.confirm_cycles:
                         self.pending_total += 1
                         continue
-
                     record = self._stable[stable_id]
                     record.raw_members.add(raw_track_id)
                     record.updated_ns = current_ns
                     self._raw_to_stable[(camera_id, raw_track_id)] = stable_id
+                    self._deferred_first_cycle.pop((camera_id, raw_track_id), None)
                     self.stitched_total += 1
 
             for key in list(self._votes):
                 if key not in seen_vote_keys and self._votes[key].last_cycle < int(cycle):
                     del self._votes[key]
+            for key in list(self._deferred_first_cycle):
+                camera_id, raw_track_id = key
+                if key in self._raw_to_stable or raw_track_id not in active_snapshot.get(
+                    camera_id, frozenset()
+                ):
+                    self._deferred_first_cycle.pop(key, None)
             self.refresh_ms.append(
                 (time.perf_counter_ns() - started) / 1_000_000.0
             )
@@ -351,6 +399,7 @@ class CameraTrackletContinuityV1:
                 "raw_mapped": len(self._raw_to_stable),
                 "stitched_total": self.stitched_total,
                 "pending_votes": len(self._votes),
+                "deferred_allocations": len(self._deferred_first_cycle),
                 "pending_total": self.pending_total,
                 "suppressed_total": self.suppressed_total,
                 "low_score_total": self.low_score_total,
@@ -358,6 +407,8 @@ class CameraTrackletContinuityV1:
                 "nonreciprocal_total": self.nonreciprocal_total,
                 "overlap_reject_total": self.overlap_reject_total,
                 "insufficient_total": self.insufficient_total,
+                "active_overlap_deferred_total": self.active_overlap_deferred_total,
+                "active_overlap_fallback_allocated_total": self.active_overlap_fallback_allocated_total,
                 "refresh_p50_ms": self._pct(self.refresh_ms, 0.50),
                 "refresh_p95_ms": self._pct(self.refresh_ms, 0.95),
             }
