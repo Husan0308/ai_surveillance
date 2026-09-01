@@ -58,6 +58,10 @@ class V11Step6GlobalShadowRuntimeV1(V11Step5GlobalShadowRuntimeV1):
             affinity_cpu=old_match.affinity_cpu,
             global_shadow_worker=self.global_shadow_worker,
         )
+        # Step6 replaces the Step5 matcher again so the Step3 pair-score producer
+        # must be rebound once more to the final matcher object that run() starts.
+        # Without this, the callback still points at the discarded Step5 matcher.
+        self.pair_worker.set_scores_published_callback(self.match_worker.notify)
         self.global_shadow_closed = False
         self.verify_tsv_path = verify_tsv_path
 
