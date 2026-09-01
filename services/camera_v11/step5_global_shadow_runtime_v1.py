@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 import signal
 
+from .step4_reid_camera_tracklet_v1 import (
+    CameraTrackletConfigV1,
+    CameraTrackletContinuityV1,
+)
 from .step4_reid_pair_runtime_v1 import ROOT
 from .step4_reid_same_room_runtime_v1 import V11Step4ReIDSameRoomRuntimeV1
 from .step5_global_shadow_worker_v1 import V11GlobalShadowWorkerV1
@@ -10,7 +14,7 @@ from .step5_same_room_shadow_tap_v1 import V11SameRoomMatcherShadowWorkerStep5Ta
 
 
 class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
-    """Step5 shadow Global ID lifecycle layered on the passing Step4 matcher."""
+    """Step5 shadow Global ID lifecycle layered on Step4 + camera continuity."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -35,6 +39,15 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             ),
         )
 
+        # Step4.5: shadow-only same-camera continuity for the Devs pair. This does
+        # not mutate frozen tracker IDs or Step4 matcher rows; it only canonicalizes
+        # MATCH_PROPOSED endpoints before they enter the Step5 state machine.
+        self.camera_tracklet_continuity = CameraTrackletContinuityV1(
+            self.reid_gallery.gallery_views,
+            self._camera_tracklet_active_snapshot,
+            config=CameraTrackletConfigV1(),
+        )
+
         old = self.match_worker
         self.match_worker = V11SameRoomMatcherShadowWorkerStep5TapV1(
             self.reid_gallery.gallery_views,
@@ -46,6 +59,7 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             phase_delay_sec=old.phase_delay_sec,
             affinity_cpu=old.affinity_cpu,
             global_shadow_worker=self.global_shadow_worker,
+            camera_tracklet_continuity=self.camera_tracklet_continuity,
         )
         # Step4 bound the pair-score completion callback to the matcher object that
         # existed during super().__init__(). Step5 replaces that matcher with the
@@ -54,8 +68,29 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
         self.pair_worker.set_scores_published_callback(self.match_worker.notify)
         self.global_shadow_closed = False
         print(
+            "CAMERA_V11_STEP4_CAMERA_TRACKLET_V1_ARCH "
+            "scope=CAM-01+CAM-04 mode=shadow same_camera_reid=1 recent_lost=1 "
+            "simultaneous_stitch=0 reciprocal=1 margin=1 confirm_cycles=2 "
+            "tracker_mutation=0 step4_matcher_mutation=0 production_id_mutation=0",
+            flush=True,
+        )
+        cfg = self.camera_tracklet_continuity.config
+        print(
+            "CAMERA_V11_STEP4_CAMERA_TRACKLET_V1_CONFIG "
+            f"recent_gap_sec={cfg.recent_gap_sec:.2f} "
+            f"max_overlap_sec={cfg.max_overlap_sec:.2f} "
+            f"visually_active_sec={cfg.visually_active_sec:.2f} "
+            f"min_samples={cfg.min_samples} "
+            f"min_robust_score={cfg.min_robust_score:.3f} "
+            f"min_margin={cfg.min_margin:.3f} "
+            f"min_support_ge_065={cfg.min_support_ge_065} "
+            f"confirm_cycles={cfg.confirm_cycles}",
+            flush=True,
+        )
+        print(
             "CAMERA_V11_STEP5_GLOBAL_SHADOW_V1_ARCH "
-            "mode=shadow input=step4_MATCH_PROPOSED reciprocal_required=1 assigned_required=1 "
+            "mode=shadow input=step4.5_camera_tracklet_MATCH_PROPOSED "
+            "reciprocal_required=1 assigned_required=1 "
             "states=PROVISIONAL+CONFIRMED_SHADOW+EXPIRED_SHADOW "
             "confirm_observations=3 confirm_consecutive=3 different_pair_reuse=0 "
             "conflict_resolution=0 hysteresis=0 production_global_id=0 room_id=0 "
@@ -70,6 +105,31 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             "confirm_observations=3 confirm_consecutive=3 "
             f"expire_provisional_after_missed_cycles="
             f"{self.global_shadow_worker.machine.expire_provisional_after_missed_cycles}",
+            flush=True,
+        )
+
+    def _camera_tracklet_active_snapshot(self):
+        # Values are immutable frozensets; return a shallow copy so the matcher
+        # thread never iterates a dictionary while the quality thread updates it.
+        return {camera: frozenset(tracks) for camera, tracks in self.active_track_ids.items()}
+
+    def _print_camera_tracklet_stats(self) -> None:
+        row = self.camera_tracklet_continuity.snapshot()
+        print(
+            "CAMERA_V11_STEP4_CAMERA_TRACKLET_V1 "
+            f"stable_ids={row['stable_ids']} "
+            f"raw_mapped={row['raw_mapped']} "
+            f"stitched={row['stitched_total']} "
+            f"pending_votes={row['pending_votes']} "
+            f"pending_total={row['pending_total']} "
+            f"suppressed={row['suppressed_total']} "
+            f"low_score={row['low_score_total']} "
+            f"low_margin={row['low_margin_total']} "
+            f"nonreciprocal={row['nonreciprocal_total']} "
+            f"overlap_reject={row['overlap_reject_total']} "
+            f"insufficient={row['insufficient_total']} "
+            f"refresh_p50={row['refresh_p50_ms']:.3f}ms "
+            f"refresh_p95={row['refresh_p95_ms']:.3f}ms",
             flush=True,
         )
 
@@ -96,6 +156,7 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
 
     def _print_stats(self) -> None:
         super()._print_stats()
+        self._print_camera_tracklet_stats()
         self._print_global_shadow_stats()
 
     def run(self) -> int:
@@ -110,6 +171,7 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             return
         self.global_shadow_closed = True
         self.global_shadow_worker.close(timeout_sec=3.0)
+        self._print_camera_tracklet_stats()
         self._print_global_shadow_stats()
 
     def close(self) -> None:
