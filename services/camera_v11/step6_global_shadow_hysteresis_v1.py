@@ -14,7 +14,6 @@ from .step5_global_shadow_v1 import (
     GlobalShadowEventV1,
 )
 
-
 VERIFY_PENDING = "VERIFY_PENDING"
 VERIFIED_SHADOW = "VERIFIED_SHADOW"
 CONFLICT_HOLD_SHADOW = "CONFLICT_HOLD_SHADOW"
@@ -26,7 +25,6 @@ GLOBAL_VERIFY_HOLD = "GLOBAL_VERIFY_HOLD"
 GLOBAL_VERIFY_RECOVER = "GLOBAL_VERIFY_RECOVER"
 GLOBAL_VERIFY_CONFLICT_PERSISTENT = "GLOBAL_VERIFY_CONFLICT_PERSISTENT"
 GLOBAL_VERIFY_EXPIRE = "GLOBAL_VERIFY_EXPIRE"
-
 
 TrackKeyV1 = tuple[str, str]
 PairKeyV1 = tuple[TrackKeyV1, TrackKeyV1]
@@ -42,10 +40,7 @@ def _pct(values: deque[float], quantile: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = min(
-        len(ordered) - 1,
-        max(0, int(round((len(ordered) - 1) * float(quantile)))),
-    )
+    index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * float(quantile)))))
     return float(ordered[index])
 
 
@@ -85,19 +80,11 @@ class ShadowVerificationEventV1:
 
 
 class GlobalShadowHysteresisV1:
-    """Step6-only temporal hysteresis over Step5 shadow identities.
+    """Step6 temporal hysteresis over Step5 person-owned shadow identities.
 
-    The verifier consumes Step5 events only.  It never changes Step5 ownership,
-    tracker IDs, Room IDs, UI IDs, or production Global IDs.  A confirmed Step5
-    identity must survive additional clean observations before becoming
-    VERIFIED_SHADOW.  Conflicts immediately move impacted identities into a hold
-    state; recovery also requires repeated clean observations.  Persistent
-    conflicts are surfaced but intentionally not resolved in this step.
-
-    Geometry is deliberately absent here: calibrated common-world coordinates are
-    required before a geometric gate can be trustworthy.  This module therefore
-    implements the safe Step6 temporal/conflict layer without inventing camera
-    geometry from raw pixels.
+    Step5 may update the current local-track pair after a safe tracker-ID
+    re-association. Step6 follows that latest pair while keeping the same global
+    shadow ID; local-track turnover must not create a verification HOLD by itself.
     """
 
     def __init__(
@@ -110,13 +97,10 @@ class GlobalShadowHysteresisV1:
     ) -> None:
         self.verify_clean_observations = max(1, int(verify_clean_observations))
         self.recover_clean_observations = max(1, int(recover_clean_observations))
-        self.persistent_conflict_observations = max(
-            1, int(persistent_conflict_observations)
-        )
+        self.persistent_conflict_observations = max(1, int(persistent_conflict_observations))
         self.max_records = max(8, int(max_records))
         self._records: dict[str, ShadowVerificationRecordV1] = {}
         self.verify_ms: deque[float] = deque(maxlen=4096)
-
         self.records_created = 0
         self.verified_total = 0
         self.hold_events = 0
@@ -159,14 +143,11 @@ class GlobalShadowHysteresisV1:
         if len(self._records) < self.max_records:
             return
         expired = sorted(
-            (
-                record.updated_at_ns,
-                shadow_id,
-            )
+            (record.updated_at_ns, shadow_id)
             for shadow_id, record in self._records.items()
             if record.state == EXPIRED_VERIFY_SHADOW
         )
-        for _updated_at_ns, shadow_id in expired:
+        for _updated, shadow_id in expired:
             if len(self._records) < self.max_records:
                 break
             self._records.pop(shadow_id, None)
@@ -200,11 +181,14 @@ class GlobalShadowHysteresisV1:
                     )
                     self._records[record.shadow_global_id] = record
                     self.records_created += 1
+                else:
+                    record.pair_key = _pair_from_event(source)
+                    record.room = str(source.room)
                 record.updated_at_ns = int(source.timestamp_ns)
                 record.last_score = source.robust_score
-                event = self._event(source, record, GLOBAL_VERIFY_PENDING, VERIFY_PENDING)
+                out = self._event(source, record, GLOBAL_VERIFY_PENDING, VERIFY_PENDING)
                 self.events_total += 1
-                return (event,)
+                return (out,)
 
             if source.event == GLOBAL_SHADOW_OBSERVE:
                 if source.state != CONFIRMED_SHADOW or not source.shadow_global_id:
@@ -212,6 +196,8 @@ class GlobalShadowHysteresisV1:
                 record = self._records.get(source.shadow_global_id)
                 if record is None or record.state == EXPIRED_VERIFY_SHADOW:
                     return ()
+                record.pair_key = _pair_from_event(source)
+                record.room = str(source.room)
                 record.updated_at_ns = int(source.timestamp_ns)
                 record.total_observations += 1
                 record.clean_observations += 1
@@ -225,20 +211,14 @@ class GlobalShadowHysteresisV1:
                 ):
                     record.state = VERIFIED_SHADOW
                     self.verified_total += 1
-                    output.append(
-                        self._event(source, record, GLOBAL_VERIFY_PASS, VERIFIED_SHADOW)
-                    )
+                    output.append(self._event(source, record, GLOBAL_VERIFY_PASS, VERIFIED_SHADOW))
                 elif (
                     record.state == CONFLICT_HOLD_SHADOW
                     and record.clean_observations >= self.recover_clean_observations
                 ):
                     record.state = VERIFIED_SHADOW
                     self.recovered_total += 1
-                    output.append(
-                        self._event(
-                            source, record, GLOBAL_VERIFY_RECOVER, VERIFIED_SHADOW
-                        )
-                    )
+                    output.append(self._event(source, record, GLOBAL_VERIFY_RECOVER, VERIFIED_SHADOW))
                 self.events_total += len(output)
                 return tuple(output)
 
@@ -252,8 +232,8 @@ class GlobalShadowHysteresisV1:
                 ]
                 output: list[ShadowVerificationEventV1] = []
                 for record in sorted(impacted, key=lambda item: item.shadow_global_id):
-                    same_conflict = record.last_conflict_pair == conflict_pair
-                    record.conflict_streak = record.conflict_streak + 1 if same_conflict else 1
+                    same = record.last_conflict_pair == conflict_pair
+                    record.conflict_streak = record.conflict_streak + 1 if same else 1
                     record.last_conflict_pair = conflict_pair
                     record.conflict_events += 1
                     record.clean_observations = 0
@@ -261,12 +241,7 @@ class GlobalShadowHysteresisV1:
                     record.state = CONFLICT_HOLD_SHADOW
                     self.hold_events += 1
                     output.append(
-                        self._event(
-                            source,
-                            record,
-                            GLOBAL_VERIFY_HOLD,
-                            CONFLICT_HOLD_SHADOW,
-                        )
+                        self._event(source, record, GLOBAL_VERIFY_HOLD, CONFLICT_HOLD_SHADOW)
                     )
                     if record.conflict_streak == self.persistent_conflict_observations:
                         self.persistent_conflicts += 1
@@ -290,27 +265,18 @@ class GlobalShadowHysteresisV1:
                 record.state = EXPIRED_VERIFY_SHADOW
                 record.updated_at_ns = int(source.timestamp_ns)
                 self.expired_total += 1
-                event = self._event(
-                    source, record, GLOBAL_VERIFY_EXPIRE, EXPIRED_VERIFY_SHADOW
-                )
+                out = self._event(source, record, GLOBAL_VERIFY_EXPIRE, EXPIRED_VERIFY_SHADOW)
                 self.events_total += 1
-                return (event,)
-
+                return (out,)
             return ()
         finally:
             self.verify_ms.append((time.perf_counter_ns() - started_ns) / 1_000_000.0)
 
     def snapshot(self) -> dict[str, int | float]:
         pending = sum(1 for item in self._records.values() if item.state == VERIFY_PENDING)
-        verified = sum(
-            1 for item in self._records.values() if item.state == VERIFIED_SHADOW
-        )
-        hold = sum(
-            1 for item in self._records.values() if item.state == CONFLICT_HOLD_SHADOW
-        )
-        expired = sum(
-            1 for item in self._records.values() if item.state == EXPIRED_VERIFY_SHADOW
-        )
+        verified = sum(1 for item in self._records.values() if item.state == VERIFIED_SHADOW)
+        hold = sum(1 for item in self._records.values() if item.state == CONFLICT_HOLD_SHADOW)
+        expired = sum(1 for item in self._records.values() if item.state == EXPIRED_VERIFY_SHADOW)
         return {
             "verify_records_created": self.records_created,
             "verify_pending": pending,
