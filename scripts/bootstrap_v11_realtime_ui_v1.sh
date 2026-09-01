@@ -9,9 +9,9 @@ CURRENT_BRANCH="$(git branch --show-current 2>/dev/null || true)"
 
 printf 'V11_UI_BOOTSTRAP branch=%s expected=%s\n' "${CURRENT_BRANCH:-DETACHED}" "$EXPECTED_BRANCH"
 
-if [[ ! -f tests/test_frontend_realtime_models.py ]]; then
+if [[ ! -f tests/test_frontend_realtime_models.py || ! -f tests/test_v11_monitoring_single_pipeline.py ]]; then
   echo "V11_UI_BOOTSTRAP RESULT=FAIL reason=realtime_branch_files_missing"
-  echo "Expected tests/test_frontend_realtime_models.py. Fetch/switch to $EXPECTED_BRANCH or use a clean git worktree."
+  echo "Expected realtime UI tests. Fetch/switch to $EXPECTED_BRANCH or use a clean git worktree."
   exit 2
 fi
 
@@ -43,6 +43,8 @@ from PySide6.QtWebSockets import QWebSocket
 print("V11_UI_IMPORTS_OK", "fastapi", fastapi.__version__, "httpx", httpx.__version__, "uvicorn", uvicorn.__version__, "qt", QT_VERSION_STR, "qwebsocket", QWebSocket.__name__)
 PY
 
-"$PY" -m pytest -q tests/test_frontend_realtime_models.py
+"$PY" -m pytest -q \
+  tests/test_frontend_realtime_models.py \
+  tests/test_v11_monitoring_single_pipeline.py
 
 echo "V11_UI_BOOTSTRAP RESULT=PASS"
