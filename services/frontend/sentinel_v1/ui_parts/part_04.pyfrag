@@ -1,0 +1,300 @@
+            self.update_presence_widget(widgets)
+
+    def open_profile(self, person: Person):
+        PersonProfileDialog(person, self).exec()
+
+    def open_enrollment(self):
+        dialog = EnrollmentDialog(self)
+        if dialog.exec():
+            self.rebuild()
+            self.people_changed.emit()
+
+
+class EventsPage(ScrollPage):
+    TYPE_COLORS = {"entry": C["blue"], "exit": C["muted"]}
+
+    def __init__(self):
+        super().__init__()
+        self.resetting = False
+        self.selected_date = None
+        self.people_by_id = {person.id: person for person in PEOPLE}
+
+        summary = QHBoxLayout()
+        summary.setSpacing(10)
+        self.total_value = self.add_summary_card(summary, "Jami", C["primary"], "Tanlangan hodisalar")
+        self.known_value = self.add_summary_card(summary, "Known", C["known"], "Tanilgan shaxslar")
+        self.unknown_value = self.add_summary_card(summary, "Unknown", C["unknown"], "Noma'lum shaxslar")
+        self.direction_value = self.add_summary_card(summary, "Kirish / Chiqish", C["blue"], "Harakat yo'nalishi")
+        self.layout.addLayout(summary)
+
+        filter_panel = Panel()
+        filter_layout = QHBoxLayout(filter_panel)
+        filter_layout.setContentsMargins(12, 10, 12, 10)
+        filter_layout.setSpacing(8)
+        self.identity = QComboBox()
+        self.identity.addItem("Known va Unknown", "all")
+        self.identity.addItem("Faqat Known", "known")
+        self.identity.addItem("Faqat Unknown", "unknown")
+        self.direction = QComboBox()
+        self.direction.addItem("Kirish va chiqish", "all")
+        self.direction.addItem("Faqat kirish", "entry")
+        self.direction.addItem("Faqat chiqish", "exit")
+        self.room = QComboBox()
+        self.room.addItem("Barcha xonalar", "all")
+        for room in ROOMS:
+            self.room.addItem(room.name, room.id)
+        self.date = make_button("▣  Sana tanlash", "secondary")
+        self.date.setMinimumWidth(180)
+        self.date.clicked.connect(self.choose_date)
+        for widget in [self.identity, self.direction, self.room]:
+            widget.setMinimumWidth(180)
+        filter_layout.addWidget(self.identity)
+        filter_layout.addWidget(self.direction)
+        filter_layout.addWidget(self.room)
+        filter_layout.addWidget(self.date)
+        filter_layout.addStretch()
+        reset = make_button("↺  Tozalash", "ghost")
+        reset.clicked.connect(self.reset_filters)
+        filter_layout.addWidget(reset)
+        self.identity.currentIndexChanged.connect(self.rebuild)
+        self.direction.currentIndexChanged.connect(self.rebuild)
+        self.room.currentIndexChanged.connect(self.rebuild)
+        self.layout.addWidget(filter_panel)
+
+        result_head = QHBoxLayout()
+        heading = QVBoxLayout()
+        heading.addWidget(label("Hodisalar lentasi", "sectionTitle"))
+        heading.addWidget(label("Eng yangi hodisalar yuqorida ko'rsatiladi", "muted"))
+        result_head.addLayout(heading)
+        result_head.addStretch()
+        self.result_count = label("", "mono")
+        result_head.addWidget(self.result_count)
+        self.layout.addLayout(result_head)
+        self.list = QVBoxLayout()
+        self.list.setSpacing(8)
+        self.layout.addLayout(self.list)
+        self.layout.addStretch()
+        self.rebuild()
+
+    def add_summary_card(self, row, title, tone, hint):
+        card = Panel()
+        card.setMinimumHeight(108)
+        card_layout = panel_layout(card, (14, 12, 14, 12), 3)
+        card_layout.addWidget(label(title.upper(), "eyebrow"))
+        value = label("0", "metric", tone)
+        card_layout.addWidget(value)
+        card_layout.addWidget(label(hint, "muted"))
+        row.addWidget(card, 1)
+        return value
+
+    def reset_filters(self):
+        self.resetting = True
+        self.identity.setCurrentIndex(0)
+        self.direction.setCurrentIndex(0)
+        self.room.setCurrentIndex(0)
+        self.set_selected_date(None, rebuild=False)
+        self.resetting = False
+        self.rebuild()
+
+    def choose_date(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Sana tanlash")
+        dialog.setFixedSize(360, 340)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        calendar = QCalendarWidget()
+        calendar.setGridVisible(True)
+        if self.selected_date is not None:
+            calendar.setSelectedDate(self.selected_date)
+        elif EVENTS:
+            latest = EVENTS[0].at.astimezone()
+            calendar.setSelectedDate(QDate(latest.year, latest.month, latest.day))
+        layout.addWidget(calendar)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Tanlash")
+        buttons.button(QDialogButtonBox.Cancel).setText("Bekor qilish")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec():
+            self.set_selected_date(calendar.selectedDate())
+
+    def set_selected_date(self, selected_date, rebuild=True):
+        self.selected_date = selected_date
+        if selected_date is None:
+            self.date.setText("▣  Sana tanlash")
+        else:
+            self.date.setText(f"▣  {selected_date.toString('dd.MM.yyyy')}")
+        if rebuild and not self.resetting:
+            self.rebuild()
+
+    def filtered_events(self):
+        identity = self.identity.currentData()
+        direction = self.direction.currentData()
+        room = self.room.currentData()
+        rows = []
+        for event in EVENTS:
+            person = self.people_by_id.get(event.person_id)
+            is_known = bool(person and person.known)
+            if identity == "known" and not is_known:
+                continue
+            if identity == "unknown" and is_known:
+                continue
+            if direction != "all" and event.type != direction:
+                continue
+            if room != "all" and event.room_id != room:
+                continue
+            if self.selected_date is not None:
+                local_date = event.at.astimezone().date()
+                if (
+                    local_date.year != self.selected_date.year()
+                    or local_date.month != self.selected_date.month()
+                    or local_date.day != self.selected_date.day()
+                ):
+                    continue
+            rows.append(event)
+        return rows
+
+    def update_summary(self, rows):
+        known_count = sum(bool(self.people_by_id.get(event.person_id) and self.people_by_id[event.person_id].known) for event in rows)
+        entry_count = sum(event.type == "entry" for event in rows)
+        exit_count = sum(event.type == "exit" for event in rows)
+        self.total_value.setText(str(len(rows)))
+        self.known_value.setText(str(known_count))
+        self.unknown_value.setText(str(len(rows) - known_count))
+        self.direction_value.setText(f"{entry_count} / {exit_count}")
+        self.result_count.setText(f"{len(rows)} ta natija")
+
+    def rebuild(self, *_):
+        if self.resetting:
+            return
+        clear_layout(self.list)
+        rows = self.filtered_events()
+        self.update_summary(rows)
+        if not rows:
+            empty = Panel()
+            empty_layout = panel_layout(empty, (18, 30, 18, 30), 5)
+            empty_title = label("Mos hodisa topilmadi", "sectionTitle")
+            empty_title.setAlignment(Qt.AlignCenter)
+            empty_hint = label("Tezkor ko'rinish yoki filtrlarni o'zgartirib ko'ring.", "muted")
+            empty_hint.setAlignment(Qt.AlignCenter)
+            empty_layout.addWidget(empty_title)
+            empty_layout.addWidget(empty_hint)
+            self.list.addWidget(empty)
+            return
+
+        for event in rows:
+            person = self.people_by_id.get(event.person_id)
+            known = bool(person and person.known)
+            identity_tone = C["known"] if known else C["unknown"]
+            direction_tone = self.TYPE_COLORS[event.type]
+            card = Panel()
+            card.setMinimumHeight(108)
+            card_layout = QHBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 10)
+            card_layout.setSpacing(12)
+
+            time_column = QVBoxLayout()
+            time_column.setSpacing(1)
+            time_value = label(event.at.astimezone().strftime("%H:%M"), "sectionTitle", direction_tone)
+            time_value.setAlignment(Qt.AlignCenter)
+            date_value = label(event.at.astimezone().strftime("%d.%m.%Y"), "mono")
+            date_value.setAlignment(Qt.AlignCenter)
+            time_column.addStretch()
+            time_column.addWidget(time_value)
+            time_column.addWidget(date_value)
+            time_column.addStretch()
+            card_layout.addLayout(time_column)
+
+            snapshot = EventSnapshot(event, person)
+            snapshot.clicked.connect(lambda item=event, identity=person: self.open_snapshot(item, identity))
+            card_layout.addWidget(snapshot)
+
+            info = QVBoxLayout()
+            info.setSpacing(4)
+            top = QHBoxLayout()
+            identity_badge = label("KNOWN" if known else "UNKNOWN")
+            identity_badge.setStyleSheet(
+                f"background:{identity_tone};color:{C['bg']};padding:3px 6px;"
+                "border-radius:3px;font:8px 'DejaVu Sans Mono';"
+            )
+            direction_badge = label(TYPE_LABEL[event.type])
+            direction_badge.setStyleSheet(
+                f"color:{direction_tone};border:1px solid {direction_tone};padding:2px 6px;"
+                "border-radius:3px;font:8px 'DejaVu Sans Mono';"
+            )
+            top.addWidget(identity_badge)
+            top.addWidget(direction_badge)
+            top.addStretch()
+            top.addWidget(label(event.id, "mono"))
+            info.addLayout(top)
+            info.addWidget(label(event.message))
+            info.addWidget(label(f"{camera_name(event.camera_id)}  ·  {room_name(event.room_id)}", "mono"))
+            card_layout.addLayout(info, 1)
+
+            if known:
+                profile = make_button("Profil  →", "ghost")
+                profile.clicked.connect(lambda _, person_id=event.person_id: self.open_profile(person_id))
+                card_layout.addWidget(profile)
+            self.list.addWidget(card)
+
+    def open_snapshot(self, event, person):
+        EventSnapshotDialog(event, person, self).exec()
+
+    def open_profile(self, person_id):
+        person = next((item for item in PEOPLE if item.id == person_id), None)
+        if person and person.known:
+            PersonProfileDialog(person, self).exec()
+
+
+class RoomsPage(ScrollPage):
+    def __init__(self):
+        super().__init__()
+        self.grid = QGridLayout()
+        self.grid.setSpacing(16)
+        self.layout.addLayout(self.grid)
+        self.layout.addStretch()
+        self.refresh_cameras()
+
+    def refresh_cameras(self):
+        clear_layout(self.grid)
+        inside=[p for p in PEOPLE if p.in_building]
+        for i,room in enumerate(ROOMS):
+            occupants=[p for p in inside if p.room_id==room.id]; cams=[c for c in CAMERAS if c.room_id==room.id]; load=round(len(occupants)/room.capacity*100)
+            card=Panel(); lay=panel_layout(card); top=QHBoxLayout(); top.addWidget(label(room.name,"sectionTitle")); top.addStretch(); top.addWidget(label(str(len(occupants)),"metric",C['primary'])); lay.addLayout(top)
+            bar=QProgressBar(); bar.setMaximum(100); bar.setValue(load); lay.addWidget(bar); lay.addWidget(label(f"sig'im {room.capacity} · {load}% band","mono")); lay.addSpacing(8); lay.addWidget(label("KAMERALAR","eyebrow"))
+            for cam in cams:
+                row=QHBoxLayout(); row.addWidget(label(cam.name)); row.addStretch(); row.addWidget(label(f"{cam.fps:.1f} fps" if cam.online else "offline","mono",C['known'] if cam.online else C['offline'])); lay.addLayout(row)
+            lay.addSpacing(8); lay.addWidget(label("HOZIR XONADA","eyebrow"))
+            if occupants:
+                for p in occupants:
+                    row=QHBoxLayout(); row.addWidget(FaceAvatar(p,32)); row.addWidget(label(p.label)); row.addStretch(); lay.addLayout(row)
+            else: lay.addWidget(label("Xona bo'sh","muted"))
+            lay.addStretch(); self.grid.addWidget(card,0,i); self.grid.setColumnStretch(i,1)
+
+
+class EnrollmentPage(ScrollPage):
+    enrolled = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.image_paths: list[str] = []
+        self.profile_index: int | None = None
+
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        form = Panel()
+        form.setMaximumWidth(370)
+        form_layout = panel_layout(form, (18, 18, 18, 18), 10)
+        form_layout.addWidget(label("Yangi Known profil", "sectionTitle"))
+        form_layout.addWidget(label("Shaxsning to'liq ismi", "muted"))
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("To'liq ism kiriting")
+        form_layout.addWidget(self.name)
+        form_layout.addWidget(label("Profil izohi", "muted"))
+        self.note = QTextEdit()
+        self.note.setPlaceholderText("Lavozimi yoki bo'limi")
+        self.note.setMaximumHeight(82)
+        form_layout.addWidget(self.note)
+
+        profile_box = Panel()
