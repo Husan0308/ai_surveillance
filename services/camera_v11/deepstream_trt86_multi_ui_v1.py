@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import threading
 import time
@@ -251,22 +252,10 @@ class V11DeepStreamTRT86MultiCameraUIV1(V11DeepStreamTRT86MultiCameraV1):
         self.ui_preview_stop.set()
         return super().stop()
 
-    def close(self) -> None:
-        self.ui_preview_stop.set()
-        for thread in self.ui_preview_threads.values():
-            if thread.is_alive():
-                thread.join(timeout=3.0)
-        for cid, writer in list(self.ui_preview_writers.items()):
-            try:
-                writer.close(unlink=True)
-            except Exception:
-                pass
-            finally:
-                self.ui_preview_writers.pop(cid, None)
-
-        # Explicitly dispose the additive conversion branch while CUDA/GStreamer
-        # are still fully alive. Leaving these Gst/NVMM references for interpreter
-        # teardown can make NvBufSurface report cudaErrorCudartUnloading (status 4).
+    def _dispose_ui_preview_branches(self) -> None:
+        # Keep all temporary Gst references scoped to this helper. Once it
+        # returns, gc.collect() can release every additive NVMM converter while
+        # CUDA is still alive, before the shared TRT client is closed.
         for cid in self.ui_preview_cameras:
             state = self.states[cid]
             pipeline = state.pipeline
@@ -283,6 +272,9 @@ class V11DeepStreamTRT86MultiCameraUIV1(V11DeepStreamTRT86MultiCameraV1):
                     pad = getattr(state, pad_name, None)
                     if pad is not None:
                         try:
+                            peer = pad.get_peer()
+                            if peer is not None:
+                                pad.unlink(peer)
                             tee.release_request_pad(pad)
                         except Exception:
                             pass
@@ -291,11 +283,32 @@ class V11DeepStreamTRT86MultiCameraUIV1(V11DeepStreamTRT86MultiCameraV1):
                 element = getattr(state, attr, None)
                 if element is not None:
                     try:
+                        element.set_state(self.Gst.State.NULL)
                         pipeline.remove(element)
                     except Exception:
                         pass
                     setattr(state, attr, None)
             print(f"CAMERA_V11_UI_PREVIEW_CLEANUP camera={cid} state=COMPLETE", flush=True)
+
+    def close(self) -> None:
+        self.ui_preview_stop.set()
+        for thread in self.ui_preview_threads.values():
+            if thread.is_alive():
+                thread.join(timeout=3.0)
+        self.ui_preview_threads.clear()
+        for cid, writer in list(self.ui_preview_writers.items()):
+            try:
+                writer.close(unlink=True)
+            except Exception:
+                pass
+            finally:
+                self.ui_preview_writers.pop(cid, None)
+
+        self._dispose_ui_preview_branches()
+        # PyGObject may defer final unrefs. Collect here, before super().close()
+        # destroys the shared TRT/CUDA context, so NvBufSurface never sees
+        # cudaErrorCudartUnloading during interpreter teardown.
+        gc.collect()
         super().close()
 
 
