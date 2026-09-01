@@ -98,7 +98,14 @@ class PreviewFrameReader:
 
     def _ensure_open(self) -> bool:
         if self.mm is not None and self.fd is not None:
-            return True
+            try:
+                current = os.stat(self.path)
+                opened = os.fstat(self.fd)
+                if (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+                    return True
+            except OSError:
+                pass
+            self.close()
         try:
             fd = os.open(self.path, os.O_RDONLY)
             size = os.fstat(fd).st_size

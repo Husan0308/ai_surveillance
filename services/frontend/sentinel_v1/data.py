@@ -1,7 +1,7 @@
 """Sentinel VMS UI state for the staged real-camera rollout.
 
 Camera demo rows are intentionally removed. During this milestone the UI
-contains exactly two runtime-backed camera cards, CAM-01 and CAM-02. Other demo
+contains only runtime-backed camera cards selected by SENTINEL_CAMERA_IDS. Other demo
 domains (people/events/rooms) remain temporarily so the rest of the supplied
 interface is preserved while cameras are replaced one by one.
 """
@@ -88,6 +88,24 @@ ROOMS = [
 # Camera cards are authoritative runtime cards, not demo RTSP rows.
 # Add the next real camera here only after its pipeline milestone passes.
 RUNTIME_CAMERA_IDS = ("CAM-01", "CAM-02")
+_ALLOWED_RUNTIME_CAMERA_IDS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
+_raw_runtime_camera_ids = os.environ.get("SENTINEL_CAMERA_IDS", "").strip()
+if _raw_runtime_camera_ids:
+    _requested_runtime_camera_ids = tuple(
+        value.strip() for value in _raw_runtime_camera_ids.split(",") if value.strip()
+    )
+    if not _requested_runtime_camera_ids:
+        raise RuntimeError("SENTINEL_CAMERA_IDS resolved to zero camera cards")
+    if len(set(_requested_runtime_camera_ids)) != len(_requested_runtime_camera_ids):
+        raise RuntimeError("SENTINEL_CAMERA_IDS contains duplicate camera cards")
+    invalid = [
+        camera_id
+        for camera_id in _requested_runtime_camera_ids
+        if camera_id not in _ALLOWED_RUNTIME_CAMERA_IDS
+    ]
+    if invalid:
+        raise RuntimeError(f"unsupported Sentinel camera cards: {invalid}")
+    RUNTIME_CAMERA_IDS = _requested_runtime_camera_ids
 
 
 def _runtime_camera(camera_id: str) -> Camera:

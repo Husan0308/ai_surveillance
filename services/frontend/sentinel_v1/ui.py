@@ -5,6 +5,7 @@ from __future__ import annotations
 # incrementally. The parts are concatenated and executed as this module.
 from pathlib import Path as _Path
 import os as _os
+import time as _time
 
 _parts_dir = _Path(__file__).with_name("ui_parts")
 _source = "".join(path.read_text(encoding="utf-8") for path in sorted(_parts_dir.glob("part_*.pyfrag")))
@@ -16,7 +17,10 @@ exec(compile(_source, str(_parts_dir / "sentinel_ui_combined.py"), "exec"), glob
 LIVE_PREVIEW_CAMERAS = tuple(
     dict.fromkeys(
         part.strip()
-        for part in _os.environ.get("SENTINEL_LIVE_PREVIEW_CAMERAS", "CAM-01,CAM-02").split(",")
+        for part in _os.environ.get(
+            "SENTINEL_LIVE_PREVIEW_CAMERAS",
+            _os.environ.get("SENTINEL_CAMERA_IDS", "CAM-01,CAM-02"),
+        ).split(",")
         if part.strip()
     )
 )
@@ -75,6 +79,37 @@ def _camera_view_init_staged_live(
     self.live_timer.start()
 
 
+def _camera_view_poll_live_preview_fresh(self):
+    if self.live_reader is None:
+        return
+    now = _time.monotonic()
+    frame = self.live_reader.read_latest()
+    if frame is not None and frame.sequence != self.live_sequence:
+        image = QImage(
+            frame.payload, frame.width, frame.height, frame.stride, QImage.Format_RGB32
+        ).copy()
+        if not image.isNull():
+            self.live_image = image
+            self.live_sequence = frame.sequence
+            self.live_last_frame_mono = now
+            self.live_object_count = frame.object_count
+            self.camera.online = True
+            self.camera.fps = frame.fps
+            self.camera.last_error = None
+            self.update()
+            return
+    if self.live_last_frame_mono <= 0.0 or (now - self.live_last_frame_mono) > 1.20:
+        changed = self.camera.online or not self.live_image.isNull()
+        self.live_image = QImage()
+        self.live_sequence = -1
+        self.live_object_count = 0
+        self.camera.online = False
+        self.camera.fps = 0.0
+        self.camera.last_error = "Ulanish kutilmoqda"
+        if changed:
+            self.update()
+
+
 def _camera_view_draw_live_frame_qsize_safe(self, painter, rect):
     if self.live_image.isNull():
         return False
@@ -96,6 +131,7 @@ def _camera_view_draw_live_frame_qsize_safe(self, painter, rect):
 
 
 CameraView.__init__ = _camera_view_init_staged_live
+CameraView._poll_live_preview = _camera_view_poll_live_preview_fresh
 CameraView._draw_live_frame = _camera_view_draw_live_frame_qsize_safe
 
 del _source, _parts_dir, _Path, _os
