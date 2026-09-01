@@ -15,9 +15,9 @@ from .step5_global_shadow_worker_v1 import V11GlobalShadowWorkerV1
 class Step5IdentityGateConfigV2:
     """Conservative identity gate between Step4 mechanics and Step5 ownership.
 
-    Step4 remains a diagnostic/mechanics matcher.  A reciprocal maximum alone is
+    Step4 remains a diagnostic/mechanics matcher. A reciprocal maximum alone is
     not proof that two people are the same identity: in a crowded view the best
-    edge may still be a near-tie between two different people.  Step5 therefore
+    edge may still be a near-tie between two different people. Step5 therefore
     requires absolute appearance evidence plus row/column separation before a
     proposal is allowed to mutate Global Shadow state.
     """
@@ -64,8 +64,8 @@ def proposal_passes_step5_identity_gate_v2(
     """Return whether a Step4 pair is strong enough to mutate global identity.
 
     A missing margin is acceptable only when there is no competitor on that side
-    (row_second/column_second is None).  When competitors exist, lack of a margin
-    is treated as ambiguous.  This explicitly supports NO-MATCH rather than
+    (row_second/column_second is None). When competitors exist, lack of a margin
+    is treated as ambiguous. This explicitly supports NO-MATCH rather than
     forcing the highest-scoring edge into a GSH.
     """
 
@@ -92,6 +92,10 @@ def proposal_passes_step5_identity_gate_v2(
     return True, "accepted"
 
 
+def _number(value: float | None) -> str:
+    return "none" if value is None else f"{float(value):.6f}"
+
+
 class V11SameRoomMatcherShadowWorkerStep5TapV1(
     V11SameRoomMatcherShadowWorkerCachedV3
 ):
@@ -102,7 +106,7 @@ class V11SameRoomMatcherShadowWorkerStep5TapV1(
     the same-camera continuity layer. A not-yet-proven fragment is suppressed.
 
     Crucially, Step4's reciprocal/assignment result is not by itself an identity
-    decision.  The Step5 identity gate additionally requires absolute ReID score,
+    decision. The Step5 identity gate additionally requires absolute ReID score,
     high-similarity support, and row/column margins when competitors exist. Weak
     or ambiguous pairs become NO-MATCH and never acquire/modify a GSH.
     """
@@ -122,6 +126,9 @@ class V11SameRoomMatcherShadowWorkerStep5TapV1(
         self.identity_gate_accepted = 0
         self.identity_gate_rejected = 0
         self.identity_gate_reasons: dict[str, int] = {}
+        self.identity_gate_diagnostic_limit = max(
+            0, _env_int("V11_STEP5_IDENTITY_GATE_DIAGNOSTIC_LIMIT", 32)
+        )
         cfg = self.identity_gate_config
         print(
             "CAMERA_V11_STEP5_IDENTITY_GATE_V2 "
@@ -143,12 +150,23 @@ class V11SameRoomMatcherShadowWorkerStep5TapV1(
         finally:
             self.global_shadow_worker.enqueue_cycle_end(next_cycle, time.time_ns())
 
-    def _record_gate(self, accepted: bool, reason: str) -> None:
+    def _record_gate(self, accepted: bool, reason: str, row: SameRoomPairDiagnosticV1) -> None:
         if accepted:
             self.identity_gate_accepted += 1
             return
         self.identity_gate_rejected += 1
         self.identity_gate_reasons[reason] = self.identity_gate_reasons.get(reason, 0) + 1
+        if self.identity_gate_rejected <= self.identity_gate_diagnostic_limit:
+            print(
+                "CAMERA_V11_STEP5_IDENTITY_GATE_REJECT "
+                f"reason={reason} room={row.room} "
+                f"pair={row.camera_a}/{row.track_a}+{row.camera_b}/{row.track_b} "
+                f"robust={_number(row.robust_score)} "
+                f"row_margin={_number(row.row_margin)} "
+                f"column_margin={_number(row.column_margin)} "
+                f"support_ge_065={row.support_ge_065}",
+                flush=True,
+            )
 
     def identity_gate_snapshot(self) -> dict[str, object]:
         return {
@@ -164,7 +182,7 @@ class V11SameRoomMatcherShadowWorkerStep5TapV1(
             accepted, reason = proposal_passes_step5_identity_gate_v2(
                 row, self.identity_gate_config
             )
-            self._record_gate(accepted, reason)
+            self._record_gate(accepted, reason, row)
             if not accepted:
                 return result
 
