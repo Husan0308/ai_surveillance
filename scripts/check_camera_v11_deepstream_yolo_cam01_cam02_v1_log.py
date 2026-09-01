@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import statistics
 from collections import defaultdict
 from pathlib import Path
 
@@ -20,7 +21,13 @@ def main() -> int:
     parser.add_argument("--log", type=Path, default=Path("/tmp/CAMERA_V11_DS_YOLO_CAM01_CAM02.log"))
     parser.add_argument("--required-cameras", default="CAM-01,CAM-02")
     parser.add_argument("--min-runtime-stats", type=int, default=5)
-    parser.add_argument("--min-render-fps", type=float, default=15.0)
+    parser.add_argument("--min-render-fps", type=float, default=15.0,
+                        help="required median render FPS over recent windows")
+    parser.add_argument("--hard-min-render-fps", type=float, default=12.0,
+                        help="absolute floor for any recent render window")
+    parser.add_argument("--max-consecutive-low-render", type=int, default=1,
+                        help="allow at most this many consecutive recent windows below --min-render-fps")
+    parser.add_argument("--max-render-gap-p95-ms", type=float, default=250.0)
     parser.add_argument("--min-source-fps", type=float, default=8.0)
     parser.add_argument("--min-infer-hz", type=float, default=1.20)
     parser.add_argument("--max-infer-skew-hz", type=float, default=0.75)
@@ -99,22 +106,40 @@ def main() -> int:
         if len(rows) < args.min_runtime_stats:
             reasons.append(f"{cid}:stats={len(rows)}<{args.min_runtime_stats}")
             continue
-        tail = rows[-min(3, len(rows)):]
+
+        # Five-second live-stat buckets are integer frame counts divided by elapsed time.
+        # A single scheduler/network hiccup can move one bucket from 15.0 to 14.8 FPS.
+        # Treat sustained degradation as failure, while keeping a hard floor and jitter gate.
+        tail = rows[-min(5, len(rows)):]
         latest = rows[-1]
         latest_by_camera[cid] = latest
-        source_min = min(number(row, "source_fps") for row in tail)
-        render_min = min(number(row, "render_fps") for row in tail)
-        infer_min = min(number(row, "infer_hz") for row in tail)
+        source_values = [number(row, "source_fps") for row in tail]
+        render_values = [number(row, "render_fps") for row in tail]
+        infer_values = [number(row, "infer_hz") for row in tail]
+        source_min = min(source_values)
+        render_min = min(render_values)
+        render_median = float(statistics.median(render_values))
+        infer_min = min(infer_values)
         infer_latest = number(latest, "infer_hz")
         infer_hz_by_camera[cid] = infer_latest
         queue_max = max(int(number(row, "queue", 999)) for row in tail)
+        render_gap_p95 = max(number(row, "render_gap_p95_ms", 9999.0) for row in tail)
+        low_flags = [value < args.min_render_fps for value in render_values]
+        max_low_streak = 0
+        current_low_streak = 0
+        for is_low in low_flags:
+            if is_low:
+                current_low_streak += 1
+                max_low_streak = max(max_low_streak, current_low_streak)
+            else:
+                current_low_streak = 0
+
         infer_count = int(number(latest, "infer_count", -1))
         detector_drops = int(number(latest, "detector_drops", -1))
         positive = int(number(latest, "positive_inferences", -1))
         detections = int(number(latest, "detections_total", -1))
         metadata = int(number(latest, "metadata_added", -1))
         stale = int(number(latest, "stale_expirations", -1))
-        result_clears = int(number(latest, "result_clears", -1))
         worker_alive = int(number(latest, "worker_alive", 0))
         thread_alive = int(number(latest, "detector_thread_alive", 0))
         copy_errors = int(number(latest, "copy_errors", 999))
@@ -126,8 +151,18 @@ def main() -> int:
 
         if source_min < args.min_source_fps:
             reasons.append(f"{cid}:source_fps_min={source_min:.2f}<{args.min_source_fps:.2f}")
-        if render_min < args.min_render_fps:
-            reasons.append(f"{cid}:render_fps_min={render_min:.2f}<{args.min_render_fps:.2f}")
+        if render_min < args.hard_min_render_fps:
+            reasons.append(f"{cid}:render_fps_hard_min={render_min:.2f}<{args.hard_min_render_fps:.2f}")
+        if render_median < args.min_render_fps:
+            reasons.append(f"{cid}:render_fps_median={render_median:.2f}<{args.min_render_fps:.2f}")
+        if max_low_streak > args.max_consecutive_low_render:
+            reasons.append(
+                f"{cid}:render_low_streak={max_low_streak}>{args.max_consecutive_low_render}"
+            )
+        if render_gap_p95 > args.max_render_gap_p95_ms:
+            reasons.append(
+                f"{cid}:render_gap_p95_ms={render_gap_p95:.1f}>{args.max_render_gap_p95_ms:.1f}"
+            )
         if infer_min < args.min_infer_hz:
             reasons.append(f"{cid}:infer_hz_min={infer_min:.2f}<{args.min_infer_hz:.2f}")
         if queue_max > args.max_queue:
@@ -151,9 +186,10 @@ def main() -> int:
 
         details.append(
             f"{cid}:source_min={source_min:.2f},render_min={render_min:.2f},"
-            f"infer={infer_latest:.2f},queue={queue_max},infer_count={infer_count},"
-            f"drops={detector_drops},positive={positive},detections={detections},"
-            f"metadata={metadata},stale={stale},infer_p95={infer_p95:.1f}ms"
+            f"render_median={render_median:.2f},render_low_streak={max_low_streak},"
+            f"render_gap_p95={render_gap_p95:.1f}ms,infer={infer_latest:.2f},queue={queue_max},"
+            f"infer_count={infer_count},drops={detector_drops},positive={positive},"
+            f"detections={detections},metadata={metadata},stale={stale},infer_p95={infer_p95:.1f}ms"
         )
 
     if len(infer_hz_by_camera) == len(required) and len(required) > 1:
