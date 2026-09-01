@@ -37,7 +37,6 @@ for plugin in nvurisrcbin nvv4l2decoder queue nvstreammux nvvideoconvert capsfil
   gst-inspect-1.0 "$plugin" >/dev/null 2>&1 || fail "missing_plugin=$plugin"
 done
 
-# V7 uses decoder low-latency-mode on CAM-02 only.
 if ! gst-inspect-1.0 nvv4l2decoder 2>/dev/null | grep 'low-latency-mode' >/dev/null; then
   fail "nvv4l2decoder_low_latency_property_missing"
 fi
@@ -45,8 +44,6 @@ fi
 git cat-file -e "${FROZEN_STEP2_SHA}^{commit}" 2>/dev/null || fail "frozen_step2_sha_missing_locally"
 git merge-base --is-ancestor "$FROZEN_STEP2_SHA" HEAD || fail "branch_not_based_on_frozen_step2"
 
-# Keep the accepted Step3 launcher's frozen Step1/Step2 contract. Step3 files are
-# intentionally newer than FROZEN_STEP2_SHA, so they must not be compared to it.
 git diff --quiet "$FROZEN_STEP2_SHA" -- \
   services/camera_v11/step1_cam02_lowlat_v7.py \
   services/camera_v11/step1_independent_egl_v4.py \
@@ -60,7 +57,6 @@ git diff --quiet "$FROZEN_STEP2_SHA" -- \
   scripts/camera_v11_powermizer_keeper_v25.sh \
   || fail "frozen_camera_or_detector_files_changed"
 
-# Build/import checks before any camera is opened.
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 "$APP_PY" -m py_compile \
   services/camera_v11/bbox_overlay_ipc_v1.py \
@@ -84,7 +80,6 @@ CONFLICT_PATTERN='services\.camera_v11\.(step1_cam02_lowlat_v7|step1_bbox_overla
 conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 [[ -z "$conflicts" ]] || fail $'conflicting_camera_or_trt_process:\n'"$conflicts"
 
-# shellcheck source=/dev/null
 source "$ROOT/scripts/camera_v11_powermizer_keeper_v25.sh"
 
 display_pid=""
@@ -111,7 +106,6 @@ rm -f "$STATE_PATH"
 : >"$DISPLAY_LOG"
 : >"$TRACKER_LOG"
 
-# Preserve the exact V25 PowerMizer priming sequence used by accepted Step3.
 printf 'CAMERA_V11_BBOX_POWER_PRIME phase=baseline start=1\n'
 "$TRT_PY" "$PRIME_SCRIPT" --engine "$ENGINE" --warmup 30 --iterations 100 \
   >>"${V11_POWERMIZER_KEEPER_LOG:-/tmp/CAMERA_V11_POWERMIZER_KEEPER.log}" 2>&1 \
@@ -132,7 +126,6 @@ if [[ ! "$clock" =~ ^[0-9]+$ ]] || (( clock < minimum_mhz )); then
 fi
 printf 'CAMERA_V11_BBOX_POWER_PRIME phase=gui_held result=PASS memory_mhz=%s\n' "$clock"
 
-# Preserve V7 camera policy exactly. Only the display tail gains batch1 metadata + GPU OSD.
 export V11_RTSP_TRANSPORT=tcp
 export V11_RTSP_LATENCY_MS="${V11_RTSP_LATENCY_MS:-100}"
 export V11_DROP_ON_LATENCY="${V11_DROP_ON_LATENCY:-1}"
@@ -148,29 +141,35 @@ export V11_LOWLAT_CAMERAS="${V11_LOWLAT_CAMERAS:-CAM-02}"
 export V11_BBOX_STATE_PATH="$STATE_PATH"
 export V11_BBOX_STALE_SEC="${V11_BBOX_STALE_SEC:-1.10}"
 
-# False-positive guard. Keep the detector's 0.18/0.30 low/high split unchanged so a
-# weak detection can still preserve an existing track. Only NEW local-track creation
-# and activation are stricter.
-export V11_BBOX_NEW_TRACK_CONF="${V11_BBOX_NEW_TRACK_CONF:-0.38}"
+# v2 false-positive guard: do not raise the detector floor. New births are strict;
+# already-confirmed identities receive a longer bounded recovery window.
+export V11_BBOX_NEW_TRACK_CONF="${V11_BBOX_NEW_TRACK_CONF:-0.50}"
 export V11_BBOX_TRACK_CONFIRM_HITS="${V11_BBOX_TRACK_CONFIRM_HITS:-3}"
-export V11_BBOX_TENTATIVE_TTL_SEC="${V11_BBOX_TENTATIVE_TTL_SEC:-1.40}"
-export V11_BBOX_DUPLICATE_IOU="${V11_BBOX_DUPLICATE_IOU:-0.62}"
+export V11_BBOX_TENTATIVE_TTL_SEC="${V11_BBOX_TENTATIVE_TTL_SEC:-1.60}"
+export V11_BBOX_DUPLICATE_IOU="${V11_BBOX_DUPLICATE_IOU:-0.60}"
+export V11_BBOX_TRACK_SHADOW_SEC="${V11_BBOX_TRACK_SHADOW_SEC:-1.20}"
+export V11_BBOX_TRACK_MAX_LOST_SEC="${V11_BBOX_TRACK_MAX_LOST_SEC:-4.50}"
+export V11_BBOX_LOW_RECOVERY_SEC="${V11_BBOX_LOW_RECOVERY_SEC:-2.50}"
 
-# Single-person validation gate.
 export V11_BBOX_SINGLE_TARGET="${V11_BBOX_SINGLE_TARGET:-1}"
 export V11_BBOX_LOCK_ACQUIRE_UPDATES="${V11_BBOX_LOCK_ACQUIRE_UPDATES:-2}"
 export V11_BBOX_LOCK_MIN_HITS="${V11_BBOX_LOCK_MIN_HITS:-$V11_BBOX_TRACK_CONFIRM_HITS}"
 export V11_BBOX_LOCK_MIN_CONF="${V11_BBOX_LOCK_MIN_CONF:-0.30}"
 export V11_BBOX_LOCK_MIN_AREA="${V11_BBOX_LOCK_MIN_AREA:-0.008}"
-export V11_BBOX_LOCK_HOLD_SEC="${V11_BBOX_LOCK_HOLD_SEC:-1.10}"
-export V11_BBOX_LOCK_RELEASE_SEC="${V11_BBOX_LOCK_RELEASE_SEC:-1.60}"
-export V11_BBOX_LOCK_HANDOFF_SEC="${V11_BBOX_LOCK_HANDOFF_SEC:-1.35}"
+export V11_BBOX_LOCK_HOLD_SEC="${V11_BBOX_LOCK_HOLD_SEC:-1.20}"
+export V11_BBOX_LOCK_RELEASE_SEC="${V11_BBOX_LOCK_RELEASE_SEC:-4.50}"
+export V11_BBOX_LOCK_HANDOFF_SEC="${V11_BBOX_LOCK_HANDOFF_SEC:-3.50}"
 export V11_BBOX_LOCK_HANDOFF_UPDATES="${V11_BBOX_LOCK_HANDOFF_UPDATES:-2}"
+export V11_BBOX_LOCK_HANDOFF_MIN_IOU="${V11_BBOX_LOCK_HANDOFF_MIN_IOU:-0.08}"
+export V11_BBOX_LOCK_HANDOFF_MAX_CENTER="${V11_BBOX_LOCK_HANDOFF_MAX_CENTER:-0.20}"
+export V11_BBOX_LOCK_HANDOFF_MIN_AREA_RATIO="${V11_BBOX_LOCK_HANDOFF_MIN_AREA_RATIO:-0.35}"
+export V11_BBOX_LOCK_HANDOFF_MAX_AREA_RATIO="${V11_BBOX_LOCK_HANDOFF_MAX_AREA_RATIO:-2.80}"
 export V11_BBOX_CHECK_CAMERAS="${V11_BBOX_CHECK_CAMERAS:-CAM-01,CAM-04}"
 
-printf 'CAMERA_V11_BBOX_PREFLIGHT result=PASS frozen_step2_sha=%s display_log=%s tracker_log=%s state=%s single_target=%s new_track_conf=%s confirm_hits=%s\n' \
+printf 'CAMERA_V11_BBOX_PREFLIGHT result=PASS frozen_step2_sha=%s display_log=%s tracker_log=%s state=%s single_target=%s new_track_conf=%s confirm_hits=%s max_lost=%s release=%s\n' \
   "$FROZEN_STEP2_SHA" "$DISPLAY_LOG" "$TRACKER_LOG" "$STATE_PATH" \
-  "$V11_BBOX_SINGLE_TARGET" "$V11_BBOX_NEW_TRACK_CONF" "$V11_BBOX_TRACK_CONFIRM_HITS"
+  "$V11_BBOX_SINGLE_TARGET" "$V11_BBOX_NEW_TRACK_CONF" "$V11_BBOX_TRACK_CONFIRM_HITS" \
+  "$V11_BBOX_TRACK_MAX_LOST_SEC" "$V11_BBOX_LOCK_RELEASE_SEC"
 
 "$TRT_PY" -u -m services.camera_v11.step1_bbox_overlay_v1 >"$DISPLAY_LOG" 2>&1 &
 display_pid=$!
@@ -214,7 +213,7 @@ done
   fail "live_bbox_metadata_not_ready"
 }
 
-printf 'CAMERA_V11_BBOX_RUNNING display_pid=%s tracker_pid=%s state=%s labels=0 reid=0 global_id=0 single_target=%s fp_guard=1 new_track_conf=%s confirm_hits=%s\n' \
+printf 'CAMERA_V11_BBOX_RUNNING display_pid=%s tracker_pid=%s state=%s labels=0 reid=0 global_id=0 single_target=%s fp_guard=2 new_track_conf=%s confirm_hits=%s\n' \
   "$display_pid" "$tracker_pid" "$STATE_PATH" "$V11_BBOX_SINGLE_TARGET" \
   "$V11_BBOX_NEW_TRACK_CONF" "$V11_BBOX_TRACK_CONFIRM_HITS"
 printf 'CAMERA_V11_BBOX_HINT log_command="tail -f %s %s"\n' "$DISPLAY_LOG" "$TRACKER_LOG"
