@@ -70,9 +70,7 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
         )
 
     def confirm(self, shadow_id: str = "GSH-000001") -> None:
-        out = self.machine.observe_step5_event(
-            event(GLOBAL_SHADOW_CONFIRM, shadow_id=shadow_id)
-        )
+        out = self.machine.observe_step5_event(event(GLOBAL_SHADOW_CONFIRM, shadow_id=shadow_id))
         self.assertEqual(1, len(out))
         self.assertEqual(VERIFY_PENDING, out[0].state)
 
@@ -81,11 +79,7 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
         for index in range(n):
             output.extend(
                 self.machine.observe_step5_event(
-                    event(
-                        GLOBAL_SHADOW_OBSERVE,
-                        shadow_id=shadow_id,
-                        timestamp_ns=10 + index,
-                    )
+                    event(GLOBAL_SHADOW_OBSERVE, shadow_id=shadow_id, timestamp_ns=10 + index)
                 )
             )
         return tuple(output)
@@ -96,16 +90,28 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
         self.assertEqual(VERIFY_PENDING, row.state)
         self.assertEqual(0, row.clean_observations)
 
-    def test_two_clean_observations_do_not_verify(self) -> None:
+    def test_third_clean_observation_verifies(self) -> None:
         self.confirm()
         self.observe(n=2)
         self.assertEqual(VERIFY_PENDING, self.machine.records[0].state)
-
-    def test_third_clean_observation_verifies(self) -> None:
-        self.confirm()
-        out = self.observe(n=3)
+        out = self.observe(n=1)
         self.assertTrue(any(item.event == GLOBAL_VERIFY_PASS for item in out))
         self.assertEqual(VERIFIED_SHADOW, self.machine.records[0].state)
+
+    def test_successor_pair_follows_same_shadow_id_and_verifies(self) -> None:
+        first = (("CAM-01", "A1"), ("CAM-04", "B1"))
+        second = (("CAM-01", "A2"), ("CAM-04", "B1"))
+        third = (("CAM-01", "A2"), ("CAM-04", "B2"))
+        self.machine.observe_step5_event(event(GLOBAL_SHADOW_CONFIRM, pair=first))
+        self.machine.observe_step5_event(event(GLOBAL_SHADOW_OBSERVE, pair=second, timestamp_ns=2))
+        self.machine.observe_step5_event(event(GLOBAL_SHADOW_OBSERVE, pair=third, timestamp_ns=3))
+        out = self.machine.observe_step5_event(event(GLOBAL_SHADOW_OBSERVE, pair=third, timestamp_ns=4))
+        row = self.machine.records[0]
+        self.assertEqual(row.shadow_global_id, "GSH-000001")
+        self.assertEqual(row.pair_key, third)
+        self.assertEqual(row.state, VERIFIED_SHADOW)
+        self.assertTrue(any(item.event == GLOBAL_VERIFY_PASS for item in out))
+        self.assertEqual(self.machine.snapshot()["verify_hold_events"], 0)
 
     def test_conflict_moves_verified_identity_to_hold(self) -> None:
         self.confirm()
@@ -114,10 +120,7 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
             event(
                 GLOBAL_SHADOW_CONFLICT,
                 shadow_id="",
-                pair=(
-                    ("CAM-01", "CAM-01-T00001"),
-                    ("CAM-04", "CAM-04-T99999"),
-                ),
+                pair=(("CAM-01", "CAM-01-T00001"), ("CAM-04", "CAM-04-T99999")),
                 state="CONFLICT_PENDING",
             )
         )
@@ -132,10 +135,7 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
             event(
                 GLOBAL_SHADOW_CONFLICT,
                 shadow_id="",
-                pair=(
-                    ("CAM-01", "CAM-01-T77777"),
-                    ("CAM-04", "CAM-04-T88888"),
-                ),
+                pair=(("CAM-01", "CAM-01-T77777"), ("CAM-04", "CAM-04-T88888")),
                 state="CONFLICT_PENDING",
             )
         )
@@ -148,10 +148,7 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
             event(
                 GLOBAL_SHADOW_CONFLICT,
                 shadow_id="",
-                pair=(
-                    ("CAM-01", "CAM-01-T00001"),
-                    ("CAM-04", "CAM-04-T00002"),
-                ),
+                pair=(("CAM-01", "CAM-01-T00001"), ("CAM-04", "CAM-04-T00002")),
                 state="CONFLICT_PENDING",
             )
         )
@@ -166,18 +163,13 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
         conflict = event(
             GLOBAL_SHADOW_CONFLICT,
             shadow_id="",
-            pair=(
-                ("CAM-01", "CAM-01-T00001"),
-                ("CAM-04", "CAM-04-T00002"),
-            ),
+            pair=(("CAM-01", "CAM-01-T00001"), ("CAM-04", "CAM-04-T00002")),
             state="CONFLICT_PENDING",
         )
         output = []
         for _ in range(3):
             output.extend(self.machine.observe_step5_event(conflict))
-        self.assertTrue(
-            any(item.event == GLOBAL_VERIFY_CONFLICT_PERSISTENT for item in output)
-        )
+        self.assertTrue(any(item.event == GLOBAL_VERIFY_CONFLICT_PERSISTENT for item in output))
         row = self.machine.records[0]
         self.assertEqual("GSH-000001", row.shadow_global_id)
         self.assertEqual(CONFLICT_HOLD_SHADOW, row.state)
@@ -187,19 +179,13 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
         first = event(
             GLOBAL_SHADOW_CONFLICT,
             shadow_id="",
-            pair=(
-                ("CAM-01", "CAM-01-T00001"),
-                ("CAM-04", "CAM-04-T00002"),
-            ),
+            pair=(("CAM-01", "CAM-01-T00001"), ("CAM-04", "CAM-04-T00002")),
             state="CONFLICT_PENDING",
         )
         second = event(
             GLOBAL_SHADOW_CONFLICT,
             shadow_id="",
-            pair=(
-                ("CAM-01", "CAM-01-T00001"),
-                ("CAM-04", "CAM-04-T00003"),
-            ),
+            pair=(("CAM-01", "CAM-01-T00001"), ("CAM-04", "CAM-04-T00003")),
             state="CONFLICT_PENDING",
         )
         self.machine.observe_step5_event(first)
@@ -210,19 +196,13 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
     def test_expiry_marks_verification_expired(self) -> None:
         self.confirm()
         out = self.machine.observe_step5_event(
-            event(
-                GLOBAL_SHADOW_EXPIRE,
-                state=EXPIRED_SHADOW,
-                timestamp_ns=999,
-            )
+            event(GLOBAL_SHADOW_EXPIRE, state=EXPIRED_SHADOW, timestamp_ns=999)
         )
         self.assertEqual(EXPIRED_VERIFY_SHADOW, self.machine.records[0].state)
         self.assertEqual(1, len(out))
 
     def test_raw_score_never_controls_verification_threshold(self) -> None:
-        self.machine.observe_step5_event(
-            event(GLOBAL_SHADOW_CONFIRM, score=-1000.0)
-        )
+        self.machine.observe_step5_event(event(GLOBAL_SHADOW_CONFIRM, score=-1000.0))
         for index in range(3):
             self.machine.observe_step5_event(
                 event(GLOBAL_SHADOW_OBSERVE, score=-1000.0, timestamp_ns=20 + index)
