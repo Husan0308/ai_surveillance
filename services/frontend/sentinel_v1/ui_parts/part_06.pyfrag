@@ -1,0 +1,228 @@
+        summary_layout.addWidget(self.active)
+        self.layout.addWidget(summary)
+
+        self.camera_list = QVBoxLayout()
+        self.camera_list.setSpacing(10)
+        self.layout.addLayout(self.camera_list)
+        self.layout.addStretch()
+        self.rebuild()
+
+    def rebuild(self):
+        clear_layout(self.camera_list)
+        self.total.setText(f"{len(CAMERAS)} ta kamera")
+        enabled_count = sum(camera.enabled for camera in CAMERAS)
+        self.active.setText(f"{enabled_count} faol · {len(CAMERAS) - enabled_count} o'chirilgan")
+        if not CAMERAS:
+            empty = Panel()
+            empty_layout = panel_layout(empty, (20, 28, 20, 28), 6)
+            title = label("Hali kamera yo'q", "sectionTitle")
+            title.setAlignment(Qt.AlignCenter)
+            hint = label("Yuqoridagi «Kamera qo'shish» tugmasi orqali birinchi RTSP kamerani ulang.", "muted")
+            hint.setAlignment(Qt.AlignCenter)
+            empty_layout.addWidget(title)
+            empty_layout.addWidget(hint)
+            self.camera_list.addWidget(empty)
+            return
+        for camera in CAMERAS:
+            self.camera_list.addWidget(self.camera_card(camera))
+
+    def camera_card(self, camera: Camera) -> Panel:
+        card = Panel()
+        card.setMinimumHeight(126)
+        row = QHBoxLayout(card)
+        row.setContentsMargins(16, 14, 14, 14)
+        row.setSpacing(16)
+
+        state = label("●", color=C["known"] if camera.online else (C["blue"] if camera.enabled else C["muted"]))
+        state.setStyleSheet(f"color:{C['known'] if camera.online else (C['blue'] if camera.enabled else C['muted'])};font-size:16px;")
+        row.addWidget(state, 0, Qt.AlignTop)
+        info = QVBoxLayout()
+        info.setSpacing(5)
+        name_row = QHBoxLayout()
+        name_row.addWidget(label(camera.name, "sectionTitle"))
+        name_row.addWidget(label(camera.id, "mono"))
+        name_row.addStretch()
+        info.addLayout(name_row)
+        info.addWidget(label(f"{room_name(camera.room_id)}  ·  {masked_rtsp(camera.rtsp)}", "mono"))
+        credentials = camera.username or "Login kiritilmagan"
+        password_state = "••••••••" if camera.password else "—"
+        info.addWidget(label(f"{credentials}  ·  {password_state}", "muted"))
+        status_text = "Online" if camera.online else ("Ulanish kutilmoqda" if camera.enabled else "O'chirilgan")
+        info.addWidget(label(status_text, "mono", C["known"] if camera.online else (C["blue"] if camera.enabled else C["muted"])))
+        row.addLayout(info, 1)
+
+        actions = QVBoxLayout()
+        actions.setSpacing(6)
+        edit = make_button("✎  Tahrirlash", "secondary")
+        edit.clicked.connect(lambda _, item=camera: self.edit_camera(item))
+        toggle = make_button("Vaqtincha o'chirish" if camera.enabled else "Faollashtirish")
+        toggle.clicked.connect(lambda _, item=camera: self.toggle_camera(item))
+        remove = make_button("✕  Olib tashlash", "ghost")
+        remove.clicked.connect(lambda _, item=camera: self.remove_camera(item))
+        actions.addWidget(edit)
+        actions.addWidget(toggle)
+        actions.addWidget(remove)
+        row.addLayout(actions)
+        return card
+
+    def persist(self) -> bool:
+        try:
+            save_cameras()
+        except OSError as error:
+            QMessageBox.critical(self, "Saqlash xatosi", f"Kamera sozlamalari saqlanmadi:\n{error}")
+            return False
+        self.rebuild()
+        self.cameras_changed.emit()
+        return True
+
+    def add_camera(self):
+        dialog = CameraDialog(parent=self)
+        if not dialog.exec():
+            return
+        values = dialog.values()
+        camera = Camera(
+            id=next_camera_id(),
+            name=values["name"],
+            room_id=values["room_id"],
+            rtsp=values["rtsp"],
+            online=False,
+            fps=0.0,
+            enabled=values["enabled"],
+            last_error="Ulanish kutilmoqda" if values["enabled"] else "Kamera o'chirilgan",
+            username=values["username"],
+            password=values["password"],
+        )
+        CAMERAS.append(camera)
+        if not self.persist():
+            CAMERAS.remove(camera)
+            self.rebuild()
+
+    def edit_camera(self, camera: Camera):
+        dialog = CameraDialog(camera, self)
+        if not dialog.exec():
+            return
+        old_values = (
+            camera.name, camera.room_id, camera.rtsp, camera.username, camera.password,
+            camera.enabled, camera.online, camera.fps, camera.last_error,
+        )
+        values = dialog.values()
+        camera.name = values["name"]
+        camera.room_id = values["room_id"]
+        camera.rtsp = values["rtsp"]
+        camera.username = values["username"]
+        camera.password = values["password"]
+        camera.enabled = values["enabled"]
+        camera.online = False
+        camera.fps = 0.0
+        camera.last_error = "Ulanish kutilmoqda" if camera.enabled else "Kamera o'chirilgan"
+        if not self.persist():
+            (
+                camera.name, camera.room_id, camera.rtsp, camera.username, camera.password,
+                camera.enabled, camera.online, camera.fps, camera.last_error,
+            ) = old_values
+            self.rebuild()
+
+    def toggle_camera(self, camera: Camera):
+        old_state = camera.enabled, camera.online, camera.fps, camera.last_error
+        camera.enabled = not camera.enabled
+        camera.online = False
+        camera.fps = 0.0
+        camera.last_error = "Ulanish kutilmoqda" if camera.enabled else "Kamera o'chirilgan"
+        if not self.persist():
+            camera.enabled, camera.online, camera.fps, camera.last_error = old_state
+            self.rebuild()
+
+    def remove_camera(self, camera: Camera):
+        answer = QMessageBox.question(
+            self,
+            "Kamerani olib tashlash",
+            f"{camera.name} kamerasi va uning saqlangan ulanish ma'lumotlari olib tashlansinmi?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        index = CAMERAS.index(camera)
+        CAMERAS.pop(index)
+        if not self.persist():
+            CAMERAS.insert(index, camera)
+            self.rebuild()
+
+
+class MainWindow(QMainWindow):
+    NAV = [
+        ("▣","Monitoring","Kameralar holati · bir ekranda · so'nggi kuzatuvlar",MonitoringPage),
+        ("♙","People",f"{len([person for person in PEOPLE if person.known])} ta Known profil",PeoplePage),
+        ("⌁","Events",f"{len(EVENTS)} ta hodisa",EventsPage),
+        ("▥","Rooms","Kameralar orasidagi bir xil odam bir marta hisoblanadi (global ID bo'yicha)",RoomsPage),
+        ("⚙","Settings","Kameralar va RTSP ulanish sozlamalari",SettingsPage),
+    ]
+
+    def __init__(self):
+        super().__init__(); self.setWindowTitle("SENTINEL VMS"); self.resize(1440,900); self.setMinimumSize(1180,720)
+        root=QWidget(); root.setObjectName("root"); self.setCentralWidget(root); main=QHBoxLayout(root); main.setContentsMargins(0,0,0,0); main.setSpacing(0)
+        sidebar=QFrame(); sidebar.setObjectName("sidebar"); sidebar.setFixedWidth(224); side=QVBoxLayout(sidebar); side.setContentsMargins(0,0,0,0); side.setSpacing(0)
+        brand=QFrame(); brand.setFixedHeight(70); brand.setStyleSheet(f"border-bottom:1px solid {C['border']};"); bl=QHBoxLayout(brand); bl.setContentsMargins(16,0,12,0); shield=label("◇",color=C['primary']); shield.setStyleSheet(f"color:{C['primary']};font-size:24px;"); bl.addWidget(shield); bt=QVBoxLayout(); bt.setSpacing(1); bt.addWidget(label("SENTINEL VMS","brand")); self.brand_meta=label(f"face re-id · {len(CAMERAS)} cam","mono"); bt.addWidget(self.brand_meta); bl.addLayout(bt); bl.addStretch(); side.addWidget(brand)
+        self.nav_group=QButtonGroup(self); self.nav_group.setExclusive(True); self.nav_buttons=[]
+        navwrap=QWidget(); nl=QVBoxLayout(navwrap); nl.setContentsMargins(8,8,8,8); nl.setSpacing(2)
+        for i,(icon,title,_,_) in enumerate(self.NAV):
+            b=make_button(f"{icon:>2}   {title}"); b.setObjectName("nav"); b.setCheckable(True); b.setFixedHeight(38); b.clicked.connect(lambda _,i=i:self.switch_page(i)); self.nav_group.addButton(b); self.nav_buttons.append(b); nl.addWidget(b)
+        nl.addStretch(); side.addWidget(navwrap,1); build=label("build 2026.08 · edge worker","mono"); build.setStyleSheet(f"border-top:1px solid {C['border']};padding:14px;color:{C['muted']};"); side.addWidget(build); main.addWidget(sidebar)
+        content=QWidget(); content_l=QVBoxLayout(content); content_l.setContentsMargins(0,0,0,0); content_l.setSpacing(0); header=QFrame(); header.setObjectName("header"); header.setFixedHeight(70); hl=QHBoxLayout(header); hl.setContentsMargins(24,0,24,0); titles=QVBoxLayout(); titles.setSpacing(2); self.title=label("Monitoring","title"); self.subtitle=label(self.NAV[0][2],"subtitle"); titles.addWidget(self.title); titles.addWidget(self.subtitle); hl.addLayout(titles); hl.addStretch()
+        self.heatmap_button = QToolButton()
+        self.heatmap_button.setText("◉  Heatmap · OFF")
+        self.heatmap_button.setToolTip("Kamera tasviri ustidagi heatmap qatlamini yoqish/o'chirish")
+        self.heatmap_button.setCheckable(True)
+        self.heatmap_button.toggled.connect(self.toggle_heatmap)
+        hl.addWidget(self.heatmap_button)
+        self.camera_fullscreen = QToolButton()
+        self.camera_fullscreen.setText("⛶  Fullscreen")
+        self.camera_fullscreen.setToolTip("Barcha kameralarni fullscreen ko'rish")
+        self.camera_fullscreen.clicked.connect(self.open_camera_fullscreen)
+        hl.addWidget(self.camera_fullscreen)
+        content_l.addWidget(header)
+        self.stack=QStackedWidget(); self.pages=[]
+        for _,_,_,klass in self.NAV: page=klass(); self.pages.append(page); self.stack.addWidget(page)
+        self.people_page = next(page for page in self.pages if isinstance(page, PeoplePage))
+        self.people_page.people_changed.connect(self.refresh_people_views)
+        self.settings_page = next(page for page in self.pages if isinstance(page, SettingsPage))
+        self.settings_page.cameras_changed.connect(self.refresh_camera_views)
+        content_l.addWidget(self.stack,1); main.addWidget(content,1); self.nav_buttons[0].setChecked(True); self.switch_page(0)
+
+    def switch_page(self,index):
+        self.stack.setCurrentIndex(index); _,title,subtitle,_=self.NAV[index]; self.title.setText(title)
+        if title == "Monitoring":
+            online_count = sum(camera.online for camera in CAMERAS)
+            subtitle = f"{len(CAMERAS)} ta kamera · {online_count} online · so'nggi kuzatuvlar"
+        elif title == "People":
+            subtitle = f"{len([person for person in PEOPLE if person.known])} ta Known profil · yangi shaxs qo'shish"
+        elif title == "Settings":
+            subtitle = f"{len(CAMERAS)} ta kamera · RTSP ulanish sozlamalari"
+        self.subtitle.setText(subtitle)
+        self.heatmap_button.setVisible(index == 0)
+        self.camera_fullscreen.setVisible(index == 0)
+        self.camera_fullscreen.setEnabled(bool(CAMERAS))
+
+    def refresh_camera_views(self):
+        self.pages[0].refresh_cameras()
+        self.pages[3].refresh_cameras()
+        self.brand_meta.setText(f"face re-id · {len(CAMERAS)} cam")
+        self.camera_fullscreen.setEnabled(bool(CAMERAS))
+        self.switch_page(self.stack.currentIndex())
+
+    def refresh_people_views(self):
+        self.switch_page(self.stack.currentIndex())
+
+    def open_camera_fullscreen(self):
+        monitoring = self.pages[0]
+        monitoring.open_fullscreen_grid()
+
+    def toggle_heatmap(self, enabled):
+        self.heatmap_button.setText(f"◉  Heatmap · {'ON' if enabled else 'OFF'}")
+        monitoring = self.pages[0]
+        monitoring.set_heatmap_enabled(enabled)
+
+
+def run():
+    app=QApplication.instance() or QApplication([]); app.setStyle("Fusion"); app.setStyleSheet(APP_QSS)
+    window=MainWindow(); window.show(); return app.exec()
