@@ -63,6 +63,58 @@ def _event_rows(rows: list[dict[str, str]], event: str) -> list[dict[str, str]]:
     return [row for row in rows if row.get("event") == event]
 
 
+def _verified_ids_at(
+    rows: list[dict[str, str]], end: int
+) -> set[str]:
+    state: dict[str, bool] = {}
+    for row in _slice(rows, 0, end):
+        shadow_id = str(row.get("shadow_global_id", "")).strip()
+        if not shadow_id:
+            continue
+        event = row.get("event")
+        if event in {"GLOBAL_VERIFY_PASS", "GLOBAL_VERIFY_RECOVER"}:
+            state[shadow_id] = True
+        elif event in {
+            "GLOBAL_VERIFY_HOLD",
+            "GLOBAL_VERIFY_EXPIRE",
+            "GLOBAL_VERIFY_CONFLICT_PERSISTENT",
+        }:
+            state[shadow_id] = False
+    return {shadow_id for shadow_id, verified in state.items() if verified}
+
+
+def _isolation_reasons(
+    *,
+    label: str,
+    global_rows: list[dict[str, str]],
+    verify_rows: list[dict[str, str]],
+    global_start: int,
+    global_end: int,
+    verify_start: int,
+    expected_id: str,
+    min_observations: int,
+) -> list[str]:
+    reasons: list[str] = []
+    observed = _event_rows(
+        _slice(global_rows, global_start, global_end),
+        "GLOBAL_SHADOW_OBSERVE",
+    )
+    observed_ids = _ids(observed)
+    if len(observed) < min_observations:
+        reasons.append(
+            f"phase_{label}_observations={len(observed)}/min{min_observations}"
+        )
+    if expected_id and expected_id not in _verified_ids_at(verify_rows, verify_start):
+        reasons.append(f"phase_{label}_expected_not_verified_at_start={expected_id}")
+    if expected_id and observed_ids != {expected_id}:
+        reasons.append(
+            f"id_swap_after_crossing_phase_{label}_seen="
+            + ",".join(sorted(observed_ids or {"NONE"}))
+            + f"/expected={expected_id}"
+        )
+    return reasons
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--display-log", required=True, type=Path)
@@ -286,31 +338,30 @@ def main() -> int:
         # When only A remains, every clean Step5 observation must still be A's ID;
         # then when only B remains, every clean observation must be B's ID. This
         # catches an ID swap that a simple final count of two IDs cannot detect.
-        d_global = _slice(global_rows, d_g_start, d_g_end)
-        d_observe = _event_rows(d_global, "GLOBAL_SHADOW_OBSERVE")
-        d_ids = _ids(d_observe)
-        if len(d_observe) < args.min_isolation_observations:
-            reasons.append(
-                f"phase_d_observations={len(d_observe)}/min{args.min_isolation_observations}"
+        reasons.extend(
+            _isolation_reasons(
+                label="d",
+                global_rows=global_rows,
+                verify_rows=verify_rows,
+                global_start=d_g_start,
+                global_end=d_g_end,
+                verify_start=d_v_start,
+                expected_id=person_a_id,
+                min_observations=args.min_isolation_observations,
             )
-        if person_a_id and d_ids != {person_a_id}:
-            reasons.append(
-                "id_swap_after_crossing_phase_d_seen=" + ",".join(sorted(d_ids or {"NONE"}))
-                + f"/expected={person_a_id}"
+        )
+        reasons.extend(
+            _isolation_reasons(
+                label="e",
+                global_rows=global_rows,
+                verify_rows=verify_rows,
+                global_start=e_g_start,
+                global_end=e_g_end,
+                verify_start=e_v_start,
+                expected_id=person_b_id,
+                min_observations=args.min_isolation_observations,
             )
-
-        e_global = _slice(global_rows, e_g_start, e_g_end)
-        e_observe = _event_rows(e_global, "GLOBAL_SHADOW_OBSERVE")
-        e_ids = _ids(e_observe)
-        if len(e_observe) < args.min_isolation_observations:
-            reasons.append(
-                f"phase_e_observations={len(e_observe)}/min{args.min_isolation_observations}"
-            )
-        if person_b_id and e_ids != {person_b_id}:
-            reasons.append(
-                "id_swap_after_crossing_phase_e_seen=" + ",".join(sorted(e_ids or {"NONE"}))
-                + f"/expected={person_b_id}"
-            )
+        )
 
         all_global_ids = _ids(global_rows)
         if len(expected_ids) == 2 and all_global_ids != expected_ids:

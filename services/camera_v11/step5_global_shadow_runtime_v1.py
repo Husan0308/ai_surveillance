@@ -37,6 +37,12 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             expire_provisional_after_missed_cycles=int(
                 os.environ.get("V11_STEP5_GLOBAL_EXPIRE_MISSED_CYCLES", "6")
             ),
+            successor_confirm_observations=int(
+                os.environ.get("V11_STEP5_SUCCESSOR_CONFIRM_OBSERVATIONS", "2")
+            ),
+            successor_max_gap_cycles=int(
+                os.environ.get("V11_STEP5_SUCCESSOR_MAX_GAP_CYCLES", "2")
+            ),
         )
 
         self.camera_tracklet_continuity = CameraTrackletContinuityV1(
@@ -89,7 +95,8 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             "states=PROVISIONAL+CONFIRMED_SHADOW+EXPIRED_SHADOW "
             "confirm_observations=3 confirm_consecutive=3 "
             "identity_owner=person track_successor_reuse=1 current_member_per_camera=1 "
-            "historical_aliases=1 same_cycle_overlap_conflict=1 cross_global_merge=0 "
+            "historical_aliases=1 same_cycle_overlap_reject=1 cross_owner_ambiguity=1 "
+            "successor_evidence_required=1 cross_global_merge=0 "
             "hysteresis=0 production_global_id=0 room_id=0 tracker_mutation=0 "
             "face=0 handoff=0 identity_accuracy_proven=0 "
             "queue=bounded async=1 matcher_blocking_state_work=0",
@@ -101,7 +108,11 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             f"{self.global_shadow_worker._queue.maxsize} "
             "confirm_observations=3 confirm_consecutive=3 "
             f"expire_provisional_after_missed_cycles="
-            f"{self.global_shadow_worker.machine.expire_provisional_after_missed_cycles}",
+            f"{self.global_shadow_worker.machine.expire_provisional_after_missed_cycles} "
+            f"successor_confirm_observations="
+            f"{self.global_shadow_worker.machine.successor_confirm_observations} "
+            f"successor_max_gap_cycles="
+            f"{self.global_shadow_worker.machine.successor_max_gap_cycles}",
             flush=True,
         )
 
@@ -140,6 +151,8 @@ class V11Step5GlobalShadowRuntimeV1(V11Step4ReIDSameRoomRuntimeV1):
             f"confirmed={row['global_shadow_confirmed']} "
             f"observations={row['global_shadow_observations']} "
             f"conflicts={row['global_shadow_conflicts']} "
+            f"ambiguities={row['global_shadow_ambiguities']} "
+            f"successor_attaches={row['global_shadow_successor_attaches']} "
             f"expired={row['global_shadow_expired']} "
             f"active={row['global_shadow_active']} "
             f"member_tracks={row['global_shadow_member_tracks']} "

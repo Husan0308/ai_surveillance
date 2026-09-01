@@ -27,6 +27,12 @@ TSV_COLUMNS = (
     "state",
     "robust_score",
     "status",
+    "decision",
+    "cycle",
+    "owner_a",
+    "owner_b",
+    "current_members",
+    "last_seen_cycles",
 )
 
 
@@ -60,12 +66,16 @@ class V11GlobalShadowWorkerV1:
         confirm_observations: int = 3,
         confirm_consecutive: int = 3,
         expire_provisional_after_missed_cycles: int = 6,
+        successor_confirm_observations: int = 2,
+        successor_max_gap_cycles: int = 2,
     ) -> None:
         self.tsv_path = Path(tsv_path).expanduser() if tsv_path else None
         self.machine = GlobalShadowStateMachineV1(
             confirm_observations=confirm_observations,
             confirm_consecutive=confirm_consecutive,
             expire_provisional_after_missed_cycles=expire_provisional_after_missed_cycles,
+            successor_confirm_observations=successor_confirm_observations,
+            successor_max_gap_cycles=successor_max_gap_cycles,
         )
         self._queue: queue.Queue[object] = queue.Queue(maxsize=max(32, int(queue_capacity)))
         self._stop = threading.Event()
@@ -139,6 +149,12 @@ class V11GlobalShadowWorkerV1:
                         event.state,
                         self._number(event.robust_score),
                         event.status,
+                        event.decision,
+                        str(event.cycle),
+                        event.owner_a,
+                        event.owner_b,
+                        event.current_members,
+                        event.last_seen_cycles,
                     )
                 )
             with self.tsv_path.open("a", encoding="utf-8", newline="") as handle:

@@ -35,6 +35,12 @@ class V11Step6GlobalShadowRuntimeV1(V11Step5GlobalShadowRuntimeV1):
             expire_provisional_after_missed_cycles=(
                 old_global.machine.expire_provisional_after_missed_cycles
             ),
+            successor_confirm_observations=(
+                old_global.machine.successor_confirm_observations
+            ),
+            successor_max_gap_cycles=(
+                old_global.machine.successor_max_gap_cycles
+            ),
             verify_tsv_path=verify_tsv_path,
             verify_clean_observations=int(
                 os.environ.get("V11_STEP6_VERIFY_CLEAN_OBSERVATIONS", "3")

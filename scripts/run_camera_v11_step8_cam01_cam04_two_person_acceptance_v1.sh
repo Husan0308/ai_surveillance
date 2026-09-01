@@ -11,7 +11,9 @@ C_SEC="${V11_STEP8_PHASE_C_SEC:-45}"
 D_SEC="${V11_STEP8_PHASE_D_SEC:-35}"
 E_SEC="${V11_STEP8_PHASE_E_SEC:-35}"
 SETTLE_SEC="${V11_STEP8_SETTLE_SEC:-7}"
-DURATION="${V11_STEP8_DURATION_SEC:-250}"
+DURATION="${V11_STEP8_DURATION_SEC:-1800}"
+STATE_WAIT_SEC="${V11_STEP8_STATE_WAIT_SEC:-90}"
+OPERATOR_MODE="${V11_STEP8_OPERATOR_MODE:-1}"
 
 DISPLAY_LOG="$OUT/display.log"
 MATCH_LOG="$OUT/match.log"
@@ -38,11 +40,77 @@ fail() {
   exit 1
 }
 
-for value in "$A_SEC" "$B_SEC" "$C_SEC" "$D_SEC" "$E_SEC" "$SETTLE_SEC" "$DURATION"; do
+for value in "$A_SEC" "$B_SEC" "$C_SEC" "$D_SEC" "$E_SEC" "$SETTLE_SEC" "$DURATION" "$STATE_WAIT_SEC"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail "invalid_duration_value_$value"
 done
 [[ "$ACK" == "1" ]] || fail "set_V11_STEP8_TWO_PERSON_ACK=1_after_two_people_are_ready"
-required=$((A_SEC + B_SEC + C_SEC + D_SEC + E_SEC + SETTLE_SEC * 4 + 15))
+[[ "$OPERATOR_MODE" == "0" || "$OPERATOR_MODE" == "1" ]] || fail "invalid_operator_mode_$OPERATOR_MODE"
+
+operator_confirm() {
+  local message="$1"
+  if [[ "$OPERATOR_MODE" == "0" ]]; then
+    printf 'V11_STEP8_OPERATOR auto=1 instruction=%s\n' "$message"
+    return
+  fi
+  [[ -r /dev/tty ]] || fail "operator_terminal_required_set_V11_STEP8_OPERATOR_MODE=0_only_for_external_orchestration"
+  printf '\nV11_STEP8_OPERATOR ACTION: %s\n' "$message" >/dev/tty
+  printf 'Press ENTER only after the debug preview confirms the requested bboxes and people.\n' >/dev/tty
+  IFS= read -r </dev/tty || fail "operator_confirmation_failed"
+}
+
+count_event() {
+  local path="$1"
+  local event="$2"
+  if [[ ! -s "$path" ]]; then
+    printf '0'
+    return
+  fi
+  awk -F '\t' -v wanted="$event" 'NR > 1 && $2 == wanted { count += 1 } END { print count + 0 }' "$path"
+}
+
+wait_for_event_count() {
+  local path="$1"
+  local event="$2"
+  local expected="$3"
+  local label="$4"
+  local deadline=$((SECONDS + STATE_WAIT_SEC))
+  local current
+  while (( SECONDS <= deadline )); do
+    current="$(count_event "$path" "$event")"
+    if (( current == expected )); then
+      printf 'V11_STEP8_STATE_READY label=%s event=%s count=%s\n' "$label" "$event" "$current"
+      return
+    fi
+    (( current < expected )) || fail "${label}_${event}_count_${current}_expected_${expected}"
+    kill -0 "$launcher_pid" 2>/dev/null || fail "${label}_runtime_stopped_while_waiting"
+    sleep 1
+  done
+  fail "${label}_${event}_timeout_count_$(count_event "$path" "$event")_expected_${expected}"
+}
+
+wait_for_event_delta() {
+  local path="$1"
+  local event="$2"
+  local baseline="$3"
+  local minimum="$4"
+  local label="$5"
+  local deadline=$((SECONDS + STATE_WAIT_SEC))
+  local current delta
+  while (( SECONDS <= deadline )); do
+    current="$(count_event "$path" "$event")"
+    delta=$((current - baseline))
+    if (( delta >= minimum )); then
+      printf 'V11_STEP8_STATE_READY label=%s event=%s delta=%s\n' "$label" "$event" "$delta"
+      return
+    fi
+    kill -0 "$launcher_pid" 2>/dev/null || fail "${label}_runtime_stopped_while_waiting"
+    sleep 1
+  done
+  current="$(count_event "$path" "$event")"
+  fail "${label}_${event}_timeout_delta_$((current - baseline))_min_${minimum}"
+}
+
+required=$((A_SEC + B_SEC + C_SEC + D_SEC + E_SEC + SETTLE_SEC * 4 + STATE_WAIT_SEC * 6 + 15))
 (( DURATION >= required )) || fail "duration_${DURATION}_too_short_min_${required}"
 
 # Dedicated Devs ground-truth run. Keep all unrelated people outside CAM-01/CAM-04.
@@ -69,8 +137,10 @@ printf '%s\n' \
 
 # Keep cheap deterministic unit guards before the live test. Frozen Step1-3 remains untouched.
 "$ROOT/.venv/bin/python" "$ROOT/scripts/test_camera_v11_step4_camera_tracklet_v1.py" >"$OUT/step4_tracklet_unit.log" 2>&1 || fail "step4_tracklet_unit_tests"
+"$ROOT/.venv/bin/python" "$ROOT/scripts/test_camera_v11_step4_reid_same_room_matcher_v1.py" >"$OUT/step4_matcher_unit.log" 2>&1 || fail "step4_matcher_unit_tests"
 "$ROOT/.venv/bin/python" "$ROOT/scripts/test_camera_v11_step5_global_shadow_v1.py" >"$OUT/step5_unit.log" 2>&1 || fail "step5_unit_tests"
 "$ROOT/.venv/bin/python" "$ROOT/scripts/test_camera_v11_step6_global_shadow_hysteresis_v1.py" >"$OUT/step6_unit.log" 2>&1 || fail "step6_unit_tests"
+"$ROOT/.venv/bin/python" "$ROOT/scripts/test_camera_v11_step8_cam01_cam04_two_person_v1.py" >"$OUT/step8_checker_unit.log" 2>&1 || fail "step8_checker_unit_tests"
 "$ROOT/.venv/bin/python" "$ROOT/scripts/check_camera_v11_frozen_step123_guard.py" >"$OUT/frozen_guard.log" 2>&1 || fail "frozen_step123_guard"
 
 V11_STEP6_RUNTIME_MODULE="services.camera_v11.step8_two_person_debug_runtime_v1" \
@@ -117,6 +187,8 @@ if (( preview_ready != 1 )); then
   fail "step8_debug_preview_not_ready"
 fi
 
+operator_confirm "ONLY Person A is visible with one tracked bbox in BOTH CAM-01 and CAM-04; Person B and all third people are outside both views."
+
 count_rows() {
   local path="$1"
   if [[ ! -s "$path" ]]; then
@@ -141,39 +213,51 @@ printf 'PHASE A | ONLY PERSON A | A must have a bbox in BOTH CAM-01 and CAM-04' 
 printf 'V11_STEP8_PHASE_A START seconds=%s condition=ONLY_PERSON_A_VISIBLE\n' "$A_SEC"
 printf 'Watch the debug preview: Person A must have a tracked bbox in BOTH cameras. Person B stays outside.\n'
 sleep "$A_SEC"
+wait_for_event_count "$GLOBAL_TSV" GLOBAL_SHADOW_CONFIRM 1 phase_a_confirm
+wait_for_event_count "$VERIFY_TSV" GLOBAL_VERIFY_PASS 1 phase_a_verify
 mark_phase A_END
 
+operator_confirm "Person A stays visible; Person B has joined, separated from A, and BOTH people have tracked bboxes in BOTH camera panes."
 printf 'PHASE B | A + B SEPARATED | BOTH need bboxes in BOTH cameras' >"$PHASE_STATE"
 printf 'V11_STEP8_PHASE_B START settle=%ss measure=%ss condition=A_STAYS_AND_B_JOINS_SEPARATED\n' "$SETTLE_SEC" "$B_SEC"
 printf 'Person A stays visible. Person B enters. Keep them separated and confirm two bboxes in BOTH camera panes before crossing.\n'
 sleep "$SETTLE_SEC"
 sleep "$B_SEC"
+wait_for_event_count "$GLOBAL_TSV" GLOBAL_SHADOW_CONFIRM 2 phase_b_confirm
+wait_for_event_count "$VERIFY_TSV" GLOBAL_VERIFY_PASS 2 phase_b_verify
 mark_phase B_END
 
+operator_confirm "Both A and B are still tracked in BOTH panes and are ready to cross, briefly occlude, turn, and swap positions."
 printf 'PHASE C | CROSS + BRIEF OCCLUSION | watch T/CT/GSH labels for swaps' >"$PHASE_STATE"
 printf 'V11_STEP8_PHASE_C START seconds=%s condition=BOTH_CROSS_AND_OCCLUDE\n' "$C_SEC"
 printf 'Both people cross repeatedly. Cause brief natural occlusion, turns/back-view, and position swaps. Watch whether GSH labels jump between people.\n'
 sleep "$C_SEC"
 mark_phase C_END
 
+operator_confirm "Person B has left BOTH views completely; only Person A remains with a tracked bbox in BOTH panes."
 printf 'TRANSITION D | PERSON B LEAVES BOTH CAMERAS | keep A visible' >"$PHASE_STATE"
 printf 'V11_STEP8_PHASE_D TRANSITION settle=%ss condition=ONLY_PERSON_A_REMAINS\n' "$SETTLE_SEC"
 printf 'Person B leaves BOTH camera views completely. Person A remains visible with a bbox in BOTH cameras.\n'
 sleep "$SETTLE_SEC"
 mark_phase D_START
+D_OBSERVE_START="$(count_event "$GLOBAL_TSV" GLOBAL_SHADOW_OBSERVE)"
 printf 'PHASE D | ONLY PERSON A | verify post-crossing GSH-A' >"$PHASE_STATE"
 printf 'V11_STEP8_PHASE_D MEASURE seconds=%s ground_truth=PERSON_A\n' "$D_SEC"
 sleep "$D_SEC"
+wait_for_event_delta "$GLOBAL_TSV" GLOBAL_SHADOW_OBSERVE "$D_OBSERVE_START" 3 phase_d_observe
 mark_phase D_END
 
+operator_confirm "Person A has left BOTH views completely; only Person B remains or has returned with a tracked bbox in BOTH panes."
 printf 'TRANSITION E | PERSON A LEAVES BOTH CAMERAS | bring B back alone' >"$PHASE_STATE"
 printf 'V11_STEP8_PHASE_E TRANSITION settle=%ss condition=ONLY_PERSON_B_REMAINS\n' "$SETTLE_SEC"
 printf 'Person A leaves BOTH camera views completely. Person B enters/remains visible alone with a bbox in BOTH cameras.\n'
 sleep "$SETTLE_SEC"
 mark_phase E_START
+E_OBSERVE_START="$(count_event "$GLOBAL_TSV" GLOBAL_SHADOW_OBSERVE)"
 printf 'PHASE E | ONLY PERSON B | verify post-crossing GSH-B' >"$PHASE_STATE"
 printf 'V11_STEP8_PHASE_E MEASURE seconds=%s ground_truth=PERSON_B\n' "$E_SEC"
 sleep "$E_SEC"
+wait_for_event_delta "$GLOBAL_TSV" GLOBAL_SHADOW_OBSERVE "$E_OBSERVE_START" 3 phase_e_observe
 mark_phase E_END
 printf 'DONE | Step8 checker is validating identities' >"$PHASE_STATE"
 

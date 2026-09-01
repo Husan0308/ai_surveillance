@@ -12,11 +12,13 @@ if str(ROOT) not in sys.path:
 from services.camera_v11.step5_global_shadow_v1 import (
     CONFIRMED_SHADOW,
     EXPIRED_SHADOW,
+    GLOBAL_SHADOW_AMBIGUITY,
     GLOBAL_SHADOW_CONFIRM,
     GLOBAL_SHADOW_CONFLICT,
     GLOBAL_SHADOW_EXPIRE,
     GLOBAL_SHADOW_OBSERVE,
     GlobalShadowEventV1,
+    GlobalShadowStateMachineV1,
 )
 from services.camera_v11.step6_global_shadow_hysteresis_v1 import (
     CONFLICT_HOLD_SHADOW,
@@ -192,6 +194,72 @@ class Step6GlobalShadowHysteresisTests(unittest.TestCase):
         self.machine.observe_step5_event(first)
         self.machine.observe_step5_event(second)
         self.assertEqual(1, self.machine.records[0].conflict_streak)
+
+    def test_two_people_verify_and_cross_owner_ambiguity_never_holds(self) -> None:
+        step5 = GlobalShadowStateMachineV1(
+            confirm_observations=3,
+            confirm_consecutive=3,
+            expire_provisional_after_missed_cycles=6,
+        )
+        verifier = GlobalShadowHysteresisV1(
+            verify_clean_observations=3,
+            recover_clean_observations=3,
+            persistent_conflict_observations=3,
+        )
+        pairs = (
+            (("CAM-01", "A1"), ("CAM-04", "A4")),
+            (("CAM-01", "B1"), ("CAM-04", "B4")),
+        )
+        for cycle in range(1, 7):
+            step5.begin_cycle(cycle)
+            for a, b in pairs:
+                events = step5.observe_proposal(
+                    cycle=cycle,
+                    timestamp_ns=cycle,
+                    room="Devs",
+                    camera_a=a[0],
+                    track_a=a[1],
+                    camera_b=b[0],
+                    track_b=b[1],
+                    robust_score=0.8,
+                    reciprocal=True,
+                    assigned=True,
+                    status="MATCH_PROPOSED",
+                )
+                for source in events:
+                    verifier.observe_step5_event(source)
+            for source in step5.end_cycle(cycle=cycle, timestamp_ns=cycle):
+                verifier.observe_step5_event(source)
+
+        before = verifier.snapshot()
+        self.assertEqual(before["verify_records_created"], 2)
+        self.assertEqual(before["verify_verified"], 2)
+        self.assertEqual(before["verify_verified_total"], 2)
+
+        step5.begin_cycle(7)
+        ambiguity = step5.observe_proposal(
+            cycle=7,
+            timestamp_ns=7,
+            room="Devs",
+            camera_a="CAM-01",
+            track_a="A1",
+            camera_b="CAM-04",
+            track_b="B4",
+            robust_score=0.81,
+            reciprocal=True,
+            assigned=True,
+            status="MATCH_PROPOSED",
+        )
+        step5.end_cycle(cycle=7, timestamp_ns=7)
+        self.assertEqual(ambiguity[0].event, GLOBAL_SHADOW_AMBIGUITY)
+        for source in ambiguity:
+            self.assertEqual(verifier.observe_step5_event(source), ())
+
+        after = verifier.snapshot()
+        self.assertEqual(after["verify_verified"], 2)
+        self.assertEqual(after["verify_hold"], 0)
+        self.assertEqual(after["verify_hold_events"], 0)
+        self.assertEqual(after["verify_recovered_total"], 0)
 
     def test_expiry_marks_verification_expired(self) -> None:
         self.confirm()
