@@ -30,7 +30,23 @@ TargetManagement:
 
 TrajectoryManagement:
   useUniqueID: 0
-  enableReAssoc: 0
+  # Motion-only re-association for short full occlusions (desk/column/person).
+  # ReID stays disabled in this step so we can isolate whether the existing
+  # state-estimator trajectory is enough to restore the original local ID.
+  enableReAssoc: 1
+  minMatchingScore4Overall: 0.0
+  minTrackletMatchingScore: 0.5644
+  matchingScoreWeight4TrackletSimilarity: 1.0
+  minTrajectoryLength4Projection: 36
+  prepLength4TrajectoryProjection: 50
+  trajectoryProjectionLength: 94
+  maxAngle4TrackletMatching: 106
+  minSpeedSimilarity4TrackletMatching: 0.0967
+  minBboxSizeSimilarity4TrackletMatching: 0.5577
+  maxTrackletMatchingTimeSearchRange: 20
+  trajectoryProjectionProcessNoiseScale: 0.0100
+  trajectoryProjectionMeasurementNoiseScale: 100.0
+  trackletSpacialSearchRegionScale: 0.2598
 
 DataAssociator:
   dataAssociatorType: 0
