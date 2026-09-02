@@ -59,13 +59,16 @@ export CAMERA_V2_TRACK_BOX_TOP_MARGIN="0.0"
 export CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN="0.0"
 export CAMERA_V2_MIN_DISPLAY_TRACK_CONF="${CAMERA_V2_MIN_DISPLAY_TRACK_CONF:-0.22}"
 
-# CAM-01..04 continuity behavior stays as accepted.
+# CAM-02..04 retain the accepted short frozen continuity hold. CAM-01 bypasses
+# this layer below and uses live NvDCF shadow boxes instead, preventing an old
+# frozen rectangle from being drawn next to a newly active box for the same person.
 export V11_BBOX_DISPLAY_HOLD_FRAMES="${V11_BBOX_DISPLAY_HOLD_FRAMES:-6}"
 export V11_BBOX_DISPLAY_HOLD_SUPPRESS_IOU="${V11_BBOX_DISPLAY_HOLD_SUPPRESS_IOU:-0.50}"
 
-# CAM-05/CAM-06 retain the accepted live-shadow display settings.
-export V11_BBOX_SHADOW_DIAG_CAMERAS="${V11_BBOX_SHADOW_DIAG_CAMERAS:-CAM-05,CAM-06}"
-export V11_BBOX_SHADOW_DISPLAY_CAMERAS="${V11_BBOX_SHADOW_DISPLAY_CAMERAS:-CAM-05,CAM-06}"
+# CAM-01/CAM-05/CAM-06 use live INACTIVE/shadow tracker rectangles. For selected
+# cameras the shadow-display runtime bypasses frozen continuity completely.
+export V11_BBOX_SHADOW_DIAG_CAMERAS="${V11_BBOX_SHADOW_DIAG_CAMERAS:-CAM-01,CAM-05,CAM-06}"
+export V11_BBOX_SHADOW_DISPLAY_CAMERAS="${V11_BBOX_SHADOW_DISPLAY_CAMERAS:-CAM-01,CAM-05,CAM-06}"
 export V11_BBOX_SHADOW_DISPLAY_FRAMES="${V11_BBOX_SHADOW_DISPLAY_FRAMES:-10}"
 export V11_BBOX_SHADOW_DISPLAY_MIN_CONF="${V11_BBOX_SHADOW_DISPLAY_MIN_CONF:-0.15}"
 export V11_BBOX_SHADOW_DISPLAY_SUPPRESS_IOU="${V11_BBOX_SHADOW_DISPLAY_SUPPRESS_IOU:-0.50}"
