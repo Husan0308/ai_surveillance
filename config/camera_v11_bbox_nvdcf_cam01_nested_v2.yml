@@ -1,0 +1,74 @@
+%YAML:1.0
+---
+BaseConfig:
+  # CAM-01 only. The external TRT detector admits person boxes at 0.18, while
+  # the shared NvDCF profile used 0.20. That mismatch can make a real low-score
+  # nested person appear in detector_visible diagnostics but get filtered before
+  # NvDCF target candidacy. Align the CAM-01 tracker floor with the detector.
+  minDetectorConfidence: 0.18
+
+TargetManagement:
+  enableBboxUnClipping: 0
+  preserveStreamUpdateOrder: 1
+  maxTargetsPerStream: 24
+  # Keep the already-tested nested-person creation threshold unchanged. NVIDIA
+  # documents that a new target is created when max IoU to existing targets is
+  # below this threshold; raising it further can create duplicate tracks.
+  minIouDiff4NewTarget: 0.80
+  minTrackerConfidence: 0.22
+  probationAge: 3
+  maxShadowTrackingAge: 50
+  earlyTerminationAge: 12
+  outputShadowTracks: 1
+
+TrajectoryManagement:
+  useUniqueID: 0
+  enableReAssoc: 1
+  minMatchingScore4Overall: 0.0
+  minTrackletMatchingScore: 0.5644
+  matchingScoreWeight4TrackletSimilarity: 1.0
+  minTrajectoryLength4Projection: 36
+  prepLength4TrajectoryProjection: 50
+  trajectoryProjectionLength: 94
+  maxAngle4TrackletMatching: 106
+  minSpeedSimilarity4TrackletMatching: 0.0967
+  minBboxSizeSimilarity4TrackletMatching: 0.5577
+  maxTrackletMatchingTimeSearchRange: 20
+  trajectoryProjectionProcessNoiseScale: 0.0100
+  trajectoryProjectionMeasurementNoiseScale: 100.0
+  trackletSpacialSearchRegionScale: 0.2598
+
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1
+  checkClassMatch: 1
+  minMatchingScore4Overall: 0.18
+  minMatchingScore4SizeSimilarity: 0.30
+  minMatchingScore4Iou: 0.05
+  minMatchingScore4VisualSimilarity: 0.12
+  matchingScoreWeight4VisualSimilarity: 0.45
+  matchingScoreWeight4SizeSimilarity: 0.20
+  matchingScoreWeight4Iou: 0.35
+
+StateEstimator:
+  stateEstimatorType: 2
+  processNoiseVar4Loc: 6.0
+  processNoiseVar4Size: 4.0
+  processNoiseVar4Vel: 1.5
+  measurementNoiseVar4Detector: 2.0
+  measurementNoiseVar4Tracker: 3.0
+  useAspectRatio: 0
+
+VisualTracker:
+  visualTrackerType: 1
+  useColorNames: 1
+  useHog: 1
+  featureImgSizeLevel: 2
+  featureFocusOffsetFactor_y: 0.0
+  filterLr: 0.10
+  filterChannelWeightsLr: 0.12
+  gaussianSigma: 0.75
+  SearchRegionPaddingScale: 1
+
+ReID:
+  reidType: 0
