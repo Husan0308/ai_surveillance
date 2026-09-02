@@ -89,7 +89,7 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
         self._set_if(tracker, "ll-config-file", self.tracker_config)
         self._set_if(tracker, "enable-batch-process", True)
         self._set_if(tracker, "display-tracking-id", False)
-        self._set_if(tracker, "enable-past-frame", False)
+        self._set_if(tracker, "enable-past-frame", True)
 
         display_caps.unlink(osd)
         pipeline.add(tracker)
