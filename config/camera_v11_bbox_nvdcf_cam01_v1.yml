@@ -17,7 +17,11 @@ TargetManagement:
   # Keep partial-occlusion tracks active a little longer. Too-low values can
   # create ghosts, so do not push this below 0.22 without a dedicated test.
   minTrackerConfidence: 0.22
-  probationAge: 7
+  # Faster late activation for crowded/overlapped people. The previous value 7
+  # kept a newly-created real person silent downstream for too many frames; 3
+  # still keeps a short validation window without going as aggressive as the
+  # NVIDIA NvDCF accuracy profile (probationAge=1).
+  probationAge: 3
   # Desk/column occlusion recovery: keep an already-active target in shadow
   # tracking long enough to survive a short full occlusion and re-associate with
   # the same ID when it becomes visible again. NVIDIA's accuracy profile uses a
