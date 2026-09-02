@@ -30,24 +30,33 @@ DataAssociator:
   matchingScoreWeight4SizeSimilarity: 0.20
   matchingScoreWeight4Iou: 0.35
 
+# Keep the regular KF, but make it respond to the current DCF/detector
+# measurements instead of over-smoothing a moving person.  The previous
+# tracker-noise=8 / velocity-noise=0.10 profile visibly let the person move
+# inside an old box before the state caught up.
 StateEstimator:
   stateEstimatorType: 2
-  processNoiseVar4Loc: 2.0
-  processNoiseVar4Size: 1.0
-  processNoiseVar4Vel: 0.10
-  measurementNoiseVar4Detector: 4.0
-  measurementNoiseVar4Tracker: 8.0
+  processNoiseVar4Loc: 6.0
+  processNoiseVar4Size: 4.0
+  processNoiseVar4Vel: 1.5
+  measurementNoiseVar4Detector: 2.0
+  measurementNoiseVar4Tracker: 3.0
+  useAspectRatio: 0
 
+# CAM-01 accuracy-first local tracking profile.  Use a smaller search-region
+# padding together with a larger feature image so the target occupies more of
+# the DCF feature map; this improves per-frame localization instead of drawing
+# a padded rectangle around a lagging estimate.
 VisualTracker:
   visualTrackerType: 1
   useColorNames: 1
   useHog: 0
-  featureImgSizeLevel: 1
-  featureFocusOffsetFactor_y: -0.10
-  filterLr: 0.075
-  filterChannelWeightsLr: 0.10
+  featureImgSizeLevel: 2
+  featureFocusOffsetFactor_y: 0.0
+  filterLr: 0.10
+  filterChannelWeightsLr: 0.12
   gaussianSigma: 0.75
-  SearchRegionPaddingScale: 2
+  SearchRegionPaddingScale: 1
 
 ReID:
   reidType: 0
