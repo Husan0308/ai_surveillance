@@ -6,6 +6,7 @@ import threading
 import time
 
 from services.camera_v11.deepstream_trt86_multi_v1 import V11DeepStreamTRT86MultiCameraV1
+from services.camera_v11.monitoring_telemetry_ipc_v1 import RuntimeMonitoringTelemetryPublisher
 from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameWriter
 
 
@@ -61,6 +62,14 @@ class V11DeepStreamTRT86MultiCameraUIV1(V11DeepStreamTRT86MultiCameraV1):
                 f"queue=latest1 fps={self.ui_preview_hz:.1f} transport=raw-bgrx-shm path={path}",
                 flush=True,
             )
+        self.monitoring_telemetry = RuntimeMonitoringTelemetryPublisher(self)
+        print(
+            "CAMERA_V11_MONITORING_TELEMETRY_ARCH "
+            f"path={self.monitoring_telemetry.writer.path} "
+            f"period_sec={self.monitoring_telemetry.period_sec:.3f} "
+            "transport=atomic-json-shm queue=latest1 log_parsing=0",
+            flush=True,
+        )
 
     def _build_camera(self, state) -> None:
         super()._build_camera(state)
@@ -237,6 +246,7 @@ class V11DeepStreamTRT86MultiCameraUIV1(V11DeepStreamTRT86MultiCameraV1):
         return keep_running
 
     def run(self) -> int:
+        self.monitoring_telemetry.start()
         for cid in self.ui_preview_cameras:
             thread = threading.Thread(
                 target=self._ui_preview_loop,
@@ -291,6 +301,7 @@ class V11DeepStreamTRT86MultiCameraUIV1(V11DeepStreamTRT86MultiCameraV1):
             print(f"CAMERA_V11_UI_PREVIEW_CLEANUP camera={cid} state=COMPLETE", flush=True)
 
     def close(self) -> None:
+        self.monitoring_telemetry.stop()
         self.ui_preview_stop.set()
         for thread in self.ui_preview_threads.values():
             if thread.is_alive():
