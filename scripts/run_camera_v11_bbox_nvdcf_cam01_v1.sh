@@ -29,7 +29,7 @@ TRACKER_CFG="${V11_BBOX_TRACKER_CONFIG:-$ROOT/config/camera_v11_bbox_nvdcf_cam01
 [[ -s "$TRACKER_CFG" ]] || fail "nvdcf_config_missing=$TRACKER_CFG"
 TRT_VERSION="$($TRT_PY -I -c 'import ctypes, ctypes.util, tensorrt as trt; path=ctypes.util.find_library("cudart"); assert path; ctypes.CDLL(path); print(trt.__version__)' 2>/dev/null || true)"
 [[ "$TRT_VERSION" == 8.6.1* ]] || fail "trt86_or_cudart_preflight_failed=${TRT_VERSION:-missing}"
-CONFLICT_PATTERN='services\.camera_v11\.(deepstream_trt86_multi|deepstream_trt86_nvdcf)|yolo26_trt86_step2_worker\.py'
+CONFLICT_PATTERN='services\\.camera_v11\\.(deepstream_trt86_multi|deepstream_trt86_nvdcf)|yolo26_trt86_step2_worker\\.py'
 conflicts="$(pgrep -af "$CONFLICT_PATTERN" || true)"
 [[ -z "$conflicts" ]] || fail $'conflicting_camera_process:\n'"$conflicts"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" V11_ENV_FILE="$ENV_FILE"
@@ -38,26 +38,27 @@ export V11_UI_PREVIEW_CAMERAS="CAM-01"
 export V11_UI_PREVIEW_HZ="${V11_UI_PREVIEW_HZ:-15.0}"
 export V11_UI_PREVIEW_PATH_CAM01="${V11_UI_PREVIEW_PATH_CAM01:-/dev/shm/v11_ui_preview_cam01_v1.bin}"
 export V11_BBOX_TRACK_CAMERAS="CAM-01"
-# Accuracy-first for CAM-01.  640x384 is still aligned with the 672x384 YOLO
-# detector while remaining valid for NvDCF's multiple-of-32 requirement.
+# Accuracy-first local tracking.  This remains close to the 672x384 detector
+# geometry while giving NvDCF enough spatial detail for body-fit localization.
 export V11_BBOX_TRACKER_WIDTH="${V11_BBOX_TRACKER_WIDTH:-640}"
 export V11_BBOX_TRACKER_HEIGHT="${V11_BBOX_TRACKER_HEIGHT:-384}"
 export V11_BBOX_TRACKER_LL_LIB="$TRACKER_LIB"
 export V11_BBOX_TRACKER_CONFIG="$TRACKER_CFG"
-# No fake display padding.  The visible rectangle is the current NvDCF state;
-# correctness must come from frame-to-frame localization and responsive size /
-# position estimation, not a permanently oversized box.
+# No artificial display padding. The OSD rectangle is the live NvDCF state.
 export CAMERA_V2_TRACK_BOX_SIDE_MARGIN="0.0"
 export CAMERA_V2_TRACK_BOX_TOP_MARGIN="0.0"
 export CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN="0.0"
 export V11_DS_YOLO_ENABLED="${V11_DS_YOLO_ENABLED:-1}"
 export V11_STEP2_TRT86_PYTHON="$TRT_PY" V11_STEP2_TRT86_WORKER="$WORKER" V11_STEP2_ENGINE="$ENGINE"
-export V11_DS_YOLO_HZ="${V11_DS_YOLO_HZ:-2.0}" V11_DS_YOLO_CONF="${V11_DS_YOLO_CONF:-0.18}"
+# Slightly denser detector corrections help rapid sit/stand/scale changes while
+# NvDCF still owns frame-to-frame motion. This is CAM-01 validation only; the
+# all-six rate will be benchmarked before rollout.
+export V11_DS_YOLO_HZ="${V11_DS_YOLO_HZ:-2.5}" V11_DS_YOLO_CONF="${V11_DS_YOLO_CONF:-0.18}"
 export V11_DS_YOLO_MAX_DET="${V11_DS_YOLO_MAX_DET:-20}" V11_DS_YOLO_BOX_STALE_SEC="${V11_DS_YOLO_BOX_STALE_SEC:-0.80}"
 export V11_RTSP_LATENCY_MS="${V11_RTSP_LATENCY_MS:-100}" V11_EXTRA_SURFACES="${V11_EXTRA_SURFACES:-4}" V11_RECONNECT_SEC="${V11_RECONNECT_SEC:-5}"
 "$APP_PY" -c 'import services.camera_v11.deepstream_trt86_nvdcf_bbox_cam01_v1' || fail "runtime_import_failed"
 "$APP_PY" -c 'from services.ml_service.app.config import load_settings; rows=load_settings().cameras; c=next((x for x in rows if x.camera_id=="CAM-01"), None); assert c and c.username and c.password' || fail "camera_credentials_unresolved"
-printf 'V11_BBOX_NVDCF_CAM01_PREFLIGHT RESULT=PASS branch=%s camera=CAM-01 rtsp_sources=1 detector_workers=1 detector_hz=%s raw_conf=%s tracker=nvdcf tracker_size=%sx%s reid=0 display_margin=0/0/0 profile=responsive-dynamic config=%s trt=%s log=%s\n' "$BRANCH_EXPECTED" "$V11_DS_YOLO_HZ" "$V11_DS_YOLO_CONF" "$V11_BBOX_TRACKER_WIDTH" "$V11_BBOX_TRACKER_HEIGHT" "$TRACKER_CFG" "$TRT_VERSION" "$LOG"
+printf 'V11_BBOX_NVDCF_CAM01_PREFLIGHT RESULT=PASS branch=%s camera=CAM-01 rtsp_sources=1 detector_workers=1 detector_hz=%s raw_conf=%s tracker=nvdcf tracker_size=%sx%s reid=0 display_margin=0/0/0 profile=body-fit-hog-simplekf config=%s trt=%s log=%s\n' "$BRANCH_EXPECTED" "$V11_DS_YOLO_HZ" "$V11_DS_YOLO_CONF" "$V11_BBOX_TRACKER_WIDTH" "$V11_BBOX_TRACKER_HEIGHT" "$TRACKER_CFG" "$TRT_VERSION" "$LOG"
 : >"$LOG"
 exec > >(trap '' INT TERM; tee "$LOG") 2>&1
 exec "$APP_PY" -u -m services.camera_v11.deepstream_trt86_nvdcf_bbox_cam01_v1
