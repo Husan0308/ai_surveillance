@@ -48,6 +48,12 @@ export V11_BBOX_TRACKER_CONFIG="$TRACKER_CFG"
 export CAMERA_V2_TRACK_BOX_SIDE_MARGIN="0.0"
 export CAMERA_V2_TRACK_BOX_TOP_MARGIN="0.0"
 export CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN="0.0"
+# The NvDCF profile keeps a target alive down to 0.22 confidence. Do not apply
+# a stricter post-tracker display filter (the native bridge defaults to 0.28),
+# otherwise a valid walking target can disappear for one or two frames and then
+# reappear with the same tracker ID. This changes presentation only; it does not
+# relax NvDCF association or target creation.
+export CAMERA_V2_MIN_DISPLAY_TRACK_CONF="${CAMERA_V2_MIN_DISPLAY_TRACK_CONF:-0.22}"
 export V11_DS_YOLO_ENABLED="${V11_DS_YOLO_ENABLED:-1}"
 export V11_STEP2_TRT86_PYTHON="$TRT_PY" V11_STEP2_TRT86_WORKER="$WORKER" V11_STEP2_ENGINE="$ENGINE"
 export V11_DS_YOLO_HZ="${V11_DS_YOLO_HZ:-2.0}" V11_DS_YOLO_CONF="${V11_DS_YOLO_CONF:-0.18}"
@@ -55,7 +61,7 @@ export V11_DS_YOLO_MAX_DET="${V11_DS_YOLO_MAX_DET:-20}" V11_DS_YOLO_BOX_STALE_SE
 export V11_RTSP_LATENCY_MS="${V11_RTSP_LATENCY_MS:-100}" V11_EXTRA_SURFACES="${V11_EXTRA_SURFACES:-4}" V11_RECONNECT_SEC="${V11_RECONNECT_SEC:-5}"
 "$APP_PY" -c 'import services.camera_v11.deepstream_trt86_nvdcf_bbox_cam01_v1' || fail "runtime_import_failed"
 "$APP_PY" -c 'from services.ml_service.app.config import load_settings; rows=load_settings().cameras; wanted={"CAM-01","CAM-02","CAM-03"}; found={c.camera_id for c in rows if c.username and c.password}; assert wanted <= found' || fail "camera_credentials_unresolved"
-printf 'V11_BBOX_NVDCF_CAM01_CAM02_CAM03_PREFLIGHT RESULT=PASS branch=%s cameras=CAM-01,CAM-02,CAM-03 rtsp_sources=3 detector_workers=1 detector_hz=%s raw_conf=%s tracker=nvdcf tracker_size=%sx%s reid=0 display_margin=0/0/0 profile=responsive-dynamic config=%s trt=%s log=%s\n' "$BRANCH_EXPECTED" "$V11_DS_YOLO_HZ" "$V11_DS_YOLO_CONF" "$V11_BBOX_TRACKER_WIDTH" "$V11_BBOX_TRACKER_HEIGHT" "$TRACKER_CFG" "$TRT_VERSION" "$LOG"
+printf 'V11_BBOX_NVDCF_CAM01_CAM02_CAM03_PREFLIGHT RESULT=PASS branch=%s cameras=CAM-01,CAM-02,CAM-03 rtsp_sources=3 detector_workers=1 detector_hz=%s raw_conf=%s tracker=nvdcf tracker_size=%sx%s reid=0 display_margin=0/0/0 display_track_conf=%s profile=responsive-dynamic config=%s trt=%s log=%s\n' "$BRANCH_EXPECTED" "$V11_DS_YOLO_HZ" "$V11_DS_YOLO_CONF" "$V11_BBOX_TRACKER_WIDTH" "$V11_BBOX_TRACKER_HEIGHT" "$CAMERA_V2_MIN_DISPLAY_TRACK_CONF" "$TRACKER_CFG" "$TRT_VERSION" "$LOG"
 : >"$LOG"
 exec > >(trap '' INT TERM; tee "$LOG") 2>&1
 exec "$APP_PY" -u -m services.camera_v11.deepstream_trt86_nvdcf_bbox_cam01_v1
