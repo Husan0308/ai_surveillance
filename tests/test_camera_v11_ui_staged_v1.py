@@ -214,7 +214,7 @@ def test_full_sentinel_surface_and_qpainter_balance_are_preserved() -> None:
     assert "self.live_image = QImage()" in wrapper
     for forbidden in ("cv2.VideoCapture", "nvurisrcbin", "rtspsrc", "tensorrt"):
         assert forbidden.lower() not in (source + wrapper).lower()
-    assert "lay.addWidget(CameraView(cam, PEOPLE" in source  # expanded view uses same boundary
+    assert "lay.addWidget(CameraView(cam, []" in source  # expanded view uses same live boundary
 
 
 @pytest.mark.parametrize("cameras", STAGES)

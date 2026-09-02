@@ -75,6 +75,9 @@ def test_atomic_latest_snapshot_and_six_camera_schema(tmp_path: Path) -> None:
     assert path.stat().st_size < MAX_SNAPSHOT_BYTES
     assert writer.publish(payload()) == 2
     assert reader.read()["sequence"] == 2
+    restarted_writer = MonitoringTelemetryWriter(path)
+    assert restarted_writer.publish(payload()) == 3
+    assert reader.read()["sequence"] == 3
     assert not list(tmp_path.glob("*.tmp"))
 
 
@@ -90,6 +93,8 @@ def test_reader_fresh_stale_offline_missing_and_explicit_stop(tmp_path: Path) ->
     assert not any(row["online"] for row in stale["cameras"])
     expired = reader.read(now_monotonic_ns=generated + 6_000_000_000)
     assert expired["telemetry_status"] == "offline"
+    future = reader.read(now_monotonic_ns=generated - 2_000_000_000)
+    assert future["reason"] == "telemetry_timestamp_in_future"
     path.unlink()
     missing = reader.read()
     assert missing["runtime"]["status"] == "offline"
