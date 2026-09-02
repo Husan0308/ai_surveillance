@@ -16,24 +16,39 @@ export ML_HOST="${ML_HOST:-127.0.0.1}" ML_PORT="${ML_PORT:-8001}"
 export API_HOST="${API_HOST:-127.0.0.1}" API_PORT="${API_PORT:-8000}"
 export ML_SERVICE_URL="${ML_SERVICE_URL:-http://127.0.0.1:${ML_PORT}}"
 
-children=()
+ml_pid=""
+api_pid=""
+stopping=0
 cleanup() {
   trap - INT TERM EXIT
-  for pid in "${children[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
-  for pid in "${children[@]}"; do wait "$pid" 2>/dev/null || true; done
+  stopping=1
+  for pid in "$ml_pid" "$api_pid"; do [[ -z "$pid" ]] || kill -TERM "$pid" 2>/dev/null || true; done
+  for pid in "$ml_pid" "$api_pid"; do [[ -z "$pid" ]] || wait "$pid" 2>/dev/null || true; done
 }
-trap cleanup INT TERM EXIT
+handle_signal() { stopping=1; exit 0; }
+trap handle_signal INT TERM
+trap cleanup EXIT
 
-"$APP_PY" -u -m services.ml_service.app.main &
-children+=("$!")
-"$APP_PY" -u -m services.api_service.app.main &
-children+=("$!")
+start_ml() { "$APP_PY" -u -m services.ml_service.app.main & ml_pid="$!"; }
+start_api() { "$APP_PY" -u -m services.api_service.app.main & api_pid="$!"; }
+start_ml
+start_api
 printf 'V11_MONITORING_SERVICES RESULT=STARTED ml_pid=%s api_pid=%s ml_port=%s api_port=%s\n' \
-  "${children[0]}" "${children[1]}" "$ML_PORT" "$API_PORT"
+  "$ml_pid" "$api_pid" "$ML_PORT" "$API_PORT"
 
-set +e
-wait -n "${children[@]}"
-status=$?
-set -e
-printf 'V11_MONITORING_SERVICES RESULT=STOPPING child_status=%s\n' "$status"
-exit "$status"
+while (( ! stopping )); do
+  stopped_pid=""
+  set +e
+  wait -n -p stopped_pid "$ml_pid" "$api_pid"
+  status=$?
+  set -e
+  (( stopping )) && break
+  sleep 0.5
+  if [[ "$stopped_pid" == "$ml_pid" ]]; then
+    start_ml
+    printf 'V11_MONITORING_SERVICES RESULT=RESTARTED service=ml_service pid=%s previous_status=%s\n' "$ml_pid" "$status"
+  elif [[ "$stopped_pid" == "$api_pid" ]]; then
+    start_api
+    printf 'V11_MONITORING_SERVICES RESULT=RESTARTED service=api_service pid=%s previous_status=%s\n' "$api_pid" "$status"
+  fi
+done

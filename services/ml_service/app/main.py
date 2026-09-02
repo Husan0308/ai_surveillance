@@ -57,6 +57,7 @@ def main() -> None:
         host=os.getenv("ML_HOST", "0.0.0.0"),
         port=int(os.getenv("ML_PORT", "8001")),
         reload=False,
+        access_log=False,
     )
 
 

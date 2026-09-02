@@ -127,6 +127,11 @@ class MonitoringTelemetryWriter:
     def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
         self.path = Path(path or telemetry_path())
         self.sequence = 0
+        try:
+            previous = validate_snapshot(json.loads(self.path.read_text(encoding="utf-8")))
+            self.sequence = previous["sequence"]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, MonitoringTelemetryError):
+            pass
 
     def publish(self, payload: dict[str, Any]) -> int:
         next_sequence = self.sequence + 1
@@ -189,6 +194,10 @@ class MonitoringTelemetryReader:
             )
 
         now_ns = now_monotonic_ns if now_monotonic_ns is not None else time.monotonic_ns()
+        if payload["generated_monotonic_ns"] > now_ns + 1_000_000_000:
+            return offline_snapshot(
+                self.camera_ids, status="offline", reason="telemetry_timestamp_in_future"
+            )
         age_sec = max(0.0, (now_ns - payload["generated_monotonic_ns"]) / 1_000_000_000.0)
         explicit_status = payload["runtime"].get("status")
         if explicit_status in {"offline", "stopped"}:
@@ -334,11 +343,12 @@ class RuntimeMonitoringTelemetryPublisher:
             render_age = now - last_render if last_render is not None else None
             completed = item["snapshot_completed_mono"]
             result_age_ms = (now - completed) * 1000.0 if completed > 0.0 else None
-            current_boxes = (
-                item["snapshot_box_count"]
-                if completed > 0.0 and (now - completed) <= runtime.box_stale_sec
-                else 0
-            )
+            if completed <= 0.0:
+                current_boxes = None
+            elif (now - completed) <= runtime.box_stale_sec:
+                current_boxes = item["snapshot_box_count"]
+            else:
+                current_boxes = 0
             preview_last = item["preview_last_mono"]
             preview_age_ms = (now - preview_last) * 1000.0 if preview_last > 0.0 else None
             online = bool(

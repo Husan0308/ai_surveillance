@@ -84,7 +84,7 @@
         if self.show_room:
             p.setFont(QFont("DejaVu Sans Mono", 7)); p.setPen(QColor(C['muted'])); p.drawText(12, 38, room_name(self.camera.room_id))
         dot = QColor(C['known'] if self.camera.online else (C['blue'] if connecting else C['offline'])); p.setPen(Qt.NoPen); p.setBrush(dot); p.drawEllipse(self.width()-77, 13, 7, 7)
-        p.setPen(QColor(C['muted'])); p.drawText(self.width()-65, 21, f"{self.camera.fps:.1f} fps" if self.camera.online else ("kutish" if connecting else "0.0 fps"))
+        p.setPen(QColor(C['muted'])); p.drawText(self.width()-65, 21, f"{self.camera.fps:.1f} fps" if self.camera.online else ("kutish" if connecting else "— fps"))
         occupancy_value = self.live_object_count if self.realtime_camera_id else self.occupancy
         if occupancy_value is not None:
             badge = QRectF(10, self.height() - 31, 54, 21)

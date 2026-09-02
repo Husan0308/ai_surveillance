@@ -187,7 +187,8 @@ def _update_monitoring_views(window):
 
 def _main_window_apply_monitoring_snapshot(self, payload):
     status = payload.get("telemetry_status", "offline")
-    fresh = status == "fresh" and payload.get("runtime", {}).get("status") == "live"
+    runtime_status = payload.get("runtime", {}).get("status")
+    fresh = status == "fresh" and runtime_status == "live"
     rows = {row.get("camera_id"): row for row in payload.get("cameras", [])}
     detector_enabled = payload.get("runtime", {}).get("detector_enabled")
     visible = 0
@@ -221,7 +222,10 @@ def _main_window_apply_monitoring_snapshot(self, payload):
             camera.reconnects = None
             camera.latency = None
             camera.current_box_count = None
-            camera.last_error = "Telemetry stale" if status == "stale" else "Telemetry offline"
+            if runtime_status == "degraded":
+                camera.last_error = "ML service unavailable"
+            else:
+                camera.last_error = "Telemetry stale" if status == "stale" else "Telemetry offline"
     monitoring = self.pages[0]
     monitoring.total_people_value.setText(str(visible) if fresh else "—")
     monitoring.known_people_value.setText("—")
@@ -243,6 +247,9 @@ def _main_window_monitoring_status(self, status):
         camera.render_fps = None
         camera.infer_hz = None
         camera.queue = None
+        camera.dropped = None
+        camera.reconnects = None
+        camera.latency = None
         camera.current_box_count = None
         camera.telemetry_status = status
         camera.last_error = "API disconnected" if status == "disconnected" else f"Telemetry {status}"
