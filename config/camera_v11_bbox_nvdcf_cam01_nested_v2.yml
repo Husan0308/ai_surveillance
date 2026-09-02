@@ -11,10 +11,14 @@ TargetManagement:
   enableBboxUnClipping: 0
   preserveStreamUpdateOrder: 1
   maxTargetsPerStream: 24
-  # Keep the already-tested nested-person creation threshold unchanged. NVIDIA
-  # documents that a new target is created when max IoU to existing targets is
-  # below this threshold; raising it further can create duplicate tracks.
-  minIouDiff4NewTarget: 0.80
+  # CAM-01 active-active duplicate fix. NVIDIA defines this as the duplicate/new
+  # target gate: an unmatched detector creates a new target only when its maximum
+  # IoU to existing targets is BELOW this value. The previous 0.80 was too
+  # permissive and could spawn a second ACTIVE tracker for the same person when
+  # detector/tracker box sizes shifted. 0.60 is a conservative compromise: it
+  # suppresses strongly overlapping duplicate targets while still allowing a
+  # genuinely separate nested person when overlap is sufficiently lower.
+  minIouDiff4NewTarget: 0.60
   minTrackerConfidence: 0.22
   probationAge: 3
   maxShadowTrackingAge: 50
