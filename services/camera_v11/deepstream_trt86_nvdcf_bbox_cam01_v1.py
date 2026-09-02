@@ -19,8 +19,9 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
     """Add CAM-01 local NvDCF tracking without changing the frozen detector runtime.
 
     The shared TRT detector still runs sparsely. A detector snapshot is injected
-    into DeepStream metadata exactly once per detector sequence. NvDCF then owns
-    the display-rate bbox updates between detector corrections.
+    into DeepStream metadata exactly once per detector sequence and explicitly
+    marks bInferDone on those frames. NvDCF then owns display-rate bbox updates
+    between detector corrections.
     """
 
     def __init__(self) -> None:
@@ -34,6 +35,10 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
         self._nvdcf_last_injected_sequence = {cid: 0 for cid in self.bbox_track_cameras}
         self._nvdcf_detector_corrections = {cid: 0 for cid in self.bbox_track_cameras}
         self._nvdcf_injection_errors = {cid: 0 for cid in self.bbox_track_cameras}
+        self._nvdcf_tracker_errors = {cid: 0 for cid in self.bbox_track_cameras}
+        self._nvdcf_tracker_frames = {cid: 0 for cid in self.bbox_track_cameras}
+        self._nvdcf_visible_last = {cid: -1 for cid in self.bbox_track_cameras}
+        self._nvdcf_visible_max = {cid: 0 for cid in self.bbox_track_cameras}
         super().__init__()
 
         missing = [cid for cid in self.bbox_track_cameras if cid not in self.states]
@@ -45,7 +50,7 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
             f"cameras={','.join(self.bbox_track_cameras)} tracker=nvdcf-local-only "
             f"tracker_size={self.tracker_width}x{self.tracker_height} "
             "reid=0 global_id=0 detector=shared-trt86 detector_rtsp=0 "
-            "detector_metadata=once-per-sequence osd_source=nvtracker",
+            "detector_metadata=once-per-sequence infer_done=explicit osd_source=nvtracker",
             flush=True,
         )
 
@@ -93,10 +98,15 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
         if not tracker.link(osd):
             raise RuntimeError(f"{cid}: nvtracker->osd link failed")
 
+        tracker_src = tracker.get_static_pad("src")
+        if tracker_src is None:
+            raise RuntimeError(f"{cid}: nvtracker src pad missing")
+        tracker_src.add_probe(self.Gst.PadProbeType.BUFFER, self._tracker_output_probe, cid)
+
         state.bbox_nvtracker = tracker
         print(
             "CAMERA_V11_BBOX_NVDCF_PIPELINE "
-            f"camera={cid} path=mux->detector-meta-once->rgba->nvtracker->nvdsosd "
+            f"camera={cid} path=mux->detector-meta-once->rgba->nvtracker->style->nvdsosd "
             f"tracker_size={self.tracker_width}x{self.tracker_height} config={self.tracker_config}",
             flush=True,
         )
@@ -120,19 +130,16 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
             boxes = snapshot.boxes if age <= self.box_stale_sec else ()
             sequence = snapshot.sequence
 
-        if not boxes:
-            self._nvdcf_last_injected_sequence[cid] = sequence
-            return self.Gst.PadProbeReturn.OK
-
-        scaled = map_detector_boxes_to_display(boxes, self.width, self.height)
-        if not scaled:
-            self._nvdcf_last_injected_sequence[cid] = sequence
-            return self.Gst.PadProbeReturn.OK
+        scaled = map_detector_boxes_to_display(boxes, self.width, self.height) if boxes else []
 
         try:
-            added = self.meta_bridge.add_boxes(buffer, 0, scaled)
+            # Important: apply_detector_result marks NvDsFrameMeta.bInferDone=TRUE.
+            # NvDCF relies on that bit to distinguish a real detector cycle from
+            # the display frames where our sparse external detector did not run.
+            # This call is required even for an empty detector result.
+            added = self.meta_bridge.apply_detector_result(buffer, 0, scaled)
             if added < 0:
-                raise RuntimeError(f"metadata add returned {added}")
+                raise RuntimeError(f"detector result metadata apply returned {added}")
             with self.lock:
                 state.metadata_added += int(added)
                 self._nvdcf_last_injected_sequence[cid] = sequence
@@ -142,7 +149,7 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
                 print(
                     "CAMERA_V11_BBOX_NVDCF_CORRECTION "
                     f"camera={cid} sequence={sequence} raw_boxes={len(boxes)} added={added} "
-                    f"age_ms={age * 1000.0:.1f} corrections={corrections}",
+                    f"infer_done=1 age_ms={age * 1000.0:.1f} corrections={corrections}",
                     flush=True,
                 )
         except Exception as exc:
@@ -153,6 +160,39 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
             if errors <= 5 or errors % 100 == 0:
                 print(
                     "CAMERA_V11_BBOX_NVDCF_META "
+                    f"camera={cid} warning={type(exc).__name__}:{exc} errors={errors}",
+                    flush=True,
+                )
+        return self.Gst.PadProbeReturn.OK
+
+    def _tracker_output_probe(self, _pad, info, cid: str):
+        buffer = info.get_buffer()
+        if buffer is None:
+            return self.Gst.PadProbeReturn.OK
+        try:
+            visible = self.meta_bridge.style_and_count_tracked(buffer)
+            if visible < 0:
+                raise RuntimeError(f"style_and_count_tracked returned {visible}")
+            with self.lock:
+                self._nvdcf_tracker_frames[cid] += 1
+                tracker_frames = self._nvdcf_tracker_frames[cid]
+                previous = self._nvdcf_visible_last[cid]
+                self._nvdcf_visible_last[cid] = int(visible)
+                self._nvdcf_visible_max[cid] = max(self._nvdcf_visible_max[cid], int(visible))
+            if tracker_frames <= 5 or visible != previous or tracker_frames % 100 == 0:
+                print(
+                    "CAMERA_V11_BBOX_NVDCF_TRACK "
+                    f"camera={cid} visible={visible} tracker_frames={tracker_frames} "
+                    f"visible_max={self._nvdcf_visible_max[cid]}",
+                    flush=True,
+                )
+        except Exception as exc:
+            with self.lock:
+                self._nvdcf_tracker_errors[cid] += 1
+                errors = self._nvdcf_tracker_errors[cid]
+            if errors <= 5 or errors % 100 == 0:
+                print(
+                    "CAMERA_V11_BBOX_NVDCF_TRACKER "
                     f"camera={cid} warning={type(exc).__name__}:{exc} errors={errors}",
                     flush=True,
                 )
