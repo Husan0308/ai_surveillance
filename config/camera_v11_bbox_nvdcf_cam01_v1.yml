@@ -30,31 +30,32 @@ DataAssociator:
   matchingScoreWeight4SizeSimilarity: 0.20
   matchingScoreWeight4Iou: 0.35
 
-# Keep the regular KF, but make it respond to the current DCF/detector
-# measurements instead of over-smoothing a moving person.  The previous
-# tracker-noise=8 / velocity-noise=0.10 profile visibly let the person move
-# inside an old box before the state caught up.
+# CAM-01 body-fit profile.
+# Use SIMPLE_BBOX_KF so width/height follow current detector/NvDCF measurements
+# instead of extrapolating dw/dh.  This avoids a person moving inside a stale or
+# over-tall rectangle while still retaining x/y velocity prediction.
 StateEstimator:
-  stateEstimatorType: 2
+  stateEstimatorType: 1
   processNoiseVar4Loc: 6.0
-  processNoiseVar4Size: 4.0
+  processNoiseVar4Size: 8.0
   processNoiseVar4Vel: 1.5
-  measurementNoiseVar4Detector: 2.0
-  measurementNoiseVar4Tracker: 3.0
+  measurementNoiseVar4Detector: 1.5
+  measurementNoiseVar4Tracker: 2.0
   useAspectRatio: 0
 
-# CAM-01 accuracy-first local tracking profile.  Use a smaller search-region
-# padding together with a larger feature image so the target occupies more of
-# the DCF feature map; this improves per-frame localization instead of drawing
-# a padded rectangle around a lagging estimate.
+# Accuracy-first per-frame localization.  HOG captures body/limb shape and is
+# important on CAM-01's low-color/IR-like view; ColorNames is retained as an
+# additional cue.  A small search region and larger feature map keep more of the
+# feature resolution on the actual person rather than background.
 VisualTracker:
   visualTrackerType: 1
   useColorNames: 1
-  useHog: 0
-  featureImgSizeLevel: 2
+  useHog: 1
+  useHighPrecisionFeature: 0
+  featureImgSizeLevel: 3
   featureFocusOffsetFactor_y: 0.0
-  filterLr: 0.10
-  filterChannelWeightsLr: 0.12
+  filterLr: 0.11
+  filterChannelWeightsLr: 0.14
   gaussianSigma: 0.75
   SearchRegionPaddingScale: 1
 
