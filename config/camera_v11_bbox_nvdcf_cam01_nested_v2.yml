@@ -49,6 +49,13 @@ DataAssociator:
   matchingScoreWeight4VisualSimilarity: 0.45
   matchingScoreWeight4SizeSimilarity: 0.20
   matchingScoreWeight4Iou: 0.35
+  # CAM-01 nested-person fix: NvMultiObjectTracker defaults this to 0.5, which
+  # makes the many 0.20-0.49 nested detections in our log enter the tentative
+  # detection path. That later-stage path uses IOU-only matching, exactly where
+  # nearby/inside-person boxes are ambiguous. Set the split point equal to the
+  # detector admission floor so admitted CAM-01 detections use the normal joint
+  # visual + size + IOU association path. This is CAM-01 only.
+  tentativeDetectorConfidence: 0.18
 
 StateEstimator:
   stateEstimatorType: 2
