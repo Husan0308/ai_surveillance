@@ -63,12 +63,14 @@ export V11_BBOX_DISPLAY_HOLD_FRAMES="${V11_BBOX_DISPLAY_HOLD_FRAMES:-6}"
 export V11_BBOX_DISPLAY_HOLD_SUPPRESS_IOU="${V11_BBOX_DISPLAY_HOLD_SUPPRESS_IOU:-0.50}"
 
 # CAM-05/CAM-06: use current NvDCF INACTIVE/shadow tBbox for at most 10 frames
-# (~0.5 s at 20 FPS) after an already-active ID becomes INACTIVE. The runtime
-# never feeds these display-only boxes back into nvtracker.
+# (~0.5 s at 20 FPS) after an already-active ID becomes INACTIVE. Shadow
+# confidence can legitimately dip below the active-display threshold while NvDCF
+# still keeps the target alive, so use a lower display-only floor here. The
+# recently-active + 10-frame bound + overlap guard remain the ghost protections.
 export V11_BBOX_SHADOW_DIAG_CAMERAS="${V11_BBOX_SHADOW_DIAG_CAMERAS:-CAM-05,CAM-06}"
 export V11_BBOX_SHADOW_DISPLAY_CAMERAS="${V11_BBOX_SHADOW_DISPLAY_CAMERAS:-CAM-05,CAM-06}"
 export V11_BBOX_SHADOW_DISPLAY_FRAMES="${V11_BBOX_SHADOW_DISPLAY_FRAMES:-10}"
-export V11_BBOX_SHADOW_DISPLAY_MIN_CONF="${V11_BBOX_SHADOW_DISPLAY_MIN_CONF:-0.22}"
+export V11_BBOX_SHADOW_DISPLAY_MIN_CONF="${V11_BBOX_SHADOW_DISPLAY_MIN_CONF:-0.15}"
 export V11_BBOX_SHADOW_DISPLAY_SUPPRESS_IOU="${V11_BBOX_SHADOW_DISPLAY_SUPPRESS_IOU:-0.50}"
 
 export V11_DS_YOLO_ENABLED="${V11_DS_YOLO_ENABLED:-1}"
