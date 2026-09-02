@@ -42,6 +42,12 @@ export V11_BBOX_TRACKER_WIDTH="${V11_BBOX_TRACKER_WIDTH:-512}"
 export V11_BBOX_TRACKER_HEIGHT="${V11_BBOX_TRACKER_HEIGHT:-288}"
 export V11_BBOX_TRACKER_LL_LIB="$TRACKER_LIB"
 export V11_BBOX_TRACKER_CONFIG="$TRACKER_CFG"
+# Display-only padding applied after NvDCF has already tracked the target. This
+# deliberately gives moving arms/head/feet a little room without changing the
+# detector geometry, NvDCF association state, track ID, or false-positive gate.
+export CAMERA_V2_TRACK_BOX_SIDE_MARGIN="${CAMERA_V2_TRACK_BOX_SIDE_MARGIN:-0.12}"
+export CAMERA_V2_TRACK_BOX_TOP_MARGIN="${CAMERA_V2_TRACK_BOX_TOP_MARGIN:-0.08}"
+export CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN="${CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN:-0.10}"
 export V11_DS_YOLO_ENABLED="${V11_DS_YOLO_ENABLED:-1}"
 export V11_STEP2_TRT86_PYTHON="$TRT_PY" V11_STEP2_TRT86_WORKER="$WORKER" V11_STEP2_ENGINE="$ENGINE"
 export V11_DS_YOLO_HZ="${V11_DS_YOLO_HZ:-2.0}" V11_DS_YOLO_CONF="${V11_DS_YOLO_CONF:-0.18}"
@@ -49,7 +55,7 @@ export V11_DS_YOLO_MAX_DET="${V11_DS_YOLO_MAX_DET:-20}" V11_DS_YOLO_BOX_STALE_SE
 export V11_RTSP_LATENCY_MS="${V11_RTSP_LATENCY_MS:-100}" V11_EXTRA_SURFACES="${V11_EXTRA_SURFACES:-4}" V11_RECONNECT_SEC="${V11_RECONNECT_SEC:-5}"
 "$APP_PY" -c 'import services.camera_v11.deepstream_trt86_nvdcf_bbox_cam01_v1' || fail "runtime_import_failed"
 "$APP_PY" -c 'from services.ml_service.app.config import load_settings; rows=load_settings().cameras; c=next((x for x in rows if x.camera_id=="CAM-01"), None); assert c and c.username and c.password' || fail "camera_credentials_unresolved"
-printf 'V11_BBOX_NVDCF_CAM01_PREFLIGHT RESULT=PASS branch=%s camera=CAM-01 rtsp_sources=1 detector_workers=1 detector_hz=%s raw_conf=%s tracker=nvdcf tracker_size=%sx%s reid=0 config=%s trt=%s log=%s\n' "$BRANCH_EXPECTED" "$V11_DS_YOLO_HZ" "$V11_DS_YOLO_CONF" "$V11_BBOX_TRACKER_WIDTH" "$V11_BBOX_TRACKER_HEIGHT" "$TRACKER_CFG" "$TRT_VERSION" "$LOG"
+printf 'V11_BBOX_NVDCF_CAM01_PREFLIGHT RESULT=PASS branch=%s camera=CAM-01 rtsp_sources=1 detector_workers=1 detector_hz=%s raw_conf=%s tracker=nvdcf tracker_size=%sx%s reid=0 display_margin=%s/%s/%s config=%s trt=%s log=%s\n' "$BRANCH_EXPECTED" "$V11_DS_YOLO_HZ" "$V11_DS_YOLO_CONF" "$V11_BBOX_TRACKER_WIDTH" "$V11_BBOX_TRACKER_HEIGHT" "$CAMERA_V2_TRACK_BOX_SIDE_MARGIN" "$CAMERA_V2_TRACK_BOX_TOP_MARGIN" "$CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN" "$TRACKER_CFG" "$TRT_VERSION" "$LOG"
 : >"$LOG"
 exec > >(trap '' INT TERM; tee "$LOG") 2>&1
 exec "$APP_PY" -u -m services.camera_v11.deepstream_trt86_nvdcf_bbox_cam01_v1
