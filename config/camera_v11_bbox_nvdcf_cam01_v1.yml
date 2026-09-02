@@ -18,9 +18,11 @@ TargetManagement:
   # create ghosts, so do not push this below 0.22 without a dedicated test.
   minTrackerConfidence: 0.22
   probationAge: 7
-  # Give a temporarily occluded person a few more display frames to recover and
-  # re-associate before termination.
-  maxShadowTrackingAge: 18
+  # Desk/column occlusion recovery: keep an already-active target in shadow
+  # tracking long enough to survive a short full occlusion and re-associate with
+  # the same ID when it becomes visible again. NVIDIA's accuracy profile uses a
+  # value around 49; use 50 here instead of the previous 18.
+  maxShadowTrackingAge: 50
   earlyTerminationAge: 12
   # Export shadow-track misc metadata for overlap diagnostics / recovery. This
   # does not feed enlarged display boxes back into association.
