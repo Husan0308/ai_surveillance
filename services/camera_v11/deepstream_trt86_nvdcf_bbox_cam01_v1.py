@@ -39,6 +39,8 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
         self._nvdcf_tracker_frames = {cid: 0 for cid in self.bbox_track_cameras}
         self._nvdcf_visible_last = {cid: -1 for cid in self.bbox_track_cameras}
         self._nvdcf_visible_max = {cid: 0 for cid in self.bbox_track_cameras}
+        self._nvdcf_overlap_gap_events = {cid: 0 for cid in self.bbox_track_cameras}
+        self._nvdcf_last_ids = {cid: () for cid in self.bbox_track_cameras}
         super().__init__()
 
         missing = [cid for cid in self.bbox_track_cameras if cid not in self.states]
@@ -50,7 +52,8 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
             f"cameras={','.join(self.bbox_track_cameras)} tracker=nvdcf-local-only "
             f"tracker_size={self.tracker_width}x{self.tracker_height} "
             "reid=0 global_id=0 detector=shared-trt86 detector_rtsp=0 "
-            "detector_metadata=once-per-sequence infer_done=explicit osd_source=nvtracker",
+            "detector_metadata=once-per-sequence infer_done=explicit osd_source=nvtracker "
+            "overlap_suppression=0",
             flush=True,
         )
 
@@ -179,11 +182,43 @@ class V11DeepStreamTRT86NvDCFBBoxCam01V1(V11DeepStreamTRT86MultiCameraUIV1):
                 previous = self._nvdcf_visible_last[cid]
                 self._nvdcf_visible_last[cid] = int(visible)
                 self._nvdcf_visible_max[cid] = max(self._nvdcf_visible_max[cid], int(visible))
+
+            inspect_ids = tracker_frames <= 5 or visible != previous or tracker_frames % 20 == 0
+            if inspect_ids:
+                tracks = self.meta_bridge.copy_tracks(buffer, max_rows=32)
+                track_ids = tuple(sorted({int(row["object_id"]) for row in tracks}))
+                now = time.monotonic()
+                with self.lock:
+                    state = self.states[cid]
+                    snapshot = state.latest_snapshot
+                    detector_age = (
+                        now - snapshot.completed_mono if snapshot.completed_mono > 0 else 999.0
+                    )
+                    detector_visible = (
+                        len(snapshot.boxes) if detector_age <= self.box_stale_sec else -1
+                    )
+                    if detector_visible >= 2 and visible < detector_visible:
+                        self._nvdcf_overlap_gap_events[cid] += 1
+                    overlap_gaps = self._nvdcf_overlap_gap_events[cid]
+                    ids_changed = track_ids != self._nvdcf_last_ids[cid]
+                    self._nvdcf_last_ids[cid] = track_ids
+
+                if ids_changed or detector_visible >= 2 or tracker_frames <= 5 or tracker_frames % 100 == 0:
+                    ids_text = ",".join(str(value) for value in track_ids) if track_ids else "none"
+                    print(
+                        "CAMERA_V11_BBOX_NVDCF_IDS "
+                        f"camera={cid} tracker_visible={visible} detector_visible={detector_visible} "
+                        f"ids={ids_text} overlap_gap_events={overlap_gaps} "
+                        f"detector_age_ms={detector_age * 1000.0:.1f} tracker_frames={tracker_frames}",
+                        flush=True,
+                    )
+
             if tracker_frames <= 5 or visible != previous or tracker_frames % 100 == 0:
                 print(
                     "CAMERA_V11_BBOX_NVDCF_TRACK "
                     f"camera={cid} visible={visible} tracker_frames={tracker_frames} "
-                    f"visible_max={self._nvdcf_visible_max[cid]}",
+                    f"visible_max={self._nvdcf_visible_max[cid]} "
+                    f"overlap_gap_events={self._nvdcf_overlap_gap_events[cid]}",
                     flush=True,
                 )
         except Exception as exc:
