@@ -42,8 +42,8 @@ export V11_UI_PREVIEW_PATH_CAM03="${V11_UI_PREVIEW_PATH_CAM03:-/dev/shm/v11_ui_p
 export V11_UI_PREVIEW_PATH_CAM04="${V11_UI_PREVIEW_PATH_CAM04:-/dev/shm/v11_ui_preview_cam04_v1.bin}"
 export V11_UI_PREVIEW_PATH_CAM05="${V11_UI_PREVIEW_PATH_CAM05:-/dev/shm/v11_ui_preview_cam05_v1.bin}"
 export V11_BBOX_TRACK_CAMERAS="CAM-01,CAM-02,CAM-03,CAM-04,CAM-05"
-# CAM-05 rollout is intentionally additive: keep the accepted CAM-01..04
-# detector, tracker, display-confidence, reassociation and latency profile unchanged.
+# Keep the accepted CAM-01..05 detector/NvDCF profile frozen. The continuity
+# layer below is display-only and runs after nvtracker, immediately before OSD.
 export V11_BBOX_TRACKER_WIDTH="${V11_BBOX_TRACKER_WIDTH:-640}"
 export V11_BBOX_TRACKER_HEIGHT="${V11_BBOX_TRACKER_HEIGHT:-384}"
 export V11_BBOX_TRACKER_LL_LIB="$TRACKER_LIB"
@@ -52,14 +52,18 @@ export CAMERA_V2_TRACK_BOX_SIDE_MARGIN="0.0"
 export CAMERA_V2_TRACK_BOX_TOP_MARGIN="0.0"
 export CAMERA_V2_TRACK_BOX_BOTTOM_MARGIN="0.0"
 export CAMERA_V2_MIN_DISPLAY_TRACK_CONF="${CAMERA_V2_MIN_DISPLAY_TRACK_CONF:-0.22}"
+# Six display frames (~0.30 s at 20 FPS) bridge only short metadata gaps.
+# A 0.50 IoU guard prevents drawing the held old ID on top of a current box.
+export V11_BBOX_DISPLAY_HOLD_FRAMES="${V11_BBOX_DISPLAY_HOLD_FRAMES:-6}"
+export V11_BBOX_DISPLAY_HOLD_SUPPRESS_IOU="${V11_BBOX_DISPLAY_HOLD_SUPPRESS_IOU:-0.50}"
 export V11_DS_YOLO_ENABLED="${V11_DS_YOLO_ENABLED:-1}"
 export V11_STEP2_TRT86_PYTHON="$TRT_PY" V11_STEP2_TRT86_WORKER="$WORKER" V11_STEP2_ENGINE="$ENGINE"
 export V11_DS_YOLO_HZ="${V11_DS_YOLO_HZ:-2.0}" V11_DS_YOLO_CONF="${V11_DS_YOLO_CONF:-0.18}"
 export V11_DS_YOLO_MAX_DET="${V11_DS_YOLO_MAX_DET:-20}" V11_DS_YOLO_BOX_STALE_SEC="${V11_DS_YOLO_BOX_STALE_SEC:-0.80}"
 export V11_RTSP_LATENCY_MS="${V11_RTSP_LATENCY_MS:-100}" V11_EXTRA_SURFACES="${V11_EXTRA_SURFACES:-4}" V11_RECONNECT_SEC="${V11_RECONNECT_SEC:-5}"
-"$APP_PY" -c 'import services.camera_v11.deepstream_trt86_nvdcf_bbox_cam01_v1' || fail "runtime_import_failed"
+"$APP_PY" -c 'import services.camera_v11.deepstream_trt86_nvdcf_bbox_continuity_v1' || fail "runtime_import_failed"
 "$APP_PY" -c 'from services.ml_service.app.config import load_settings; rows=load_settings().cameras; wanted={"CAM-01","CAM-02","CAM-03","CAM-04","CAM-05"}; found={c.camera_id for c in rows if c.username and c.password}; assert wanted <= found' || fail "camera_credentials_unresolved"
-printf 'V11_BBOX_NVDCF_CAM01_CAM02_CAM03_CAM04_CAM05_PREFLIGHT RESULT=PASS branch=%s cameras=CAM-01,CAM-02,CAM-03,CAM-04,CAM-05 rtsp_sources=5 detector_workers=1 detector_hz=%s raw_conf=%s tracker=nvdcf tracker_size=%sx%s reid=0 display_margin=0/0/0 display_track_conf=%s profile=responsive-dynamic config=%s trt=%s log=%s\n' "$BRANCH_EXPECTED" "$V11_DS_YOLO_HZ" "$V11_DS_YOLO_CONF" "$V11_BBOX_TRACKER_WIDTH" "$V11_BBOX_TRACKER_HEIGHT" "$CAMERA_V2_MIN_DISPLAY_TRACK_CONF" "$TRACKER_CFG" "$TRT_VERSION" "$LOG"
+printf 'V11_BBOX_NVDCF_CAM01_CAM02_CAM03_CAM04_CAM05_PREFLIGHT RESULT=PASS branch=%s cameras=CAM-01,CAM-02,CAM-03,CAM-04,CAM-05 rtsp_sources=5 detector_workers=1 detector_hz=%s raw_conf=%s tracker=nvdcf tracker_size=%sx%s reid=0 display_margin=0/0/0 display_track_conf=%s display_hold_frames=%s display_hold_iou=%s profile=responsive-dynamic config=%s trt=%s log=%s\n' "$BRANCH_EXPECTED" "$V11_DS_YOLO_HZ" "$V11_DS_YOLO_CONF" "$V11_BBOX_TRACKER_WIDTH" "$V11_BBOX_TRACKER_HEIGHT" "$CAMERA_V2_MIN_DISPLAY_TRACK_CONF" "$V11_BBOX_DISPLAY_HOLD_FRAMES" "$V11_BBOX_DISPLAY_HOLD_SUPPRESS_IOU" "$TRACKER_CFG" "$TRT_VERSION" "$LOG"
 : >"$LOG"
 exec > >(trap '' INT TERM; tee "$LOG") 2>&1
-exec "$APP_PY" -u -m services.camera_v11.deepstream_trt86_nvdcf_bbox_cam01_v1
+exec "$APP_PY" -u -m services.camera_v11.deepstream_trt86_nvdcf_bbox_continuity_v1
