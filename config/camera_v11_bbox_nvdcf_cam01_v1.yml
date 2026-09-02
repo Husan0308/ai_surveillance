@@ -7,12 +7,22 @@ TargetManagement:
   enableBboxUnClipping: 0
   preserveStreamUpdateOrder: 1
   maxTargetsPerStream: 24
-  minIouDiff4NewTarget: 0.55
-  minTrackerConfidence: 0.28
+  # Favor a distinct tracker for a real second person even when the new
+  # detector box overlaps heavily with an existing person box.  NVIDIA creates
+  # a new target when max IoU to existing targets is below this threshold, so a
+  # modest increase helps nested/overlapping people without going aggressive.
+  minIouDiff4NewTarget: 0.65
+  # Keep partial-occlusion tracks active a little longer.  Too-low values can
+  # create ghosts, so do not push this below 0.22 without a dedicated test.
+  minTrackerConfidence: 0.22
   probationAge: 7
-  maxShadowTrackingAge: 14
+  # Give a temporarily occluded person a few more display frames to recover and
+  # re-associate before termination.
+  maxShadowTrackingAge: 18
   earlyTerminationAge: 12
-  outputShadowTracks: 0
+  # Export shadow-track misc metadata for overlap diagnostics / recovery.  This
+  # does not feed enlarged display boxes back into association.
+  outputShadowTracks: 1
 
 TrajectoryManagement:
   useUniqueID: 0
