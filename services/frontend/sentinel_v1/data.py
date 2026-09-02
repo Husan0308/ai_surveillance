@@ -37,10 +37,16 @@ class Camera:
     enabled: bool = True
     last_error: str | None = None
     frame_age: int = 0
-    queue: int = 0
-    dropped: int = 0
-    reconnects: int = 0
-    latency: int = 0
+    queue: int | None = None
+    dropped: int | None = None
+    reconnects: int | None = None
+    latency: int | None = None
+    source_fps: float | None = None
+    render_fps: float | None = None
+    infer_hz: float | None = None
+    current_box_count: int | None = None
+    detector_enabled: bool | None = None
+    telemetry_status: str = "offline"
     username: str = ""
     password: str = ""
 

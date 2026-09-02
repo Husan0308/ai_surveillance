@@ -75,14 +75,16 @@ class FullscreenCameraGrid(QDialog):
         controls.addLayout(title_box)
         controls.addStretch()
 
-        inside = [person for person in people if person.in_building]
-        known = sum(person.known for person in inside)
-        unknown = len(inside) - known
         online = sum(camera.online for camera in CAMERAS)
+        visible = sum(
+            camera.current_box_count or 0
+            for camera in CAMERAS
+            if camera.telemetry_status == "fresh"
+        )
         for text, tone in [
-            (f"TOTAL  {len(inside)}", C["primary"]),
-            (f"KNOWN  {known}", C["known"]),
-            (f"UNKNOWN  {unknown}", C["unknown"]),
+            (f"DETECTIONS  {visible}", C["primary"]),
+            ("KNOWN  —", C["known"]),
+            ("UNKNOWN  —", C["unknown"]),
             (f"ONLINE  {online}/{len(CAMERAS)}", C["blue"]),
         ]:
             badge = label(text)
@@ -103,12 +105,11 @@ class FullscreenCameraGrid(QDialog):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(8)
         for index, camera in enumerate(CAMERAS):
-            count = len([person for person in inside if person.room_id == camera.room_id])
             view = CameraView(
                 camera,
-                people,
+                [],
                 show_room=True,
-                occupancy=count,
+                occupancy=camera.current_box_count,
                 display_name=f"CAM-{index + 1:02d}  ·  {camera.name}",
                 heatmap_enabled=heatmap_enabled,
             )
@@ -128,17 +129,15 @@ class FullscreenCameraGrid(QDialog):
         activity_title = QVBoxLayout()
         activity_title.setSpacing(2)
         activity_title.addWidget(label("Kirish / Chiqish", "sectionTitle"))
-        entry_count = sum(event.type == "entry" for event in EVENTS)
-        exit_count = sum(event.type == "exit" for event in EVENTS)
-        activity_title.addWidget(label(f"{entry_count} kirish · {exit_count} chiqish", "muted"))
+        activity_title.addWidget(label("Identity/event telemetry is not active", "muted"))
         activity_head.addLayout(activity_title)
         activity_head.addStretch()
         activity_head.addWidget(label("LIVE", "eyebrow", C["primary"]))
         activity_layout.addLayout(activity_head)
         activity_layout.addSpacing(7)
-        people_by_id = {person.id: person for person in people}
-        for event in EVENTS[:6]:
-            activity_layout.addWidget(self.activity_item(event, people_by_id.get(event.person_id)))
+        unavailable = label("Realtime events: —", "mono", C["muted"])
+        unavailable.setAlignment(Qt.AlignCenter)
+        activity_layout.addWidget(unavailable)
         activity_layout.addStretch()
         workspace.addWidget(activity_panel, 1)
         layout.addLayout(workspace, 1)
@@ -196,10 +195,6 @@ class MonitoringPage(QWidget):
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(22, 10, 22, 12)
         self.layout.setSpacing(14)
-        inside = [p for p in PEOPLE if p.in_building]
-        known = len([p for p in inside if p.known])
-        unknown = len(inside) - known
-
         self.camera_grid = QGridLayout()
         self.camera_grid.setContentsMargins(0, 0, 0, 0)
         self.camera_grid.setHorizontalSpacing(10)
@@ -216,11 +211,11 @@ class MonitoringPage(QWidget):
         summary_top = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        title_box.addWidget(label("PEOPLE INSIDE", "eyebrow", C["primary"]))
-        title_box.addWidget(label("Hozir binodagi odamlar", "muted"))
+        title_box.addWidget(label("VISIBLE DETECTIONS", "eyebrow", C["primary"]))
+        title_box.addWidget(label("Per-camera boxes · unique people emas", "muted"))
         summary_top.addLayout(title_box)
         summary_top.addStretch()
-        self.total_people_value = label(str(len(inside)), "metric", C["primary"])
+        self.total_people_value = label("—", "metric", C["primary"])
         summary_top.addWidget(self.total_people_value)
         summary_layout.addLayout(summary_top)
 
@@ -229,8 +224,8 @@ class MonitoringPage(QWidget):
         self.known_people_value = None
         self.unknown_people_value = None
         for heading_text, value, tone in [
-            ("KNOWN", known, C["known"]),
-            ("UNKNOWN", unknown, C["unknown"]),
+            ("KNOWN", "—", C["known"]),
+            ("UNKNOWN", "—", C["unknown"]),
         ]:
             metric = QFrame()
             metric.setObjectName("identityMetric")
@@ -257,12 +252,12 @@ class MonitoringPage(QWidget):
         recent_head = QHBoxLayout()
         heading = QVBoxLayout()
         heading.setSpacing(2)
-        heading.addWidget(label("Recent Entries", "sectionTitle"))
-        heading.addWidget(label("Kirish paytidagi bbox kadrlar", "muted"))
+        heading.addWidget(label("Realtime identity/events", "sectionTitle"))
+        heading.addWidget(label("Bu milestone’da faol emas", "muted"))
         recent_head.addLayout(heading)
         recent_head.addStretch()
-        entry_events = [event for event in EVENTS if event.type == "entry"]
-        recent_head.addWidget(label(f"{len(entry_events)} entry", "mono"))
+        self.recent_status_value = label("TELEMETRY —", "mono")
+        recent_head.addWidget(self.recent_status_value)
         recent_layout.addLayout(recent_head)
         recent_layout.addSpacing(7)
         self.recent_entries = QVBoxLayout()
@@ -277,11 +272,9 @@ class MonitoringPage(QWidget):
     def refresh_cameras(self):
         clear_layout(self.camera_grid)
         self.camera_views = []
-        inside = [person for person in PEOPLE if person.in_building]
-        known_count = sum(person.known for person in inside)
-        self.total_people_value.setText(str(len(inside)))
-        self.known_people_value.setText(str(known_count))
-        self.unknown_people_value.setText(str(len(inside) - known_count))
+        self.total_people_value.setText("—")
+        self.known_people_value.setText("—")
+        self.unknown_people_value.setText("—")
         if not CAMERAS:
             empty = Panel()
             empty_layout = panel_layout(empty)
@@ -297,4 +290,3 @@ class MonitoringPage(QWidget):
             return
 
         for index, camera in enumerate(CAMERAS):
-            occupancy = len([person for person in inside if person.room_id == camera.room_id])
