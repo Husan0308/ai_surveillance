@@ -8,11 +8,11 @@ TargetManagement:
   preserveStreamUpdateOrder: 1
   maxTargetsPerStream: 24
   # Favor a distinct tracker for a real second person even when the new
-  # detector box overlaps heavily with an existing person box.  NVIDIA creates
+  # detector box overlaps heavily with an existing person box. NVIDIA creates
   # a new target when max IoU to existing targets is below this threshold, so a
   # modest increase helps nested/overlapping people without going aggressive.
   minIouDiff4NewTarget: 0.65
-  # Keep partial-occlusion tracks active a little longer.  Too-low values can
+  # Keep partial-occlusion tracks active a little longer. Too-low values can
   # create ghosts, so do not push this below 0.22 without a dedicated test.
   minTrackerConfidence: 0.22
   probationAge: 7
@@ -20,7 +20,7 @@ TargetManagement:
   # re-associate before termination.
   maxShadowTrackingAge: 18
   earlyTerminationAge: 12
-  # Export shadow-track misc metadata for overlap diagnostics / recovery.  This
+  # Export shadow-track misc metadata for overlap diagnostics / recovery. This
   # does not feed enlarged display boxes back into association.
   outputShadowTracks: 1
 
@@ -41,7 +41,7 @@ DataAssociator:
   matchingScoreWeight4Iou: 0.35
 
 # Keep the regular KF, but make it respond to the current DCF/detector
-# measurements instead of over-smoothing a moving person.  The previous
+# measurements instead of over-smoothing a moving person. The previous
 # tracker-noise=8 / velocity-noise=0.10 profile visibly let the person move
 # inside an old box before the state caught up.
 StateEstimator:
@@ -53,14 +53,15 @@ StateEstimator:
   measurementNoiseVar4Tracker: 3.0
   useAspectRatio: 0
 
-# CAM-01 accuracy-first local tracking profile.  Use a smaller search-region
-# padding together with a larger feature image so the target occupies more of
-# the DCF feature map; this improves per-frame localization instead of drawing
-# a padded rectangle around a lagging estimate.
+# Accuracy-first local tracking profile. Keep the small search region and
+# featureImgSizeLevel=2, but add HOG to ColorNames for better discrimination
+# when two people overlap or one person is inside another person's bbox.
+# This is the only behavior change in this step; feature size stays unchanged
+# to limit the extra GPU cost.
 VisualTracker:
   visualTrackerType: 1
   useColorNames: 1
-  useHog: 0
+  useHog: 1
   featureImgSizeLevel: 2
   featureFocusOffsetFactor_y: 0.0
   filterLr: 0.10
