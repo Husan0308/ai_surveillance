@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from services.camera_v11.deepstream_trt86_nvdcf_bbox_shadow_display_v1 import (
-    V11DeepStreamTRT86NvDCFShadowDisplayV1,
+from services.camera_v11.deepstream_trt86_nvdcf_bbox_active_dedupe_v1 import (
+    V11DeepStreamTRT86NvDCFActiveDedupeV1,
 )
 
 
@@ -13,13 +13,14 @@ DEFAULT_CAM01_NESTED_CONFIG = str(
 )
 
 
-class V11DeepStreamTRT86NvDCFBBoxCam01NestedV2(V11DeepStreamTRT86NvDCFShadowDisplayV1):
-    """Apply a CAM-01-only NvDCF candidacy profile without touching CAM-02..06.
+class V11DeepStreamTRT86NvDCFBBoxCam01NestedV2(V11DeepStreamTRT86NvDCFActiveDedupeV1):
+    """Apply CAM-01 nested-person tracking plus detector-guided active dedupe.
 
-    The six-camera detector, shadow-display behavior, association weights, HOG,
-    ReAssoc, tracker resolution, and all other accepted settings remain unchanged.
-    Only CAM-01 gets a separate ll-config-file whose detector confidence floor is
-    aligned with the external detector's 0.18 admission threshold.
+    CAM-01 keeps its separate NvDCF candidacy profile. The downstream active-dedupe
+    layer removes a duplicate ACTIVE OSD box only when two strongly-overlapping
+    tracks are not supported by two distinct recent detector-person boxes. This
+    preserves two real nested people while enforcing one displayed box per person.
+    CAM-02..06 keep their previously accepted behavior.
     """
 
     def __init__(self) -> None:
@@ -30,7 +31,8 @@ class V11DeepStreamTRT86NvDCFBBoxCam01NestedV2(V11DeepStreamTRT86NvDCFShadowDisp
         print(
             "CAMERA_V11_BBOX_CAM01_NESTED_V2_ARCH "
             f"camera=CAM-01 config={self.cam01_nested_config} "
-            "detector_floor=0.18 shared_profile_unchanged=1 tracker_feedback=normal",
+            "detector_floor=0.18 active_dedupe=detector-guided shared_profile_unchanged=1 "
+            "tracker_feedback=normal",
             flush=True,
         )
 
