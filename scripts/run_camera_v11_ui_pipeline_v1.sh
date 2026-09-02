@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
-BRANCH_EXPECTED="rebuild/service-architecture-v11-ui-sentinel-cam01-cam06-v1-20260902"
+BRANCH_EXPECTED="rebuild/service-architecture-v11-monitoring-realtime-v1-20260902"
 UI_CAMERAS="${V11_UI_STAGE_CAMERAS:-CAM-01,CAM-02,CAM-03,CAM-04,CAM-05,CAM-06}"
 case "$UI_CAMERAS" in
   CAM-01|CAM-01,CAM-02|CAM-01,CAM-02,CAM-03|CAM-01,CAM-02,CAM-03,CAM-04|CAM-01,CAM-02,CAM-03,CAM-04,CAM-05|CAM-01,CAM-02,CAM-03,CAM-04,CAM-05,CAM-06) ;;

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 
+from services.camera_v11.monitoring_telemetry_ipc_v1 import DEFAULT_CAMERA_IDS, offline_snapshot
 from services.api_service.app.config import load_settings
 from services.api_service.app.ml_client import MLServiceClient, MLServiceUnavailable
 
@@ -68,6 +70,35 @@ async def cameras(request: Request) -> dict:
         return await get_ml_client(request).cameras()
     except MLServiceUnavailable as exc:
         raise service_unavailable(exc) from exc
+
+
+def monitoring_degraded(reason: str) -> dict:
+    return offline_snapshot(
+        DEFAULT_CAMERA_IDS, status="degraded", reason=f"ml_service_unavailable:{reason}"
+    )
+
+
+@app.get("/api/v1/monitoring/snapshot")
+async def monitoring_snapshot(request: Request) -> dict:
+    try:
+        return await get_ml_client(request).monitoring_snapshot()
+    except MLServiceUnavailable as exc:
+        return monitoring_degraded(str(exc))
+
+
+@app.websocket("/ws/v1/monitoring")
+async def monitoring_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    try:
+        while True:
+            try:
+                payload = await websocket.app.state.ml_client.monitoring_snapshot()
+            except MLServiceUnavailable as exc:
+                payload = monitoring_degraded(str(exc))
+            await websocket.send_json(payload)
+            await asyncio.sleep(0.5)
+    except (WebSocketDisconnect, RuntimeError):
+        return
 
 
 def main() -> None:

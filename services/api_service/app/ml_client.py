@@ -27,6 +27,9 @@ class MLServiceClient:
     async def cameras(self) -> dict[str, Any]:
         return await self._get_json("/cameras")
 
+    async def monitoring_snapshot(self) -> dict[str, Any]:
+        return await self._get_json("/api/v1/monitoring/snapshot")
+
     async def _get_json(self, path: str) -> dict[str, Any]:
         try:
             response = await self._client.get(path)

@@ -1,76 +1,53 @@
 from __future__ import annotations
 
 import os
-from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
 
+from services.camera_v11.monitoring_telemetry_ipc_v1 import MonitoringTelemetryReader
 from services.ml_service.app.config import load_settings
-from services.ml_service.app.deepstream.pipeline import DeepStreamRuntime
 
 settings = load_settings()
-runtime = DeepStreamRuntime(settings)
+camera_ids = tuple(camera.camera_id for camera in settings.cameras)
+telemetry = MonitoringTelemetryReader(camera_ids=camera_ids)
 
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    runtime.start()
-    try:
-        yield
-    finally:
-        runtime.stop()
-
-
-app = FastAPI(title="AI Surveillance ML Service", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="AI Surveillance ML Service", version="0.4.0")
 
 
 @app.get("/health")
 def health() -> dict:
-    snapshot = runtime.snapshot()
+    snapshot = telemetry.read()
     return {
         "service": "ml_service",
-        "status": snapshot.state.value,
-        "camera_count": snapshot.camera_count,
-        "online_camera_count": snapshot.online_camera_count,
-        "last_error": snapshot.last_error,
+        "status": "ok",
+        "monitoring_status": snapshot["telemetry_status"],
+        "camera_count": len(snapshot["cameras"]),
+        "online_camera_count": sum(bool(row["online"]) for row in snapshot["cameras"]),
     }
 
 
 @app.get("/cameras")
 def cameras() -> dict:
-    rows = runtime.camera_metrics()
+    rows = telemetry.read()["cameras"]
     return {"count": len(rows), "cameras": rows}
+
+
+@app.get("/api/v1/monitoring/snapshot")
+def monitoring_snapshot() -> dict:
+    return telemetry.read()
 
 
 @app.get("/video/{camera_id}")
 def video(camera_id: str):
-    if not runtime.has_camera(camera_id):
+    if camera_id not in camera_ids:
         raise HTTPException(status_code=404, detail=f"Unknown camera: {camera_id}")
-
-    def stream():
-        last_version = 0
-        try:
-            while True:
-                jpeg, version = runtime.wait_jpeg(camera_id, last_version, timeout=1.0)
-                if jpeg is None or version <= last_version:
-                    continue
-                last_version = version
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n"
-                    + f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
-                    + jpeg
-                    + b"\r\n"
-                )
-        except GeneratorExit:
-            return
-
-    return StreamingResponse(
-        stream(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Video is transported directly from the V11 runtime to Sentinel via "
+            "post-OSD shared memory; ml_service does not open or proxy camera streams"
+        ),
     )
 
 
