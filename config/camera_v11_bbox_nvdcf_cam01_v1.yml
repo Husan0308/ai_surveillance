@@ -7,11 +7,13 @@ TargetManagement:
   enableBboxUnClipping: 0
   preserveStreamUpdateOrder: 1
   maxTargetsPerStream: 24
-  # Favor a distinct tracker for a real second person even when the new
-  # detector box overlaps heavily with an existing person box. NVIDIA creates
-  # a new target when max IoU to existing targets is below this threshold, so a
-  # modest increase helps nested/overlapping people without going aggressive.
-  minIouDiff4NewTarget: 0.65
+  # Nested-person step: create a distinct target even when a real second-person
+  # detector box overlaps strongly with an existing target. NvMultiObjectTracker
+  # only instantiates an unmatched detector object when its maximum IoU to an
+  # existing target is below this threshold. Raising 0.65 -> 0.80 is targeted at
+  # the fresh nested_unmatched events seen on CAM-01/CAM-02. Do not raise further
+  # until duplicate/ghost-track behavior is measured.
+  minIouDiff4NewTarget: 0.80
   # Keep partial-occlusion tracks active a little longer. Too-low values can
   # create ghosts, so do not push this below 0.22 without a dedicated test.
   minTrackerConfidence: 0.22
