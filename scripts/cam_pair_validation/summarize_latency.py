@@ -49,6 +49,7 @@ def main():
     pipeline = {}
     elements = {}
     total = 0
+    invalid = 0
 
     for line in args.pipeline_log.read_text(errors="replace").splitlines():
         m = EVENT_RE.search(line)
@@ -69,6 +70,14 @@ def main():
         kind = m.group("kind")
         total += 1
 
+        # GST_CLOCK_TIME_NONE is UINT64_MAX. Aggregators can also yield
+        # nonsensical wraparound values in element tracing; do not let those
+        # corrupt percentiles/means. A single element taking >=10 seconds in
+        # this 20 FPS graph is invalid telemetry, not a useful latency sample.
+        if time_ns <= 0 or time_ns >= 10_000_000_000:
+            invalid += 1
+            continue
+
         if kind == "latency":
             src = SRC_RE.search(line)
             sink = SINK_RE.search(line)
@@ -80,9 +89,10 @@ def main():
             elements.setdefault(key, []).append(time_ns)
 
     report = {
-        "status": "PASS" if pipeline else "NO_PIPELINE_LATENCY_SAMPLES",
+        "status": "PASS_PIPELINE" if pipeline else ("PASS_ELEMENT_ONLY" if elements else "NO_LATENCY_SAMPLES"),
         "warmup_sec": args.warmup_sec,
         "total_latency_events": total,
+        "invalid_latency_events_ignored": invalid,
         "pipeline": {k: summarize(v) for k, v in sorted(pipeline.items())},
         "elements": {k: summarize(v) for k, v in sorted(elements.items())},
         "note": (
@@ -92,7 +102,7 @@ def main():
         ),
     }
     print(json.dumps(report, indent=2))
-    return 0 if pipeline else 1
+    return 0 if (pipeline or elements) else 1
 
 
 if __name__ == "__main__":
