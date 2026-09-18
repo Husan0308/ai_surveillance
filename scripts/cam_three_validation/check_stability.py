@@ -67,7 +67,7 @@ def assess(source_rows, group_rows, text, gpu):
                 failures.append("GROUP: frozen output/PTS")
                 break
         # nvstreammux pushes when a batch fills OR batched-push-timeout expires.
-        # With two asynchronous live sources and sync-inputs=false, downstream
+        # With three asynchronous live sources and sync-inputs=false, downstream
         # buffer cadence is not required to equal the per-camera frame rate.
         # Per-camera FPS above is the authoritative rate gate.
         missing_pair_fields = [
