@@ -59,8 +59,7 @@ static int interrupt_seconds = 12;
 static bool interruption_started = false;
 static bool interruption_resumed = false;
 static bool interruption_reported = false;
-static gint64 interruption_start_us = 0;
-static guint64 target_start_frames = 0, peer_start_frames = 0, target_resume_frames = 0;
+static guint64 target_start_frames = 0, peer_start_frames = 0, target_resume_frames = 0, peer_resume_frames = 0;
 
 static void safe_print(const std::string &prefix, const std::string &detail) {
   std::string text = detail;
@@ -281,6 +280,8 @@ static SourceCtx *peer_source(SourceCtx *target) {
 static gboolean resume_interrupted(gpointer data) {
   auto *target = static_cast<SourceCtx*>(data);
   target_resume_frames = target->input.frames.load();
+  SourceCtx *peer = peer_source(target);
+  peer_resume_frames = peer ? peer->input.frames.load() : 0;
   event(target, "ISOLATION", "restoring source to PLAYING");
   if (gst_element_set_state(target->source, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
     fail("failed to restore isolated source");
@@ -350,7 +351,6 @@ static gboolean tick(gpointer) {
     }
     target_start_frames = target->input.frames.load();
     peer_start_frames = peer->input.frames.load();
-    interruption_start_us = now;
     interruption_started = true;
     event(target, "ISOLATION", "setting only this source to NULL");
     gst_element_set_state(target->source, GST_STATE_NULL);
