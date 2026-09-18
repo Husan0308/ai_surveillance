@@ -20,7 +20,9 @@ CAM-02 nvurisrcbin -> NVDEC -> NVMM -> bounded queue -> mux.sink_1
                                   nvmultistreamtiler (1 x 2)
                                                     |
                                                     v
-                                      NVMM -> NVENC -> MKV
+                                      NVMM -> NVENC -> tee
+                                                       |-> bounded file queue -> MKV
+                                                       |-> leaky preview queue -> MPEG-TS/UDP -> host ffplay
 ```
 
 The two source IDs are fixed:
@@ -39,7 +41,11 @@ uses one mux with batch-size 2 rather than two independent pipelines. Live RTSP
 sources use `live-source=true`; the pair starts with `sync-inputs=false` so
 one source is not deliberately clock-gated behind the other.
 
-## 1. Quick visual run
+## 1. Live preview + recording
+
+The validated RTSP jitter baseline is now **100 ms**. When `DISPLAY` and
+`ffplay` are available, the launcher automatically opens a live 1x2 preview
+window while continuing to record the normal MKV evidence file:
 
 ```bash
 cd ~/ai_surveillance
@@ -48,14 +54,15 @@ python3 scripts/validate_cam_pair.py \
   --out .runtime/cam01-cam02-visual
 ```
 
-Then open:
+The preview is a sidecar after NVENC: MPEG-TS over UDP to host `ffplay`.
+Its queue is bounded and leaky-downstream so a slow/closed preview cannot
+backpressure the recording or camera ingest path. Use `--no-preview` to
+reproduce the original evidence graph without a live window.
 
-```bash
-vlc .runtime/cam01-cam02-visual/CAM-01_CAM-02.mkv
+The recording remains:
+```text
+.runtime/cam01-cam02-visual/CAM-01_CAM-02.mkv
 ```
-
-The output is a 1x2 tiled real recording. Both panes must advance; a frozen
-first frame is not acceptance.
 
 ## 2. Clean soak
 
@@ -99,10 +106,10 @@ latency. It does not by itself include sensor exposure, NVR encode delay, or
 network time that happened before the traced source. Keep the ordinary
 `age=` metric for stall/freshness detection; do not call it end-to-end latency.
 
-After the stable two-camera baseline is proven, repeat the latency run with
-lower RTSP jitter settings (for example 200, 150, then 100 ms) one step at a
-time. Keep a lower value only if both cameras still show zero RTP loss/late
-packets, no frame-rate instability and no queue growth.
+Latency A/B testing at 300, 200, 150 and 100 ms kept both cameras near 20 FPS
+with zero RTP loss/late packets and zero runtime errors. The 100 ms profile then
+passed the full 660-second soak and both source-isolation directions, so 100 ms
+is the current validated two-camera default.
 
 ## 4. Source-isolation test
 
@@ -111,8 +118,8 @@ Because CAM-01 and CAM-02 are channels on the same NVR IP/RTSP port, a host
 network cut would disconnect both simultaneously and would not test per-source
 isolation. The validator therefore has an explicit source-level isolation
 mode: it sets only the selected `nvurisrcbin` to NULL for the requested
-interval while leaving the peer source, mux and process alive, then restores
-that source to PLAYING.
+interval while leaving the peer source, mux and process alive, then removes and
+recreates only that source inside the same pipeline.
 
 Test CAM-02 failure while CAM-01 remains alive:
 
@@ -137,9 +144,19 @@ This is an application/source-isolation test, not a physical Ethernet/NVR
 failure. A later deployment test can cover real network/camera faults when a
 fault can be scoped to one source without taking the shared NVR offline.
 
-## Acceptance gate
+## Acceptance result — 2026-09-18: PASS
 
-Do not add CAM-03 until all of the following are true:
+The 100 ms profile passed a 660.55-second run. CAM-01 and CAM-02 each delivered
+13,200 frames at ~20 FPS, used hardware decode, reported zero RTP loss/late
+packets and zero runtime warnings/errors. VRAM stayed constant at 565 MiB.
+Both source-isolation directions also passed: the healthy peer continued at
+~20 FPS during the 12-second outage and the recreated source recovered in the
+same process.
+
+The two-camera gate is complete. CAM-03 may be started as the next camera-only
+stage, with AI still disabled.
+
+Acceptance criteria:
 
 - CAM-01 and CAM-02 both use `nvv4l2decoder` and NVMM.
 - Both cameras sustain their actual source rate independently.
