@@ -1,19 +1,20 @@
 # AI Surveillance — Camera V2
 
-## Current next gate: CAM-01 + CAM-02 / DeepStream 9.1
+## Current validated gate: CAM-01 + CAM-02 / DeepStream 9.1
 
-The next validation branch adds exactly two real RTSP sources to one DeepStream
+This branch validates exactly two real RTSP sources in one DeepStream
 pipeline. Both sources use `nvurisrcbin -> NVDEC -> NVMM`, then enter one
 `nvstreammux` with `batch-size=2`, `live-source=true`,
 `batched-push-timeout=50000` and `sync-inputs=false`. The output is a 1x2
 NVENC diagnostic recording. No inference, tracker, ReID, face, pose, heatmap or
 frontend code is loaded.
 
-Quick visual run:
+The validated default RTSP jitter latency is **100 ms**. A normal run now
+auto-opens a host `ffplay` 1x2 live preview while recording the MKV evidence
+file; pass `--no-preview` for a headless/evidence-only run.
 
 ```bash
 python3 scripts/validate_cam_pair.py --duration 45 --out .runtime/cam01-cam02-visual
-vlc .runtime/cam01-cam02-visual/CAM-01_CAM-02.mkv
 ```
 
 Clean soak:
@@ -29,8 +30,9 @@ Source isolation:
 python3 scripts/validate_cam_pair.py --duration 80 --interrupt-camera CAM-02 --interrupt-at 20 --interrupt-seconds 12 --out .runtime/cam02-isolation
 ```
 
-See [CAM-01 + CAM-02 validation](docs/CAM01_CAM02_DEEPSTREAM91_VALIDATION.md).
-Do not add CAM-03 until the clean soak and both source-isolation directions pass.
+The 100 ms profile passed the 660-second soak and both source-isolation
+directions. See [CAM-01 + CAM-02 validation](docs/CAM01_CAM02_DEEPSTREAM91_VALIDATION.md).
+CAM-03 is the next camera-only stage; AI remains deferred.
 
 ## Current camera-only validation: CAM-01 / DeepStream 9.1
 
