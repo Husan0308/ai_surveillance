@@ -74,7 +74,38 @@ hardware decoder evidence for both sources, no source/shared runtime errors,
 no RTP loss/late packets, no queue buildup, bounded RSS/VRAM growth and a
 finalized 2560x720 H.264 recording.
 
-## 3. Source-isolation test
+## 3. Pipeline latency measurement
+
+Run latency tracing separately from the clean soak so TRACE logging does not
+contaminate the stability measurement:
+
+```bash
+python3 scripts/validate_cam_pair.py \
+  --duration 60 \
+  --trace-latency \
+  --out .runtime/cam01-cam02-latency
+
+python3 scripts/cam_pair_validation/summarize_latency.py \
+  .runtime/cam01-cam02-latency/pipeline.log
+```
+
+The GStreamer latency tracer reports processing latency in nanoseconds between
+traced source and sink elements and can also report per-element latency. The
+summary tool converts those samples to milliseconds and reports min/p50/p95/p99,
+mean and max after a 10-second warmup.
+
+This is **pipeline processing latency**, not complete camera sensor-to-screen
+latency. It does not by itself include sensor exposure, NVR encode delay, or
+network time that happened before the traced source. Keep the ordinary
+`age=` metric for stall/freshness detection; do not call it end-to-end latency.
+
+After the stable two-camera baseline is proven, repeat the latency run with
+lower RTSP jitter settings (for example 200, 150, then 100 ms) one step at a
+time. Keep a lower value only if both cameras still show zero RTP loss/late
+packets, no frame-rate instability and no queue growth.
+
+## 4. Source-isolation test
+
 
 Because CAM-01 and CAM-02 are channels on the same NVR IP/RTSP port, a host
 network cut would disconnect both simultaneously and would not test per-source
