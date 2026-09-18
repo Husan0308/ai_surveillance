@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from scripts.cam_pair_validation.check_stability import assess
+from scripts.cam_pair_validation.check_stability import assess, parse_rows
 
 
 class PairStabilityEvidenceTests(unittest.TestCase):
@@ -88,6 +88,13 @@ class PairStabilityEvidenceTests(unittest.TestCase):
         for row in pair:
             row["fps"] = 24
         self.assertEqual(assess(self.sources, pair, self.text, self.gpu)["status"], "PASS")
+
+    def test_signed_age_is_parsed(self):
+        rows = parse_rows(
+            "PAIR STATS elapsed=35.000 output=700 fps=20.000 age=-0.001 max_gap_ms=300.000\n",
+            "PAIR STATS ",
+        )
+        self.assertEqual(rows[0]["age"], -0.001)
 
     def test_missing_pair_age_is_blocked_not_exception(self):
         pair = copy.deepcopy(self.pair)
