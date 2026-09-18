@@ -82,6 +82,13 @@ class PairStabilityEvidenceTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(assess(data, self.pair, self.text, self.gpu)["status"], "BLOCKED")
 
+
+    def test_pair_batch_rate_can_exceed_single_source_rate(self):
+        pair = copy.deepcopy(self.pair)
+        for row in pair:
+            row["fps"] = 24
+        self.assertEqual(assess(self.sources, pair, self.text, self.gpu)["status"], "PASS")
+
     def test_pair_stall_rejected(self):
         pair = copy.deepcopy(self.pair)
         pair[70]["output"] = pair[69]["output"]
