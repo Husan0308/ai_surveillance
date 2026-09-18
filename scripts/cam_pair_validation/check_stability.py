@@ -9,7 +9,7 @@ import statistics
 import subprocess
 
 
-NUMBER_RE = r"[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?"
+NUMBER_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
 
 def parse_rows(text: str, prefix: str):
