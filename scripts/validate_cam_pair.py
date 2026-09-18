@@ -22,7 +22,7 @@ from services.shared.camera_config import load_settings
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--duration", type=int, default=660)
-    ap.add_argument("--latency-ms", type=int, default=300)
+    ap.add_argument("--latency-ms", type=int, default=100)
     ap.add_argument("--out", type=Path, default=ROOT / ".runtime/cam01-cam02-validation")
     ap.add_argument("--interrupt-camera", choices=["none", "CAM-01", "CAM-02"], default="none")
     ap.add_argument("--interrupt-at", type=int, default=20)
