@@ -26,6 +26,7 @@ def main() -> int:
     ap.add_argument("--interrupt-camera", choices=["none", "CAM-01", "CAM-02"], default="none")
     ap.add_argument("--interrupt-at", type=int, default=20)
     ap.add_argument("--interrupt-seconds", type=int, default=12)
+    ap.add_argument("--trace-latency", action="store_true", help="enable GStreamer pipeline/element latency tracer")
     args = ap.parse_args()
     if args.duration < 20:
         ap.error("duration must be >=20 seconds")
@@ -101,8 +102,10 @@ def main() -> int:
         "--hostname", socket.gethostname(),
         "--gpus", "device=0",
         "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video",
-        "-e", "GST_DEBUG=1",
+        "-e", ("GST_DEBUG=GST_TRACER:7" if args.trace_latency else "GST_DEBUG=1"),
+        "-e", "GST_DEBUG_NO_COLOR=1",
         "-e", "GST_REGISTRY=/tmp/cam-pair-gst-registry.bin",
+        *([] if not args.trace_latency else ["-e", "GST_TRACERS=latency(flags=pipeline+element)"]),
         "-v", f"{out}:/work",
         "--entrypoint", "/work/cam-pair-validator",
         image,
