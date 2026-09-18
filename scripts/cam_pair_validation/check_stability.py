@@ -14,7 +14,7 @@ NUMBER_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
 def parse_rows(text: str, prefix: str):
     return [
-        {k: float(v) for k, v in re.findall(rf"(\\w+)=({NUMBER_RE})", line)}
+        {k: float(v) for k, v in re.findall(rf"(\w+)=({NUMBER_RE})", line)}
         for line in text.splitlines()
         if line.startswith(prefix)
     ]
