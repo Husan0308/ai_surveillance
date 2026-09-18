@@ -89,6 +89,13 @@ class PairStabilityEvidenceTests(unittest.TestCase):
             row["fps"] = 24
         self.assertEqual(assess(self.sources, pair, self.text, self.gpu)["status"], "PASS")
 
+    def test_missing_pair_age_is_blocked_not_exception(self):
+        pair = copy.deepcopy(self.pair)
+        del pair[70]["age"]
+        report = assess(self.sources, pair, self.text, self.gpu)
+        self.assertEqual(report["status"], "BLOCKED")
+        self.assertTrue(any("malformed telemetry" in failure for failure in report["failures"]))
+
     def test_pair_stall_rejected(self):
         pair = copy.deepcopy(self.pair)
         pair[70]["output"] = pair[69]["output"]
