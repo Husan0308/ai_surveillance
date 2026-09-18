@@ -1,5 +1,37 @@
 # AI Surveillance — Camera V2
 
+## Current next gate: CAM-01 + CAM-02 / DeepStream 9.1
+
+The next validation branch adds exactly two real RTSP sources to one DeepStream
+pipeline. Both sources use `nvurisrcbin -> NVDEC -> NVMM`, then enter one
+`nvstreammux` with `batch-size=2`, `live-source=true`,
+`batched-push-timeout=50000` and `sync-inputs=false`. The output is a 1x2
+NVENC diagnostic recording. No inference, tracker, ReID, face, pose, heatmap or
+frontend code is loaded.
+
+Quick visual run:
+
+```bash
+python3 scripts/validate_cam_pair.py --duration 45 --out .runtime/cam01-cam02-visual
+vlc .runtime/cam01-cam02-visual/CAM-01_CAM-02.mkv
+```
+
+Clean soak:
+
+```bash
+python3 scripts/validate_cam_pair.py --duration 660 --out .runtime/cam01-cam02-stability
+python3 scripts/cam_pair_validation/check_stability.py .runtime/cam01-cam02-stability
+```
+
+Source isolation:
+
+```bash
+python3 scripts/validate_cam_pair.py --duration 80 --interrupt-camera CAM-02 --interrupt-at 20 --interrupt-seconds 12 --out .runtime/cam02-isolation
+```
+
+See [CAM-01 + CAM-02 validation](docs/CAM01_CAM02_DEEPSTREAM91_VALIDATION.md).
+Do not add CAM-03 until the clean soak and both source-isolation directions pass.
+
 ## Current camera-only validation: CAM-01 / DeepStream 9.1
 
 The platform is validated: RTX 3060 12 GB, driver **595.91.07**, DeepStream
