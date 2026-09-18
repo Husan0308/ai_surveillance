@@ -1,5 +1,19 @@
 # AI Surveillance — Camera V2
 
+## Current AI gate: YOLO26m model export
+
+The six-camera DeepStream 9.1 transport/decode/mux/preview baseline is frozen.
+The next stage only exports and validates the YOLO26m detector artifact; it does
+not change the camera graph yet.
+
+```bash
+python3 -m pip install -U ultralytics onnx
+python3 scripts/yolo26m/export_yolo26m.py
+```
+
+Expected output is an NMS-free dynamic-batch ONNX model under
+`.runtime/models/yolo26m/`. See [YOLO26m export gate](docs/YOLO26M_EXPORT_GATE.md).
+
 ## Current final camera-only gate: CAM-01 through CAM-06 / DeepStream 9.1
 
 The validated five-camera 100 ms baseline is preserved. This branch adds CAM-06
