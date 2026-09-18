@@ -63,9 +63,12 @@ def assess(source_rows, pair_rows, text, gpu):
             if b["output"] <= a["output"] or b["pts_ns"] <= a["pts_ns"]:
                 failures.append("PAIR: frozen output/PTS")
                 break
+        # nvstreammux pushes when a batch fills OR batched-push-timeout expires.
+        # With two asynchronous live sources and sync-inputs=false, downstream
+        # buffer cadence is not required to equal the per-camera frame rate.
+        # Per-camera FPS above is the authoritative rate gate.
         if any(
-            not 18 <= r["fps"] <= 22
-            or r["age"] > 1
+            r["age"] > 1
             or r["max_gap_ms"] > 1000
             or r.get("dropped", 0) > 0
             or r.get("shared_errors", 0) > 0
