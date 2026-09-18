@@ -1,5 +1,18 @@
 # AI Surveillance — Camera V2
 
+## Current next gate: CAM-01 + CAM-02 + CAM-03 + CAM-04 / DeepStream 9.1
+
+The validated three-camera 100 ms baseline is preserved. This branch adds
+CAM-04 only, keeps AI disabled, uses deterministic source IDs 0..3,
+`nvstreammux batch-size=4`, and fills the existing 2x2 live ffplay grid.
+
+```bash
+python3 -m unittest tests.test_cam_four_stability -v
+python3 scripts/validate_cam_four.py --duration 60 --out .runtime/cam01-cam02-cam03-cam04-visual
+```
+
+See [the four-camera validation guide](docs/CAM01_CAM02_CAM03_CAM04_DEEPSTREAM91_VALIDATION.md).
+
 ## Current next gate: CAM-01 + CAM-02 + CAM-03 / DeepStream 9.1
 
 The validated CAM-01 + CAM-02 / 100 ms baseline is preserved. This branch adds
