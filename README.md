@@ -1,5 +1,20 @@
 # AI Surveillance — Camera V2
 
+## Current next gate: CAM-01 + CAM-02 + CAM-03 / DeepStream 9.1
+
+The validated CAM-01 + CAM-02 / 100 ms baseline is preserved. This branch adds
+CAM-03 only, with AI still disabled. The three sources use deterministic source
+IDs 0/1/2, one `nvstreammux` with `batch-size=3`, and a 2x2 tiled output.
+The host ffplay live preview auto-opens as before.
+
+```bash
+python3 -m unittest tests.test_cam_three_stability -v
+python3 scripts/validate_cam_three.py --duration 60 --out .runtime/cam01-cam02-cam03-visual
+```
+
+If all three panes advance normally, continue with the 660-second soak described
+in [the three-camera validation guide](docs/CAM01_CAM02_CAM03_DEEPSTREAM91_VALIDATION.md).
+
 ## Current validated gate: CAM-01 + CAM-02 / DeepStream 9.1
 
 This branch validates exactly two real RTSP sources in one DeepStream
