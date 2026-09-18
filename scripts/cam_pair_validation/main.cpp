@@ -53,6 +53,8 @@ static gint64 start_us = 0, previous_us = 0, last_message_us = 0;
 static guint64 previous_output = 0;
 static double previous_cpu = 0.0;
 static int duration_sec = 60;
+static bool preview_enabled = false;
+static int preview_port = 5600;
 
 static std::string interrupt_camera = "none";
 static int interrupt_at = 20;
@@ -515,6 +517,8 @@ int main(int argc, char **argv) {
   if (ival) { interrupt_camera = ival; g_free(ival); }
   interrupt_at = g_key_file_get_integer(f, "validation", "interrupt_at", nullptr);
   interrupt_seconds = g_key_file_get_integer(f, "validation", "interrupt_seconds", nullptr);
+  preview_enabled = g_key_file_get_boolean(f, "validation", "preview_enabled", nullptr);
+  preview_port = g_key_file_get_integer(f, "validation", "preview_port", nullptr);
   g_key_file_free(f);
 
   gst_init(nullptr, nullptr);
@@ -565,7 +569,12 @@ int main(int argc, char **argv) {
   gst_caps_unref(caps);
   encoder = make("nvv4l2h264enc", "NVENC");
   g_object_set(encoder, "bitrate", 12000000u, "iframeinterval", 40u, nullptr);
-  GstElement *parse = make("h264parse", "output-parse");
+  GstElement *encoded_tee = make("tee", "encoded-tee");
+
+  GstElement *file_queue = make("queue", "file-queue");
+  g_object_set(file_queue, "max-size-buffers", 0u, "max-size-bytes", 0u,
+               "max-size-time", guint64(0), "leaky", 0, "silent", TRUE, nullptr);
+  GstElement *file_parse = make("h264parse", "output-parse");
   GstElement *filemux = make("matroskamux", "filemux");
   sink_element = make("filesink", "sink");
   g_object_set(sink_element, "location", "/work/CAM-01_CAM-02.mkv", "sync", FALSE,
@@ -575,13 +584,51 @@ int main(int argc, char **argv) {
   link(tiler, conv);
   link(conv, capsfilter);
   link(capsfilter, encoder);
-  link(encoder, parse);
-  link(parse, filemux);
+  link(encoder, encoded_tee);
+
+  link(encoded_tee, file_queue);
+  link(file_queue, file_parse);
+  link(file_parse, filemux);
   link(filemux, sink_element);
+
+  if (preview_enabled) {
+    GstElement *preview_queue = make("queue", "preview-queue");
+    g_object_set(preview_queue,
+                 "max-size-buffers", 4u,
+                 "max-size-bytes", 0u,
+                 "max-size-time", guint64(0),
+                 "leaky", 2,
+                 "silent", TRUE,
+                 nullptr);
+    GstElement *preview_parse = make("h264parse", "preview-parse");
+    g_object_set(preview_parse, "config-interval", -1, nullptr);
+    GstElement *preview_caps = make("capsfilter", "preview-caps");
+    GstCaps *pcaps = gst_caps_from_string(
+        "video/x-h264,stream-format=byte-stream,alignment=au");
+    g_object_set(preview_caps, "caps", pcaps, nullptr);
+    gst_caps_unref(pcaps);
+    GstElement *tsmux = make("mpegtsmux", "preview-tsmux");
+    g_object_set(tsmux, "alignment", 7, nullptr);
+    GstElement *udp = make("udpsink", "preview-udp");
+    g_object_set(udp,
+                 "host", "host.docker.internal",
+                 "port", preview_port,
+                 "sync", FALSE,
+                 "async", FALSE,
+                 nullptr);
+
+    link(encoded_tee, preview_queue);
+    link(preview_queue, preview_parse);
+    link(preview_parse, preview_caps);
+    link(preview_caps, tsmux);
+    link(tsmux, udp);
+  }
+
   probe(encoder, "src", &output_counter);
 
   event(nullptr, "GRAPH",
-        "CAM-01+CAM-02 nvurisrcbin/NVDEC->NVMM->queues->nvstreammux(batch=2,2560x1440,live,50000us,sync-inputs=false)->tiler(1x2)->NVENC->CAM-01_CAM-02.mkv inference=0");
+        std::string("CAM-01+CAM-02 nvurisrcbin/NVDEC->NVMM->queues->nvstreammux(batch=2,2560x1440,live,50000us,sync-inputs=false)->tiler(1x2)->NVENC->record") +
+        (preview_enabled ? "+UDP-preview inference=0" : " inference=0"));
 
   GstBus *bus = gst_element_get_bus(pipeline);
   gst_bus_add_watch(bus, bus_message, nullptr);
