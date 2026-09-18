@@ -204,6 +204,40 @@ static void dynamic_pad(GstElement*, GstPad *pad, gpointer data) {
   gst_caps_unref(caps);
 }
 
+static GstElement *create_source_element(SourceCtx *ctx) {
+  const std::string source_name = ctx->id + "-source";
+  GstElement *source = gst_element_factory_make("nvurisrcbin", source_name.c_str());
+  if (!source) {
+    fail(ctx->id + ": missing nvurisrcbin");
+    return nullptr;
+  }
+  gst_bin_add(GST_BIN(pipeline), source);
+  g_signal_connect(source, "deep-element-added", G_CALLBACK(child_added), ctx);
+  g_signal_connect(source, "pad-added", G_CALLBACK(dynamic_pad), ctx);
+  g_object_set(
+      source,
+      "uri", ctx->uri.c_str(),
+      "gpu-id", 0u,
+      "source-id", ctx->source_id,
+      "disable-audio", TRUE,
+      "select-rtp-protocol", 4,
+      "latency", guint(ctx->latency_ms),
+      "drop-on-latency", FALSE,
+      "num-extra-surfaces", 4u,
+      "cudadec-memtype", 0,
+      "drop-frame-interval", 0u,
+      "dec-skip-frames", 0,
+      "low-latency-mode", FALSE,
+      "rtsp-reconnect-interval", 5u,
+      "init-rtsp-reconnect-interval", 5u,
+      "rtsp-reconnect-attempts", -1,
+      "max-size-buffers", 12u,
+      "leaky", 0,
+      "message-forward", TRUE,
+      nullptr);
+  return source;
+}
+
 static SourceCtx *owner_for_message(GstMessage *m) {
   for (auto *ctx : sources) {
     if (m->src == GST_OBJECT(ctx->source) ||
@@ -282,9 +316,28 @@ static gboolean resume_interrupted(gpointer data) {
   target_resume_frames = target->input.frames.load();
   SourceCtx *peer = peer_source(target);
   peer_resume_frames = peer ? peer->input.frames.load() : 0;
-  event(target, "ISOLATION", "restoring source to PLAYING");
-  if (!gst_element_sync_state_with_parent(target->source)) {
-    fail("failed to restore isolated source");
+
+  event(target, "ISOLATION", "recreating only this nvurisrcbin");
+  if (target->source) {
+    gst_element_set_state(target->source, GST_STATE_NULL);
+    if (!gst_bin_remove(GST_BIN(pipeline), target->source)) {
+      fail("failed to remove isolated source");
+      return G_SOURCE_REMOVE;
+    }
+    target->source = nullptr;
+  }
+
+  g_mutex_lock(&target->jitter_lock);
+  if (target->jitterbuffer) {
+    gst_object_unref(target->jitterbuffer);
+    target->jitterbuffer = nullptr;
+  }
+  g_mutex_unlock(&target->jitter_lock);
+
+  target->decoder_seen = false;
+  target->source = create_source_element(target);
+  if (!target->source || !gst_element_sync_state_with_parent(target->source)) {
+    fail("failed to recreate isolated source");
   } else {
     interruption_resumed = true;
   }
@@ -361,14 +414,15 @@ static gboolean tick(gpointer) {
     SourceCtx *target = find_source(interrupt_camera);
     SourceCtx *peer = peer_source(target);
     if (target && peer && target->input.frames.load() >= target_resume_frames + 100) {
-      const guint64 peer_gain = peer->input.frames.load() - peer_start_frames;
+      const guint64 peer_off_gain = peer_resume_frames - peer_start_frames;
       const guint64 target_off_gain = target_resume_frames - target_start_frames;
-      const bool ok = peer_gain >= guint64(interrupt_seconds * 15) && target_off_gain <= 5;
+      const guint64 target_recovered = target->input.frames.load() - target_resume_frames;
+      const bool ok = peer_off_gain >= guint64(interrupt_seconds * 15) && target_off_gain <= 5;
       g_print(
         "PAIR ISOLATION_SUMMARY target=%s peer=%s outage_sec=%d peer_frames_during=%lu "
         "target_frames_during=%lu target_recovered_frames=%lu status=%s\n",
-        target->id.c_str(), peer->id.c_str(), interrupt_seconds, peer_gain, target_off_gain,
-        target->input.frames.load() - target_resume_frames, ok ? "PASS" : "BLOCKED");
+        target->id.c_str(), peer->id.c_str(), interrupt_seconds, peer_off_gain, target_off_gain,
+        target_recovered, ok ? "PASS" : "BLOCKED");
       interruption_reported = true;
     }
   }
@@ -481,37 +535,14 @@ int main(int argc, char **argv) {
       nullptr);
 
   for (auto *ctx : sources) {
-    const std::string source_name = ctx->id + "-source";
     const std::string queue_name = ctx->id + "-queue";
     ctx->queue = make("queue", queue_name.c_str());
     g_object_set(ctx->queue, "max-size-buffers", 12u, "max-size-bytes", 0u,
                  "max-size-time", guint64(0), "leaky", 0, nullptr);
     probe(ctx->queue, "src", &ctx->input);
 
-    ctx->source = make("nvurisrcbin", source_name.c_str());
-    g_signal_connect(ctx->source, "deep-element-added", G_CALLBACK(child_added), ctx);
-    g_signal_connect(ctx->source, "pad-added", G_CALLBACK(dynamic_pad), ctx);
-    g_object_set(
-        ctx->source,
-        "uri", ctx->uri.c_str(),
-        "gpu-id", 0u,
-        "source-id", ctx->source_id,
-        "disable-audio", TRUE,
-        "select-rtp-protocol", 4,
-        "latency", guint(ctx->latency_ms),
-        "drop-on-latency", FALSE,
-        "num-extra-surfaces", 4u,
-        "cudadec-memtype", 0,
-        "drop-frame-interval", 0u,
-        "dec-skip-frames", 0,
-        "low-latency-mode", FALSE,
-        "rtsp-reconnect-interval", 5u,
-        "init-rtsp-reconnect-interval", 5u,
-        "rtsp-reconnect-attempts", -1,
-        "max-size-buffers", 12u,
-        "leaky", 0,
-        "message-forward", TRUE,
-        nullptr);
+    ctx->source = create_source_element(ctx);
+    if (!ctx->source) return 2;
 
     const std::string sink_name = "sink_" + std::to_string(ctx->source_id);
     GstPad *mp = gst_element_request_pad_simple(mux, sink_name.c_str());
