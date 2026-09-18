@@ -1,5 +1,34 @@
 # AI Surveillance — Camera V2
 
+## Current camera-only validation: CAM-01 / DeepStream 9.1
+
+The platform is validated: RTX 3060 12 GB, driver **595.91.07**, DeepStream
+**9.1.0**, CUDA runtime **13.2**, TensorRT **10.16.1.11**, using the pinned NVIDIA
+container in [config/deepstream-platform.json](config/deepstream-platform.json).
+
+CAM-01 camera-only validation **PASS** (2026-09-18): RTSP/authentication, NVIDIA
+H.264 decode, real recorded video, same-process reconnect and an uninterrupted
+660-second run are verified. The recording contains 13,189 frames; steady-state
+throughput averaged 20.002 FPS with constant 321 MiB VRAM.
+CAM-02 through CAM-06 and all AI/frontend integration remain deferred.
+
+```bash
+python3 scripts/validate_cam01.py --mode record --duration 660 --out .runtime/cam01-stability
+python3 scripts/cam01_validation/check_stability.py .runtime/cam01-stability
+```
+
+Only the existing CAM-01 URL is opened, with batch-size 1. Video remains in NVMM
+through decode/mux and is saved using NVENC to a real diagnostic recording.
+The current desktop uses software X11 rendering, so EGL display is excluded from
+acceptance. See the [CAM-01 instructions and evidence](docs/CAM01_DEEPSTREAM91_VALIDATION.md)
+for playback, settings, reconnect testing and acceptance criteria. The earlier
+[migration audit](docs/DEEPSTREAM91_MIGRATION_AUDIT.md) is a historical snapshot.
+
+## Historical runtime notes — not DS9.1 launch instructions
+
+The following predates this migration and includes paths absent from this
+checkout. It is retained as historical context.
+
 Canonical stabilization branch: `cleanup/camera-v2-audited-20260825`.
 
 This milestone is deliberately narrow: prove the six-camera DeepStream wall and
@@ -17,7 +46,7 @@ bash scripts/run_cam01_trt86_audited.sh
 
 Current graph:
 
-```text
+```tex
 6 x RTSP
   -> nvurisrcbin / NVDEC (NVMM)
   -> per-camera tee
@@ -33,7 +62,7 @@ Current graph:
   -> nvtracker / NvDCF (512x288, per-frame)
   -> nvmultistreamtiler
   -> nvvideoconvert -> RGBA NVMM
-  -> nvdsosd
+  -> nvdsosd  
   -> nveglglessink
 ```
 

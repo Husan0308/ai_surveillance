@@ -1,0 +1,22 @@
+{
+  "deepstream": "9.1.0",
+  "cuda_runtime": "13.2",
+  "tensorrt": "10.16.1.11",
+  "minimum_driver": "595.58.03",
+  "gpu_name": "NVIDIA GeForce RTX 3060",
+  "minimum_vram_mib": 12000,
+  "image_tag": "nvcr.io/nvidia/deepstream:9.1-samples-multiarch",
+  "image": "nvcr.io/nvidia/deepstream@sha256:10eca409b3894e91c1bac915c9f1346307e56695e552487cbe8cf2f58a3f998f",
+  "platform": "linux/amd64",
+  "camera_ids": [
+    "CAM-01",
+    "CAM-02",
+    "CAM-03",
+    "CAM-04",
+    "CAM-05",
+    "CAM-06"
+  ],
+  "compatibility_source": "https://docs.nvidia.com/metropolis/deepstream/9.1/text/DS_Installation.html",
+  "cuda_cudart_package": "13.2.51-1",
+  "documented_tensorrt_baseline": "10.16.0.72"
+}
