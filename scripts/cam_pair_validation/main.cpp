@@ -283,7 +283,7 @@ static gboolean resume_interrupted(gpointer data) {
   SourceCtx *peer = peer_source(target);
   peer_resume_frames = peer ? peer->input.frames.load() : 0;
   event(target, "ISOLATION", "restoring source to PLAYING");
-  if (gst_element_set_state(target->source, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+  if (!gst_element_sync_state_with_parent(target->source)) {
     fail("failed to restore isolated source");
   } else {
     interruption_resumed = true;
