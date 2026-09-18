@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -27,11 +28,15 @@ def main() -> int:
     ap.add_argument("--interrupt-at", type=int, default=20)
     ap.add_argument("--interrupt-seconds", type=int, default=12)
     ap.add_argument("--trace-latency", action="store_true", help="enable GStreamer pipeline/element latency tracer")
+    ap.add_argument("--no-preview", action="store_true", help="do not auto-open the live ffplay preview")
+    ap.add_argument("--preview-port", type=int, default=5600, help="host UDP port for live preview")
     args = ap.parse_args()
     if args.duration < 20:
         ap.error("duration must be >=20 seconds")
     if args.latency_ms < 100:
         ap.error("latency must be >=100 ms for this validation profile")
+    if not 1024 <= args.preview_port <= 65535:
+        ap.error("preview port must be between 1024 and 65535")
     if args.interrupt_camera != "none":
         if args.interrupt_at < 10 or args.interrupt_seconds < 5:
             ap.error("interruption requires --interrupt-at >=10 and --interrupt-seconds >=5")
@@ -40,6 +45,14 @@ def main() -> int:
 
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
+
+    preview_enabled = not args.no_preview
+    if preview_enabled and not os.environ.get("DISPLAY"):
+        print("PAIR PREVIEW disabled: DISPLAY is unavailable", flush=True)
+        preview_enabled = False
+    if preview_enabled and shutil.which("ffplay") is None:
+        print("PAIR PREVIEW disabled: ffplay is not installed", flush=True)
+        preview_enabled = False
 
     lock = open("/tmp/ai_surveillance_camera_v2_gpu.lock", "a")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -95,6 +108,8 @@ def main() -> int:
         f.write(f"interrupt_camera={args.interrupt_camera}\n")
         f.write(f"interrupt_at={args.interrupt_at}\n")
         f.write(f"interrupt_seconds={args.interrupt_seconds}\n")
+        f.write(f"preview_enabled={str(preview_enabled).lower()}\n")
+        f.write(f"preview_port={args.preview_port}\n")
 
     container = "ai-surveillance-cam-pair-validation"
     cmd = base + [
@@ -106,6 +121,7 @@ def main() -> int:
         "-e", "GST_DEBUG_NO_COLOR=1",
         "-e", "GST_REGISTRY=/tmp/cam-pair-gst-registry.bin",
         *([] if not args.trace_latency else ["-e", "GST_TRACERS=latency(flags=pipeline+element)"]),
+        *([] if not preview_enabled else ["--add-host", "host.docker.internal:host-gateway"]),
         "-v", f"{out}:/work",
         "--entrypoint", "/work/cam-pair-validator",
         image,
@@ -135,6 +151,7 @@ def main() -> int:
 
     t = threading.Thread(target=monitor, daemon=True)
     p = None
+    preview = None
 
     def stop(_sig, _frame) -> None:
         subprocess.run(
@@ -152,6 +169,31 @@ def main() -> int:
 
     try:
         t.start()
+        if preview_enabled:
+            preview_url = (
+                f"udp://0.0.0.0:{args.preview_port}"
+                "?fifo_size=65536&overrun_nonfatal=1"
+            )
+            preview = subprocess.Popen(
+                [
+                    "ffplay",
+                    "-hide_banner",
+                    "-loglevel", "warning",
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
+                    "-framedrop",
+                    "-an",
+                    "-sync", "video",
+                    "-window_title", "CAM-01 + CAM-02 LIVE",
+                    preview_url,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            print(
+                f"PAIR PREVIEW opening ffplay on UDP {args.preview_port}; use --no-preview to disable",
+                flush=True,
+            )
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         assert p.stdout is not None
         with (out / "pipeline.log").open("w") as log:
@@ -168,6 +210,12 @@ def main() -> int:
         t.join(timeout=6)
         if p is not None and p.poll() is None:
             stop(None, None)
+        if preview is not None and preview.poll() is None:
+            preview.terminate()
+            try:
+                preview.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                preview.kill()
         secret.unlink(missing_ok=True)
 
 
