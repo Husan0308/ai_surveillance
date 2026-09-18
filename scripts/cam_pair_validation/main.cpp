@@ -572,7 +572,7 @@ int main(int argc, char **argv) {
   GstElement *encoded_tee = make("tee", "encoded-tee");
 
   GstElement *file_queue = make("queue", "file-queue");
-  g_object_set(file_queue, "max-size-buffers", 0u, "max-size-bytes", 0u,
+  g_object_set(file_queue, "max-size-buffers", 12u, "max-size-bytes", 0u,
                "max-size-time", guint64(0), "leaky", 0, "silent", TRUE, nullptr);
   GstElement *file_parse = make("h264parse", "output-parse");
   GstElement *filemux = make("matroskamux", "filemux");
