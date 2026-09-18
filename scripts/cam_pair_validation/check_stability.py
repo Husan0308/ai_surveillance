@@ -67,9 +67,19 @@ def assess(source_rows, pair_rows, text, gpu):
         # With two asynchronous live sources and sync-inputs=false, downstream
         # buffer cadence is not required to equal the per-camera frame rate.
         # Per-camera FPS above is the authoritative rate gate.
+        missing_pair_fields = [
+            (i, key)
+            for i, r in enumerate(stable_pair)
+            for key in ("age", "max_gap_ms", "rss_mib", "cpu_pct")
+            if key not in r
+        ]
+        if missing_pair_fields:
+            preview = ", ".join(f"row{i}:{key}" for i, key in missing_pair_fields[:5])
+            failures.append(f"PAIR: malformed telemetry missing required field(s): {preview}")
+
         if any(
-            r["age"] > 1
-            or r["max_gap_ms"] > 1000
+            r.get("age", float("inf")) > 1
+            or r.get("max_gap_ms", float("inf")) > 1000
             or r.get("dropped", 0) > 0
             or r.get("shared_errors", 0) > 0
             or r.get("shared_warnings", 0) > 0
@@ -79,14 +89,18 @@ def assess(source_rows, pair_rows, text, gpu):
         ):
             failures.append("PAIR: output/error/timestamp threshold exceeded")
 
-        rss_growth = statistics.median(r["rss_mib"] for r in stable_pair[-12:]) - statistics.median(
-            r["rss_mib"] for r in stable_pair[:12]
-        )
-        cpu_mean = statistics.mean(r["cpu_pct"] for r in stable_pair)
-        if rss_growth > 48:
-            failures.append("PAIR: RSS grew more than 48 MiB")
-        if cpu_mean > 50:
-            failures.append("PAIR: CPU usage exceeded 50% of one logical core")
+        resource_rows = [r for r in stable_pair if "rss_mib" in r and "cpu_pct" in r]
+        if len(resource_rows) < len(stable_pair):
+            failures.append("PAIR: incomplete RSS/CPU telemetry")
+        elif resource_rows:
+            rss_growth = statistics.median(r["rss_mib"] for r in resource_rows[-12:]) - statistics.median(
+                r["rss_mib"] for r in resource_rows[:12]
+            )
+            cpu_mean = statistics.mean(r["cpu_pct"] for r in resource_rows)
+            if rss_growth > 48:
+                failures.append("PAIR: RSS grew more than 48 MiB")
+            if cpu_mean > 50:
+                failures.append("PAIR: CPU usage exceeded 50% of one logical core")
     if "nvstreammux(batch=2" not in text or "inference=0" not in text:
         failures.append("Missing two-source mux/no-inference evidence")
     for cid in ("CAM-01", "CAM-02"):
@@ -121,9 +135,13 @@ def assess(source_rows, pair_rows, text, gpu):
                 "pair_fps_min": min(r["fps"] for r in stable_pair),
                 "pair_fps_max": max(r["fps"] for r in stable_pair),
                 "pair_fps_mean": statistics.mean(r["fps"] for r in stable_pair),
-                "cpu_pct_mean_one_core": statistics.mean(r["cpu_pct"] for r in stable_pair),
-                "rss_mib_start": stable_pair[0]["rss_mib"],
-                "rss_mib_end": stable_pair[-1]["rss_mib"],
+                "cpu_pct_mean_one_core": (
+                    statistics.mean(r["cpu_pct"] for r in stable_pair if "cpu_pct" in r)
+                    if any("cpu_pct" in r for r in stable_pair)
+                    else None
+                ),
+                "rss_mib_start": next((r["rss_mib"] for r in stable_pair if "rss_mib" in r), None),
+                "rss_mib_end": next((r["rss_mib"] for r in reversed(stable_pair) if "rss_mib" in r), None),
             }
         )
     for cid, rows in source_rows.items():
