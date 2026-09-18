@@ -1,5 +1,18 @@
 # AI Surveillance — Camera V2
 
+## Current final camera-only gate: CAM-01 through CAM-06 / DeepStream 9.1
+
+The validated five-camera 100 ms baseline is preserved. This branch adds CAM-06
+only, keeps AI disabled, uses source IDs 0..5 and `nvstreammux batch-size=6`.
+The live preview is a full 3x2 grid with two cameras per row.
+
+```bash
+python3 -m unittest tests.test_cam_six_stability -v
+python3 scripts/validate_cam_six.py --duration 60 --out .runtime/cam01-cam02-cam03-cam04-cam05-cam06-visual
+```
+
+See [the six-camera validation guide](docs/CAM01_CAM02_CAM03_CAM04_CAM05_CAM06_DEEPSTREAM91_VALIDATION.md).
+
 ## Current next gate: CAM-01 through CAM-05 / DeepStream 9.1
 
 The validated four-camera 100 ms baseline is preserved. This branch adds
