@@ -2,6 +2,7 @@
 #include <gst/gst.h>
 #include <glib-unix.h>
 #include <atomic>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -356,7 +357,7 @@ static gboolean tick(gpointer) {
     g_object_get(ctx->queue, "current-level-buffers", &q, "current-level-time", &qtime, nullptr);
     jitter_stats(ctx, lost, late, pushed);
     const guint64 frames = ctx->input.frames.load();
-    const double age = ctx->input.last_us ? (now - ctx->input.last_us) / 1e6 : elapsed;
+    const double age = ctx->input.last_us ? std::max(0.0, (now - ctx->input.last_us) / 1e6) : elapsed;
     g_print(
       "%s STATS elapsed=%.3f input=%lu fps=%.3f age=%.3f pts_ns=%lu "
       "pts_backwards=%lu pts_duplicates=%lu max_gap_ms=%.3f queue=%u queue_ms=%.3f "
@@ -380,7 +381,7 @@ static gboolean tick(gpointer) {
     gst_structure_free(stats);
   }
   const guint64 out = output_counter.frames.load();
-  const double out_age = output_counter.last_us ? (now - output_counter.last_us) / 1e6 : elapsed;
+  const double out_age = output_counter.last_us ? std::max(0.0, (now - output_counter.last_us) / 1e6) : elapsed;
   g_print(
     "PAIR STATS elapsed=%.3f output=%lu fps=%.3f age=%.3f pts_ns=%lu "
     "pts_backwards=%lu pts_duplicates=%lu max_gap_ms=%.3f rss_mib=%.3f cpu_pct=%.3f "
@@ -428,7 +429,7 @@ static gboolean tick(gpointer) {
   }
 
   for (auto *ctx : sources) {
-    const double age = ctx->input.last_us ? (now - ctx->input.last_us) / 1e6 : elapsed;
+    const double age = ctx->input.last_us ? std::max(0.0, (now - ctx->input.last_us) / 1e6) : elapsed;
     const bool target_is_off = interruption_started && !interruption_resumed && ctx->id == interrupt_camera;
     if (!target_is_off && age > 90) {
       fail(ctx->id + " has no advancing frames for 90 seconds");
