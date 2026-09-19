@@ -141,8 +141,13 @@ def assess(text):
         failures.append('Missing primary inference graph evidence')
     if 'DeepStream-NMS(iou=0.45,conf=0.25)' not in text:
         failures.append('Missing verified DeepStream NMS graph evidence')
-    if re.search(r'GROUP FATAL|CRITICAL|PARSER_ERROR|\bERROR\s',text):
+    runtime_error_lines = [
+        line for line in text.splitlines()
+        if re.search(r'GROUP FATAL|CRITICAL|PARSER_ERROR|\\bERROR\\s', line)
+    ]
+    if runtime_error_lines:
         failures.append('Runtime error diagnostic')
+        report['runtime_error_diagnostics'] = runtime_error_lines[:20]
     for i in range(1,7):
         cid=f'CAM-{i:02d}'
         source=parse_rows(text,f'{cid} STATS ')
