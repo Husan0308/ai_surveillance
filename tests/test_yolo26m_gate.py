@@ -94,6 +94,23 @@ class DetectorGateTests(unittest.TestCase):
         self.assertEqual(set(report["clusters"][0]["cameras"]), {"CAM-01", "CAM-02"})
         self.assertEqual(report["clusters"][1]["cameras"], ["CAM-03"])
 
+    def test_gap_diagnostic_distinguishes_ingress_from_egress(self):
+        text = "\n".join([
+            "CAM-01 STATS elapsed=10 ingress=200 ingress_fps=20 ingress_age=0.02 ingress_max_gap_ms=100 input=200 fps=20 age=0.02 max_gap_ms=100 queue=0",
+            "CAM-01 STATS elapsed=20 ingress=400 ingress_fps=20 ingress_age=0.02 ingress_max_gap_ms=1500 input=400 fps=20 age=0.02 max_gap_ms=1600 queue=0",
+            "CAM-02 STATS elapsed=10 ingress=200 ingress_fps=20 ingress_age=0.02 ingress_max_gap_ms=100 input=200 fps=20 age=0.02 max_gap_ms=100 queue=0",
+            "CAM-02 STATS elapsed=20 ingress=400 ingress_fps=20 ingress_age=0.02 ingress_max_gap_ms=100 input=390 fps=18 age=0.02 max_gap_ms=1400 queue=8",
+        ])
+        report = analyze_source_gap_events(text)
+        self.assertEqual(
+            report["per_camera"]["CAM-01"][0]["classification"],
+            "source_or_decode_gap",
+        )
+        self.assertEqual(
+            report["per_camera"]["CAM-02"][0]["classification"],
+            "downstream_or_queue_backpressure",
+        )
+
     def test_overlap_analyzer_blocks_duplicate_bbox_above_nms_threshold(self):
         records = [
             {'source_id': 3, 'frame': 400, 'box': [100.0, 100.0, 200.0, 300.0],
