@@ -265,6 +265,18 @@ CUDA/TensorRT lazy initialization as a leak while still failing sustained
 steady-state growth. Short 60-second gates continue using the original
 post-15-second window.
 
+
+
+### Process-specific VRAM evidence
+
+Device-wide `nvidia-smi --query-gpu=memory.used` is retained only as telemetry
+because it includes allocations from other GPU users such as display/graphics
+and unrelated CUDA contexts. New detector runs also record the DeepStream
+container process PID and its compute-process `used_gpu_memory`. Long-run VRAM
+stability gates on that process-specific series after the warmup window. Older
+runs without process-specific samples are not retroactively accepted for the
+long-run memory gate.
+
 ## References
 
 - [Ultralytics NMS-free detection](https://docs.ultralytics.com/guides/end2end-detection)
