@@ -149,3 +149,34 @@ reidType: 0
 This retry must again pass the 60-second automated gate and a separate visual
 review. In particular, a continuously visible person must not receive a new ID
 without a genuine disappearance/re-entry.
+
+
+## Final 60-second NvDCF tracker gate — PASS
+
+The tuned no-ReID NvDCF stage passed the 60-second automated and visual gates.
+
+Validated evidence included:
+
+- six source pipelines remaining near 20 FPS;
+- YOLO26m parser/inference errors at zero;
+- no detector person-box pair surviving above NMS IoU 0.45;
+- no untracked person metadata after NvDCF;
+- no duplicate tracker ID within a source/frame;
+- process-specific GPU memory stable at 2602 MiB after the warmup window;
+- visual review confirming continuously visible people retained stable IDs,
+  nearby people kept separate IDs, and no obvious rapid ID flicker/switching
+  was observed.
+
+Notable per-camera continuity evidence included a single CAM-02 track with 1165
+observations, CAM-03 with a longest track of 1187 observations, CAM-05 with only
+two IDs and a longest track of 418 observations after the anti-fragmentation
+tuning, and CAM-06 with a 1195-observation track.
+
+The tracker configuration is now frozen for the long-soak gate:
+`NvDCF_stable_person`, 960x544 tracker resolution, ReID disabled,
+cascaded association, 90-frame shadow age, HOG + ColorNames, and
+`featureImgSizeLevel: 3`.
+
+Next gate: 660-second tracker soak using this exact configuration. ReID remains
+out of scope until the long-soak and subsequent source isolation/recovery gates
+pass.
