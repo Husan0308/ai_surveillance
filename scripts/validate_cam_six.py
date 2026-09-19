@@ -19,11 +19,20 @@ sys.path.insert(0, str(ROOT))
 from services.shared.camera_config import load_settings
 
 
-def main(*, person_detection: bool = False) -> int:
+def main(*, person_detection: bool = False, person_tracking: bool = False) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    if person_tracking and not person_detection:
+        raise RuntimeError("person_tracking requires person_detection")
+    default_out = (
+        ".runtime/yolo26m-nvdcf-short"
+        if person_tracking
+        else ".runtime/yolo26m-person-nms-short"
+        if person_detection
+        else ".runtime/cam01-cam02-cam03-cam04-cam05-cam06-validation"
+    )
     ap.add_argument("--duration", type=int, default=60 if person_detection else 660)
     ap.add_argument("--latency-ms", type=int, default=100)
-    ap.add_argument("--out", type=Path, default=ROOT / (".runtime/yolo26m-person-nms-short" if person_detection else ".runtime/cam01-cam02-cam03-cam04-cam05-cam06-validation"))
+    ap.add_argument("--out", type=Path, default=ROOT / default_out)
     ap.add_argument("--interrupt-camera", choices=["none", "CAM-01", "CAM-02", "CAM-03", "CAM-04", "CAM-05", "CAM-06"], default="none")
     ap.add_argument("--interrupt-at", type=int, default=20)
     ap.add_argument("--interrupt-seconds", type=int, default=12)
@@ -98,6 +107,26 @@ def main(*, person_detection: bool = False) -> int:
             "-I/cuda-headers/usr/local/cuda-13.2/targets/x86_64-linux/include "
             "-L/opt/nvidia/deepstream/deepstream/lib "
             "-Wl,-rpath,/opt/nvidia/deepstream/deepstream/lib -lnvdsgst_meta -lnvds_meta -ldl")
+        if person_tracking:
+            detection_build += ["-v", f"{ROOT / 'scripts/yolo26m_tracker'}:/tracker:ro"]
+            detection_flags += " -DYOLO26_TRACKER -I/tracker"
+            tracker_cfg = (
+                "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/"
+                "config_tracker_NvDCF_perf.yml"
+            )
+            tracker_lib = (
+                "/opt/nvidia/deepstream/deepstream/lib/"
+                "libnvds_nvmultiobjecttracker.so"
+            )
+            tracker_preflight = base + [
+                "--network=none",
+                "--entrypoint", "bash",
+                image,
+                "-c",
+                f"test -r {tracker_cfg} && test -r {tracker_lib} && "
+                f"grep -q 'VisualTracker' {tracker_cfg}",
+            ]
+            subprocess.run(tracker_preflight, check=True)
     build = base + detection_build + [
         "--network=none",
         "-v", f"{ROOT / 'scripts/cam_six_validation'}:/src:ro",
