@@ -1,5 +1,5 @@
 import unittest
-from scripts.yolo26m_person.check_gate import assess, analyze_overlaps, load_jsonl_evidence
+from scripts.yolo26m_person.check_gate import assess, analyze_overlaps, load_jsonl_evidence, choose_gpu_window
 
 
 class DetectorGateTests(unittest.TestCase):
@@ -81,6 +81,26 @@ class DetectorGateTests(unittest.TestCase):
             self.assertEqual(len(result['records']), 2)
             self.assertEqual(len(result['malformed']), 1)
             self.assertFalse(result['truncated_tail_accepted'])
+
+
+    def test_long_run_gpu_window_starts_after_120_seconds(self):
+        samples = [
+            {'time': 1000.0, 'memory_used_mib': 1891.0, 'gpu_pct': 0.0, 'decoder_pct': 1.0, 'encoder_pct': 0.0},
+            {'time': 1015.0, 'memory_used_mib': 1891.0, 'gpu_pct': 10.0, 'decoder_pct': 10.0, 'encoder_pct': 1.0},
+            {'time': 1120.0, 'memory_used_mib': 2039.0, 'gpu_pct': 40.0, 'decoder_pct': 24.0, 'encoder_pct': 7.0},
+            {'time': 1180.0, 'memory_used_mib': 2039.0, 'gpu_pct': 40.0, 'decoder_pct': 24.0, 'encoder_pct': 7.0},
+        ]
+        window = choose_gpu_window(samples, measured_seconds=660)
+        self.assertEqual([r['memory_used_mib'] for r in window], [2039.0, 2039.0])
+
+    def test_short_run_gpu_window_keeps_15_second_cutoff(self):
+        samples = [
+            {'time': 1000.0, 'memory_used_mib': 1900.0, 'gpu_pct': 0.0, 'decoder_pct': 1.0, 'encoder_pct': 0.0},
+            {'time': 1015.0, 'memory_used_mib': 2000.0, 'gpu_pct': 40.0, 'decoder_pct': 24.0, 'encoder_pct': 7.0},
+            {'time': 1030.0, 'memory_used_mib': 2001.0, 'gpu_pct': 40.0, 'decoder_pct': 24.0, 'encoder_pct': 7.0},
+        ]
+        window = choose_gpu_window(samples, measured_seconds=60)
+        self.assertEqual([r['memory_used_mib'] for r in window], [2000.0, 2001.0])
 
     def test_short_run_and_dirty_exit_cannot_pass(self):
         for text in [self.text.replace('elapsed=60','elapsed=50'),self.text.replace('fatal=0','fatal=1')]:
