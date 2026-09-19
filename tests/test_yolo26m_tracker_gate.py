@@ -41,6 +41,18 @@ class NvDCFTrackerGateTests(unittest.TestCase):
         self.assertEqual(report["duplicate_frame_ids"], 0)
         self.assertEqual(report["per_source"]["CAM-02"]["unique_ids"], 2)
 
+    def test_tracker_source_avoids_removed_ds9_properties(self):
+        from pathlib import Path
+        text = Path("scripts/yolo26m_tracker/tracker.hpp").read_text()
+        self.assertNotIn('"enable-batch-process"', text)
+        self.assertNotIn('"enable-past-frame"', text)
+        for name in (
+            '"tracker-width"', '"tracker-height"', '"ll-lib-file"',
+            '"ll-config-file"', '"gpu-id"', '"display-tracking-id"',
+            '"compute-hw"', '"tracking-id-reset-mode"',
+        ):
+            self.assertIn(name, text)
+
     def test_fragmented_track_does_not_fake_long_observation_count(self):
         records = [
             {"source_id": 0, "frame": i * 10, "object_id": 99}
