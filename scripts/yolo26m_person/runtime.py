@@ -9,6 +9,7 @@ def _validate_nms_config(root):
     text = cfg.read_text()
     required = {
         'cluster-mode=2': 'DeepStream NMS must be enabled',
+        'warmup-engine=1': 'TensorRT engine warmup must be enabled',
         'nms-iou-threshold=0.70': 'NMS IoU threshold must remain 0.70',
         'pre-cluster-threshold=0.25': 'confidence threshold must remain 0.25',
         'batch-size=6': 'detector batch must remain 6',
