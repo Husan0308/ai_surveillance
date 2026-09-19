@@ -119,6 +119,55 @@ def analyze_overlaps(records, nms_threshold=0.45):
         'evidence': evidence[:20],
     }
 
+def analyze_source_gap_events(text, threshold_ms=1000.0, cluster_sec=6.0):
+    events = []
+    per_camera = {}
+    for i in range(1, 7):
+        cid = f'CAM-{i:02d}'
+        rows = parse_rows(text, f'{cid} STATS ')
+        previous = 0.0
+        camera_events = []
+        for row in rows:
+            gap = row.get('max_gap_ms', 0.0)
+            if gap > previous + 1e-6:
+                if gap > threshold_ms:
+                    event = {
+                        'camera': cid,
+                        'elapsed': row.get('elapsed'),
+                        'max_gap_ms': gap,
+                        'fps_sample': row.get('fps'),
+                        'queue': row.get('queue'),
+                        'age': row.get('age'),
+                    }
+                    events.append(event)
+                    camera_events.append(event)
+                previous = gap
+        per_camera[cid] = camera_events
+
+    events.sort(key=lambda x: x['elapsed'] if x['elapsed'] is not None else float('inf'))
+    clusters = []
+    for event in events:
+        if not clusters or event['elapsed'] - clusters[-1]['last_elapsed'] > cluster_sec:
+            clusters.append({
+                'first_elapsed': event['elapsed'],
+                'last_elapsed': event['elapsed'],
+                'cameras': [event['camera']],
+                'events': [event],
+            })
+        else:
+            cluster = clusters[-1]
+            cluster['last_elapsed'] = event['elapsed']
+            if event['camera'] not in cluster['cameras']:
+                cluster['cameras'].append(event['camera'])
+            cluster['events'].append(event)
+
+    return {
+        'threshold_ms': threshold_ms,
+        'per_camera': per_camera,
+        'clusters': clusters,
+    }
+
+
 def choose_gpu_window(samples, measured_seconds):
     if not samples:
         return []
@@ -218,6 +267,7 @@ def assess(text):
             inferred_frames=int(detect[-1]['frames']),
             person_detections=int(detect[-1]['persons']),
             last_detection_unix_ms=int(detect[-1]['last_detection_unix_ms']))
+    report['source_gap_diagnostics'] = analyze_source_gap_events(text)
     if not yolo or yolo[-1].get('persons',0)==0:
         failures.append('No real person metadata observed')
     elif any(r[k]!=0 for r in yolo for k in ['errors','parser_errors','parser_rejected']):
