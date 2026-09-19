@@ -71,6 +71,15 @@ class NvDCFTrackerGateTests(unittest.TestCase):
         self.assertIn("/config/config_tracker_NvDCF_stable_person.yml", tracker)
         self.assertNotIn("config_tracker_NvDCF_perf.yml", tracker)
 
+    def test_graph_marker_matches_stable_profile(self):
+        from pathlib import Path
+        detection = Path("scripts/yolo26m_person/detection.hpp").read_text()
+        checker = Path("scripts/yolo26m_tracker/check_gate.py").read_text()
+        marker = "nvtracker(NvDCF_stable_person,960x544)"
+        self.assertIn(marker, detection)
+        self.assertIn(marker, checker)
+        self.assertNotIn("nvtracker(NvDCF_perf,960x544)", detection)
+
     def test_tracker_preflight_requests_gpu_access(self):
         from pathlib import Path
         text = Path("scripts/validate_cam_six.py").read_text()
