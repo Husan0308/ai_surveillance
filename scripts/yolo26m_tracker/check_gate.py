@@ -110,7 +110,7 @@ def main() -> int:
     report = assess_detector_runtime(text)
     failures = report["failures"]
 
-    if "tracker=1" not in text or "nvtracker(NvDCF_stable_person,960x544)" not in text:
+    if "tracker=1" not in text or "->nvtracker(" not in text:
         failures.append("Missing NvDCF tracker graph evidence")
     if "TRACKER_GRAPH nvtracker(NvDCF_stable_person,width=960,height=544,batch=6,gpu=0,reid=0)" not in text:
         failures.append("Missing frozen NvDCF stable-person/no-ReID profile evidence")
