@@ -29,6 +29,58 @@ class DetectorGateTests(unittest.TestCase):
             with self.subTest(new=new):self.assertEqual(assess(self.text.replace(old,new))['status'],'BLOCKED')
 
 
+    def _long_run_text(self, *, sustained_slow=False, large_gap=False):
+        lines=['GROUP DETECTION_GRAPH mux->nvinfer(YOLO26m,FP16,batch=6,interval=0)->DeepStream-NMS(iou=0.45,conf=0.25) inference=1']
+        for sec in range(5, 661, 5):
+            for i in range(1, 7):
+                if i == 1 and sustained_slow and sec > 300:
+                    frames = 300 * 20 + (sec - 300) * 12
+                    fps = 12
+                else:
+                    frames = sec * 20
+                    fps = 11.2 if i == 1 and sec == 300 else 20
+                gap = 1200 if i == 1 and large_gap and sec >= 300 else 50
+                lines.append(
+                    f'CAM-{i:02d} STATS elapsed={sec} input={frames} fps={fps} '
+                    f'age=0.02 pts_ns={sec*1000000000} pts_backwards=0 pts_duplicates=0 '
+                    f'max_gap_ms={gap} queue=0 queue_ms=0 rtp_lost=0 rtp_late=0 '
+                    f'errors=0 warnings=0 decoder=1'
+                )
+                lines.append(
+                    f'CAM-{i:02d} DETECT frames={frames} detections={sec*2} '
+                    f'persons={sec*2} errors=0 last_detection_unix_ms=1000'
+                )
+            lines.append(
+                f'GROUP STATS elapsed={sec} output={sec*22} pts_ns={sec*1000000000} '
+                'rss_mib=1800 cpu_pct=100 dropped=0 shared_errors=0 shared_warnings=0 '
+                'pts_backwards=0 pts_duplicates=0'
+            )
+            lines.append(
+                f'YOLO STATS persons={sec*12} errors=0 parser_errors=0 parser_rejected=0'
+            )
+        lines.extend(
+            f'CAM-{i:02d} END hardware_decoder=1 errors=0 warnings=0'
+            for i in range(1, 7)
+        )
+        lines.append('GROUP END fatal=0 shared_errors=0 shared_warnings=0')
+        return '\n'.join(lines)
+
+    def test_long_run_tolerates_isolated_5s_fps_sample_jitter(self):
+        report = assess(self._long_run_text())
+        self.assertEqual(report['status'], 'PASS')
+        self.assertEqual(report['cameras']['CAM-01']['source_fps_outlier_samples'], 1)
+        self.assertGreaterEqual(report['cameras']['CAM-01']['source_fps_window30_min'], 18)
+
+    def test_long_run_blocks_sustained_30s_source_slowdown(self):
+        report = assess(self._long_run_text(sustained_slow=True))
+        self.assertEqual(report['status'], 'BLOCKED')
+        self.assertIn('CAM-01: source throughput/backlog failure', report['failures'])
+
+    def test_long_run_blocks_large_interarrival_gap(self):
+        report = assess(self._long_run_text(large_gap=True))
+        self.assertEqual(report['status'], 'BLOCKED')
+        self.assertIn('CAM-01: source throughput/backlog failure', report['failures'])
+
     def test_overlap_analyzer_blocks_duplicate_bbox_above_nms_threshold(self):
         records = [
             {'source_id': 3, 'frame': 400, 'box': [100.0, 100.0, 200.0, 300.0],
