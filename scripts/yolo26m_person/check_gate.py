@@ -143,7 +143,7 @@ def assess(text):
         failures.append('Missing verified DeepStream NMS graph evidence')
     runtime_error_lines = [
         line for line in text.splitlines()
-        if re.search(r'GROUP FATAL|CRITICAL|PARSER_ERROR|\\bERROR\\s', line)
+        if re.search(r'GROUP FATAL|CRITICAL|PARSER_ERROR|\bERROR\s', line)
     ]
     if runtime_error_lines:
         failures.append('Runtime error diagnostic')
