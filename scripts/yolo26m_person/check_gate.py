@@ -125,23 +125,43 @@ def analyze_source_gap_events(text, threshold_ms=1000.0, cluster_sec=6.0):
     for i in range(1, 7):
         cid = f'CAM-{i:02d}'
         rows = parse_rows(text, f'{cid} STATS ')
-        previous = 0.0
+        previous_egress = 0.0
+        previous_ingress = 0.0
         camera_events = []
         for row in rows:
-            gap = row.get('max_gap_ms', 0.0)
-            if gap > previous + 1e-6:
-                if gap > threshold_ms:
-                    event = {
-                        'camera': cid,
-                        'elapsed': row.get('elapsed'),
-                        'max_gap_ms': gap,
-                        'fps_sample': row.get('fps'),
-                        'queue': row.get('queue'),
-                        'age': row.get('age'),
-                    }
-                    events.append(event)
-                    camera_events.append(event)
-                previous = gap
+            egress_gap = row.get('max_gap_ms', 0.0)
+            ingress_gap = row.get('ingress_max_gap_ms', 0.0)
+            egress_new = egress_gap > previous_egress + 1e-6
+            ingress_new = ingress_gap > previous_ingress + 1e-6
+
+            if egress_new and egress_gap > threshold_ms:
+                if ingress_new and ingress_gap > threshold_ms:
+                    classification = 'source_or_decode_gap'
+                elif 'ingress_max_gap_ms' in row:
+                    classification = 'downstream_or_queue_backpressure'
+                else:
+                    classification = 'legacy_unknown'
+
+                event = {
+                    'camera': cid,
+                    'elapsed': row.get('elapsed'),
+                    'classification': classification,
+                    'egress_gap_ms': egress_gap,
+                    'ingress_gap_ms': ingress_gap if 'ingress_max_gap_ms' in row else None,
+                    'egress_fps_sample': row.get('fps'),
+                    'ingress_fps_sample': row.get('ingress_fps'),
+                    'queue': row.get('queue'),
+                    'age': row.get('age'),
+                    'ingress_age': row.get('ingress_age'),
+                }
+                events.append(event)
+                camera_events.append(event)
+
+            if egress_new:
+                previous_egress = egress_gap
+            if ingress_new:
+                previous_ingress = ingress_gap
+
         per_camera[cid] = camera_events
 
     events.sort(key=lambda x: x['elapsed'] if x['elapsed'] is not None else float('inf'))
@@ -152,6 +172,7 @@ def analyze_source_gap_events(text, threshold_ms=1000.0, cluster_sec=6.0):
                 'first_elapsed': event['elapsed'],
                 'last_elapsed': event['elapsed'],
                 'cameras': [event['camera']],
+                'classifications': [event['classification']],
                 'events': [event],
             })
         else:
@@ -159,6 +180,8 @@ def analyze_source_gap_events(text, threshold_ms=1000.0, cluster_sec=6.0):
             cluster['last_elapsed'] = event['elapsed']
             if event['camera'] not in cluster['cameras']:
                 cluster['cameras'].append(event['camera'])
+            if event['classification'] not in cluster['classifications']:
+                cluster['classifications'].append(event['classification'])
             cluster['events'].append(event)
 
     return {
