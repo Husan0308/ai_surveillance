@@ -53,6 +53,24 @@ class NvDCFTrackerGateTests(unittest.TestCase):
         ):
             self.assertIn(name, text)
 
+    def test_stable_person_profile_is_no_reid_and_accuracy_tuned(self):
+        from pathlib import Path
+        text = Path("config/deepstream/config_tracker_NvDCF_stable_person.yml").read_text()
+        for item in (
+            "associationMatcherType: 1",
+            "maxShadowTrackingAge: 90",
+            "minTrackerConfidence: 0.15",
+            "useColorNames: 1",
+            "useHog: 1",
+            "featureImgSizeLevel: 3",
+            "reidType: 0",
+        ):
+            self.assertIn(item, text)
+
+        tracker = Path("scripts/yolo26m_tracker/tracker.hpp").read_text()
+        self.assertIn("/config/config_tracker_NvDCF_stable_person.yml", tracker)
+        self.assertNotIn("config_tracker_NvDCF_perf.yml", tracker)
+
     def test_tracker_preflight_requests_gpu_access(self):
         from pathlib import Path
         text = Path("scripts/validate_cam_six.py").read_text()
