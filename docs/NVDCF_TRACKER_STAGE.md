@@ -236,3 +236,36 @@ cluster was produced. Queue occupancy remained 0 for CAM-01..05 and reached only
 1 buffer on CAM-06. The previous >1 second events are therefore treated as
 unreproduced/transient rather than waived. A final 660-second tracker soak with
 the same ingress/egress instrumentation is required before tracker-stage freeze.
+
+
+## Final 660-second NvDCF tracker soak — PASS
+
+The final 660-second tracker soak passed all automated and visual gates with the
+frozen `NvDCF_stable_person` profile.
+
+Key evidence:
+
+- all six sources averaged essentially 20 FPS;
+- every sliding ~30-second source window remained within the long-soak limits;
+- no source produced a >1000 ms ingress/egress gap and no correlated gap cluster
+  was observed;
+- YOLO26m inference/parser errors remained zero;
+- no person-box pair survived above DeepStream NMS IoU 0.45;
+- NvDCF produced no untracked person metadata and no duplicate object ID within
+  one source/frame;
+- process-specific GPU memory remained flat at 2602 MiB after warmup;
+- RSS growth over the run was about 10.56 MiB;
+- the separate visual review passed, including CAM-03/CAM-04/CAM-05 checks for
+  ID stability, nearby-person separation and absence of obvious ID flicker.
+
+The tracker configuration is frozen for source isolation/recovery testing.
+ReID remains disabled.
+
+### Isolation semantics
+
+`tracking-id-reset-mode=1` is retained. If a stream reset event is emitted
+during source recreation, DeepStream terminates existing trackers for that
+source and assigns new IDs after recovery. Therefore an isolation test must not
+require the interrupted camera to preserve its pre-outage local tracker ID.
+Healthy peer streams must continue tracking without pipeline failure, and the
+target source must recover frames normally.
