@@ -179,7 +179,7 @@ static void detection_link(GstElement *from, GstElement *tiler, GstElement *to) 
 #endif
   link(tiler,convert);link(convert,filter);link(filter,osd);link(osd,to);
 #ifdef YOLO26_TRACKER
-  event(nullptr,"DETECTION_GRAPH","mux->nvinfer(YOLO26m,FP16,batch=6,interval=0)->DeepStream-NMS(iou=0.45,conf=0.25)->nvtracker(NvDCF_perf,960x544)->tiler->NVMM/RGBA->nvdsosd(GPU,person+ID)->NVENC inference=1 tracker=1");
+  event(nullptr,"DETECTION_GRAPH","mux->nvinfer(YOLO26m,FP16,batch=6,interval=0)->DeepStream-NMS(iou=0.45,conf=0.25)->nvtracker(NvDCF_stable_person,960x544)->tiler->NVMM/RGBA->nvdsosd(GPU,person+ID)->NVENC inference=1 tracker=1");
 #else
   event(nullptr,"DETECTION_GRAPH","mux->nvinfer(YOLO26m,FP16,batch=6,interval=0)->DeepStream-NMS(iou=0.45,conf=0.25)->tiler->NVMM/RGBA->nvdsosd(GPU,person+confidence)->NVENC inference=1");
 #endif
