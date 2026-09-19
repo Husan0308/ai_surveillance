@@ -125,7 +125,16 @@ def main(*, person_detection: bool = False, person_tracking: bool = False) -> in
                 "-c",
                 f"test -r {tracker_cfg} && test -r {tracker_lib} && "
                 f"grep -q 'VisualTracker' {tracker_cfg} && "
-                f"! grep -Eq '^[[:space:]]*reidType:[[:space:]]*[1-9]' {tracker_cfg}",
+                f"! grep -Eq '^[[:space:]]*reidType:[[:space:]]*[1-9]' {tracker_cfg} && "
+                "gst-inspect-1.0 nvtracker > /tmp/nvtracker-inspect.txt && "
+                "grep -q 'tracker-width' /tmp/nvtracker-inspect.txt && "
+                "grep -q 'tracker-height' /tmp/nvtracker-inspect.txt && "
+                "grep -q 'll-lib-file' /tmp/nvtracker-inspect.txt && "
+                "grep -q 'll-config-file' /tmp/nvtracker-inspect.txt && "
+                "grep -q 'compute-hw' /tmp/nvtracker-inspect.txt && "
+                "grep -q 'tracking-id-reset-mode' /tmp/nvtracker-inspect.txt && "
+                "! grep -q 'enable-batch-process' /tmp/nvtracker-inspect.txt && "
+                "! grep -q 'enable-past-frame' /tmp/nvtracker-inspect.txt",
             ]
             subprocess.run(tracker_preflight, check=True)
     build = base + detection_build + [
