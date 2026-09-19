@@ -149,7 +149,7 @@ static GstElement *create_nvdcf_tracker() {
   gst_object_unref(out);
 
   event(nullptr, "TRACKER_GRAPH",
-        "nvtracker(NvDCF_perf,width=960,height=544,batch=1,gpu=0,reid=0)->"
+        "nvtracker(NvDCF_perf,width=960,height=544,batch=6,gpu=0,reid=0)->"
         "per-camera-object-id");
   return tracker;
 }
