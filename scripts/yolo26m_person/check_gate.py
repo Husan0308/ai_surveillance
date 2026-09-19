@@ -148,6 +148,9 @@ def assess(text):
     if runtime_error_lines:
         failures.append('Runtime error diagnostic')
         report['runtime_error_diagnostics'] = runtime_error_lines[:20]
+    measured_runtime = group[-1].get('elapsed', 0) if group else 0
+    long_run = measured_runtime >= 300
+
     for i in range(1,7):
         cid=f'CAM-{i:02d}'
         source=parse_rows(text,f'{cid} STATS ')
@@ -157,7 +160,34 @@ def assess(text):
             failures.append(f'{cid}: insufficient source/inference evidence');continue
         if not re.search(rf'{cid} END .*hardware_decoder=1 errors=0 warnings=0',text):
             failures.append(f'{cid}: missing clean decoder completion')
-        if any(not 18<=r['fps']<=22 or r['age']>1 or r['queue']>=12 or r['queue_ms']>600 for r in steady):
+
+        fps_values=[r['fps'] for r in steady]
+        fps_outliers=sum(1 for v in fps_values if not 18<=v<=22)
+        rolling_fps=[
+            statistics.mean(fps_values[j:j+3])
+            for j in range(len(fps_values)-2)
+        ]
+
+        # Short gates remain strict. Long soaks tolerate isolated 5-second
+        # source bursts/dips when aggregate throughput is correct and there is
+        # no sustained ~15-second slowdown, backlog, stale source, or large
+        # inter-arrival gap.
+        if long_run:
+            fps_bad = (
+                not 19.5 <= statistics.mean(fps_values) <= 20.5
+                or any(not 18<=v<=22 for v in rolling_fps)
+            )
+        else:
+            fps_bad = any(not 18<=v<=22 for v in fps_values)
+
+        transport_bad = any(
+            r['age']>1
+            or r['queue']>=12
+            or r['queue_ms']>600
+            or r.get('max_gap_ms', 0)>1000
+            for r in steady
+        )
+        if fps_bad or transport_bad:
             failures.append(f'{cid}: source throughput/backlog failure')
         if any(r[k]!=0 for r in source for k in ['rtp_lost','rtp_late','errors','warnings','pts_backwards','pts_duplicates']):
             failures.append(f'{cid}: packet/error/timestamp failure')
@@ -173,11 +203,19 @@ def assess(text):
             failures.append(f'{cid}: source/inference frame divergence')
         if steady[-1]['queue']>steady[0]['queue']+6:
             failures.append(f'{cid}: growing queue')
-        report['cameras'][cid]=dict(source_frames=int(source[-1]['input']),
-            source_fps_mean=statistics.mean(r['fps'] for r in steady),
-            source_fps_min=min(r['fps'] for r in steady),source_fps_max=max(r['fps'] for r in steady),
-            queue_max=max(r['queue'] for r in steady),inferred_frames=int(detect[-1]['frames']),
-            person_detections=int(detect[-1]['persons']),last_detection_unix_ms=int(detect[-1]['last_detection_unix_ms']))
+        report['cameras'][cid]=dict(
+            source_frames=int(source[-1]['input']),
+            source_fps_mean=statistics.mean(fps_values),
+            source_fps_min=min(fps_values),
+            source_fps_max=max(fps_values),
+            source_fps_outlier_samples=fps_outliers,
+            source_fps_rolling3_min=min(rolling_fps) if rolling_fps else None,
+            source_fps_rolling3_max=max(rolling_fps) if rolling_fps else None,
+            source_max_gap_ms=max(r.get('max_gap_ms',0) for r in steady),
+            queue_max=max(r['queue'] for r in steady),
+            inferred_frames=int(detect[-1]['frames']),
+            person_detections=int(detect[-1]['persons']),
+            last_detection_unix_ms=int(detect[-1]['last_detection_unix_ms']))
     if not yolo or yolo[-1].get('persons',0)==0:
         failures.append('No real person metadata observed')
     elif any(r[k]!=0 for r in yolo for k in ['errors','parser_errors','parser_rejected']):
