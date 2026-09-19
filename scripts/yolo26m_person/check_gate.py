@@ -131,7 +131,10 @@ def assess(text):
         if any(b['output']<=a['output'] or b['pts_ns']<=a['pts_ns'] for a,b in zip(steady,steady[1:])):
             failures.append('Frozen tiled output')
         if steady:
-            if steady[-1]['rss_mib']-steady[0]['rss_mib']>96:failures.append('RSS growth exceeds 96 MiB during short gate')
+            rss_growth = steady[-1]['rss_mib'] - steady[0]['rss_mib']
+            report['rss_growth_mib'] = rss_growth
+            if rss_growth > 96:
+                failures.append(f'RSS growth exceeds 96 MiB during short gate: {rss_growth:.3f} MiB')
             report.update(measured_seconds=group[-1]['elapsed'],output_frames=int(group[-1]['output']),
                 cpu_pct_mean_one_core=statistics.mean(r['cpu_pct'] for r in steady),
                 rss_mib_start=steady[0]['rss_mib'],rss_mib_end=steady[-1]['rss_mib'])
