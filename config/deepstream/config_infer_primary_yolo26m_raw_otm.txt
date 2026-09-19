@@ -23,5 +23,5 @@ output-blob-names=output0
 
 [class-attrs-all]
 pre-cluster-threshold=0.25
-nms-iou-threshold=0.70
+nms-iou-threshold=0.50
 topk=300
