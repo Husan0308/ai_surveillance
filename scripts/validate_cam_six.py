@@ -124,7 +124,8 @@ def main(*, person_detection: bool = False, person_tracking: bool = False) -> in
                 image,
                 "-c",
                 f"test -r {tracker_cfg} && test -r {tracker_lib} && "
-                f"grep -q 'VisualTracker' {tracker_cfg}",
+                f"grep -q 'VisualTracker' {tracker_cfg} && "
+                f"! grep -Eq '^[[:space:]]*reidType:[[:space:]]*[1-9]' {tracker_cfg}",
             ]
             subprocess.run(tracker_preflight, check=True)
     build = base + detection_build + [
