@@ -1,5 +1,5 @@
 import unittest
-from scripts.yolo26m_person.check_gate import assess, analyze_overlaps
+from scripts.yolo26m_person.check_gate import assess, analyze_overlaps, load_jsonl_evidence
 
 
 class DetectorGateTests(unittest.TestCase):
@@ -58,6 +58,29 @@ class DetectorGateTests(unittest.TestCase):
             assess(self.text.replace('->DeepStream-NMS(iou=0.70,conf=0.25)', ''))['status'],
             'BLOCKED',
         )
+
+
+    def test_jsonl_accepts_only_truncated_final_record(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        with TemporaryDirectory() as td:
+            p = Path(td) / 'detections.jsonl'
+            p.write_text('{"source_id":0,"frame":1}\n{"source_id":0,"frame":2')
+            result = load_jsonl_evidence(p)
+            self.assertEqual(len(result['records']), 1)
+            self.assertEqual(len(result['malformed']), 1)
+            self.assertTrue(result['truncated_tail_accepted'])
+
+    def test_jsonl_rejects_interior_malformed_record(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        with TemporaryDirectory() as td:
+            p = Path(td) / 'detections.jsonl'
+            p.write_text('{"source_id":0}\n{broken}\n{"source_id":1}\n')
+            result = load_jsonl_evidence(p)
+            self.assertEqual(len(result['records']), 2)
+            self.assertEqual(len(result['malformed']), 1)
+            self.assertFalse(result['truncated_tail_accepted'])
 
     def test_short_run_and_dirty_exit_cannot_pass(self):
         for text in [self.text.replace('elapsed=60','elapsed=50'),self.text.replace('fatal=0','fatal=1')]:
