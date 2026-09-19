@@ -119,6 +119,9 @@ def main(*, person_detection: bool = False, person_tracking: bool = False) -> in
                 "libnvds_nvmultiobjecttracker.so"
             )
             tracker_preflight = base + [
+                "--gpus", "device=0",
+                "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video",
+                "-e", "GST_REGISTRY=/tmp/nvtracker-preflight-registry.bin",
                 "--network=none",
                 "--entrypoint", "bash",
                 image,
