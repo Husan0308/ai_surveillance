@@ -277,6 +277,31 @@ stability gates on that process-specific series after the warmup window. Older
 runs without process-specific samples are not retroactively accepted for the
 long-run memory gate.
 
+
+
+## Final 660-second YOLO26m detector soak — PASS
+
+The final detector soak with raw one-to-many YOLO26m output and DeepStream NMS
+at IoU 0.45 passed all automated and visual gates. Six sources remained near
+20 FPS, parser/inference errors were zero, RSS increased only about 4.45 MiB,
+and process-specific GPU memory was stable at 1880 MiB after the 120-second
+warmup window (0 MiB steady spread and 0 MiB end-to-start delta).
+
+The run produced 79,190 inferred frames and 82,426 person metadata records.
+No final person-box pair exceeded the configured NMS threshold; maximum observed
+same-frame IoU was approximately 0.449998. The corresponding CAM-01 frame was
+visually reviewed and did not show a duplicate person box. The visual review,
+recording hash, JSONL evidence, and detector gate all passed.
+
+Detector configuration is now frozen for the next gate:
+YOLO26m raw one-to-many, TensorRT FP16, batch 6, confidence 0.25,
+DeepStream cluster-mode 2, NMS IoU 0.45, interval 0.
+
+Next gate: six individual source isolation/recovery tests with YOLO inference
+remaining enabled. Each target source is intentionally stopped, the five peers
+must continue advancing, only the target nvurisrcbin is recreated, and the target
+must recover at least 100 frames before the run can pass.
+
 ## References
 
 - [Ultralytics NMS-free detection](https://docs.ultralytics.com/guides/end2end-detection)
