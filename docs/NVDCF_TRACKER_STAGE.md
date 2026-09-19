@@ -196,3 +196,22 @@ remain within 19.5..20.5 FPS. Independent hard failures remain for stale source
 age, queue/backlog, RTP/error/timestamp counters, and maximum inter-arrival gaps
 above 1000 ms. This prevents a single 5-second sampling burst/dip from blocking a
 healthy long soak while still rejecting sustained transport degradation.
+
+
+## Source-gap localization instrumentation
+
+The first 660-second tracker soak showed two correlated gap clusters: a
+165-170 second event affecting CAM-01, CAM-02, CAM-04, CAM-05 and CAM-06, and a
+second 215-second event affecting CAM-04 and CAM-05. The 30-second throughput
+windows remained healthy, so the >1 second maximum inter-frame gaps are being
+localized rather than waived.
+
+New runs probe both sides of each per-camera queue:
+
+- `ingress`: queue sink, immediately after the decoded `nvurisrcbin` output;
+- `input`: queue src, immediately before `nvstreammux`.
+
+If both ingress and egress develop the same >1 second gap, the event is
+classified as source/decode-side. If ingress stays smooth but queue-src egress
+develops the gap, it is classified as downstream/queue backpressure. The
+pipeline topology and queue limits are unchanged by this instrumentation.
