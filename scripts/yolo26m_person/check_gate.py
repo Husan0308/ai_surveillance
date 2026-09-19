@@ -69,7 +69,7 @@ def box_iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
-def analyze_overlaps(records, nms_threshold=0.70):
+def analyze_overlaps(records, nms_threshold=0.50):
     frames = {}
     for r in records:
         frames.setdefault((r['source_id'], r['frame']), []).append(r)
@@ -129,7 +129,7 @@ def assess(text):
         failures.append('Missing clean group completion')
     if 'inference=1' not in text or 'nvinfer(YOLO26m,FP16,batch=6,interval=0)' not in text:
         failures.append('Missing primary inference graph evidence')
-    if 'DeepStream-NMS(iou=0.70,conf=0.25)' not in text:
+    if 'DeepStream-NMS(iou=0.50,conf=0.25)' not in text:
         failures.append('Missing verified DeepStream NMS graph evidence')
     if re.search(r'GROUP FATAL|CRITICAL|PARSER_ERROR|\bERROR\s',text):
         failures.append('Runtime error diagnostic')
@@ -230,17 +230,17 @@ def main():
         if r['class_id']!=0 or not .25<=r['confidence']<=1 or not all(math.isfinite(x) for x in r['box']):
             failures.append('Non-person or invalid sampled metadata');break
 
-    overlap = analyze_overlaps(records, nms_threshold=0.70)
+    overlap = analyze_overlaps(records, nms_threshold=0.50)
     report['sampled_metadata_rows'] = len(records)
     report['overlap_validation'] = {k: v for k, v in overlap.items() if k != 'evidence'}
     (out/'overlap_evidence.json').write_text(json.dumps(overlap, indent=2) + '\n')
 
-    # DeepStream cluster-mode=2 with nms-iou-threshold=0.70 should reject the
-    # lower-confidence proposal once same-class IoU exceeds 0.70. If such a
+    # DeepStream cluster-mode=2 with nms-iou-threshold=0.50 should reject the
+    # lower-confidence proposal once same-class IoU exceeds 0.50. If such a
     # pair survives into final NvDsObjectMeta, the detector gate is not valid.
     if overlap['pairs_over_nms_threshold']:
         failures.append(
-            'Person boxes survived above configured DeepStream NMS IoU=0.70; '
+            'Person boxes survived above configured DeepStream NMS IoU=0.50; '
             'possible duplicate bbox / NMS configuration failure'
         )
     visual_path=out/'visual_review.json'
