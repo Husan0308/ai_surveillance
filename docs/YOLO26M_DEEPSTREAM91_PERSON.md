@@ -224,7 +224,7 @@ but isolation tests were not repeated with inference after this blocked gate.
 The next detector retry uses the YOLO26 one-to-many raw output
 `(batch,84,8400)` and leaves suppression to Gst-nvinfer. The active config is
 `config/deepstream/config_infer_primary_yolo26m_raw_otm.txt` with
-`cluster-mode=2`, `nms-iou-threshold=0.70`, and
+`cluster-mode=2`, `nms-iou-threshold=0.50`, and
 `pre-cluster-threshold=0.25`. The parser emits only person proposals and does
 not perform its own NMS.
 
@@ -232,7 +232,7 @@ Before cameras open, runtime validation fails closed unless that exact DeepStrea
 NMS configuration and the raw one-to-many engine/parser are selected.
 
 The final metadata checker evaluates every saved person box pair from the same
-camera/frame. It records pairs above IoU 0.70, pairs at or above 0.90 and 0.95,
+camera/frame. It records pairs above IoU 0.50, pairs at or above 0.90 and 0.95,
 the maximum person IoU, and the worst surviving pair. Any final pair above IoU
 0.70 blocks the gate because DeepStream NMS should have rejected the
 lower-confidence proposal.
@@ -240,6 +240,18 @@ lower-confidence proposal.
 Evidence is written to `overlap_evidence.json` beside `gate.json`. This rule
 is intended to prevent the previous CAM-04 double-box failure from being
 accepted.
+
+
+
+### Duplicate-box threshold adjustment after long-run visual review
+
+A later 660-second raw one-to-many run still showed visually duplicated person
+boxes while the maximum surviving same-frame IoU was exactly 0.70. The previous
+0.70 NMS setting therefore proved too permissive for this office scene. The
+active retry threshold is now 0.50, while confidence remains 0.25. This change
+targets overlapping duplicate proposals rather than hiding them by raising the
+confidence threshold. Acceptance still requires visual review so legitimate
+nearby people are not accidentally collapsed by overly aggressive suppression.
 
 ## References
 
