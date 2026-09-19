@@ -168,5 +168,5 @@ static void detection_link(GstElement *from, GstElement *tiler, GstElement *to) 
   auto *osd=make("nvdsosd","person-overlay");
   g_object_set(osd,"process-mode",1,"display-text",TRUE,"display-bbox",TRUE,"display-mask",FALSE,"display-clock",FALSE,nullptr);
   link(from,gie);link(gie,tiler);link(tiler,convert);link(convert,filter);link(filter,osd);link(osd,to);
-  event(nullptr,"DETECTION_GRAPH","mux->nvinfer(YOLO26m,FP16,batch=6,interval=0)->DeepStream-NMS(iou=0.70,conf=0.25)->tiler->NVMM/RGBA->nvdsosd(GPU,person+confidence)->NVENC inference=1");
+  event(nullptr,"DETECTION_GRAPH","mux->nvinfer(YOLO26m,FP16,batch=6,interval=0)->DeepStream-NMS(iou=0.50,conf=0.25)->tiler->NVMM/RGBA->nvdsosd(GPU,person+confidence)->NVENC inference=1");
 }
