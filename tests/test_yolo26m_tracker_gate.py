@@ -93,6 +93,12 @@ class NvDCFTrackerGateTests(unittest.TestCase):
             text,
         )
 
+    def test_tracker_isolation_checker_documents_reset_semantics(self):
+        from pathlib import Path
+        text = Path("scripts/yolo26m_tracker/check_isolation.py").read_text()
+        self.assertIn("tracking-id-reset-mode=1 allows new IDs after stream reset", text)
+        self.assertIn('"target_id_continuity_required": False', text)
+
     def test_fragmented_track_does_not_fake_long_observation_count(self):
         records = [
             {"source_id": 0, "frame": i * 10, "object_id": 99}
