@@ -218,6 +218,29 @@ The frozen checkpoint branch still points at `5db3745`; implementation changes
 remain uncommitted on the new detection branch. RTSP recovery code was preserved
 but isolation tests were not repeated with inference after this blocked gate.
 
+
+## Raw one-to-many + DeepStream NMS retry gate
+
+The next detector retry uses the YOLO26 one-to-many raw output
+`(batch,84,8400)` and leaves suppression to Gst-nvinfer. The active config is
+`config/deepstream/config_infer_primary_yolo26m_raw_otm.txt` with
+`cluster-mode=2`, `nms-iou-threshold=0.70`, and
+`pre-cluster-threshold=0.25`. The parser emits only person proposals and does
+not perform its own NMS.
+
+Before cameras open, runtime validation fails closed unless that exact DeepStream
+NMS configuration and the raw one-to-many engine/parser are selected.
+
+The final metadata checker evaluates every saved person box pair from the same
+camera/frame. It records pairs above IoU 0.70, pairs at or above 0.90 and 0.95,
+the maximum person IoU, and the worst surviving pair. Any final pair above IoU
+0.70 blocks the gate because DeepStream NMS should have rejected the
+lower-confidence proposal.
+
+Evidence is written to `overlap_evidence.json` beside `gate.json`. This rule
+is intended to prevent the previous CAM-04 double-box failure from being
+accepted.
+
 ## References
 
 - [Ultralytics NMS-free detection](https://docs.ultralytics.com/guides/end2end-detection)
