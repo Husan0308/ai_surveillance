@@ -15,6 +15,50 @@ from scripts.cam_six_validation.check_stability import parse_rows
 
 
 
+
+def load_jsonl_evidence(path):
+    raw = path.read_text()
+    physical = raw.splitlines()
+    records = []
+    malformed = []
+
+    for lineno, line in enumerate(physical, 1):
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            malformed.append({
+                'line': lineno,
+                'column': exc.colno,
+                'error': exc.msg,
+                'snippet': line[:240],
+            })
+
+    # A process can be stopped while the final buffered JSONL record is being
+    # emitted. Accept only one malformed physical tail record, and only when
+    # the file itself does not end in a newline. Interior corruption remains a
+    # hard failure and is never skipped.
+    truncated_tail = False
+    if malformed:
+        last_nonempty = max(
+            (i for i, line in enumerate(physical, 1) if line.strip()),
+            default=0,
+        )
+        truncated_tail = (
+            len(malformed) == 1
+            and malformed[0]['line'] == last_nonempty
+            and not raw.endswith('\n')
+        )
+
+    return {
+        'records': records,
+        'malformed': malformed,
+        'truncated_tail_accepted': truncated_tail,
+        'physical_lines': len(physical),
+        'ends_with_newline': raw.endswith('\n'),
+    }
+
 def box_iou(a, b):
     x, y, w, h = a
     xx, yy, ww, hh = b
@@ -165,8 +209,23 @@ def main():
         assert abs(int(st['nb_read_packets'])-report['output_frames'])<=16
         report['recording']=v
     except (ValueError,KeyError,IndexError,AssertionError):failures.append('Finalized recording validation failed')
-    records=[json.loads(line) for line in (out/'detections.jsonl').read_text().splitlines()]
-    if not records:failures.append('Missing object metadata evidence')
+    jsonl = load_jsonl_evidence(out/'detections.jsonl')
+    records = jsonl['records']
+    report['jsonl_evidence'] = {
+        'physical_lines': jsonl['physical_lines'],
+        'parsed_records': len(records),
+        'malformed_lines': jsonl['malformed'],
+        'truncated_tail_accepted': jsonl['truncated_tail_accepted'],
+        'ends_with_newline': jsonl['ends_with_newline'],
+    }
+    if jsonl['malformed'] and not jsonl['truncated_tail_accepted']:
+        first = jsonl['malformed'][0]
+        failures.append(
+            f"Malformed detections.jsonl evidence at line {first['line']} "
+            f"column {first['column']}: {first['error']}"
+        )
+    if not records:
+        failures.append('Missing object metadata evidence')
     for r in records:
         if r['class_id']!=0 or not .25<=r['confidence']<=1 or not all(math.isfinite(x) for x in r['box']):
             failures.append('Non-person or invalid sampled metadata');break
