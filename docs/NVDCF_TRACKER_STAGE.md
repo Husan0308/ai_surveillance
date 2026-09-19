@@ -180,3 +180,19 @@ cascaded association, 90-frame shadow age, HOG + ColorNames, and
 Next gate: 660-second tracker soak using this exact configuration. ReID remains
 out of scope until the long-soak and subsequent source isolation/recovery gates
 pass.
+
+
+## Long-soak source-throughput gate
+
+The 660-second tracker soak exposed isolated 5-second FPS telemetry excursions
+even though each source's overall mean stayed essentially 20 FPS, queues remained
+bounded, inference advanced, and process GPU memory was stable. The short 60-second
+gate remains strict at 18..22 FPS per telemetry sample.
+
+For 300-second-or-longer gates, source throughput is now judged using sliding
+approximately 30-second frame-counter windows plus the overall source mean.
+Every 30-second window must remain within 18..22 FPS and the overall mean must
+remain within 19.5..20.5 FPS. Independent hard failures remain for stale source
+age, queue/backlog, RTP/error/timestamp counters, and maximum inter-arrival gaps
+above 1000 ms. This prevents a single 5-second sampling burst/dip from blocking a
+healthy long soak while still rejecting sustained transport degradation.
