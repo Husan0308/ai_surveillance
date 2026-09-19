@@ -46,6 +46,17 @@ DeepStream 9 uses batch processing exclusively in Gst-nvtracker. The old
 set by this stage. Runtime preflight inspects the installed `nvtracker` plugin
 and verifies the expected DeepStream 9 properties before opening cameras.
 
+
+
+### GPU-enabled plugin preflight
+
+The `gst-inspect-1.0 nvtracker` preflight runs in the same pinned DeepStream
+image with GPU 0 exposed and
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`. Without NVIDIA runtime
+driver injection, DeepStream plugins can fail to load because `libcuda.so.1`
+is unavailable, which makes `gst-inspect` incorrectly report that
+`nvtracker` does not exist.
+
 ## Evidence
 
 The tracker probe runs after `nvtracker`. It writes
