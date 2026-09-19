@@ -119,6 +119,16 @@ def analyze_overlaps(records, nms_threshold=0.45):
         'evidence': evidence[:20],
     }
 
+def choose_gpu_window(samples, measured_seconds):
+    if not samples:
+        return []
+    start = samples[0]['time']
+    # Short gates keep the original >=15s steady window.
+    # Long gates ignore startup/lazy-allocation effects and judge device-memory
+    # stability only after 120s, while still reporting the full post-15s spread.
+    cutoff = 120 if measured_seconds >= 300 else 15
+    return [r for r in samples if r['time'] - start >= cutoff]
+
 def assess(text):
     failures=[]; report={'cameras':{}}
     group=parse_rows(text,'GROUP STATS ')
@@ -193,12 +203,40 @@ def main():
     preview=json.loads((out/'preview.json').read_text())
     if not preview.get('enabled') or not preview.get('alive_at_end'):failures.append('Preview unavailable or exited')
     with (out/'gpu.csv').open() as f:gpu=list(csv.DictReader(f))
-    g=[{k:float(r[k]) for k in ['time','memory_used_mib','gpu_pct','decoder_pct','encoder_pct']} for r in gpu]
-    g=[r for r in g if r['time']-float(gpu[0]['time'])>=15]
-    if len(g)<8 or max(r['decoder_pct'] for r in g)<=0:failures.append('Insufficient GPU/NVDEC evidence')
-    elif max(r['memory_used_mib'] for r in g)-min(r['memory_used_mib'] for r in g)>128:
-        failures.append('VRAM growth/spread exceeds 128 MiB')
-    report['gpu']={k:dict(min=min(r[k] for r in g),max=max(r[k] for r in g),mean=statistics.mean(r[k] for r in g)) for k in ['memory_used_mib','gpu_pct','decoder_pct','encoder_pct']} if g else {}
+    all_gpu=[{k:float(r[k]) for k in ['time','memory_used_mib','gpu_pct','decoder_pct','encoder_pct']} for r in gpu]
+    post15=[r for r in all_gpu if r['time']-all_gpu[0]['time']>=15] if all_gpu else []
+    measured=report.get('measured_seconds',0)
+    steady_gpu=choose_gpu_window(all_gpu, measured)
+    if len(steady_gpu)<8 or max(r['decoder_pct'] for r in steady_gpu)<=0:
+        failures.append('Insufficient GPU/NVDEC evidence')
+    else:
+        steady_vram_spread=max(r['memory_used_mib'] for r in steady_gpu)-min(r['memory_used_mib'] for r in steady_gpu)
+        if steady_vram_spread>128:
+            failures.append(f'Steady-state VRAM spread exceeds 128 MiB: {steady_vram_spread:.3f} MiB')
+    if post15:
+        report['gpu']={
+            k:dict(
+                min=min(r[k] for r in post15),
+                max=max(r[k] for r in post15),
+                mean=statistics.mean(r[k] for r in post15)
+            )
+            for k in ['memory_used_mib','gpu_pct','decoder_pct','encoder_pct']
+        }
+        report['gpu']['startup_post15_vram_spread_mib'] = (
+            max(r['memory_used_mib'] for r in post15) - min(r['memory_used_mib'] for r in post15)
+        )
+        if steady_gpu:
+            report['gpu']['steady_window_start_sec'] = 120 if measured >= 300 else 15
+            report['gpu']['steady_vram_min_mib'] = min(r['memory_used_mib'] for r in steady_gpu)
+            report['gpu']['steady_vram_max_mib'] = max(r['memory_used_mib'] for r in steady_gpu)
+            report['gpu']['steady_vram_spread_mib'] = (
+                report['gpu']['steady_vram_max_mib'] - report['gpu']['steady_vram_min_mib']
+            )
+            report['gpu']['steady_vram_delta_mib'] = (
+                steady_gpu[-1]['memory_used_mib'] - steady_gpu[0]['memory_used_mib']
+            )
+    else:
+        report['gpu']={}
     video=subprocess.run(['ffprobe','-v','error','-count_packets','-select_streams','v:0',
         '-show_entries','stream=width,height,codec_name,nb_read_packets','-show_entries','format=duration',
         '-of','json',str(out/'CAM-01_CAM-02_CAM-03_CAM-04_CAM-05_CAM-06.mkv')],capture_output=True,text=True,timeout=60)
