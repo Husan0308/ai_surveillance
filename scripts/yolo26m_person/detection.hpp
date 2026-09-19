@@ -15,32 +15,42 @@ static ParserCount parser_errors, parser_rejected, parser_calls, parser_proposal
 static FILE *detection_evidence = nullptr, *frame_evidence = nullptr;
 static GQuark infer_stamp;
 
-static void write_detection_json(
+static bool write_all_json_line(FILE *file, const char *data, size_t len) {
+  if (!file || !data || !len) return false;
+  flockfile(file);
+  clearerr(file);
+  const size_t written = std::fwrite(data, 1, len, file);
+  const bool ok = written == len && std::ferror(file) == 0;
+  funlockfile(file);
+  return ok;
+}
+
+static bool write_detection_json(
     FILE *file, guint source_id, gint frame_num, guint64 pts_ns, gint class_id,
     float confidence, float left, float top, float width, float height) {
-  if (!file) return;
-  flockfile(file);
-  std::fprintf(
-      file,
+  char line[512];
+  const int n = std::snprintf(
+      line, sizeof(line),
       "{\"source_id\":%u,\"frame\":%d,\"pts_ns\":%lu,"
       "\"class_id\":%d,\"confidence\":%.6f,"
       "\"box\":[%.3f,%.3f,%.3f,%.3f]}\n",
       source_id, frame_num, pts_ns, class_id, confidence,
       left, top, width, height);
-  funlockfile(file);
+  if (n <= 0 || static_cast<size_t>(n) >= sizeof(line)) return false;
+  return write_all_json_line(file, line, static_cast<size_t>(n));
 }
 
-static void write_frame_json(
+static bool write_frame_json(
     FILE *file, guint source_id, gint frame_num, guint64 pts_ns,
     guint64 batch_pts_ns, guint persons) {
-  if (!file) return;
-  flockfile(file);
-  std::fprintf(
-      file,
+  char line[384];
+  const int n = std::snprintf(
+      line, sizeof(line),
       "{\"source_id\":%u,\"frame\":%d,\"pts_ns\":%lu,"
       "\"batch_pts_ns\":%lu,\"persons\":%u}\n",
       source_id, frame_num, pts_ns, batch_pts_ns, persons);
-  funlockfile(file);
+  if (n <= 0 || static_cast<size_t>(n) >= sizeof(line)) return false;
+  return write_all_json_line(file, line, static_cast<size_t>(n));
 }
 
 static GstPadProbeReturn infer_enter(GstPad*, GstPadProbeInfo *info, gpointer) {
@@ -95,13 +105,19 @@ static GstPadProbeReturn infer_exit(GstPad*, GstPadProbeInfo *info, gpointer) {
       text.font_params.font_color = {1.0, 1.0, 1.0, 1.0};
       text.set_bg_clr = 1; text.text_bg_clr = {0.0, 0.0, 0.0, 0.65};
       // Save every inferred frame's object metadata; no pixels or CPU inference.
-      write_detection_json(
-          detection_evidence, frame->source_id, frame->frame_num, frame->buf_pts,
-          obj->class_id, obj->confidence, r.left, r.top, r.width, r.height);
+      if (!write_detection_json(
+              detection_evidence, frame->source_id, frame->frame_num, frame->buf_pts,
+              obj->class_id, obj->confidence, r.left, r.top, r.width, r.height)) {
+        ++c.errors; ++infer_errors; fail("YOLO detection evidence write failed");
+        return GST_PAD_PROBE_DROP;
+      }
     }
-    write_frame_json(
-        frame_evidence, frame->source_id, frame->frame_num, frame->buf_pts,
-        GST_BUFFER_PTS(b), count);
+    if (!write_frame_json(
+            frame_evidence, frame->source_id, frame->frame_num, frame->buf_pts,
+            GST_BUFFER_PTS(b), count)) {
+      ++c.errors; ++infer_errors; fail("YOLO frame evidence write failed");
+      return GST_PAD_PROBE_DROP;
+    }
     c.persons += count;
     if (count) c.last_unix_ms = g_get_real_time()/1000;
   }
@@ -137,6 +153,8 @@ static void detection_link(GstElement *from, GstElement *tiler, GstElement *to) 
   detection_evidence=std::fopen("/work/detections.jsonl","w");
   frame_evidence=std::fopen("/work/frames.jsonl","w");
   if(!detection_evidence || !frame_evidence){fail("cannot write YOLO metadata evidence");std::exit(2);}
+  std::setvbuf(detection_evidence, nullptr, _IOLBF, 0);
+  std::setvbuf(frame_evidence, nullptr, _IOLBF, 0);
   infer_stamp=g_quark_from_static_string("yolo26-infer-entry");
   auto *gie=make("nvinfer","YOLO26m-person");
   g_object_set(gie,"config-file-path","/config/config_infer_primary_yolo26m_raw_otm.txt",nullptr);
