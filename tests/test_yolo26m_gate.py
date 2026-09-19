@@ -1,5 +1,5 @@
 import unittest
-from scripts.yolo26m_person.check_gate import assess, analyze_overlaps, load_jsonl_evidence, choose_gpu_window
+from scripts.yolo26m_person.check_gate import assess, analyze_overlaps, load_jsonl_evidence, choose_gpu_window, analyze_source_gap_events
 
 
 class DetectorGateTests(unittest.TestCase):
@@ -80,6 +80,19 @@ class DetectorGateTests(unittest.TestCase):
         report = assess(self._long_run_text(large_gap=True))
         self.assertEqual(report['status'], 'BLOCKED')
         self.assertIn('CAM-01: source throughput/backlog failure', report['failures'])
+
+    def test_source_gap_diagnostics_cluster_correlated_cameras(self):
+        text = "\n".join([
+            "CAM-01 STATS elapsed=10 input=200 fps=20 age=0.02 max_gap_ms=100 queue=0",
+            "CAM-01 STATS elapsed=20 input=400 fps=20 age=0.02 max_gap_ms=1500 queue=0",
+            "CAM-02 STATS elapsed=10 input=200 fps=20 age=0.02 max_gap_ms=100 queue=0",
+            "CAM-02 STATS elapsed=25 input=500 fps=20 age=0.02 max_gap_ms=1200 queue=2",
+            "CAM-03 STATS elapsed=40 input=800 fps=20 age=0.02 max_gap_ms=1300 queue=0",
+        ])
+        report = analyze_source_gap_events(text)
+        self.assertEqual(len(report["clusters"]), 2)
+        self.assertEqual(set(report["clusters"][0]["cameras"]), {"CAM-01", "CAM-02"})
+        self.assertEqual(report["clusters"][1]["cameras"], ["CAM-03"])
 
     def test_overlap_analyzer_blocks_duplicate_bbox_above_nms_threshold(self):
         records = [
