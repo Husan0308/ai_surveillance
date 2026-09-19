@@ -4,7 +4,7 @@ from scripts.yolo26m_person.check_gate import assess, analyze_overlaps, load_jso
 
 class DetectorGateTests(unittest.TestCase):
     def setUp(self):
-        lines=['GROUP DETECTION_GRAPH mux->nvinfer(YOLO26m,FP16,batch=6,interval=0)->DeepStream-NMS(iou=0.50,conf=0.25) inference=1']
+        lines=['GROUP DETECTION_GRAPH mux->nvinfer(YOLO26m,FP16,batch=6,interval=0)->DeepStream-NMS(iou=0.45,conf=0.25) inference=1']
         for t in range(5,61,5):
             for i in range(1,7):
                 lines.append(f'CAM-{i:02d} STATS elapsed={t} input={t*20} fps=20 age=0.02 pts_ns={t*1000000000} pts_backwards=0 pts_duplicates=0 queue=0 queue_ms=0 rtp_lost=0 rtp_late=0 errors=0 warnings=0 decoder=1')
@@ -36,7 +36,7 @@ class DetectorGateTests(unittest.TestCase):
             {'source_id': 3, 'frame': 400, 'box': [102.0, 101.0, 198.0, 299.0],
              'confidence': 0.44, 'class_id': 0},
         ]
-        report = analyze_overlaps(records, nms_threshold=0.50)
+        report = analyze_overlaps(records, nms_threshold=0.45)
         self.assertGreater(report['pairs_over_nms_threshold'], 0)
         self.assertGreaterEqual(report['pairs_iou_gte_095'], 1)
         self.assertGreater(report['max_person_iou'], 0.95)
@@ -48,14 +48,14 @@ class DetectorGateTests(unittest.TestCase):
             {'source_id': 0, 'frame': 10, 'box': [130.0, 0.0, 100.0, 200.0],
              'confidence': 0.75, 'class_id': 0},
         ]
-        report = analyze_overlaps(records, nms_threshold=0.50)
+        report = analyze_overlaps(records, nms_threshold=0.45)
         self.assertEqual(report['pairs_over_nms_threshold'], 0)
         self.assertEqual(report['pairs_iou_gte_090'], 0)
         self.assertEqual(report['pairs_iou_gte_095'], 0)
 
     def test_missing_nms_graph_evidence_is_blocked(self):
         self.assertEqual(
-            assess(self.text.replace('->DeepStream-NMS(iou=0.50,conf=0.25)', ''))['status'],
+            assess(self.text.replace('->DeepStream-NMS(iou=0.45,conf=0.25)', ''))['status'],
             'BLOCKED',
         )
 
