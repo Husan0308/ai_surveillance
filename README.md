@@ -1,5 +1,24 @@
 # AI Surveillance — Camera V2
 
+## Current AI gate: YOLO26m DeepStream person detection
+
+Six-camera transport baseline: **PASS** (checkpoint `5db3745`).
+YOLO26m person detection through `nvinfer`: **BLOCKED** after the 60-second gate.
+All six sources held approximately 20 FPS, FP16 inference and realtime preview
+worked, but CAM-04 emitted two near-identical person boxes in a sampled frame.
+No NMS or threshold workaround was added. RTSP TCP/100 ms, NVDEC/NVMM,
+batch-size 6 and realtime ffplay transport are preserved.
+Tracker/ReID/face/pose/heatmap: **NOT STARTED**.
+
+See [model preparation, configuration and detector evidence](docs/YOLO26M_DEEPSTREAM91_PERSON.md).
+
+```bash
+python3 scripts/validate_yolo26m_person.py --duration 60 --out .runtime/yolo26m-person-short
+python3 scripts/yolo26m_person/check_gate.py .runtime/yolo26m-person-short
+```
+
+The camera-only stage notes below describe the preserved migration checkpoints.
+
 ## Current final camera-only gate: CAM-01 through CAM-06 / DeepStream 9.1
 
 The validated five-camera 100 ms baseline is preserved. This branch adds CAM-06

@@ -347,6 +347,10 @@ static gboolean resume_interrupted(gpointer data) {
   return G_SOURCE_REMOVE;
 }
 
+#ifdef YOLO26_PERSON
+#include "detection.hpp"
+#endif
+
 static gboolean tick(gpointer) {
   const gint64 now = g_get_monotonic_time();
   const double elapsed = (now - start_us) / 1e6;
@@ -394,6 +398,9 @@ static gboolean tick(gpointer) {
     resident * sysconf(_SC_PAGESIZE) / 1048576.0,
     100 * (cpu - previous_cpu) / dt, rendered, dropped, shared_errors, shared_warnings);
 
+#ifdef YOLO26_PERSON
+  detection_stats();
+#endif
   previous_output = out;
   previous_us = now;
   previous_cpu = cpu;
@@ -582,8 +589,12 @@ int main(int argc, char **argv) {
   g_object_set(sink_element, "location", "/work/CAM-01_CAM-02_CAM-03_CAM-04_CAM-05_CAM-06.mkv", "sync", FALSE,
                "async", FALSE, "enable-last-sample", FALSE, nullptr);
 
+#ifdef YOLO26_PERSON
+  detection_link(mux, tiler, conv);
+#else
   link(mux, tiler);
   link(tiler, conv);
+#endif
   link(conv, capsfilter);
   link(capsfilter, encoder);
   link(encoder, encoded_tee);
@@ -628,10 +639,12 @@ int main(int argc, char **argv) {
 
   probe(encoder, "src", &output_counter);
 
+#ifndef YOLO26_PERSON
   event(nullptr, "GRAPH",
         std::string("CAM-01+CAM-02+CAM-03+CAM-04+CAM-05+CAM-06 nvurisrcbin/NVDEC->NVMM->queues->nvstreammux(batch=6,2560x1440,live,50000us,sync-inputs=false)->tiler(3x2,1920x1620)->NVENC->record") +
         (preview_enabled ? "+UDP-preview inference=0" : " inference=0"));
 
+#endif
   GstBus *bus = gst_element_get_bus(pipeline);
   gst_bus_add_watch(bus, bus_message, nullptr);
   gst_object_unref(bus);
@@ -648,6 +661,11 @@ int main(int argc, char **argv) {
 
   stopping = true;
   gst_element_set_state(pipeline, GST_STATE_NULL);
+#ifdef YOLO26_PERSON
+  detection_stats();
+  if (detection_evidence) std::fclose(detection_evidence);
+  if (frame_evidence) std::fclose(frame_evidence);
+#endif
   gst_object_unref(pipeline);
 
   for (auto *ctx : sources) {

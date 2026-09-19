@@ -19,11 +19,11 @@ sys.path.insert(0, str(ROOT))
 from services.shared.camera_config import load_settings
 
 
-def main() -> int:
+def main(*, person_detection: bool = False) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--duration", type=int, default=660)
+    ap.add_argument("--duration", type=int, default=60 if person_detection else 660)
     ap.add_argument("--latency-ms", type=int, default=100)
-    ap.add_argument("--out", type=Path, default=ROOT / ".runtime/cam01-cam02-cam03-cam04-cam05-cam06-validation")
+    ap.add_argument("--out", type=Path, default=ROOT / (".runtime/yolo26m-person-nms-short" if person_detection else ".runtime/cam01-cam02-cam03-cam04-cam05-cam06-validation"))
     ap.add_argument("--interrupt-camera", choices=["none", "CAM-01", "CAM-02", "CAM-03", "CAM-04", "CAM-05", "CAM-06"], default="none")
     ap.add_argument("--interrupt-at", type=int, default=20)
     ap.add_argument("--interrupt-seconds", type=int, default=12)
@@ -43,7 +43,11 @@ def main() -> int:
         if args.interrupt_at + args.interrupt_seconds + 15 >= args.duration:
             ap.error("duration must leave at least 15 seconds after interruption")
 
+    if person_detection and args.latency_ms != 100:
+        ap.error("the validated detection transport uses exactly 100 ms")
     out = args.out.resolve()
+    if person_detection and (out / "pipeline.log").exists():
+        raise RuntimeError("Use a new output directory; detector evidence must not be overwritten")
     out.mkdir(parents=True, exist_ok=True)
 
     preview_enabled = not args.no_preview
@@ -53,6 +57,9 @@ def main() -> int:
     if preview_enabled and shutil.which("ffplay") is None:
         print("GROUP PREVIEW disabled: ffplay is not installed", flush=True)
         preview_enabled = False
+
+    if person_detection and not preview_enabled:
+        raise RuntimeError("Detection gate requires the existing realtime ffplay preview")
 
     lock = open("/tmp/ai_surveillance_camera_v2_gpu.lock", "a")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -79,7 +86,19 @@ def main() -> int:
         "docker", "run", "--rm", "--pull=never",
         "--user", f"{os.getuid()}:{os.getgid()}",
     ]
-    build = base + [
+    detection_build = []
+    detection_flags = ""
+    if person_detection:
+        from scripts.yolo26m_person.runtime import validate_artifacts
+        validate_artifacts(ROOT)
+        detection_build = ["-v", f"{ROOT / 'scripts/yolo26m_person'}:/detector:ro",
+                           "-v", f"{ROOT / '.runtime/build-deps/cuda13.2'}:/cuda-headers:ro"]
+        detection_flags = (" -DYOLO26_PERSON -I/detector "
+            "-I/opt/nvidia/deepstream/deepstream/sources/includes "
+            "-I/cuda-headers/usr/local/cuda-13.2/targets/x86_64-linux/include "
+            "-L/opt/nvidia/deepstream/deepstream/lib "
+            "-Wl,-rpath,/opt/nvidia/deepstream/deepstream/lib -lnvdsgst_meta -lnvds_meta -ldl")
+    build = base + detection_build + [
         "--network=none",
         "-v", f"{ROOT / 'scripts/cam_six_validation'}:/src:ro",
         "-v", f"{out}:/out",
@@ -87,7 +106,7 @@ def main() -> int:
         image,
         "-c",
         "g++ -O2 -std=c++17 -Wall -Wextra /src/main.cpp -o /out/cam-six-validator "
-        "$(pkg-config --cflags --libs gstreamer-1.0)",
+        "$(pkg-config --cflags --libs gstreamer-1.0)" + detection_flags,
     ]
     subprocess.run(build, check=True)
 
@@ -112,7 +131,10 @@ def main() -> int:
         f.write(f"preview_port={args.preview_port}\n")
 
     container = "ai-surveillance-cam-six-validation"
-    cmd = base + [
+    detection_mounts = [] if not person_detection else [
+        "-v", f"{ROOT / '.runtime/models/yolo26m'}:/models:ro",
+        "-v", f"{ROOT / 'config/deepstream'}:/config:ro"]
+    cmd = base + detection_mounts + [
         "--name", container,
         "--hostname", socket.gethostname(),
         "--gpus", "device=0",
@@ -204,7 +226,13 @@ def main() -> int:
                 log.write(line)
                 log.flush()
                 print(line, end="", flush=True)
-        return p.wait()
+        result = p.wait()
+        if person_detection:
+            alive = preview is not None and preview.poll() is None
+            (out / "preview.json").write_text(json.dumps({"enabled": preview_enabled, "alive_at_end": alive}) + "\n")
+            if not alive:
+                raise RuntimeError("Realtime ffplay preview exited during detection gate")
+        return result
     finally:
         done.set()
         t.join(timeout=6)
