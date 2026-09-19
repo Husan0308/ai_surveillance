@@ -155,7 +155,10 @@ def main(*, person_detection: bool = False) -> int:
 
     def monitor() -> None:
         with (out / "gpu.csv").open("w") as f:
-            f.write("time,name,driver,memory_used_mib,gpu_pct,decoder_pct,encoder_pct\n")
+            f.write(
+                "time,name,driver,memory_used_mib,gpu_pct,decoder_pct,encoder_pct,"
+                "process_memory_used_mib,container_pid\n"
+            )
             while not done.is_set():
                 r = subprocess.run(
                     [
@@ -167,7 +170,46 @@ def main(*, person_detection: bool = False) -> int:
                     capture_output=True,
                     text=True,
                 )
-                f.write(f"{time.time():.3f}," + r.stdout.strip() + "\n")
+
+                container_pid = 0
+                inspect = subprocess.run(
+                    ["docker", "inspect", "-f", "{{.State.Pid}}", container],
+                    capture_output=True,
+                    text=True,
+                )
+                if inspect.returncode == 0:
+                    try:
+                        container_pid = int(inspect.stdout.strip() or "0")
+                    except ValueError:
+                        container_pid = 0
+
+                process_memory = ""
+                if container_pid > 0:
+                    proc = subprocess.run(
+                        [
+                            "nvidia-smi",
+                            "--query-compute-apps=pid,used_gpu_memory",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                    for row in proc.stdout.splitlines():
+                        parts = [part.strip() for part in row.split(",")]
+                        if len(parts) != 2:
+                            continue
+                        try:
+                            pid = int(parts[0])
+                        except ValueError:
+                            continue
+                        if pid == container_pid:
+                            process_memory = parts[1]
+                            break
+
+                f.write(
+                    f"{time.time():.3f}," + r.stdout.strip()
+                    + f",{process_memory},{container_pid}\n"
+                )
                 f.flush()
                 done.wait(5)
 
