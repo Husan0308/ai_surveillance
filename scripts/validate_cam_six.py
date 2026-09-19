@@ -110,6 +110,24 @@ def main(*, person_detection: bool = False, person_tracking: bool = False) -> in
         if person_tracking:
             detection_build += ["-v", f"{ROOT / 'scripts/yolo26m_tracker'}:/tracker:ro"]
             detection_flags += " -DYOLO26_TRACKER -I/tracker"
+            tracker_host_cfg = ROOT / "config/deepstream/config_tracker_NvDCF_stable_person.yml"
+            tracker_text = tracker_host_cfg.read_text()
+            required_tracker = {
+                "associationMatcherType: 1": "cascaded association",
+                "maxShadowTrackingAge: 90": "extended shadow tracking",
+                "useColorNames: 1": "ColorNames visual features",
+                "useHog: 1": "HOG visual features",
+                "featureImgSizeLevel: 3": "higher-resolution visual features",
+                "reidType: 0": "ReID must remain disabled in tracker stage",
+            }
+            missing_tracker = [
+                why for needle, why in required_tracker.items()
+                if needle not in tracker_text
+            ]
+            if missing_tracker:
+                raise RuntimeError(
+                    "Unsafe NvDCF stable-person config: " + "; ".join(missing_tracker)
+                )
             tracker_cfg = (
                 "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/"
                 "config_tracker_NvDCF_perf.yml"
