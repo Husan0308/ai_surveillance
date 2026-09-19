@@ -102,6 +102,19 @@ class DetectorGateTests(unittest.TestCase):
         window = choose_gpu_window(samples, measured_seconds=60)
         self.assertEqual([r['memory_used_mib'] for r in window], [2000.0, 2001.0])
 
+
+    def test_device_wide_vram_is_not_process_leak_metric(self):
+        device = [
+            {'time': 1000.0, 'memory_used_mib': 1891.0, 'gpu_pct': 40.0, 'decoder_pct': 24.0, 'encoder_pct': 7.0},
+            {'time': 1120.0, 'memory_used_mib': 2039.0, 'gpu_pct': 40.0, 'decoder_pct': 24.0, 'encoder_pct': 7.0},
+            {'time': 1180.0, 'memory_used_mib': 1891.0, 'gpu_pct': 40.0, 'decoder_pct': 24.0, 'encoder_pct': 7.0},
+            {'time': 1240.0, 'memory_used_mib': 2039.0, 'gpu_pct': 40.0, 'decoder_pct': 24.0, 'encoder_pct': 7.0},
+        ]
+        self.assertEqual(
+            max(r['memory_used_mib'] for r in device) - min(r['memory_used_mib'] for r in device),
+            148.0,
+        )
+
     def test_short_run_and_dirty_exit_cannot_pass(self):
         for text in [self.text.replace('elapsed=60','elapsed=50'),self.text.replace('fatal=0','fatal=1')]:
             self.assertEqual(assess(text)['status'],'BLOCKED')
