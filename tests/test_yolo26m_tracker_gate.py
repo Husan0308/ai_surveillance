@@ -53,6 +53,19 @@ class NvDCFTrackerGateTests(unittest.TestCase):
         ):
             self.assertIn(name, text)
 
+    def test_tracker_preflight_requests_gpu_access(self):
+        from pathlib import Path
+        text = Path("scripts/validate_cam_six.py").read_text()
+        self.assertIn('"--gpus", "device=0"', text)
+        self.assertIn(
+            '"NVIDIA_DRIVER_CAPABILITIES=compute,utility,video"',
+            text,
+        )
+        self.assertIn(
+            '"GST_REGISTRY=/tmp/nvtracker-preflight-registry.bin"',
+            text,
+        )
+
     def test_fragmented_track_does_not_fake_long_observation_count(self):
         records = [
             {"source_id": 0, "frame": i * 10, "object_id": 99}
