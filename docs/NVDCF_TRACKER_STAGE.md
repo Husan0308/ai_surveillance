@@ -215,3 +215,24 @@ If both ingress and egress develop the same >1 second gap, the event is
 classified as source/decode-side. If ingress stays smooth but queue-src egress
 develops the gap, it is classified as downstream/queue backpressure. The
 pipeline topology and queue limits are unchanged by this instrumentation.
+
+
+## 300-second source-gap localization run — clean
+
+The 300-second diagnostic rerun with queue-sink ingress and queue-src egress
+probes did not reproduce the >1 second gap clusters from the earlier long soak.
+
+Observed maximum gaps:
+
+- CAM-01 ingress/egress: 327.774 / 327.774 ms;
+- CAM-02: 429.494 / 318.549 ms;
+- CAM-03: 420.644 / 297.787 ms;
+- CAM-04: 195.119 / 571.135 ms;
+- CAM-05: 179.953 / 179.955 ms;
+- CAM-06: 358.507 / 586.299 ms.
+
+No gap event exceeded the 1000 ms diagnostic threshold and no correlated gap
+cluster was produced. Queue occupancy remained 0 for CAM-01..05 and reached only
+1 buffer on CAM-06. The previous >1 second events are therefore treated as
+unreproduced/transient rather than waived. A final 660-second tracker soak with
+the same ingress/egress instrumentation is required before tracker-stage freeze.
