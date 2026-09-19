@@ -15,7 +15,7 @@ This stage adds only per-camera multi-object tracking:
  -> nvstreammux(batch=6)
  -> nvinfer(YOLO26m raw OTM, FP16, interval=0)
  -> DeepStream NMS(conf=0.25, IoU=0.45)
- -> nvtracker(NvDCF_perf, 960x544, GPU, batch processing)
+ -> nvtracker(NvDCF_stable_person, 960x544, GPU, batch processing)
  -> tiler
  -> nvdsosd(person ID=<object_id>)
  -> NVENC/MKV + live ffplay
@@ -32,7 +32,7 @@ Not enabled in this stage:
 The low-level tracker is
 `/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so`
 with the pinned DeepStream image's
-`config_tracker_NvDCF_perf.yml`. The perf profile is deliberately used instead
+`config_tracker_NvDCF_stable_person.yml`. The perf profile is deliberately used instead
 of the accuracy profile so this milestone does not pull the Re-ID model into the
 tracker stage. Tracker input resolution is 960x544; both values are multiples of
 32.
@@ -114,3 +114,38 @@ python3 scripts/yolo26m_tracker/check_gate.py \
 ```
 
 Do not begin ReID or any later stage until this tracker gate passes.
+
+
+## ID-switch tuning after first visual gate
+
+The first clean 60-second NvDCF run was not accepted because human visual
+review observed the same continuously visible person receiving a new tracker ID.
+This is a real tracker-stage failure even though object metadata had no duplicate
+IDs within individual frames.
+
+The active low-level config is now
+`config/deepstream/config_tracker_NvDCF_stable_person.yml`. ReID remains
+explicitly disabled (`reidType: 0`). Compared with the initial balanced
+profile, this retry uses cascaded association, longer shadow retention, HOG plus
+ColorNames visual features, and a larger DCF feature image. The intent is to
+reduce fragmentation before adding any cross-camera/ReID model.
+
+Key active settings:
+
+```yaml
+minTrackerConfidence: 0.15
+maxShadowTrackingAge: 90
+associationMatcherType: 1
+minMatchingScore4SizeSimilarity: 0.5
+minMatchingScore4Iou: 0.05
+minMatchingScore4VisualSimilarity: 0.6
+matchingScoreWeight4VisualSimilarity: 0.7
+useColorNames: 1
+useHog: 1
+featureImgSizeLevel: 3
+reidType: 0
+```
+
+This retry must again pass the 60-second automated gate and a separate visual
+review. In particular, a continuously visible person must not receive a new ID
+without a genuine disappearance/re-entry.
