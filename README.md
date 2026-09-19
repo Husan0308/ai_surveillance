@@ -7,7 +7,7 @@ isolation/recovery gates. Per-camera tracking work continues on
 `rebuild/deepstream91-nvdcf-v1-20260919`.
 
 The current tracker graph is
-`YOLO26m -> DeepStream NMS IoU 0.45 -> NvDCF_perf 960x544 -> tiler/OSD`.
+`YOLO26m -> DeepStream NMS IoU 0.45 -> NvDCF_stable_person 960x544 -> tiler/OSD`.
 Cross-camera ReID, face recognition and global identity are intentionally not
 enabled yet. See [NvDCF tracker stage](docs/NVDCF_TRACKER_STAGE.md).
 
