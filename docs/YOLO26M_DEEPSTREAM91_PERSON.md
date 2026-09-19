@@ -253,6 +253,18 @@ targets overlapping duplicate proposals rather than hiding them by raising the
 confidence threshold. Acceptance still requires visual review so legitimate
 nearby people are not accidentally collapsed by overly aggressive suppression.
 
+
+
+### Long-run VRAM stability measurement
+
+For 300-second-or-longer detector gates, device-memory stability is evaluated
+after 120 seconds of runtime. The full post-15-second min/max/mean remains in the
+report as startup evidence, but only the post-120-second VRAM spread is used for
+the existing 128 MiB stability limit. This avoids classifying one-time
+CUDA/TensorRT lazy initialization as a leak while still failing sustained
+steady-state growth. Short 60-second gates continue using the original
+post-15-second window.
+
 ## References
 
 - [Ultralytics NMS-free detection](https://docs.ultralytics.com/guides/end2end-detection)
