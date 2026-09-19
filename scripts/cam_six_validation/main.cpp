@@ -400,6 +400,9 @@ static gboolean tick(gpointer) {
 
 #ifdef YOLO26_PERSON
   detection_stats();
+#ifdef YOLO26_TRACKER
+  tracker_stats();
+#endif
 #endif
   previous_output = out;
   previous_us = now;
@@ -663,6 +666,10 @@ int main(int argc, char **argv) {
   gst_element_set_state(pipeline, GST_STATE_NULL);
 #ifdef YOLO26_PERSON
   detection_stats();
+#ifdef YOLO26_TRACKER
+  tracker_stats();
+  if (tracker_evidence) std::fclose(tracker_evidence);
+#endif
   if (detection_evidence) std::fclose(detection_evidence);
   if (frame_evidence) std::fclose(frame_evidence);
 #endif
