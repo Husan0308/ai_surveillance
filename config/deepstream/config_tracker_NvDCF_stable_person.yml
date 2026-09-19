@@ -1,0 +1,53 @@
+%YAML:1.0
+
+# Project-specific NvDCF profile for stable per-camera person IDs.
+# Derived from NVIDIA NvDCF perf profile; ReID remains disabled in this stage.
+
+BaseConfig:
+  minDetectorConfidence: 0.0
+
+TargetManagement:
+  enableBboxUnClipping: 1
+  maxTargetsPerStream: 150
+  minIouDiff4NewTarget: 0.5
+  minTrackerConfidence: 0.15
+  probationAge: 3
+  maxShadowTrackingAge: 90
+  earlyTerminationAge: 3
+
+TrajectoryManagement:
+  useUniqueID: 0
+  enableReAssoc: 0
+
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1
+  checkClassMatch: 1
+  minMatchingScore4Overall: 0.0
+  minMatchingScore4SizeSimilarity: 0.5
+  minMatchingScore4Iou: 0.05
+  minMatchingScore4VisualSimilarity: 0.6
+  matchingScoreWeight4VisualSimilarity: 0.7
+  matchingScoreWeight4SizeSimilarity: 0.1
+  matchingScoreWeight4Iou: 0.2
+
+StateEstimator:
+  stateEstimatorType: 1
+  processNoiseVar4Loc: 2.0
+  processNoiseVar4Size: 1.0
+  processNoiseVar4Vel: 0.1
+  measurementNoiseVar4Detector: 4.0
+  measurementNoiseVar4Tracker: 16.0
+
+VisualTracker:
+  visualTrackerType: 1
+  useColorNames: 1
+  useHog: 1
+  featureImgSizeLevel: 3
+  featureFocusOffsetFactor_y: -0.2
+  filterLr: 0.075
+  filterChannelWeightsLr: 0.1
+  gaussianSigma: 0.75
+
+ReID:
+  reidType: 0
