@@ -203,16 +203,47 @@ def main():
     preview=json.loads((out/'preview.json').read_text())
     if not preview.get('enabled') or not preview.get('alive_at_end'):failures.append('Preview unavailable or exited')
     with (out/'gpu.csv').open() as f:gpu=list(csv.DictReader(f))
-    all_gpu=[{k:float(r[k]) for k in ['time','memory_used_mib','gpu_pct','decoder_pct','encoder_pct']} for r in gpu]
+    all_gpu=[]
+    process_gpu=[]
+    for r in gpu:
+        base={k:float(r[k]) for k in ['time','memory_used_mib','gpu_pct','decoder_pct','encoder_pct']}
+        all_gpu.append(base)
+        raw_process=(r.get('process_memory_used_mib') or '').strip()
+        if raw_process:
+            try:
+                process_gpu.append({'time':base['time'],'process_memory_used_mib':float(raw_process)})
+            except ValueError:
+                pass
+
     post15=[r for r in all_gpu if r['time']-all_gpu[0]['time']>=15] if all_gpu else []
     measured=report.get('measured_seconds',0)
     steady_gpu=choose_gpu_window(all_gpu, measured)
+
     if len(steady_gpu)<8 or max(r['decoder_pct'] for r in steady_gpu)<=0:
         failures.append('Insufficient GPU/NVDEC evidence')
-    else:
-        steady_vram_spread=max(r['memory_used_mib'] for r in steady_gpu)-min(r['memory_used_mib'] for r in steady_gpu)
-        if steady_vram_spread>128:
-            failures.append(f'Steady-state VRAM spread exceeds 128 MiB: {steady_vram_spread:.3f} MiB')
+
+    # Device-wide memory.used includes every process/context on GPU 0, so it is
+    # telemetry only. Detector memory stability is gated on the DeepStream
+    # container process's usedGpuMemory when that evidence is present.
+    process_steady=choose_gpu_window(process_gpu, measured) if process_gpu else []
+    if process_steady:
+        process_spread=(
+            max(r['process_memory_used_mib'] for r in process_steady)
+            - min(r['process_memory_used_mib'] for r in process_steady)
+        )
+        process_delta=(
+            process_steady[-1]['process_memory_used_mib']
+            - process_steady[0]['process_memory_used_mib']
+        )
+        if process_spread>128:
+            failures.append(
+                f'DeepStream process VRAM spread exceeds 128 MiB: {process_spread:.3f} MiB'
+            )
+    elif measured >= 300:
+        failures.append(
+            'Missing process-specific DeepStream VRAM evidence; device-wide memory.used is not a valid leak gate'
+        )
+
     if post15:
         report['gpu']={
             k:dict(
@@ -222,19 +253,27 @@ def main():
             )
             for k in ['memory_used_mib','gpu_pct','decoder_pct','encoder_pct']
         }
-        report['gpu']['startup_post15_vram_spread_mib'] = (
+        report['gpu']['device_vram_spread_mib'] = (
             max(r['memory_used_mib'] for r in post15) - min(r['memory_used_mib'] for r in post15)
         )
-        if steady_gpu:
-            report['gpu']['steady_window_start_sec'] = 120 if measured >= 300 else 15
-            report['gpu']['steady_vram_min_mib'] = min(r['memory_used_mib'] for r in steady_gpu)
-            report['gpu']['steady_vram_max_mib'] = max(r['memory_used_mib'] for r in steady_gpu)
-            report['gpu']['steady_vram_spread_mib'] = (
-                report['gpu']['steady_vram_max_mib'] - report['gpu']['steady_vram_min_mib']
+        report['gpu']['device_vram_is_observational_only'] = True
+        if process_gpu:
+            report['gpu']['process_memory_samples'] = len(process_gpu)
+            report['gpu']['process_memory_used_mib'] = {
+                'min': min(r['process_memory_used_mib'] for r in process_gpu),
+                'max': max(r['process_memory_used_mib'] for r in process_gpu),
+                'mean': statistics.mean(r['process_memory_used_mib'] for r in process_gpu),
+            }
+        if process_steady:
+            report['gpu']['process_steady_window_start_sec'] = 120 if measured >= 300 else 15
+            report['gpu']['process_steady_vram_min_mib'] = min(
+                r['process_memory_used_mib'] for r in process_steady
             )
-            report['gpu']['steady_vram_delta_mib'] = (
-                steady_gpu[-1]['memory_used_mib'] - steady_gpu[0]['memory_used_mib']
+            report['gpu']['process_steady_vram_max_mib'] = max(
+                r['process_memory_used_mib'] for r in process_steady
             )
+            report['gpu']['process_steady_vram_spread_mib'] = process_spread
+            report['gpu']['process_steady_vram_delta_mib'] = process_delta
     else:
         report['gpu']={}
     video=subprocess.run(['ffprobe','-v','error','-count_packets','-select_streams','v:0',
