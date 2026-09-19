@@ -163,19 +163,21 @@ def assess(text):
 
         fps_values=[r['fps'] for r in steady]
         fps_outliers=sum(1 for v in fps_values if not 18<=v<=22)
-        rolling_fps=[
-            statistics.mean(fps_values[j:j+3])
-            for j in range(len(fps_values)-2)
-        ]
+        window30_fps=[]
+        for a,b in zip(steady, steady[6:]):
+            dt=b['elapsed']-a['elapsed']
+            if dt>0:
+                window30_fps.append((b['input']-a['input'])/dt)
 
         # Short gates remain strict. Long soaks tolerate isolated 5-second
-        # source bursts/dips when aggregate throughput is correct and there is
-        # no sustained ~15-second slowdown, backlog, stale source, or large
-        # inter-arrival gap.
+        # burst/dip samples, but require correct aggregate rate and every
+        # sliding ~30-second frame-counter window to remain within 18..22 FPS.
+        # Transport stalls are independently caught by age/max_gap/queue below.
         if long_run:
             fps_bad = (
                 not 19.5 <= statistics.mean(fps_values) <= 20.5
-                or any(not 18<=v<=22 for v in rolling_fps)
+                or not window30_fps
+                or any(not 18<=v<=22 for v in window30_fps)
             )
         else:
             fps_bad = any(not 18<=v<=22 for v in fps_values)
@@ -209,8 +211,8 @@ def assess(text):
             source_fps_min=min(fps_values),
             source_fps_max=max(fps_values),
             source_fps_outlier_samples=fps_outliers,
-            source_fps_rolling3_min=min(rolling_fps) if rolling_fps else None,
-            source_fps_rolling3_max=max(rolling_fps) if rolling_fps else None,
+            source_fps_window30_min=min(window30_fps) if window30_fps else None,
+            source_fps_window30_max=max(window30_fps) if window30_fps else None,
             source_max_gap_ms=max(r.get('max_gap_ms',0) for r in steady),
             queue_max=max(r['queue'] for r in steady),
             inferred_frames=int(detect[-1]['frames']),
