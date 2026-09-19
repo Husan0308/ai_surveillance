@@ -37,6 +37,15 @@ of the accuracy profile so this milestone does not pull the Re-ID model into the
 tracker stage. Tracker input resolution is 960x544; both values are multiples of
 32.
 
+
+
+## DeepStream 9 tracker property API
+
+DeepStream 9 uses batch processing exclusively in Gst-nvtracker. The old
+`enable-batch-process` and `enable-past-frame` GStreamer properties are not
+set by this stage. Runtime preflight inspects the installed `nvtracker` plugin
+and verifies the expected DeepStream 9 properties before opening cameras.
+
 ## Evidence
 
 The tracker probe runs after `nvtracker`. It writes
