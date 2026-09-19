@@ -12,7 +12,7 @@ Tracker/ReID/face/pose/heatmap: **NOT STARTED**.
 
 Current retry path: **YOLO26m raw one-to-many `(N,84,8400)` -> custom
 person-only proposal parser -> Gst-nvinfer `cluster-mode=2` DeepStream NMS
-(`nms-iou-threshold=0.70`)**. The gate now fails closed if any final same-frame
+(`nms-iou-threshold=0.50`)**. The gate now fails closed if any final same-frame
 person boxes survive above the configured NMS IoU threshold. The previous
 NMS-free `(N,300,6)` run remains preserved as BLOCKED evidence.
 
