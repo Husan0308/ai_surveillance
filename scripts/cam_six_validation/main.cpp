@@ -32,10 +32,12 @@ struct SourceCtx {
   GstElement *queue = nullptr;
   GstElement *jitterbuffer = nullptr;
   GMutex jitter_lock;
+  Counter ingress;
   Counter input;
   std::atomic_bool decoder_seen{false};
   guint errors = 0;
   guint warnings = 0;
+  guint64 previous_ingress_frames = 0;
   guint64 previous_frames = 0;
 };
 
@@ -362,16 +364,25 @@ static gboolean tick(gpointer) {
     guint64 qtime = 0, lost = 0, late = 0, pushed = 0;
     g_object_get(ctx->queue, "current-level-buffers", &q, "current-level-time", &qtime, nullptr);
     jitter_stats(ctx, lost, late, pushed);
+    const guint64 ingress_frames = ctx->ingress.frames.load();
     const guint64 frames = ctx->input.frames.load();
-    const double age = ctx->input.last_us ? std::max(0.0, (now - ctx->input.last_us) / 1e6) : elapsed;
+    const double ingress_age = ctx->ingress.last_us
+        ? std::max(0.0, (now - ctx->ingress.last_us) / 1e6) : elapsed;
+    const double age = ctx->input.last_us
+        ? std::max(0.0, (now - ctx->input.last_us) / 1e6) : elapsed;
     g_print(
-      "%s STATS elapsed=%.3f input=%lu fps=%.3f age=%.3f pts_ns=%lu "
+      "%s STATS elapsed=%.3f ingress=%lu ingress_fps=%.3f ingress_age=%.3f "
+      "ingress_max_gap_ms=%.3f input=%lu fps=%.3f age=%.3f pts_ns=%lu "
       "pts_backwards=%lu pts_duplicates=%lu max_gap_ms=%.3f queue=%u queue_ms=%.3f "
       "rtp_lost=%lu rtp_late=%lu rtp_pushed=%lu errors=%u warnings=%u decoder=%d\n",
-      ctx->id.c_str(), elapsed, frames, (frames - ctx->previous_frames) / dt, age,
+      ctx->id.c_str(), elapsed,
+      ingress_frames, (ingress_frames - ctx->previous_ingress_frames) / dt,
+      ingress_age, ctx->ingress.max_gap_us / 1000.0,
+      frames, (frames - ctx->previous_frames) / dt, age,
       ctx->input.pts.load(), ctx->input.backwards.load(), ctx->input.duplicates.load(),
       ctx->input.max_gap_us / 1000.0, q, qtime / 1e6, lost, late, pushed,
       ctx->errors, ctx->warnings, int(ctx->decoder_seen.load()));
+    ctx->previous_ingress_frames = ingress_frames;
     ctx->previous_frames = frames;
   }
 
@@ -556,6 +567,7 @@ int main(int argc, char **argv) {
     ctx->queue = make("queue", queue_name.c_str());
     g_object_set(ctx->queue, "max-size-buffers", 12u, "max-size-bytes", 0u,
                  "max-size-time", guint64(0), "leaky", 0, nullptr);
+    probe(ctx->queue, "sink", &ctx->ingress);
     probe(ctx->queue, "src", &ctx->input);
 
     ctx->source = create_source_element(ctx);
@@ -677,8 +689,8 @@ int main(int argc, char **argv) {
 
   for (auto *ctx : sources) {
     if (ctx->jitterbuffer) gst_object_unref(ctx->jitterbuffer);
-    g_print("%s END input=%lu hardware_decoder=%d errors=%u warnings=%u pts_backwards=%lu pts_duplicates=%lu\n",
-            ctx->id.c_str(), ctx->input.frames.load(), int(ctx->decoder_seen.load()),
+    g_print("%s END ingress=%lu input=%lu hardware_decoder=%d errors=%u warnings=%u pts_backwards=%lu pts_duplicates=%lu\n",
+            ctx->id.c_str(), ctx->ingress.frames.load(), ctx->input.frames.load(), int(ctx->decoder_seen.load()),
             ctx->errors, ctx->warnings, ctx->input.backwards.load(), ctx->input.duplicates.load());
   }
   g_print("GROUP END output=%lu fatal=%d shared_errors=%u shared_warnings=%u isolation=%s\n",
