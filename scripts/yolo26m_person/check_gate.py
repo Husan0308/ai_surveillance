@@ -14,6 +14,67 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from scripts.cam_six_validation.check_stability import parse_rows
 
 
+
+def box_iou(a, b):
+    x, y, w, h = a
+    xx, yy, ww, hh = b
+    inter_w = max(0.0, min(x + w, xx + ww) - max(x, xx))
+    inter_h = max(0.0, min(y + h, yy + hh) - max(y, yy))
+    inter = inter_w * inter_h
+    union = w * h + ww * hh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def analyze_overlaps(records, nms_threshold=0.70):
+    frames = {}
+    for r in records:
+        frames.setdefault((r['source_id'], r['frame']), []).append(r)
+
+    pairs_070 = 0
+    pairs_090 = 0
+    pairs_095 = 0
+    max_iou = 0.0
+    worst = None
+    evidence = []
+
+    for (source_id, frame), boxes in frames.items():
+        for i, a in enumerate(boxes):
+            for b in boxes[i + 1:]:
+                iou = box_iou(a['box'], b['box'])
+                if iou > max_iou:
+                    max_iou = iou
+                    worst = {
+                        'source_id': source_id,
+                        'frame': frame,
+                        'iou': iou,
+                        'a': a,
+                        'b': b,
+                    }
+                if iou > nms_threshold:
+                    pairs_070 += 1
+                    evidence.append({
+                        'source_id': source_id,
+                        'frame': frame,
+                        'iou': iou,
+                        'a': a,
+                        'b': b,
+                    })
+                if iou >= 0.90:
+                    pairs_090 += 1
+                if iou >= 0.95:
+                    pairs_095 += 1
+
+    evidence.sort(key=lambda x: x['iou'], reverse=True)
+    return {
+        'nms_iou_threshold': nms_threshold,
+        'pairs_over_nms_threshold': pairs_070,
+        'pairs_iou_gte_090': pairs_090,
+        'pairs_iou_gte_095': pairs_095,
+        'max_person_iou': max_iou,
+        'worst_pair': worst,
+        'evidence': evidence[:20],
+    }
+
 def assess(text):
     failures=[]; report={'cameras':{}}
     group=parse_rows(text,'GROUP STATS ')
@@ -24,6 +85,8 @@ def assess(text):
         failures.append('Missing clean group completion')
     if 'inference=1' not in text or 'nvinfer(YOLO26m,FP16,batch=6,interval=0)' not in text:
         failures.append('Missing primary inference graph evidence')
+    if 'DeepStream-NMS(iou=0.70,conf=0.25)' not in text:
+        failures.append('Missing verified DeepStream NMS graph evidence')
     if re.search(r'GROUP FATAL|CRITICAL|PARSER_ERROR|\bERROR\s',text):
         failures.append('Runtime error diagnostic')
     for i in range(1,7):
@@ -101,20 +164,23 @@ def main():
     except (ValueError,KeyError,IndexError,AssertionError):failures.append('Finalized recording validation failed')
     records=[json.loads(line) for line in (out/'detections.jsonl').read_text().splitlines()]
     if not records:failures.append('Missing object metadata evidence')
-    frames={}
     for r in records:
         if r['class_id']!=0 or not .25<=r['confidence']<=1 or not all(math.isfinite(x) for x in r['box']):
             failures.append('Non-person or invalid sampled metadata');break
-        frames.setdefault((r['source_id'],r['frame']),[]).append(r)
-    duplicates=0
-    for boxes in frames.values():
-        for i,a in enumerate(boxes):
-            x,y,w,h=a['box']
-            for b in boxes[i+1:]:
-                xx,yy,ww,hh=b['box'];intersection=max(0,min(x+w,xx+ww)-max(x,xx))*max(0,min(y+h,yy+hh)-max(y,yy))
-                if intersection/(w*h+ww*hh-intersection)>0.9:duplicates+=1
-    if duplicates:failures.append('Near-identical person boxes in sampled frames; visual review required')
-    report['sampled_metadata_rows']=len(records);report['near_duplicate_pairs']=duplicates
+
+    overlap = analyze_overlaps(records, nms_threshold=0.70)
+    report['sampled_metadata_rows'] = len(records)
+    report['overlap_validation'] = {k: v for k, v in overlap.items() if k != 'evidence'}
+    (out/'overlap_evidence.json').write_text(json.dumps(overlap, indent=2) + '\n')
+
+    # DeepStream cluster-mode=2 with nms-iou-threshold=0.70 should reject the
+    # lower-confidence proposal once same-class IoU exceeds 0.70. If such a
+    # pair survives into final NvDsObjectMeta, the detector gate is not valid.
+    if overlap['pairs_over_nms_threshold']:
+        failures.append(
+            'Person boxes survived above configured DeepStream NMS IoU=0.70; '
+            'possible duplicate bbox / NMS configuration failure'
+        )
     visual_path=out/'visual_review.json'
     if not visual_path.exists():
         failures.append('Missing separate visual review of live preview/person geometry')
