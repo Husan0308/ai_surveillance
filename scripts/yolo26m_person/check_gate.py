@@ -277,6 +277,7 @@ def assess(text):
             failures.append(f'{cid}: source/inference frame divergence')
         if steady[-1]['queue']>steady[0]['queue']+6:
             failures.append(f'{cid}: growing queue')
+        ingress_values=[r.get('ingress_fps') for r in steady if 'ingress_fps' in r]
         report['cameras'][cid]=dict(
             source_frames=int(source[-1]['input']),
             source_fps_mean=statistics.mean(fps_values),
@@ -286,6 +287,12 @@ def assess(text):
             source_fps_window30_min=min(window30_fps) if window30_fps else None,
             source_fps_window30_max=max(window30_fps) if window30_fps else None,
             source_max_gap_ms=max(r.get('max_gap_ms',0) for r in steady),
+            ingress_frames=int(source[-1].get('ingress', source[-1]['input'])),
+            ingress_fps_mean=statistics.mean(ingress_values) if ingress_values else None,
+            ingress_max_gap_ms=max(
+                (r.get('ingress_max_gap_ms',0) for r in steady),
+                default=0,
+            ) if ingress_values else None,
             queue_max=max(r['queue'] for r in steady),
             inferred_frames=int(detect[-1]['frames']),
             person_detections=int(detect[-1]['persons']),
