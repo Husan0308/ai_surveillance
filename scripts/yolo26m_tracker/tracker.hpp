@@ -137,8 +137,6 @@ static GstElement *create_nvdcf_tracker() {
       "ll-lib-file", lib,
       "ll-config-file", cfg,
       "gpu-id", 0u,
-      "enable-batch-process", TRUE,
-      "enable-past-frame", FALSE,
       "display-tracking-id", FALSE,
       "compute-hw", 1u,
       "tracking-id-reset-mode", 1u,
