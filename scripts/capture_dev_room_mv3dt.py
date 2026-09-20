@@ -59,15 +59,14 @@ def safe_camera_summary(cameras: list[dict]) -> list[dict]:
 
 
 def launch_preview(ffplay: str, cam: dict, x: int) -> subprocess.Popen:
-    # Never print RTSP URIs; they may later contain credentials.
+    # Keep the preview command intentionally minimal. The recorder is the source
+    # of truth; preview should not depend on codec-tuning AVOptions.
     return subprocess.Popen(
         [
             ffplay,
             "-hide_banner",
-            "-loglevel", "warning",
+            "-loglevel", "error",
             "-rtsp_transport", "tcp",
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
             "-framedrop",
             "-window_title", f'{cam["id"]} - {cam.get("name", "")}',
             "-x", "960",
@@ -77,8 +76,22 @@ def launch_preview(ffplay: str, cam: dict, x: int) -> subprocess.Popen:
             cam["uri"],
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
+
+
+def preview_failure_message(proc: subprocess.Popen, cam: dict) -> str:
+    try:
+        _stdout, stderr = proc.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        stderr = ""
+    # Do not surface a credential-bearing RTSP URL even if ffplay echoed it.
+    uri = cam.get("uri", "")
+    if uri:
+        stderr = stderr.replace(uri, "<RTSP_URI>")
+    stderr = stderr.strip()
+    return stderr or f'{cam["id"]}: ffplay exited with code {proc.returncode}'
 
 
 def terminate_process(proc: subprocess.Popen | None) -> None:
@@ -161,7 +174,13 @@ def main() -> int:
             time.sleep(3)
             dead = [i for i, p in enumerate(previews) if p.poll() is not None]
             if dead:
-                raise RuntimeError(f"Preview failed to stay open for camera index(es): {dead}")
+                details = [
+                    preview_failure_message(previews[i], cameras[i])
+                    for i in dead
+                ]
+                raise RuntimeError(
+                    "Preview failed to stay open:\n  " + "\n  ".join(details)
+                )
 
         print("\nWalk through the room during the whole capture.")
         print("Try to visit both cameras' shared/overlap area and room edges.")
