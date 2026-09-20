@@ -269,3 +269,16 @@ source and assigns new IDs after recovery. Therefore an isolation test must not
 require the interrupted camera to preserve its pre-outage local tracker ID.
 Healthy peer streams must continue tracking without pipeline failure, and the
 target source must recover frames normally.
+
+
+## Clean-tree 60-second regression smoke — PASS
+
+After repository cleanup, the retained six-camera YOLO26m + NvDCF runtime was
+rerun for 60 seconds on the clean production-oriented branch and passed both
+automated and visual checks. Source rates remained near 20 FPS, source-gap
+diagnostics produced no >1000 ms events or clusters, inference/parser errors were
+zero, NvDCF reported no untracked objects or duplicate per-frame IDs, process
+GPU memory was stable at 2602 MiB, and visual ID-stability review passed.
+
+Repository cleanup therefore did not break the validated detector/tracker
+runtime contract.
