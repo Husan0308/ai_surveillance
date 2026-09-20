@@ -300,3 +300,28 @@ CAM-01 intentional isolation/recovery passed on the clean branch:
 
 CAM-01 may receive new local tracker IDs after recovery because
 `tracking-id-reset-mode=1` is retained by design.
+
+
+## Clean-tree NvDCF isolation/recovery — 6/6 PASS
+
+The clean production-oriented branch completed intentional source isolation and
+recovery validation for CAM-01 through CAM-06.
+
+For every target source:
+
+- five healthy peer sources remained active;
+- the target stopped advancing during the intentional 12-second outage;
+- the target recovered at least 100 frames after source recreation;
+- YOLO26m/NMS evidence remained clean;
+- NvDCF reported no untracked objects and no duplicate per-frame IDs;
+- no blocking runtime/parser/tracker diagnostics remained;
+- exact V4L2/NVDEC buffer-pool diagnostics emitted only during the intentional
+  source-NULL window were classified as benign teardown diagnostics.
+
+CAM-06 final evidence included 1193 peer frames during the outage, zero target
+frames during the outage, and 158 recovered target frames.
+
+With 60-second validation, 660-second long soak, visual ID-stability review and
+6/6 source isolation/recovery all passing, the per-camera NvDCF tracker stage is
+complete and frozen. The next AI stage is cross-camera ReID; the current local
+tracker configuration remains unchanged.
