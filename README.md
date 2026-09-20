@@ -49,6 +49,28 @@ config/deepstream/config_tracker_NvDCF_stable_person.yml
 
 ReID remains disabled in the current tracker stage.
 
+
+
+## Clean-tree runtime regression — PASS
+
+After removing 520 legacy/experimental files (609 tracked files reduced to 89),
+the retained production-oriented tree passed both static/unit checks and a real
+60-second six-camera YOLO26m + NvDCF smoke run.
+
+Smoke evidence:
+
+- all six RTSP sources remained near 20 FPS;
+- no >1000 ms source-gap events or correlated gap clusters;
+- YOLO26m inference/parser errors remained zero;
+- detector NMS overlap validation passed;
+- NvDCF reported zero untracked objects and zero duplicate per-frame IDs;
+- process-specific GPU memory was flat at 2602 MiB after warmup;
+- the separate visual review passed for advancing tiles, aligned boxes, stable
+  IDs and absence of obvious ID switches or duplicate boxes.
+
+This confirms that the cleanup did not remove a runtime dependency required by
+the validated detector/tracker pipeline.
+
 ## Current next gate
 
 Run source isolation/recovery with YOLO26m + NvDCF enabled for CAM-01 through
