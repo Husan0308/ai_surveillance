@@ -95,6 +95,7 @@ def main() -> int:
         "target_id_continuity_required": False,
         "target_reset_semantics": "tracking-id-reset-mode=1 allows new IDs after stream reset",
         "runtime_error_diagnostics": base.get("runtime_error_diagnostics", []),
+        "benign_teardown_diagnostics": base.get("benign_teardown_diagnostics", []),
         "detector_overlap_validation": base.get("overlap_validation"),
     }
     (out / "tracker_isolation_gate.json").write_text(json.dumps(report, indent=2) + "\n")
