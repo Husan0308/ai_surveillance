@@ -2,9 +2,9 @@
 """Record a synchronized 120 s Dev Room camera pair for AMC/MV3DT calibration.
 
 Dev Room is resolved from config/cameras.yaml. The current mapping is expected
-to contain exactly two enabled cameras in room "Devs". Preview windows are
-opened with ffplay, then one ffmpeg process records both RTSP inputs
-concurrently as cam_00.mp4 and cam_01.mp4.
+to contain exactly two enabled cameras in room "Devs". Preview windows are opened with ffplay, then two ffmpeg recorder processes are
+started back-to-back so both outputs cover the same 120-second wall-clock
+window as closely as possible.
 """
 from __future__ import annotations
 
@@ -134,17 +134,19 @@ def main() -> int:
     print("RTSP URLs are intentionally not printed.")
 
     previews: list[subprocess.Popen] = []
-    recorder: subprocess.Popen | None = None
+    recorders: list[subprocess.Popen] = []
 
     def cleanup(*_args) -> None:
-        nonlocal recorder
-        if recorder is not None and recorder.poll() is None:
-            recorder.send_signal(signal.SIGINT)
-            try:
-                recorder.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                recorder.kill()
-                recorder.wait(timeout=3)
+        for recorder in recorders:
+            if recorder.poll() is None:
+                recorder.send_signal(signal.SIGINT)
+        for recorder in recorders:
+            if recorder.poll() is None:
+                try:
+                    recorder.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    recorder.kill()
+                    recorder.wait(timeout=3)
         for proc in previews:
             terminate_process(proc)
 
@@ -170,34 +172,31 @@ def main() -> int:
         output0 = out / "cam_00.mp4"
         output1 = out / "cam_01.mp4"
 
-        cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-y",
-            "-rtsp_transport", "tcp",
-            "-i", cameras[0]["uri"],
-            "-rtsp_transport", "tcp",
-            "-i", cameras[1]["uri"],
-            "-map", "0:v:0",
-            "-an",
-            "-c:v", "copy",
-            "-t", str(args.duration),
-            "-movflags", "+faststart",
-            str(output0),
-            "-map", "1:v:0",
-            "-an",
-            "-c:v", "copy",
-            "-t", str(args.duration),
-            "-movflags", "+faststart",
-            str(output1),
-        ]
+        def recorder_cmd(cam: dict, output: Path) -> list[str]:
+            return [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel", "warning",
+                "-y",
+                "-rtsp_transport", "tcp",
+                "-use_wallclock_as_timestamps", "1",
+                "-i", cam["uri"],
+                "-map", "0:v:0",
+                "-an",
+                "-c:v", "copy",
+                "-t", str(args.duration),
+                "-movflags", "+faststart",
+                str(output),
+            ]
 
         print("\nRECORDING STARTED — walk now.")
+        launch_started = time.monotonic()
+        recorders.append(subprocess.Popen(recorder_cmd(cameras[0], output0)))
+        recorders.append(subprocess.Popen(recorder_cmd(cameras[1], output1)))
+        launch_skew_ms = (time.monotonic() - launch_started) * 1000.0
         started = time.monotonic()
-        recorder = subprocess.Popen(cmd)
 
-        while recorder.poll() is None:
+        while any(proc.poll() is None for proc in recorders):
             elapsed = int(time.monotonic() - started)
             remaining = max(0, args.duration - elapsed)
             print(
@@ -208,8 +207,13 @@ def main() -> int:
             time.sleep(1)
 
         print()
-        if recorder.returncode != 0:
-            raise RuntimeError(f"ffmpeg exited with code {recorder.returncode}")
+        bad = [
+            (idx, proc.returncode)
+            for idx, proc in enumerate(recorders)
+            if proc.returncode != 0
+        ]
+        if bad:
+            raise RuntimeError(f"ffmpeg recorder failure(s): {bad}")
 
         results = []
         for idx, path in enumerate((output0, output1)):
@@ -246,6 +250,7 @@ def main() -> int:
             "status": "PASS",
             "purpose": "AutoMagicCalib / DeepStream MV3DT Dev Room calibration",
             "duration_requested_sec": args.duration,
+            "recorder_launch_skew_ms": launch_skew_ms,
             "camera_mapping": summary,
             "files": results,
         }
