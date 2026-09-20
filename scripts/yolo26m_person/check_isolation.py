@@ -24,6 +24,49 @@ SUMMARY_RE = re.compile(
 )
 
 
+def classify_runtime_diagnostics(text: str, summary: dict | None) -> tuple[list[str], list[str]]:
+    diagnostic_re = re.compile(r"GROUP FATAL|CRITICAL|PARSER_ERROR|\\bERROR\\s")
+    rows = text.splitlines()
+    diagnostics = [(i, line) for i, line in enumerate(rows) if diagnostic_re.search(line)]
+    if not diagnostics:
+        return [], []
+
+    target = summary.get("target") if summary else None
+    if not target or summary.get("status") != "PASS":
+        return [line for _, line in diagnostics], []
+
+    start_marker = f"{target} ISOLATION setting only this source to NULL"
+    resume_marker = f"{target} ISOLATION recreating only this nvurisrcbin"
+    try:
+        start_idx = next(i for i, line in enumerate(rows) if start_marker in line)
+        resume_idx = next(i for i, line in enumerate(rows) if i > start_idx and resume_marker in line)
+    except StopIteration:
+        return [line for _, line in diagnostics], []
+
+    benign_patterns = (
+        re.compile(
+            r"ERROR\\s+v4l2allocator\\b.*"
+            r"<nvv4l2decoder\\d+:pool:src:allocator> "
+            r"failed queueing buffer \\d+: Bad file descriptor$"
+        ),
+        re.compile(
+            r"ERROR\\s+v4l2bufferpool\\b.*"
+            r"<nvv4l2decoder\\d+:pool:src> could not queue a buffer \\d+$"
+        ),
+    )
+
+    blocking: list[str] = []
+    benign: list[str] = []
+    for idx, line in diagnostics:
+        in_intentional_teardown = start_idx < idx < resume_idx
+        exact_benign = any(pattern.search(line) for pattern in benign_patterns)
+        if in_intentional_teardown and exact_benign:
+            benign.append(line)
+        else:
+            blocking.append(line)
+    return blocking, benign
+
+
 def assess(directory: Path) -> dict:
     text = (directory / "pipeline.log").read_text()
     failures: list[str] = []
@@ -65,10 +108,9 @@ def assess(directory: Path) -> dict:
     ):
         failures.append("Missing clean completed-isolation group shutdown")
 
-    runtime_error_diagnostics = [
-        line for line in text.splitlines()
-        if re.search(r"GROUP FATAL|CRITICAL|PARSER_ERROR|\bERROR\s", line)
-    ]
+    runtime_error_diagnostics, benign_teardown_diagnostics = (
+        classify_runtime_diagnostics(text, summary)
+    )
     if runtime_error_diagnostics:
         failures.append("Fatal/runtime/parser error diagnostic present")
 
@@ -135,6 +177,7 @@ def assess(directory: Path) -> dict:
         "isolation": summary,
         "jsonl_rows": len(records),
         "runtime_error_diagnostics": runtime_error_diagnostics,
+        "benign_teardown_diagnostics": benign_teardown_diagnostics,
         "overlap_validation": {k: v for k, v in overlap.items() if k != "evidence"},
     }
     (directory / "isolation_gate.json").write_text(json.dumps(report, indent=2) + "\n")
