@@ -1,5 +1,6 @@
 import unittest
 from scripts.yolo26m_person.check_gate import assess, analyze_overlaps, load_jsonl_evidence, choose_gpu_window, analyze_source_gap_events
+from scripts.yolo26m_person.check_isolation import classify_runtime_diagnostics
 
 
 class DetectorGateTests(unittest.TestCase):
@@ -110,6 +111,43 @@ class DetectorGateTests(unittest.TestCase):
             report["per_camera"]["CAM-02"][0]["classification"],
             "downstream_or_queue_backpressure",
         )
+
+    def test_isolation_allows_exact_v4l2_teardown_errors_only_inside_window(self):
+        text = "\n".join([
+            "CAM-01 ISOLATION setting only this source to NULL",
+            "0:00:21.4 1 0x1 ERROR v4l2allocator gstv4l2allocator.c:1398:gst_v4l2_allocator_qbuf:<nvv4l2decoder0:pool:src:allocator> failed queueing buffer 5: Bad file descriptor",
+            "0:00:21.4 1 0x1 ERROR v4l2bufferpool gstv4l2bufferpool.c:1502:gst_v4l2_buffer_pool_qbuf:<nvv4l2decoder0:pool:src> could not queue a buffer 5",
+            "CAM-01 ISOLATION recreating only this nvurisrcbin",
+        ])
+        blocking, benign = classify_runtime_diagnostics(
+            text, {"target": "CAM-01", "status": "PASS"}
+        )
+        self.assertEqual(blocking, [])
+        self.assertEqual(len(benign), 2)
+
+    def test_isolation_does_not_hide_v4l2_error_outside_window(self):
+        text = "\n".join([
+            "CAM-01 ISOLATION setting only this source to NULL",
+            "CAM-01 ISOLATION recreating only this nvurisrcbin",
+            "0:00:40.0 1 0x1 ERROR v4l2allocator gstv4l2allocator.c:1398:gst_v4l2_allocator_qbuf:<nvv4l2decoder0:pool:src:allocator> failed queueing buffer 5: Bad file descriptor",
+        ])
+        blocking, benign = classify_runtime_diagnostics(
+            text, {"target": "CAM-01", "status": "PASS"}
+        )
+        self.assertEqual(len(blocking), 1)
+        self.assertEqual(benign, [])
+
+    def test_isolation_does_not_hide_other_errors_inside_window(self):
+        text = "\n".join([
+            "CAM-01 ISOLATION setting only this source to NULL",
+            "0:00:21.4 ERROR nvinfer parser crashed",
+            "CAM-01 ISOLATION recreating only this nvurisrcbin",
+        ])
+        blocking, benign = classify_runtime_diagnostics(
+            text, {"target": "CAM-01", "status": "PASS"}
+        )
+        self.assertEqual(len(blocking), 1)
+        self.assertEqual(benign, [])
 
     def test_overlap_analyzer_blocks_duplicate_bbox_above_nms_threshold(self):
         records = [
