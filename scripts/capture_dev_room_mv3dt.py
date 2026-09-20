@@ -111,18 +111,21 @@ def safe_camera_summary(cameras: list[dict]) -> list[dict]:
     ]
 
 
-def check_gstreamer_plugins() -> None:
-    required = (
+def check_gstreamer_plugins(codec: str | None = None) -> None:
+    required = [
         "rtspsrc",
-        "rtph264depay",
-        "h264parse",
+        "fakesink",
         "tee",
         "queue",
         "mp4mux",
         "filesink",
         "mpegtsmux",
         "udpsink",
-    )
+    ]
+    if codec == "H264":
+        required += ["rtph264depay", "h264parse"]
+    elif codec == "H265":
+        required += ["rtph265depay", "h265parse"]
     missing = [name for name in required if Gst.ElementFactory.find(name) is None]
     if missing:
         raise RuntimeError(
@@ -130,13 +133,8 @@ def check_gstreamer_plugins() -> None:
         )
 
 
-def build_camera_pipeline(
-    cam: dict,
-    output: Path,
-    preview_port: int,
-    latency_ms: int,
-) -> Gst.Pipeline:
-    source_options = [
+def source_options(cam: dict, latency_ms: int) -> list[str]:
+    return [
         f"location={_gst_quote(cam['uri'])}",
         f"latency={latency_ms}",
         "drop-on-latency=true",
@@ -145,22 +143,111 @@ def build_camera_pipeline(
         f"user-pw={_gst_quote(cam['password'])}",
     ]
 
+
+def detect_rtsp_codec(cam: dict, latency_ms: int, timeout_sec: float = 10.0) -> str:
+    # Link any RTP video stream to fakesink first, then inspect the negotiated
+    # SDP-derived RTP caps. This avoids assuming H264/H265 in advance.
     pipeline_text = " ".join(
         [
-            "rtspsrc", "name=source", *source_options,
-            "!", "application/x-rtp,media=video,encoding-name=H264",
-            "!", "rtph264depay",
-            "!", "h264parse", "config-interval=-1",
+            "rtspsrc", "name=source", *source_options(cam, latency_ms),
+            "!", "application/x-rtp,media=video",
+            "!", "fakesink", "name=codec_sink", "sync=false",
+        ]
+    )
+    try:
+        pipeline = Gst.parse_launch(pipeline_text)
+    except Exception as exc:
+        raise RuntimeError(
+            f"{cam['id']}: failed to construct codec-probe pipeline: {exc}"
+        ) from exc
+
+    sink = pipeline.get_by_name("codec_sink")
+    if sink is None:
+        pipeline.set_state(Gst.State.NULL)
+        raise RuntimeError(f"{cam['id']}: codec probe sink was not created")
+
+    try:
+        result = pipeline.set_state(Gst.State.PLAYING)
+        if result == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError(f"{cam['id']}: codec probe failed to enter PLAYING")
+
+        bus = pipeline.get_bus()
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            message = bus.timed_pop_filtered(
+                100 * Gst.MSECOND,
+                Gst.MessageType.ERROR,
+            )
+            if message is not None:
+                err, debug = message.parse_error()
+                source = (
+                    message.src.get_name()
+                    if message.src is not None
+                    else "unknown"
+                )
+                raise RuntimeError(
+                    f"{cam['id']}: codec probe {source}: "
+                    f"{err.message} | {debug or ''}"
+                )
+
+            pad = sink.get_static_pad("sink")
+            caps = pad.get_current_caps() if pad is not None else None
+            if caps is None or caps.get_size() == 0:
+                continue
+            structure = caps.get_structure(0)
+            encoding = str(structure.get_value("encoding-name") or "").upper()
+            if encoding in {"H264", "H265"}:
+                return encoding
+            if encoding:
+                raise RuntimeError(
+                    f"{cam['id']}: unsupported RTP video encoding {encoding}"
+                )
+
+        raise RuntimeError(
+            f"{cam['id']}: timed out detecting RTSP video codec"
+        )
+    finally:
+        pipeline.set_state(Gst.State.NULL)
+
+
+def build_camera_pipeline(
+    cam: dict,
+    codec: str,
+    output: Path,
+    preview_port: int,
+    latency_ms: int,
+) -> Gst.Pipeline:
+    if codec == "H264":
+        encoding = "H264"
+        depay = "rtph264depay"
+        parser = "h264parse"
+        encoded_caps = "video/x-h264"
+        mp4_stream_format = "avc"
+    elif codec == "H265":
+        encoding = "H265"
+        depay = "rtph265depay"
+        parser = "h265parse"
+        encoded_caps = "video/x-h265"
+        mp4_stream_format = "hvc1"
+    else:
+        raise RuntimeError(f"{cam['id']}: unsupported codec {codec}")
+
+    pipeline_text = " ".join(
+        [
+            "rtspsrc", "name=source", *source_options(cam, latency_ms),
+            "!", f"application/x-rtp,media=video,encoding-name={encoding}",
+            "!", depay,
+            "!", parser, "config-interval=-1",
             "!", "tee", "name=t",
             "t.", "!", "queue",
-            "!", "h264parse", "config-interval=-1",
-            "!", "video/x-h264,stream-format=avc,alignment=au",
+            "!", parser, "config-interval=-1",
+            "!", f"{encoded_caps},stream-format={mp4_stream_format},alignment=au",
             "!", "mp4mux", "faststart=true",
             "!", "filesink", f"location={_gst_quote(str(output))}",
             "sync=false",
             "t.", "!", "queue",
-            "!", "h264parse", "config-interval=-1",
-            "!", "video/x-h264,stream-format=byte-stream,alignment=au",
+            "!", parser, "config-interval=-1",
+            "!", f"{encoded_caps},stream-format=byte-stream,alignment=au",
             "!", "mpegtsmux", "alignment=7",
             "!", "udpsink", "host=127.0.0.1",
             f"port={preview_port}",
@@ -178,7 +265,6 @@ def build_camera_pipeline(
     if not isinstance(pipeline, Gst.Pipeline):
         raise RuntimeError(f"{cam['id']}: GStreamer did not create a pipeline")
     return pipeline
-
 
 def launch_preview(ffplay: str, cam: dict, port: int, left: int) -> subprocess.Popen:
     return subprocess.Popen(
@@ -302,6 +388,14 @@ def main() -> int:
     check_gstreamer_plugins()
 
     cameras = load_dev_cameras()
+    print("Detecting RTSP codecs...")
+    codecs = [
+        detect_rtsp_codec(camera, args.latency_ms)
+        for camera in cameras
+    ]
+    for camera, codec in zip(cameras, codecs):
+        check_gstreamer_plugins(codec)
+        print(f"  {camera['id']}: {codec}")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out = args.out or (ROOT / ".runtime" / "mv3dt" / f"dev-room-{stamp}")
     out = out.resolve()
@@ -318,7 +412,9 @@ def main() -> int:
     outputs = [out / "cam_00.mp4", out / "cam_01.mp4"]
     ports = [args.preview_port_base, args.preview_port_base + 1]
     pipelines = [
-        build_camera_pipeline(cameras[i], outputs[i], ports[i], args.latency_ms)
+        build_camera_pipeline(
+            cameras[i], codecs[i], outputs[i], ports[i], args.latency_ms
+        )
         for i in range(2)
     ]
     previews: list[subprocess.Popen] = []
@@ -408,6 +504,9 @@ def main() -> int:
             "duration_requested_sec": args.duration,
             "pipeline_launch_skew_ms": pipeline_launch_skew_ms,
             "camera_mapping": summary,
+            "detected_codecs": {
+                cameras[i]["id"]: codecs[i] for i in range(2)
+            },
             "files": results,
         }
         (out / "capture_manifest.json").write_text(
