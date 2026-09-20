@@ -37,6 +37,7 @@ Validated platform:
 - YOLO26m detector source isolation/recovery: PASS
 - NvDCF 60-second tracker gate: PASS
 - NvDCF 660-second tracker soak: PASS
+- NvDCF source isolation/recovery CAM-01..CAM-06: PASS
 - process-specific GPU memory stability: PASS
 - detector duplicate-box / NMS validation: PASS
 - visual tracker ID-stability review: PASS
@@ -71,28 +72,12 @@ Smoke evidence:
 This confirms that the cleanup did not remove a runtime dependency required by
 the validated detector/tracker pipeline.
 
-## Current next gate
+## Current next stage
 
-Run source isolation/recovery with YOLO26m + NvDCF enabled for CAM-01 through
-CAM-06. The interrupted source may receive a new local tracker ID after reset;
-healthy peer streams must continue advancing and tracking.
-
-Example:
-
-```bash
-python3 scripts/validate_yolo26m_tracker.py \
-  --duration 90 \
-  --interrupt-camera CAM-01 \
-  --interrupt-at 20 \
-  --interrupt-seconds 12 \
-  --out .runtime/nvdcf-isolation-cam01
-
-python3 scripts/yolo26m_tracker/check_isolation.py \
-  .runtime/nvdcf-isolation-cam01
-```
-
-Do not begin cross-camera ReID until all six tracker isolation/recovery tests
-pass.
+Per-camera NvDCF tracking is frozen after passing the 60-second gate, 660-second
+soak, visual ID-stability review and CAM-01..CAM-06 source isolation/recovery.
+The next AI stage is cross-camera ReID. Keep the validated YOLO26m detector and
+NvDCF local tracker unchanged while adding ReID as a separate identity layer.
 
 ## Active source tree
 
