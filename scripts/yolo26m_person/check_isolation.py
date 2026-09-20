@@ -65,7 +65,11 @@ def assess(directory: Path) -> dict:
     ):
         failures.append("Missing clean completed-isolation group shutdown")
 
-    if re.search(r"GROUP FATAL|CRITICAL|PARSER_ERROR|\bERROR\s", text):
+    runtime_error_diagnostics = [
+        line for line in text.splitlines()
+        if re.search(r"GROUP FATAL|CRITICAL|PARSER_ERROR|\bERROR\s", line)
+    ]
+    if runtime_error_diagnostics:
         failures.append("Fatal/runtime/parser error diagnostic present")
 
     for i in range(1, 7):
@@ -130,6 +134,7 @@ def assess(directory: Path) -> dict:
         "failures": failures,
         "isolation": summary,
         "jsonl_rows": len(records),
+        "runtime_error_diagnostics": runtime_error_diagnostics,
         "overlap_validation": {k: v for k, v in overlap.items() if k != "evidence"},
     }
     (directory / "isolation_gate.json").write_text(json.dumps(report, indent=2) + "\n")
