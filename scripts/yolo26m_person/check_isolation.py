@@ -25,7 +25,7 @@ SUMMARY_RE = re.compile(
 
 
 def classify_runtime_diagnostics(text: str, summary: dict | None) -> tuple[list[str], list[str]]:
-    diagnostic_re = re.compile(r"GROUP FATAL|CRITICAL|PARSER_ERROR|\\bERROR\\s")
+    diagnostic_re = re.compile(r"GROUP FATAL|CRITICAL|PARSER_ERROR|\bERROR\s")
     rows = text.splitlines()
     diagnostics = [(i, line) for i, line in enumerate(rows) if diagnostic_re.search(line)]
     if not diagnostics:
@@ -39,19 +39,22 @@ def classify_runtime_diagnostics(text: str, summary: dict | None) -> tuple[list[
     resume_marker = f"{target} ISOLATION recreating only this nvurisrcbin"
     try:
         start_idx = next(i for i, line in enumerate(rows) if start_marker in line)
-        resume_idx = next(i for i, line in enumerate(rows) if i > start_idx and resume_marker in line)
+        resume_idx = next(
+            i for i, line in enumerate(rows)
+            if i > start_idx and resume_marker in line
+        )
     except StopIteration:
         return [line for _, line in diagnostics], []
 
     benign_patterns = (
         re.compile(
-            r"ERROR\\s+v4l2allocator\\b.*"
-            r"<nvv4l2decoder\\d+:pool:src:allocator> "
-            r"failed queueing buffer \\d+: Bad file descriptor$"
+            r"ERROR\s+v4l2allocator\b.*"
+            r"<nvv4l2decoder\d+:pool:src:allocator> "
+            r"failed queueing buffer \d+: Bad file descriptor$"
         ),
         re.compile(
-            r"ERROR\\s+v4l2bufferpool\\b.*"
-            r"<nvv4l2decoder\\d+:pool:src> could not queue a buffer \\d+$"
+            r"ERROR\s+v4l2bufferpool\b.*"
+            r"<nvv4l2decoder\d+:pool:src> could not queue a buffer \d+$"
         ),
     )
 
@@ -65,7 +68,6 @@ def classify_runtime_diagnostics(text: str, summary: dict | None) -> tuple[list[
         else:
             blocking.append(line)
     return blocking, benign
-
 
 def assess(directory: Path) -> dict:
     text = (directory / "pipeline.log").read_text()
