@@ -76,8 +76,13 @@ class NvDCFTrackerGateTests(unittest.TestCase):
         detection = Path("scripts/yolo26m_person/detection.hpp").read_text()
         checker = Path("scripts/yolo26m_tracker/check_gate.py").read_text()
         marker = "nvtracker(NvDCF_stable_person,960x544)"
+        profile_marker = (
+            "TRACKER_GRAPH nvtracker("
+            "NvDCF_stable_person,width=960,height=544,batch=6,gpu=0,reid=0)"
+        )
         self.assertIn(marker, detection)
-        self.assertIn(marker, checker)
+        self.assertIn('"->nvtracker("', checker)
+        self.assertIn(profile_marker, checker)
         self.assertNotIn("nvtracker(NvDCF_perf,960x544)", detection)
 
     def test_tracker_preflight_requests_gpu_access(self):
