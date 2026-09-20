@@ -282,3 +282,21 @@ GPU memory was stable at 2602 MiB, and visual ID-stability review passed.
 
 Repository cleanup therefore did not break the validated detector/tracker
 runtime contract.
+
+
+## Clean-tree NvDCF isolation — CAM-01 PASS
+
+CAM-01 intentional isolation/recovery passed on the clean branch:
+
+- 5 healthy peers remained active;
+- target frames during the 12-second outage: 0;
+- peer frames during outage: 1196;
+- target recovered 150 frames;
+- detector NMS overlap gate passed;
+- NvDCF reported no untracked objects and no duplicate per-frame IDs;
+- exact V4L2/NVDEC teardown diagnostics during the intentional source-NULL window
+  were classified as benign teardown-only diagnostics;
+- no other runtime/parser/tracker errors remained.
+
+CAM-01 may receive new local tracker IDs after recovery because
+`tracking-id-reset-mode=1` is retained by design.
