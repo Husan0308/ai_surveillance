@@ -1,0 +1,6 @@
+pubBrokerTopicStr:
+- 127.0.0.1:1883;/trck/cam1
+- 127.0.0.1:1883;/trck/cam2
+subPeerBrokerTopicStrs:
+- - 127.0.0.1:1883;/trck/cam2
+- - 127.0.0.1:1883;/trck/cam1

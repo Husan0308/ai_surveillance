@@ -1,0 +1,46 @@
+# Production room-pair profile. This profile is intentionally limited to the
+# accepted Dev Room pair; the six-camera runtime uses config/cameras.yaml.
+profile: dev-room-cam01-cam04
+cameras:
+  - CAM-01
+  - CAM-04
+detector: PeopleNet2.6.3
+detector_precision: FP16
+detector_interval: 0
+tracker: NvDCF
+projection: ObjectModelProjection
+calibration: VGGT
+face_recognition: false
+reid:
+  model: osnet_ain_x1_0_msmt17
+  device: cuda
+  input_height: 256
+  input_width: 128
+  extraction_interval_frames: 10
+  event_driven: true
+identity:
+  manager: GlobalIdentityManager
+  visible_id_field: global_person_id
+  unknown_label: Unknown
+  native_id_debug_only: true
+  hard_coded_person_count: false
+runtime:
+  source_mode_env: MV3DT_DEV_ROOM_SOURCE_MODE
+  source_modes: [replay, live]
+  binary: /home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/experiments/deepstream/dev-room-pn263-global-identity-20260921/bin/deepstream-test5-pn263-global-id-proto
+  deepstream_image: nvcr.io/nvidia/deepstream:9.1-triton-multiarch
+  models_root: /home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/models
+  osnet_model: /home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/experiments/deepstream/dev-room-pn263-global-identity-20260921/models/reid/osnet_ain_x1_0_msmt17.pth
+  runtime_root: .runtime/mv3dt/dev-room-cam01-cam04
+  kafka_topic: mv3dt
+  kafka_bootstrap: localhost:9092
+  mqtt_broker: localhost:1883
+replay:
+  video_dir: .runtime/mv3dt/amc-input/dev-room-1080p-v1
+  expected_duration_seconds: 120
+  expected_fps: 20
+live:
+  source_config: config/cameras.yaml
+  real_time: true
+  rtsp_transport: tcp
+  reconnect: true

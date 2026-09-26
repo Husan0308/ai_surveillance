@@ -71,6 +71,28 @@ async def cameras(request: Request) -> dict:
     except MLServiceUnavailable as exc:
         raise service_unavailable(exc) from exc
 
+@app.get("/api/v1/room-pair/identity")
+async def room_pair_identity(request: Request) -> dict:
+    try:
+        return await get_ml_client(request).room_pair_identity()
+    except MLServiceUnavailable as exc:
+        raise service_unavailable(exc) from exc
+
+@app.get("/api/v1/room-pair/metrics")
+async def room_pair_metrics(request: Request) -> dict:
+    try:
+        return await get_ml_client(request).room_pair_metrics()
+    except MLServiceUnavailable as exc:
+        raise service_unavailable(exc) from exc
+
+
+@app.get("/api/v1/room-pair/acceptance-candidates")
+async def room_pair_acceptance_candidates(request: Request) -> dict:
+    try:
+        return await get_ml_client(request).room_pair_acceptance_candidates()
+    except MLServiceUnavailable as exc:
+        raise service_unavailable(exc) from exc
+
 
 def monitoring_degraded(reason: str) -> dict:
     return offline_snapshot(

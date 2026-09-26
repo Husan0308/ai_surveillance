@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 import re
 import time
 
@@ -16,6 +17,15 @@ _CODEC = {
     "h264": ("H264", "rtph264depay", "h264parse"),
     "h265": ("H265", "rtph265depay", "h265parse"),
 }
+
+
+@dataclass(frozen=True)
+class CaptureTiming:
+    decoder_reference_ns: int
+    decoder_out_ns: int
+    appsink_receive_ns: int
+    pts_ns: int
+    dts_ns: int
 
 
 def _gst_quote(value: str) -> str:
@@ -53,6 +63,7 @@ class DeepStreamCapture:
         transport: str | None = None,
         username: str = "",
         password: str = "",
+        output_bgrx: bool = False,
     ) -> None:
         self.camera_id = camera_id
         self.uri = uri
@@ -61,11 +72,17 @@ class DeepStreamCapture:
         self.transport = (transport or config.rtsp_transport).lower()
         self.username = username
         self.password = password
+        self.output_bgrx = bool(output_bgrx)
         self._opened = False
         self._last_error = ""
         self._last_warning = ""
         self._frame_intervals_ms = deque(maxlen=300)
         self._last_frame_mono: float | None = None
+        self.last_timing = CaptureTiming(0, 0, 0, 0, 0)
+        self._decoder_input_times: dict[int, int] = {}
+        self._decoder_output_times: dict[int, tuple[int, int]] = {}
+        self._decoder_input_order: deque[int] = deque(maxlen=256)
+        self._decoder_output_order: deque[int] = deque(maxlen=256)
 
         if self.codec not in _CODEC:
             raise ValueError(f"{camera_id}: unsupported codec {codec}")
@@ -77,10 +94,18 @@ class DeepStreamCapture:
         self.pipeline = Gst.parse_launch(self.pipeline_text)
         self.bus = self.pipeline.get_bus()
         self.sink = self.pipeline.get_by_name("sink")
+        self.decoder = self.pipeline.get_by_name("decoder")
         self.latest_queue = self.pipeline.get_by_name("latest_queue")
         if self.sink is None:
             self.pipeline.set_state(Gst.State.NULL)
             raise RuntimeError(f"{camera_id}: appsink was not created")
+        if self.decoder is not None:
+            decoder_sink = self.decoder.get_static_pad("sink")
+            decoder_src = self.decoder.get_static_pad("src")
+            if decoder_sink is not None:
+                decoder_sink.add_probe(Gst.PadProbeType.BUFFER, self._decoder_input_probe)
+            if decoder_src is not None:
+                decoder_src.add_probe(Gst.PadProbeType.BUFFER, self._decoder_output_probe)
 
         result = self.pipeline.set_state(Gst.State.PLAYING)
         self._opened = result != Gst.StateChangeReturn.FAILURE
@@ -88,6 +113,42 @@ class DeepStreamCapture:
             detail = self._consume_bus()
             self.pipeline.set_state(Gst.State.NULL)
             raise RuntimeError(f"{camera_id}: PLAYING failed: {detail or 'no detail'}")
+
+    @staticmethod
+    def _buffer_pts(buffer) -> int:
+        return int(buffer.pts) if buffer.pts != Gst.CLOCK_TIME_NONE else -1
+
+    @staticmethod
+    def _remember(mapping: dict, order: deque, key: int, value) -> None:
+        if key < 0:
+            return
+        if len(order) == order.maxlen:
+            mapping.pop(order.popleft(), None)
+        order.append(key)
+        mapping[key] = value
+
+    def _decoder_input_probe(self, _pad, info):
+        buffer = info.get_buffer()
+        if buffer is None:
+            return Gst.PadProbeReturn.OK
+        self._remember(
+            self._decoder_input_times, self._decoder_input_order,
+            self._buffer_pts(buffer), time.monotonic_ns(),
+        )
+        return Gst.PadProbeReturn.OK
+
+    def _decoder_output_probe(self, _pad, info):
+        buffer = info.get_buffer()
+        if buffer is None:
+            return Gst.PadProbeReturn.OK
+        pts = self._buffer_pts(buffer)
+        out_ns = time.monotonic_ns()
+        reference_ns = self._decoder_input_times.pop(pts, out_ns)
+        self._remember(
+            self._decoder_output_times, self._decoder_output_order,
+            pts, (reference_ns, out_ns),
+        )
+        return Gst.PadProbeReturn.OK
 
     def _build_pipeline(self) -> str:
         c = self.config
@@ -193,11 +254,21 @@ class DeepStreamCapture:
         if not ok:
             return False, None
         try:
-            image = _owned_bgr(mapped.data, width, height)
+            if self.output_bgrx:
+                image = np.frombuffer(mapped.data, dtype=np.uint8).reshape((height, width, 4)).copy()
+            else:
+                image = _owned_bgr(mapped.data, width, height)
         finally:
             buffer.unmap(mapped)
 
-        now = time.monotonic()
+        receive_ns = time.monotonic_ns()
+        pts_ns = int(buffer.pts) if buffer.pts != Gst.CLOCK_TIME_NONE else -1
+        dts_ns = int(buffer.dts) if buffer.dts != Gst.CLOCK_TIME_NONE else -1
+        decoder_reference_ns, decoder_out_ns = self._decoder_output_times.pop(pts_ns, (0, 0))
+        self.last_timing = CaptureTiming(
+            decoder_reference_ns, decoder_out_ns, receive_ns, pts_ns, dts_ns
+        )
+        now = receive_ns / 1e9
         if self._last_frame_mono is not None:
             self._frame_intervals_ms.append((now - self._last_frame_mono) * 1000.0)
         self._last_frame_mono = now

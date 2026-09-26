@@ -1,0 +1,8 @@
+ds_instance_cam_assignment:
+- - 1
+  - 2
+ds_instance_gpu_assignment:
+- 0
+mqtt_broker_per_instance:
+- 127.0.0.1:1883
+topic_template: /trck/cam%d

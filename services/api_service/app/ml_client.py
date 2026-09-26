@@ -30,6 +30,15 @@ class MLServiceClient:
     async def monitoring_snapshot(self) -> dict[str, Any]:
         return await self._get_json("/api/v1/monitoring/snapshot")
 
+    async def room_pair_identity(self) -> dict[str, Any]:
+        return await self._get_json("/api/v1/room-pair/identity")
+
+    async def room_pair_metrics(self) -> dict[str, Any]:
+        return await self._get_json("/api/v1/room-pair/metrics")
+
+    async def room_pair_acceptance_candidates(self) -> dict[str, Any]:
+        return await self._get_json("/api/v1/room-pair/acceptance-candidates")
+
     async def _get_json(self, path: str) -> dict[str, Any]:
         try:
             response = await self._client.get(path)

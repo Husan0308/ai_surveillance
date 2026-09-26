@@ -1,0 +1,9 @@
+[sensor0]
+enable=1
+type=Camera
+id=CAM-01
+
+[sensor1]
+enable=1
+type=Camera
+id=CAM-04

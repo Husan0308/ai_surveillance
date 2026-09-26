@@ -71,15 +71,22 @@ def test_ml_health_and_monitoring_endpoint_are_telemetry_only(tmp_path: Path, mo
     path = tmp_path / "telemetry.json"
     MonitoringTelemetryWriter(path).publish(live_payload())
     monkeypatch.setattr(ml_main, "telemetry", MonitoringTelemetryReader(path))
+    monkeypatch.setattr(
+        ml_main.room_pair_state, "readiness",
+        lambda: {"status": "ready", "ready": True},
+    )
     with TestClient(ml_main.app) as client:
         health = client.get("/health").json()
-        assert health == {
+        assert {key: health[key] for key in (
+            "service", "status", "monitoring_status", "camera_count", "online_camera_count"
+        )} == {
             "service": "ml_service",
             "status": "ok",
             "monitoring_status": "fresh",
             "camera_count": 6,
             "online_camera_count": 6,
         }
+        assert "room_pair_readiness" in health
         response = client.get("/api/v1/monitoring/snapshot")
         assert response.status_code == 200
         assert response.json()["runtime"]["rtsp_source_count"] == 6

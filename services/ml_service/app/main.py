@@ -7,23 +7,28 @@ from fastapi import FastAPI, HTTPException
 
 from services.camera_v11.monitoring_telemetry_ipc_v1 import MonitoringTelemetryReader
 from services.ml_service.app.config import load_settings
+from services.ml_service.app.room_pair import router as room_pair_router, state as room_pair_state
 
 settings = load_settings()
 camera_ids = tuple(camera.camera_id for camera in settings.cameras)
 telemetry = MonitoringTelemetryReader(camera_ids=camera_ids)
 
 app = FastAPI(title="AI Surveillance ML Service", version="0.4.0")
+app.include_router(room_pair_router)
 
 
 @app.get("/health")
 def health() -> dict:
     snapshot = telemetry.read()
+    readiness = room_pair_state.readiness()
+    room_status = str(readiness.get("status", "not_ready"))
     return {
         "service": "ml_service",
-        "status": "ok",
+        "status": "ok" if room_status == "ready" else "degraded",
         "monitoring_status": snapshot["telemetry_status"],
         "camera_count": len(snapshot["cameras"]),
         "online_camera_count": sum(bool(row["online"]) for row in snapshot["cameras"]),
+        "room_pair_readiness": readiness,
     }
 
 
