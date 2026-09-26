@@ -12,7 +12,7 @@
     "native/bbox_history_lifecycle.c": "3cd37e549dfe18d7ac751197bc9eeb2e355888e6ea8024ea585fe701ddcc3a5f",
     "native/bbox_history_lifecycle.h": "f25e9ca30290b5e6b6036a3e2cce69d39f51c2e4eee6b1d4232b5428ceba84a4",
     "native/bbox_correction.h": "b57974e18430cc329b37ecc61f7d2ff560e06463a399e8a02983b19317d12edd",
-    "native/deepstream_test5_app_main.c": "332bcd0782906a543f67bfaeaa9f65875d7a2275884e66e188a135688a07ca78"
+    "native/deepstream_test5_app_main.c": "99399c1733d3eab0750fa6732d10c564a39bbf958eb083c00a08ad0e12a03d0e"
   },
   "accepted_config_sha256": {
     "config_tracker.yml": "9b7b9bddb96abafdb5fdb80b09ea88d7d8804b5f48cd9ee3f5e8296aae945ac0",
@@ -26,7 +26,7 @@
     "TH_ASPECT_LOG": 0.23007604131814643,
     "TH_CONF_DROP": 0.22973609999999994,
     "RECOVERY_HYSTERESIS_FRAMES": 60,
-    "RECOVERY_STRONG_REENTRY_DELTA": 30.0
+    "RECOVERY_STRONG_REENTRY_DELTA": 30
   },
   "calibration_note": "camInfo/cam_00.yml and cam_01.yml retain the existing VGGT projection matrices; class-0 PeopleNet model metadata is included as in the accepted PN2.6.3 run.",
   "rebaseline_metadata": {
@@ -39,6 +39,11 @@
       "previous_sha256": "72c71eebbc892108ff5271e89fbba292313c9f3ea76eefcf13da50d92f97e3c4",
       "current_sha256": "19265e94ae071b19694e013a2d0764a59f7bb5ba4899852ac4b185d0ab5b84de",
       "reason": "Validated bounded bbox-history lifecycle and stale-slot retirement, preventing history-capacity assertion and out-of-bounds behavior."
+    },
+    "native/deepstream_test5_app_main.c": {
+      "previous_sha256": "332bcd0782906a543f67bfaeaa9f65875d7a2275884e66e188a135688a07ca78",
+      "current_sha256": "99399c1733d3eab0750fa6732d10c564a39bbf958eb083c00a08ad0e12a03d0e",
+      "reason": "Re-baselined to the checkpoint source containing environment-gated frame audit, source-health, preview, crop provenance, and related diagnostics already used by the validated live/replay runs; accepted production binary hash unchanged."
     }
   }
 }
