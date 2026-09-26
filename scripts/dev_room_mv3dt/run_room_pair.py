@@ -113,6 +113,12 @@ RECALL_EXPERIMENTS = {
         "tentative_detector_confidence": 0.03,
         "data_associator_min_matching_score": 0.20,
     },
+    "recall-004": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.50,
+    },
 }
 
 
@@ -166,6 +172,21 @@ def apply_experiment_overrides(stage: Path, run_root: Path, experiment: str | No
     if n1 != 1 or n2 != 1:
         raise RuntimeError("recall experiment tracker keys were not uniquely resolved")
     tracker = tracker[:assoc_match.start()] + assoc + tracker[assoc_match.end():]
+    if "min_iou_diff_new_target" in spec:
+        target_match = re.search(r"(?ms)^TargetManagement:\n(.*?)(?=^[A-Za-z][^\n]*:\n|\Z)", tracker)
+        if target_match is None:
+            raise RuntimeError("could not parse TargetManagement block")
+        target = target_match.group(0)
+        target, n3 = re.subn(
+            r"(?m)^(\s*minIouDiff4NewTarget:)\s*[^\n]+$",
+            rf"\1 {spec['min_iou_diff_new_target']}",
+            target,
+            count=1,
+        )
+        if n3 != 1:
+            raise RuntimeError("recall experiment minIouDiff4NewTarget was not uniquely resolved")
+        tracker = tracker[:target_match.start()] + target + tracker[target_match.end():]
+
     tracker_path.write_text(tracker)
 
     (run_root / "experiment_overrides.json").write_text(json.dumps({
