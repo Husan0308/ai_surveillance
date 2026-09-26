@@ -208,13 +208,16 @@ def audit(run: Path) -> dict:
     )
     readiness_ok = bool(readiness.get("ready")) and readiness.get("status") == "ready"
 
-    automatic_pass = experiment_ok and readiness_ok and all(camera_passes) and identity_safe
+    recall_pass = experiment_ok and readiness_ok and all(camera_passes)
+    automatic_pass = recall_pass
 
     return {
         "automatic_pass": automatic_pass,
+        "recall_pass": recall_pass,
         "experiment_ok": experiment_ok,
         "readiness_ok": readiness_ok,
         "identity_safety_ok": identity_safe,
+        "identity_safety_scope": "informational here; identity acceptance is a later gate",
         "identity_safety_checks": identity_safety_checks,
         "identity_safety_values": {
             "pending_to_new_confirmed": int(lifecycle.get("pending_to_new_confirmed", 0)),
