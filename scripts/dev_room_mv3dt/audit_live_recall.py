@@ -7,12 +7,22 @@ from collections import defaultdict
 from pathlib import Path
 
 CAMERAS = ("CAM-01", "CAM-04")
-EXPECTED_EXPERIMENT = {
-    "experiment": "recall-003",
-    "production_profile_modified": False,
-    "pre_cluster_threshold": 0.03,
-    "tentative_detector_confidence": 0.03,
-    "data_associator_min_matching_score": 0.2,
+EXPECTED_EXPERIMENTS = {
+    "recall-003": {
+        "experiment": "recall-003",
+        "production_profile_modified": False,
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.2,
+    },
+    "recall-004": {
+        "experiment": "recall-004",
+        "production_profile_modified": False,
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.2,
+        "min_iou_diff_new_target": 0.5,
+    },
 }
 SOURCE_FPS = 20.0
 MIN_SOURCE_FPS = 19.0
@@ -192,7 +202,10 @@ def audit(run: Path) -> dict:
         "osnet_cuda": (osnet.get("embedder") or {}).get("device") == "cuda",
     }
     identity_safe = all(identity_safety_checks.values())
-    experiment_ok = all(exp.get(k) == v for k, v in EXPECTED_EXPERIMENT.items())
+    expected_experiment = EXPECTED_EXPERIMENTS.get(str(exp.get("experiment")))
+    experiment_ok = bool(expected_experiment) and all(
+        exp.get(k) == v for k, v in expected_experiment.items()
+    )
     readiness_ok = bool(readiness.get("ready")) and readiness.get("status") == "ready"
 
     automatic_pass = experiment_ok and readiness_ok and all(camera_passes) and identity_safe
