@@ -107,6 +107,74 @@ def live_config(stage: Path, uris: dict[str, str]) -> None:
     path.write_text(text)
 
 
+RECALL_EXPERIMENTS = {
+    "recall-003": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+    },
+}
+
+
+def apply_experiment_overrides(stage: Path, run_root: Path, experiment: str | None) -> None:
+    """Apply experiment-only config overlays to the staged runtime copy.
+
+    Production profile files under config/mv3dt_dev_room are never modified.
+    """
+    if not experiment:
+        return
+    if experiment not in RECALL_EXPERIMENTS:
+        raise ValueError(f"unsupported experiment: {experiment}")
+    spec = RECALL_EXPERIMENTS[experiment]
+
+    pgie_path = stage / "config_pgie.txt"
+    pgie = pgie_path.read_text()
+    class_header = "[class-attrs-0]"
+    setting = f"pre-cluster-threshold={spec['pre_cluster_threshold']}"
+    if class_header in pgie:
+        block_match = re.search(r"(?ms)^\[class-attrs-0\]\n(.*?)(?=^\[|\Z)", pgie)
+        if block_match is None:
+            raise RuntimeError("could not parse class-attrs-0 block")
+        block = block_match.group(0)
+        if re.search(r"(?m)^pre-cluster-threshold=", block):
+            updated = re.sub(r"(?m)^pre-cluster-threshold=.*$", setting, block, count=1)
+        else:
+            updated = block.rstrip() + "\n" + setting + "\n"
+        pgie = pgie[:block_match.start()] + updated + pgie[block_match.end():]
+    else:
+        pgie = pgie.rstrip() + f"\n\n{class_header}\n{setting}\n"
+    pgie_path.write_text(pgie)
+
+    tracker_path = stage / "config_tracker.yml"
+    tracker = tracker_path.read_text()
+    assoc_match = re.search(r"(?ms)^DataAssociator:\n(.*?)(?=^[A-Za-z][^\n]*:\n|\Z)", tracker)
+    if assoc_match is None:
+        raise RuntimeError("could not parse DataAssociator block")
+    assoc = assoc_match.group(0)
+    assoc, n1 = re.subn(
+        r"(?m)^(\s*tentativeDetectorConfidence:)\s*[^\n]+$",
+        rf"\1 {spec['tentative_detector_confidence']}",
+        assoc,
+        count=1,
+    )
+    assoc, n2 = re.subn(
+        r"(?m)^(\s*minMatchingScore4Overall:)\s*[^\n]+$",
+        rf"\1 {spec['data_associator_min_matching_score']}",
+        assoc,
+        count=1,
+    )
+    if n1 != 1 or n2 != 1:
+        raise RuntimeError("recall experiment tracker keys were not uniquely resolved")
+    tracker = tracker[:assoc_match.start()] + assoc + tracker[assoc_match.end():]
+    tracker_path.write_text(tracker)
+
+    (run_root / "experiment_overrides.json").write_text(json.dumps({
+        "experiment": experiment,
+        "production_profile_modified": False,
+        **spec,
+    }, indent=2))
+
+
 def resource_summary(run_root: Path) -> None:
     gpu_path = run_root / "logs/gpu_metrics.csv"
     gpu_values: list[float] = []
@@ -331,7 +399,7 @@ def make_crop_socket_alias(stage: Path, process_id: int | None = None) -> tuple[
         raise RuntimeError("crop socket alias exceeds AF_UNIX path limit")
     return alias, socket_path
 
-def run(mode: str, duration: float | None, skip_render: bool) -> Path:
+def run(mode: str, duration: float | None, skip_render: bool, experiment: str | None = None) -> Path:
     mode = "replay" if mode == "offline" else mode
     if mode not in {"replay", "live"}:
         raise ValueError(f"unsupported source mode: {mode}")
@@ -361,6 +429,7 @@ def run(mode: str, duration: float | None, skip_render: bool) -> Path:
     identity_dir = run_root / "identity-live"
     logs = run_root / "logs"
     copy_profile(stage)
+    apply_experiment_overrides(stage, run_root, experiment)
     session_id = run_root.name
     (run_root / "source_mode.json").write_text(json.dumps({
         "source_mode": mode,
@@ -483,8 +552,12 @@ def main() -> None:
     )
     parser.add_argument("--duration", type=float, default=None)
     parser.add_argument("--skip-render", action="store_true")
+    parser.add_argument(
+        "--experiment", choices=tuple(RECALL_EXPERIMENTS), default=None,
+        help="Apply an experiment-only overlay to the staged runtime config; production files stay unchanged",
+    )
     args = parser.parse_args()
-    print(run(args.mode, args.duration, args.skip_render))
+    print(run(args.mode, args.duration, args.skip_render, args.experiment))
 
 
 if __name__ == "__main__":
