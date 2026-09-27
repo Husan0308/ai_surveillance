@@ -713,6 +713,16 @@ def deepstream_command(stage: Path, binary: Path, image: str, source_mode: str, 
         "-v", f"{stage}:/workspace/experiments:rw",
         "-w", "/workspace/experiments",
     ]
+    queue_override = os.getenv(
+        "MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS", ""
+    ).strip()
+    if queue_override:
+        if not re.fullmatch(r"\d{1,2}", queue_override) or not 4 <= int(queue_override) <= 64:
+            raise ValueError("MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS must be 4..64")
+        command += [
+            "-e",
+            f"MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS={queue_override}",
+        ]
     extra_surfaces_override = os.getenv(
         "MV3DT_TEST_CAM04_DECODER_EXTRA_SURFACES", ""
     ).strip()
