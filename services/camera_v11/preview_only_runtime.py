@@ -107,9 +107,14 @@ class PreviewSource(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 self.stats.state = "CONNECTING"
+                effective_latency_ms = (
+                    self.camera.latency_ms
+                    if self.camera.latency_ms is not None
+                    else self.config.latency_ms
+                )
                 codec = detect_rtsp_codec(
                     _camera_probe(self.camera),
-                    self.config.latency_ms,
+                    effective_latency_ms,
                     timeout_sec=max(5.0, self.config.startup_grace_sec),
                 ).lower()
                 self.stats.codec = codec
@@ -121,6 +126,7 @@ class PreviewSource(threading.Thread):
                     username=self.camera.username,
                     password=self.camera.password,
                     output_bgrx=True,
+                    latency_ms=effective_latency_ms,
                 )
                 retry = max(0.5, float(self.config.reconnect_delay_sec))
                 frame_window = 0
