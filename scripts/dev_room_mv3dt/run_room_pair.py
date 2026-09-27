@@ -814,19 +814,37 @@ def run(
     audit_mode = bool(os.getenv("MV3DT_FRAME_AUDIT_LOG"))
     health_mode = bool(os.getenv("MV3DT_SOURCE_HEALTH_DIR"))
     diagnostic_mode = audit_mode or health_mode
-    # Always validate the accepted production binary and all frozen source/config
-    # assets, even for diagnostics. A separate runtime-only binary is allowed
-    # solely for a diagnostic run and must be explicitly hash-pinned.
-    check = verify(ROOT, accepted_binary)
-    if not check["ok"]:
-        raise SystemExit("validated room-pair asset check failed")
+    # Production assets remain frozen. Diagnostic runs may use exactly one
+    # source override, but only when BOTH the modified source and diagnostic
+    # binary are independently SHA256-pinned by the runner.
     diagnostic_binary = binary != accepted_binary
+    validated_asset_overrides = None
     if diagnostic_binary:
         expected_diagnostic_hash = os.getenv("MV3DT_DIAGNOSTIC_BINARY_SHA256")
+        expected_diagnostic_source_hash = os.getenv("MV3DT_DIAGNOSTIC_SOURCE_SHA256")
+        diagnostic_source = ROOT / "services/mv3dt_room/native/deepstream_test5_app_main.c"
         if not diagnostic_mode or not binary.is_relative_to(ROOT / ".runtime"):
             raise SystemExit("custom binaries are restricted to .runtime diagnostics")
         if not binary.is_file() or not expected_diagnostic_hash or sha256(binary) != expected_diagnostic_hash:
             raise SystemExit("diagnostic binary is missing or does not match MV3DT_DIAGNOSTIC_BINARY_SHA256")
+        if (
+            not expected_diagnostic_source_hash
+            or sha256(diagnostic_source) != expected_diagnostic_source_hash
+        ):
+            raise SystemExit(
+                "diagnostic source is missing or does not match MV3DT_DIAGNOSTIC_SOURCE_SHA256"
+            )
+        validated_asset_overrides = {
+            "native/deepstream_test5_app_main.c": expected_diagnostic_source_hash
+        }
+
+    check = verify(
+        ROOT,
+        accepted_binary,
+        validated_asset_overrides=validated_asset_overrides,
+    )
+    if not check["ok"]:
+        raise SystemExit("validated room-pair asset check failed")
     run_root = ROOT / profile["runtime"]["runtime_root"] / f"{mode}-{time.strftime('%Y%m%d-%H%M%S')}"
     stage = run_root / "run"
     identity_dir = run_root / "identity-live"
@@ -844,6 +862,9 @@ def run(
         "accepted_binary_path": str(accepted_binary),
         "accepted_binary_sha256": sha256(accepted_binary),
         "diagnostic_binary": diagnostic_binary,
+        "diagnostic_source_sha256": (
+            os.getenv("MV3DT_DIAGNOSTIC_SOURCE_SHA256") if diagnostic_binary else None
+        ),
         "decoder_low_latency_mode_test": os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY", "0") == "1",
     }, indent=2))
     (run_root / "running").touch()
