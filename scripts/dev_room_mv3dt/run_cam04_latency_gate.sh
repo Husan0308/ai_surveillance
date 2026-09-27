@@ -30,10 +30,12 @@ import json, sys
 d=json.load(open(sys.argv[1]))
 print(d["binary"])
 print(d["sha256"])
+print(d["source_sha256"])
 PY
 )
 BIN="${BUILD_VALUES[0]}"
 HASH="${BUILD_VALUES[1]}"
+SOURCE_HASH="${BUILD_VALUES[2]}"
 
 TIMING_LOG="$OUT/preview-latency.jsonl"
 RUN_LOG="$OUT/room-pair.log"
@@ -54,9 +56,10 @@ done
 
 echo "CAM04_LATENCY_GATE binary=$BIN"
 echo "CAM04_LATENCY_GATE sha256=$HASH"
+echo "CAM04_LATENCY_GATE source_sha256=$SOURCE_HASH"
 echo "CAM04_LATENCY_GATE queue_buffers=${MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS:-16}"
 
-MV3DT_BINARY="$BIN" MV3DT_DIAGNOSTIC_BINARY_SHA256="$HASH" MV3DT_FRAME_AUDIT_LOG=1 MV3DT_SOURCE_HEALTH_DIR=1 MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS="${MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS:-16}" python3 scripts/dev_room_mv3dt/run_room_pair.py   --mode live --duration 220 --skip-render   >"$RUN_LOG" 2>&1 &
+MV3DT_BINARY="$BIN" MV3DT_DIAGNOSTIC_BINARY_SHA256="$HASH" MV3DT_DIAGNOSTIC_SOURCE_SHA256="$SOURCE_HASH" MV3DT_FRAME_AUDIT_LOG=1 MV3DT_SOURCE_HEALTH_DIR=1 MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS="${MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS:-16}" python3 scripts/dev_room_mv3dt/run_room_pair.py   --mode live --duration 220 --skip-render   >"$RUN_LOG" 2>&1 &
 ROOM_PID=$!
 
 cleanup() {
