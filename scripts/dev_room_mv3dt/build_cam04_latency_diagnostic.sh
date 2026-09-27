@@ -47,10 +47,14 @@ docker run --rm --pull=never   -v "$ROOT/services/mv3dt_room/native:/workspace/r
 [[ -x "$OUT_BIN" ]] || fail "build completed without executable output"
 
 HASH="$(sha256sum "$OUT_BIN" | awk '{print $1}')"
+SOURCE="$ROOT/services/mv3dt_room/native/deepstream_test5_app_main.c"
+SOURCE_HASH="$(sha256sum "$SOURCE" | awk '{print $1}')"
 cat >"$OUT_DIR/build.json" <<EOF
 {
   "binary": "$OUT_BIN",
   "sha256": "$HASH",
+  "source": "$SOURCE",
+  "source_sha256": "$SOURCE_HASH",
   "source_branch": "$(git -C "$ROOT" branch --show-current)",
   "source_commit": "$(git -C "$ROOT" rev-parse HEAD)"
 }
@@ -59,3 +63,4 @@ EOF
 echo "CAM04_DIAGNOSTIC_BUILD status=PASS"
 echo "MV3DT_BINARY=$OUT_BIN"
 echo "MV3DT_DIAGNOSTIC_BINARY_SHA256=$HASH"
+echo "MV3DT_DIAGNOSTIC_SOURCE_SHA256=$SOURCE_HASH"
