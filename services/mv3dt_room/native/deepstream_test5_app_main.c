@@ -1205,14 +1205,18 @@ static gboolean
 preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
 {
   GstElement *queue = NULL;
+  GstElement *analytics_copy = NULL;
   GstObject *source_parent = NULL;
   GstPad *source_pad = NULL;
   GstPad *queue_src_pad = NULL;
   GstPad *mux_sink_pad = NULL;
   gchar *queue_name = NULL;
+  gchar *copy_name = NULL;
   const gchar *failure_stage = "source_pad";
   gboolean source_unlinked = FALSE;
   gboolean source_linked_to_queue = FALSE;
+  gboolean source_linked_to_copy = FALSE;
+  gboolean copy_linked_to_queue = FALSE;
   gboolean linked_to_mux = FALSE;
   gboolean ok = FALSE;
   GstPadLinkReturn queue_link_status = GST_PAD_LINK_OK;
@@ -1254,6 +1258,25 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   if (!source_parent || !GST_IS_BIN (source_parent))
     goto done;
 
+  if (camera_index == 1) {
+    copy_name = g_strdup_printf ("preview_analytics_copy_%u", source->source_id);
+    failure_stage = "analytics_copy_create";
+    analytics_copy = gst_element_factory_make ("nvvideoconvert", copy_name);
+    if (!analytics_copy)
+      goto done;
+    /* Force a real NVMM->NVMM copy for CAM-04 so the analytics queue owns
+     * converter-pool surfaces instead of retaining NVDEC output surfaces.
+     * This is the actual decoder/analytics surface-pool decoupling boundary. */
+    g_object_set (analytics_copy,
+        "gpu-id", 0u,
+        "disable-passthrough", TRUE,
+        "output-buffers", 24u,
+        NULL);
+    failure_stage = "analytics_copy_add";
+    if (!gst_bin_add (GST_BIN (source_parent), analytics_copy))
+      goto done;
+  }
+
   failure_stage = "queue_create";
   queue = gst_element_factory_make ("queue", queue_name);
   if (!queue)
@@ -1281,10 +1304,21 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   source_unlinked = gst_pad_unlink (source_pad, mux_sink_pad);
   if (!source_unlinked)
     goto done;
-  failure_stage = "link_source_queue";
-  if (!gst_element_link (source->bin, queue))
-    goto done;
-  source_linked_to_queue = TRUE;
+  if (analytics_copy) {
+    failure_stage = "link_source_copy";
+    if (!gst_element_link (source->bin, analytics_copy))
+      goto done;
+    source_linked_to_copy = TRUE;
+    failure_stage = "link_copy_queue";
+    if (!gst_element_link (analytics_copy, queue))
+      goto done;
+    copy_linked_to_queue = TRUE;
+  } else {
+    failure_stage = "link_source_queue";
+    if (!gst_element_link (source->bin, queue))
+      goto done;
+    source_linked_to_queue = TRUE;
+  }
 
   failure_stage = "queue_src_pad";
   queue_src_pad = gst_element_get_static_pad (queue, "src");
@@ -1295,6 +1329,11 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   if (queue_link_status != GST_PAD_LINK_OK)
     goto done;
   linked_to_mux = TRUE;
+  if (analytics_copy) {
+    failure_stage = "sync_analytics_copy_state";
+    if (!gst_element_sync_state_with_parent (analytics_copy))
+      goto done;
+  }
   failure_stage = "sync_queue_state";
   if (!gst_element_sync_state_with_parent (queue))
     goto done;
@@ -1305,8 +1344,8 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
     preview_mux_queues[camera_index] = GST_ELEMENT (gst_object_ref (queue));
     preview_mux_queue_limits[camera_index] = queue_buffers;
   }
-  g_print ("preview: inserted bounded non-leaky mux queue camera_index=%u max_buffers=%u\n",
-      source->source_id, queue_buffers);
+  g_print ("preview: inserted bounded non-leaky mux queue camera_index=%u max_buffers=%u detached_copy=%s\n",
+      source->source_id, queue_buffers, analytics_copy ? "true" : "false");
   ok = TRUE;
 
 done:
@@ -1317,10 +1356,16 @@ done:
       gst_pad_unlink (queue_src_pad, mux_sink_pad);
     if (source_linked_to_queue)
       gst_element_unlink (source->bin, queue);
+    if (copy_linked_to_queue)
+      gst_element_unlink (analytics_copy, queue);
+    if (source_linked_to_copy)
+      gst_element_unlink (source->bin, analytics_copy);
     if (source_unlinked)
       gst_pad_link (source_pad, mux_sink_pad);
     if (queue && GST_OBJECT_PARENT (queue) == source_parent)
       gst_bin_remove (GST_BIN (source_parent), queue);
+    if (analytics_copy && GST_OBJECT_PARENT (analytics_copy) == source_parent)
+      gst_bin_remove (GST_BIN (source_parent), analytics_copy);
   }
   if (queue_src_pad)
     gst_object_unref (queue_src_pad);
@@ -1330,6 +1375,7 @@ done:
     gst_object_unref (source_pad);
   if (source_parent)
     gst_object_unref (source_parent);
+  g_free (copy_name);
   g_free (queue_name);
   return ok;
 }
