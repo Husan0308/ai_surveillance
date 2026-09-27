@@ -783,6 +783,8 @@ preview_decoder_child_added (GstChildProxy *child_proxy, GObject *object,
     const gchar *test_extra_surfaces =
         g_getenv ("MV3DT_TEST_CAM04_DECODER_EXTRA_SURFACES");
     gboolean request_low_latency =
+        (context->camera_index == 1 &&
+         g_strcmp0 (g_getenv ("MV3DT_TEST_CAM04_DECODER_LOW_LATENCY"), "1") == 0) ||
         g_strcmp0 (g_getenv ("MV3DT_TEST_DECODER_LOW_LATENCY"), "1") == 0;
     GParamSpec *low_latency_property =
         g_object_class_find_property (G_OBJECT_GET_CLASS (object), "low-latency-mode");
