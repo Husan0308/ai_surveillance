@@ -107,11 +107,7 @@ class PreviewSource(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 self.stats.state = "CONNECTING"
-                effective_latency_ms = (
-                    self.camera.latency_ms
-                    if self.camera.latency_ms is not None
-                    else self.config.latency_ms
-                )
+                effective_latency_ms = self.camera.effective_latency_ms(self.config.latency_ms)
                 codec = detect_rtsp_codec(
                     _camera_probe(self.camera),
                     effective_latency_ms,
