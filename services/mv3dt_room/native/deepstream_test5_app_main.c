@@ -564,7 +564,7 @@ typedef struct {
 
 static PreviewWriter preview_writers[2];
 static gboolean preview_initialized;
-static GMutex preview_transform_mutex[2];
+static GMutex preview_transform_session_mutex;
 static GMutex preview_decode_timing_mutex;
 static PreviewDecodeTiming preview_decode_timings[2][512];
 static guint preview_decode_write_index[2];
@@ -986,8 +986,7 @@ preview_open (void)
   if (preview_initialized)
     return preview_writers[0].enabled || preview_writers[1].enabled;
   preview_initialized = TRUE;
-  g_mutex_init (&preview_transform_mutex[0]);
-  g_mutex_init (&preview_transform_mutex[1]);
+  g_mutex_init (&preview_transform_session_mutex);
   g_mutex_init (&preview_decode_timing_mutex);
   if (sample_directory && *sample_directory) {
     g_mkdir_with_parents (sample_directory, 0755);
@@ -1069,7 +1068,7 @@ preview_publish_surface (NvBufSurface *surface, gint camera_index,
   transform.dst_rect = &dst_rect;
   transform.transform_flag = NVBUFSURF_TRANSFORM_FILTER;
   transform.transform_filter = NvBufSurfTransformInter_Default;
-  g_mutex_lock (&preview_transform_mutex[camera_index]);
+  g_mutex_lock (&preview_transform_session_mutex);
   {
     NvBufSurfTransform_Error session_error = NvBufSurfTransformSetSessionParams (&config);
     NvBufSurfTransform_Error transform_error = session_error == NvBufSurfTransformError_Success ?
@@ -1082,14 +1081,13 @@ preview_publish_surface (NvBufSurface *surface, gint camera_index,
             src_params->colorFormat, transform_error);
         logged_transform[camera_index] = TRUE;
       }
-      g_mutex_unlock (&preview_transform_mutex[camera_index]);
+      g_mutex_unlock (&preview_transform_session_mutex);
       return;
     }
   }
-  if (NvBufSurfaceMap (writer->target, 0, 0, NVBUF_MAP_READ) != 0) {
-    g_mutex_unlock (&preview_transform_mutex[camera_index]);
+  g_mutex_unlock (&preview_transform_session_mutex);
+  if (NvBufSurfaceMap (writer->target, 0, 0, NVBUF_MAP_READ) != 0)
     return;
-  }
   NvBufSurfaceSyncForCpu (writer->target, 0, 0);
   dst = (guint8 *) dst_params->mappedAddr.addr[0];
   now_us = g_get_monotonic_time ();
@@ -1111,7 +1109,6 @@ preview_publish_surface (NvBufSurface *surface, gint camera_index,
   flock (writer->fd, LOCK_UN);
   g_mutex_unlock (&writer->mutex);
   NvBufSurfaceUnMap (writer->target, 0, 0);
-  g_mutex_unlock (&preview_transform_mutex[camera_index]);
 }
 
 static GstPadProbeReturn
@@ -1499,8 +1496,7 @@ preview_close (void)
       writer->path = NULL;
     }
   }
-  g_mutex_clear (&preview_transform_mutex[0]);
-  g_mutex_clear (&preview_transform_mutex[1]);
+  g_mutex_clear (&preview_transform_session_mutex);
   g_clear_pointer (&preview_diagnostics_path, g_free);
   if (native_latency_file) {
     fflush (native_latency_file);
