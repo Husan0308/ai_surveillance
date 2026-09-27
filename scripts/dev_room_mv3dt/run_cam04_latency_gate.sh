@@ -39,7 +39,18 @@ TIMING_LOG="$OUT/preview-latency.jsonl"
 RUN_LOG="$OUT/room-pair.log"
 UI_LOG="$OUT/frontend.log"
 
-rm -f /dev/shm/v11_ui_preview_cam01_v1.bin /dev/shm/v11_ui_preview_cam04_v1.bin
+SHM_CLEAN_IMAGE="${MV3DT_BUILD_IMAGE:-nvcr.io/nvidia/deepstream:9.1-triton-multiarch}"
+echo "CAM04_LATENCY_GATE cleaning_stale_shm=true image=$SHM_CLEAN_IMAGE"
+docker run --rm --pull=never --ipc=host --entrypoint sh "$SHM_CLEAN_IMAGE" -c '
+  rm -f /dev/shm/v11_ui_preview_cam01_v1.bin /dev/shm/v11_ui_preview_cam04_v1.bin
+'
+for path in /dev/shm/v11_ui_preview_cam01_v1.bin /dev/shm/v11_ui_preview_cam04_v1.bin; do
+  if [[ -e "$path" ]]; then
+    echo "CAM04_LATENCY_GATE status=FAIL reason=stale_shm_cleanup_failed path=$path" >&2
+    ls -l "$path" >&2 || true
+    exit 1
+  fi
+done
 
 echo "CAM04_LATENCY_GATE binary=$BIN"
 echo "CAM04_LATENCY_GATE sha256=$HASH"
