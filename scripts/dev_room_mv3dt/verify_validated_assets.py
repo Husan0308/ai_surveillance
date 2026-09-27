@@ -25,12 +25,22 @@ def projection_values(path: Path) -> list[float]:
     return [float(value) for value in re.findall(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", match.group(1))]
 
 
-def verify(repo: Path, binary: Path | None) -> dict:
+def verify(
+    repo: Path,
+    binary: Path | None,
+    validated_asset_overrides: dict[str, str] | None = None,
+) -> dict:
     manifest = json.loads((repo / "services/mv3dt_room/asset_manifest.json").read_text())
     profile = repo / "config/mv3dt_dev_room"
     errors: list[str] = []
     checked: dict[str, str] = {}
-    for relative, expected in {**manifest["validated_assets"], **manifest["accepted_config_sha256"]}.items():
+    asset_overrides = dict(validated_asset_overrides or {})
+    accepted_assets = dict(manifest["validated_assets"])
+    for relative, expected_override in asset_overrides.items():
+        if relative not in accepted_assets:
+            raise ValueError(f"unknown validated asset override: {relative}")
+        accepted_assets[relative] = expected_override
+    for relative, expected in {**accepted_assets, **manifest["accepted_config_sha256"]}.items():
         path = (repo / "services/mv3dt_room" / relative) if relative.startswith("native/") or relative.endswith(".py") else profile / relative
         if not path.exists():
             errors.append(f"missing {path}")
@@ -86,6 +96,7 @@ def verify(repo: Path, binary: Path | None) -> dict:
         "checked": checked,
         "binary": str(binary) if binary else None,
         "errors": errors,
+        "validated_asset_overrides": asset_overrides,
     }
     print(json.dumps(result, indent=2))
     return result
