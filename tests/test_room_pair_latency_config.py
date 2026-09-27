@@ -146,3 +146,40 @@ def test_streammux_timeout_metadata_supports_production_no_experiment_run(tmp_pa
     assert metadata["experiment"] is None
     assert metadata["production_profile_modified"] is False
     assert metadata["streammux_batched_push_timeout_us_test"] == 25000
+
+
+def test_cam04_analytics_queue_override_is_forwarded(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "config_deepstream.txt").write_text(
+        "[source0]\nenable=1\n[source1]\nenable=1\n"
+    )
+    (tmp_path / "config_msgconv.txt").write_text(
+        "[sensor0]\nid=CAM-01\n[sensor1]\nid=CAM-04\n"
+    )
+    monkeypatch.setenv("MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS", "24")
+
+    command = deepstream_command(
+        tmp_path, tmp_path / "binary", "ds-image", "live", "latency-test"
+    )
+
+    assert "MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS=24" in command
+
+
+def test_cam04_analytics_queue_override_rejects_invalid_value(
+    monkeypatch, tmp_path: Path
+) -> None:
+    (tmp_path / "config_deepstream.txt").write_text(
+        "[source0]\nenable=1\n[source1]\nenable=1\n"
+    )
+    (tmp_path / "config_msgconv.txt").write_text(
+        "[sensor0]\nid=CAM-01\n[sensor1]\nid=CAM-04\n"
+    )
+    monkeypatch.setenv("MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS", "65")
+
+    try:
+        deepstream_command(
+            tmp_path, tmp_path / "binary", "ds-image", "live", "latency-test"
+        )
+    except ValueError as exc:
+        assert "must be 4..64" in str(exc)
+    else:
+        raise AssertionError("out-of-range CAM-04 analytics queue override was accepted")
