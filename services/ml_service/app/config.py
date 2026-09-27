@@ -23,6 +23,7 @@ class CameraConfig:
     name: str = ""
     room: str = ""
     enabled: bool = True
+    latency_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -128,11 +129,19 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 name=str(row.get("name", camera_id)).strip() or camera_id,
                 room=str(row.get("room", "")).strip(),
                 enabled=True,
+                latency_ms=(
+                    int(row["latency_ms"])
+                    if row.get("latency_ms") is not None
+                    else None
+                ),
             )
         )
 
     if not cameras:
         raise ValueError("At least one camera must be enabled")
+    for camera in cameras:
+        if camera.latency_ms is not None and camera.latency_ms < 1:
+            raise ValueError(f"{camera.camera_id}: latency_ms must be >= 1")
 
     ds = raw.get("deepstream") or {}
     display = raw.get("display") or {}
