@@ -25,6 +25,12 @@ class CameraConfig:
     enabled: bool = True
     latency_ms: int | None = None
 
+    def effective_latency_ms(self, fallback_ms: int) -> int:
+        value = int(fallback_ms if self.latency_ms is None else self.latency_ms)
+        if value < 1:
+            raise ValueError(f"{self.camera_id}: effective latency_ms must be >= 1")
+        return value
+
 
 @dataclass(frozen=True)
 class DeepStreamConfig:
