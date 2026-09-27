@@ -586,7 +586,7 @@ static PreviewDecodeProbeContext preview_decode_probe_contexts[2];
 static PreviewWorker preview_workers[2];
 static GstElement *preview_mux_queues[2];
 static guint preview_mux_queue_limits[2];
-static guint64 preview_mux_queue_overruns[2];
+static guint preview_mux_queue_overruns[2];
 static gchar *preview_diagnostics_path;
 static gboolean preview_decoder_low_latency_known[2];
 static gboolean preview_decoder_low_latency[2];
@@ -852,7 +852,7 @@ preview_diagnostics_timer_cb (gpointer user_data)
     guint64 input_regressions, output_regressions, input_backstep, output_backstep;
     gboolean low_latency_known, low_latency;
     guint mux_queue_level = 0, mux_queue_limit = 0;
-    guint64 mux_queue_overruns = 0;
+    guint mux_queue_overruns = 0;
     g_mutex_lock (&preview_decode_timing_mutex);
     inputs = preview_decode_inputs[i];
     outputs = preview_decode_outputs[i];
@@ -872,8 +872,8 @@ preview_diagnostics_timer_cb (gpointer user_data)
           "max-size-buffers", &mux_queue_limit,
           NULL);
     }
-    mux_queue_overruns = (guint64) g_atomic_int64_get (
-        (volatile gint64 *) &preview_mux_queue_overruns[i]);
+    mux_queue_overruns = (guint) g_atomic_int_get (
+        (volatile gint *) &preview_mux_queue_overruns[i]);
     fprintf (file,
         "{\"camera_id\":\"%s\",\"decoder_input\":%" G_GUINT64_FORMAT
         ",\"decoder_output\":%" G_GUINT64_FORMAT
@@ -886,7 +886,7 @@ preview_diagnostics_timer_cb (gpointer user_data)
         ",\"output_max_backstep_ms\":%.3f"
         ",\"low_latency_mode_known\":%s,\"low_latency_mode\":%s"
         ",\"analytics_queue_level\":%u,\"analytics_queue_limit\":%u"
-        ",\"analytics_queue_overruns\":%" G_GUINT64_FORMAT "}\n",
+        ",\"analytics_queue_overruns\":%u}\n",
         i == 0 ? "CAM-01" : "CAM-04", inputs, outputs, output_matches,
         matches, misses, input_regressions, input_backstep / 1.0e6,
         output_regressions, output_backstep / 1.0e6,
@@ -1196,7 +1196,7 @@ preview_mux_queue_overrun_cb (GstElement *queue, gpointer user_data)
   gint camera_index = GPOINTER_TO_INT (user_data);
   (void) queue;
   if (camera_index >= 0 && camera_index < 2)
-    g_atomic_int64_add ((volatile gint64 *) &preview_mux_queue_overruns[camera_index], 1);
+    g_atomic_int_inc ((volatile gint *) &preview_mux_queue_overruns[camera_index]);
 }
 
 static gboolean
@@ -1427,7 +1427,7 @@ preview_close (void)
       gst_object_unref (preview_mux_queues[i]);
       preview_mux_queues[i] = NULL;
       preview_mux_queue_limits[i] = 0;
-      g_atomic_int64_set ((volatile gint64 *) &preview_mux_queue_overruns[i], 0);
+      g_atomic_int_set ((volatile gint *) &preview_mux_queue_overruns[i], 0);
     }
   }
   for (guint i = 0; i < 2; i++) {
