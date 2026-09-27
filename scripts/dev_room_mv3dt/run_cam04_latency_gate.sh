@@ -89,8 +89,10 @@ if [[ "$UI_RC" != "0" && "$UI_RC" != "124" ]]; then
   exit 1
 fi
 
+set +e
 wait "$ROOM_PID"
 ROOM_RC=$?
+set -e
 trap - EXIT INT TERM
 if [[ "$ROOM_RC" != "0" ]]; then
   echo "CAM04_LATENCY_GATE status=FAIL reason=room_pair_exit rc=$ROOM_RC" >&2
