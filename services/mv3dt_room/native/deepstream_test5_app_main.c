@@ -1203,6 +1203,18 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   gint camera_index = preview_camera_index (source ? source->source_id : G_MAXUINT,
       source ? source->source_id : G_MAXUINT);
   guint queue_buffers = camera_index == 1 ? 16u : 2u;
+  if (camera_index == 1) {
+    const gchar *override = g_getenv ("MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS");
+    if (override && *override) {
+      gchar *end = NULL;
+      guint64 parsed = g_ascii_strtoull (override, &end, 10);
+      if (end && *end == '\0' && parsed >= 4 && parsed <= 64)
+        queue_buffers = (guint) parsed;
+      else
+        g_printerr ("preview: ignoring invalid CAM-04 analytics queue override=%s (expected 4..64)\n",
+            override);
+    }
+  }
 
   if (!app_ctx || !source || !source->bin || !app_ctx->pipeline.pipeline)
     return FALSE;
