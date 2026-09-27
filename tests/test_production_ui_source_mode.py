@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
-from scripts.dev_room_mv3dt.run_room_pair import make_crop_socket_alias, replay_config
+from scripts.dev_room_mv3dt.run_room_pair import make_crop_socket_alias, replay_config, replay_video_dir
 from services.mv3dt_room.room_pair_state import RoomPairState
 
 
@@ -63,6 +64,22 @@ def test_replay_config_changes_only_runtime_copy_to_clock_paced(tmp_path: Path) 
     assert "[sink3]\nenable=1\ntype=6\nsync=0" in text
 
 
+def test_replay_video_directory_override_is_explicit_and_requires_both_sources(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "cam_00.mp4").touch()
+    (tmp_path / "cam_01.mp4").touch()
+    monkeypatch.setenv("MV3DT_REPLAY_VIDEO_DIR", str(tmp_path))
+
+    assert replay_video_dir({"replay": {"video_dir": "/unused"}}) == tmp_path.resolve()
+
+    (tmp_path / "cam_01.mp4").unlink()
+    try:
+        replay_video_dir({"replay": {"video_dir": "/unused"}})
+    except FileNotFoundError as exc:
+        assert "cam_01.mp4" in str(exc)
+    else:
+        raise AssertionError("incomplete replay input directory was accepted")
+
+
 def test_frontend_declares_all_six_camera_tiles() -> None:
     text = Path("services/frontend/app/main.py").read_text()
     assert 'ALL_CAMERAS = tuple(f"CAM-{index:02d}" for index in range(1, 7))' in text
@@ -118,17 +135,51 @@ def test_preview_reader_reopens_when_deepstream_recreates_file(tmp_path: Path) -
     reader = PreviewFrameReader(str(path))
     try:
         first.publish(payload, object_count=1)
-        assert reader.read_latest().payload == payload
+        current = reader.read_latest()
+        assert current.payload == payload
+        assert reader.read_latest(after_sequence=current.sequence) is None
+        for _ in range(4):
+            first.publish(payload, object_count=1)
+        previous_sequence = reader.read_latest().sequence
         first.close()
         second_payload = bytes([47] * len(payload))
         second = PreviewFrameWriter(str(path), width=16, height=8)
         try:
             second.publish(second_payload, object_count=2)
-            fresh = reader.read_latest()
+            fresh = reader.read_latest(after_sequence=previous_sequence)
             assert fresh is not None
+            assert fresh.sequence < previous_sequence
             assert fresh.payload == second_payload
             assert fresh.object_count == 2
         finally:
             second.close()
     finally:
         reader.close()
+
+
+def test_preview_v4_carries_decoder_and_packet_timestamps(tmp_path: Path) -> None:
+    from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameReader, PreviewFrameWriter
+
+    path = tmp_path / "v11_ui_preview_cam01_v1.bin"
+    writer = PreviewFrameWriter(str(path), width=16, height=8)
+    reader = PreviewFrameReader(str(path))
+    try:
+        writer.publish(
+            bytes([29] * (16 * 8 * 4)),
+            timestamp_ns=time.monotonic_ns(),
+            decoder_reference_ns=100,
+            decoder_out_ns=200,
+            pts_ns=300,
+            decoder_dts_ns=250,
+            source_frame_num=42,
+        )
+        frame = reader.read_latest()
+        assert frame is not None
+        assert frame.decoder_reference_ns == 100
+        assert frame.decoder_out_ns == 200
+        assert frame.pts_ns == 300
+        assert frame.decoder_dts_ns == 250
+        assert frame.source_frame_num == 42
+    finally:
+        reader.close()
+        writer.close()

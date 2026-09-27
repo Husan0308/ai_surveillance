@@ -25,9 +25,9 @@ import yaml
 from dotenv import dotenv_values
 
 try:
-    from .verify_validated_assets import verify
+    from .verify_validated_assets import sha256, verify
 except ImportError:  # Direct script execution.
-    from verify_validated_assets import verify
+    from verify_validated_assets import sha256, verify
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +47,19 @@ OSNET_PYTHON = Path("/home/apsidal/.local/share/Trash/files/ai_surveillance.2/ve
 def load_profile() -> dict:
     with (PROFILE / "runtime.yaml").open() as handle:
         return yaml.safe_load(handle)
+
+
+def replay_video_dir(profile: dict) -> Path:
+    """Resolve the replay directory, with an explicit runtime-only test override."""
+    configured = os.getenv("MV3DT_REPLAY_VIDEO_DIR") or profile["replay"]["video_dir"]
+    video_dir = Path(configured)
+    if not video_dir.is_absolute():
+        video_dir = ROOT / video_dir
+    video_dir = video_dir.resolve()
+    missing = [name for name in ("cam_00.mp4", "cam_01.mp4") if not (video_dir / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"replay video directory {video_dir} is missing: {', '.join(missing)}")
+    return video_dir
 
 
 def camera_uris() -> dict[str, str]:
@@ -96,13 +109,121 @@ def replay_config(stage: Path) -> None:
     path.write_text(text[:sink0.start()] + paced + text[sink0.end():])
 
 
-def live_config(stage: Path, uris: dict[str, str]) -> None:
+def camera_latency_values() -> dict[str, int]:
+    """Resolve the per-camera RTSP jitter latency for the Dev Room pair.
+
+    DeepStream's source-config parser defaults an omitted source latency to
+    100 ms. Keep the live MV3DT readers aligned with config/cameras.yaml rather
+    than silently using that parser default.
+    """
+    with (ROOT / "config/cameras.yaml").open() as handle:
+        raw = yaml.safe_load(handle) or {}
+    fallback = int((raw.get("deepstream") or {}).get("latency_ms", 150))
+    wanted = {"CAM-01", "CAM-04"}
+    values = {}
+    for row in raw.get("cameras") or []:
+        camera = str(row.get("id", ""))
+        if camera not in wanted:
+            continue
+        value = int(row["latency_ms"]) if row.get("latency_ms") is not None else fallback
+        if value < 1:
+            raise ValueError(f"{camera}: effective RTSP latency must be >= 1 ms")
+        values[camera] = value
+    if set(values) != wanted:
+        raise RuntimeError("could not resolve CAM-01/CAM-04 RTSP latency values")
+    return values
+
+
+def apply_test_camera_latency_overrides(values: dict[str, int]) -> dict[str, int]:
+    """Apply a numeric, experiment-only CAM-04 source-latency override."""
+    raw = os.getenv("MV3DT_TEST_CAM04_RTSP_LATENCY_MS", "").strip()
+    if not raw:
+        return values
+    if not re.fullmatch(r"\d{1,3}", raw) or not 1 <= int(raw) <= 150:
+        raise ValueError("MV3DT_TEST_CAM04_RTSP_LATENCY_MS must be 1..150")
+    result = dict(values)
+    result["CAM-04"] = int(raw)
+    return result
+
+
+def apply_test_streammux_timeout(stage: Path) -> int | None:
+    """Apply an opt-in test-only timeout to the staged live streammux config."""
+    raw = os.getenv("MV3DT_TEST_STREAMMUX_BATCHED_PUSH_TIMEOUT", "").strip()
+    if not raw:
+        return None
+    if not re.fullmatch(r"\d{1,5}", raw) or not 1 <= int(raw) <= 50_000:
+        raise ValueError("MV3DT_TEST_STREAMMUX_BATCHED_PUSH_TIMEOUT must be 1..50000 us")
+    path = stage / "config_deepstream.txt"
+    text = path.read_text()
+    match = re.search(r"(?ms)^\[streammux\]\n(.*?)(?=^\[|\Z)", text)
+    if match is None:
+        raise RuntimeError("missing [streammux] in staged config")
+    block = match.group(0)
+    key = "batched-push-timeout"
+    if re.search(rf"(?m)^{re.escape(key)}=", block):
+        updated, count = re.subn(
+            rf"(?m)^{re.escape(key)}=.*$",
+            f"{key}={int(raw)}",
+            block,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError("could not uniquely replace staged streammux timeout")
+    else:
+        updated = block.rstrip() + f"\n{key}={int(raw)}\n"
+    path.write_text(text[:match.start()] + updated + text[match.end():])
+    return int(raw)
+
+
+def record_test_streammux_timeout_override(
+    run_root: Path,
+    timeout_us: int | None,
+    experiment: str | None,
+    tracker_lifecycle_diagnostics: bool,
+) -> None:
+    if timeout_us is None:
+        return
+    override_path = run_root / "experiment_overrides.json"
+    if override_path.exists():
+        overrides = json.loads(override_path.read_text())
+    else:
+        overrides = {
+            "experiment": experiment,
+            "production_profile_modified": False,
+            "tracker_lifecycle_diagnostics": tracker_lifecycle_diagnostics,
+        }
+    overrides["streammux_batched_push_timeout_us_test"] = timeout_us
+    overrides["production_profile_modified"] = False
+    override_path.write_text(json.dumps(overrides, indent=2))
+
+
+def live_config(stage: Path, uris: dict[str, str], latency_values: dict[str, int]) -> None:
     path = stage / "config_deepstream.txt"
     text = path.read_text()
     text = text.replace("type=3\nenable=1\ncudadec-memtype=0\ngpu-id=0\nnum-sources=1\nuri=file:///workspace/inputs/videos/cam_00.mp4",
                         f"type=4\nenable=1\ncudadec-memtype=0\ngpu-id=0\nnum-sources=1\nuri={uris['CAM-01']}\nrtsp-reconnect-interval-sec=5\ninit-rtsp-reconnect-interval-sec=5\nrtsp-reconnect-attempts=-1")
     text = text.replace("type=3\nenable=1\ncudadec-memtype=0\ngpu-id=0\nnum-sources=1\nuri=file:///workspace/inputs/videos/cam_01.mp4",
                         f"type=4\nenable=1\ncudadec-memtype=0\ngpu-id=0\nnum-sources=1\nuri={uris['CAM-04']}\nrtsp-reconnect-interval-sec=5\ninit-rtsp-reconnect-interval-sec=5\nrtsp-reconnect-attempts=-1")
+    for source_id, camera_id in enumerate(("CAM-01", "CAM-04")):
+        match = re.search(
+            rf"(?ms)^\[source{source_id}\]\n(.*?)(?=^\[|\Z)", text
+        )
+        if match is None:
+            raise RuntimeError(f"missing [source{source_id}] for {camera_id}")
+        block = match.group(0)
+        setting = f"latency={int(latency_values[camera_id])}"
+        if re.search(r"(?m)^latency=", block):
+            updated = re.sub(r"(?m)^latency=.*$", setting, block, count=1)
+        else:
+            updated = block.rstrip() + f"\n{setting}\n"
+        drop_setting = "drop-on-latency=1"
+        if re.search(r"(?m)^drop-on-latency=", updated):
+            updated = re.sub(
+                r"(?m)^drop-on-latency=.*$", drop_setting, updated, count=1
+            )
+        else:
+            updated = updated.rstrip() + f"\n{drop_setting}\n"
+        text = text[:match.start()] + updated + text[match.end():]
     text = text.replace("live-source=0", "live-source=1", 1)
     path.write_text(text)
 
@@ -119,15 +240,163 @@ RECALL_EXPERIMENTS = {
         "data_associator_min_matching_score": 0.20,
         "min_iou_diff_new_target": 0.50,
     },
+    "recall-005": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.50,
+        "early_termination_age": 2,
+    },
+    "recall-006": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.50,
+        "early_termination_age": 2,
+        "probation_age": 3,
+    },
+    "recall-007": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.30,
+        "early_termination_age": 2,
+        "probation_age": 3,
+    },
+    "recall-008": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.50,
+        "early_termination_age": 2,
+        "probation_age": 2,
+    },
+    "recall-009": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.50,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.03,
+    },
+    "recall-010": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.50,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.045,
+    },
+    "recall-011": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.50,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.035,
+    },
+    "recall-012": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.45,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.03,
+    },
+    "recall-013": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.46,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.03,
+    },
+    "recall-014": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.46,
+        "early_termination_age": 2,
+        "probation_age": 3,
+        "min_tracker_confidence": 0.03,
+    },
+    "recall-015": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.25,
+        "min_iou_diff_new_target": 0.46,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.03,
+    },
+    "recall-016": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.15,
+        "min_iou_diff_new_target": 0.46,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.03,
+    },
+    "recall-017": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.46,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.02,
+    },
+    "recall-018": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.46,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.03,
+        "min_detector_confidence": 0.04,
+    },
+    "recall-019": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.46,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.03,
+        "min_detector_confidence": 0.036,
+    },
+    "recall-020": {
+        "pre_cluster_threshold": 0.03,
+        "tentative_detector_confidence": 0.03,
+        "data_associator_min_matching_score": 0.20,
+        "min_iou_diff_new_target": 0.47,
+        "early_termination_age": 2,
+        "probation_age": 2,
+        "min_tracker_confidence": 0.03,
+    },
 }
 
 
-def apply_experiment_overrides(stage: Path, run_root: Path, experiment: str | None) -> None:
+def apply_experiment_overrides(
+    stage: Path,
+    run_root: Path,
+    experiment: str | None,
+    tracker_lifecycle_diagnostics: bool = False,
+) -> None:
     """Apply experiment-only config overlays to the staged runtime copy.
 
     Production profile files under config/mv3dt_dev_room are never modified.
     """
     if not experiment:
+        if tracker_lifecycle_diagnostics:
+            raise ValueError("tracker lifecycle diagnostics require an experiment-only staged run")
         return
     if experiment not in RECALL_EXPERIMENTS:
         raise ValueError(f"unsupported experiment: {experiment}")
@@ -153,6 +422,21 @@ def apply_experiment_overrides(stage: Path, run_root: Path, experiment: str | No
 
     tracker_path = stage / "config_tracker.yml"
     tracker = tracker_path.read_text()
+    if "min_detector_confidence" in spec:
+        base_match = re.search(r"(?ms)^BaseConfig:\n(.*?)(?=^[A-Za-z][^\n]*:\n|\Z)", tracker)
+        if base_match is None:
+            raise RuntimeError("could not parse BaseConfig block for detector confidence override")
+        base = base_match.group(0)
+        base, nb = re.subn(
+            r"(?m)^(\s*minDetectorConfidence:)\s*[^\n]+$",
+            rf"\1 {spec['min_detector_confidence']}",
+            base,
+            count=1,
+        )
+        if nb != 1:
+            raise RuntimeError("recall experiment minDetectorConfidence was not uniquely resolved")
+        tracker = tracker[:base_match.start()] + base + tracker[base_match.end():]
+
     assoc_match = re.search(r"(?ms)^DataAssociator:\n(.*?)(?=^[A-Za-z][^\n]*:\n|\Z)", tracker)
     if assoc_match is None:
         raise RuntimeError("could not parse DataAssociator block")
@@ -187,11 +471,76 @@ def apply_experiment_overrides(stage: Path, run_root: Path, experiment: str | No
             raise RuntimeError("recall experiment minIouDiff4NewTarget was not uniquely resolved")
         tracker = tracker[:target_match.start()] + target + tracker[target_match.end():]
 
+    if "min_tracker_confidence" in spec:
+        target_match = re.search(r"(?ms)^TargetManagement:\n(.*?)(?=^[A-Za-z][^\n]*:\n|\Z)", tracker)
+        if target_match is None:
+            raise RuntimeError("recall experiment minTrackerConfidence block was not found")
+        target = target_match.group(0)
+        target, n3 = re.subn(
+            r"(?m)^(\s*minTrackerConfidence:)\s*[^\n]+$",
+            rf"\1 {spec['min_tracker_confidence']}",
+            target,
+            count=1,
+        )
+        if n3 != 1:
+            raise RuntimeError("recall experiment minTrackerConfidence was not uniquely resolved")
+        tracker = tracker[:target_match.start()] + target + tracker[target_match.end():]
+
+    if "early_termination_age" in spec:
+        target_match = re.search(r"(?ms)^TargetManagement:\n(.*?)(?=^[A-Za-z][^\n]*:\n|\Z)", tracker)
+        if target_match is None:
+            raise RuntimeError("could not parse TargetManagement block for early termination override")
+        target = target_match.group(0)
+        target, n4 = re.subn(
+            r"(?m)^(\s*earlyTerminationAge:)\s*[^\n]+$",
+            rf"\1 {spec['early_termination_age']}",
+            target,
+            count=1,
+        )
+        if n4 != 1:
+            raise RuntimeError("recall experiment earlyTerminationAge was not uniquely resolved")
+        tracker = tracker[:target_match.start()] + target + tracker[target_match.end():]
+
+    if "probation_age" in spec:
+        target_match = re.search(r"(?ms)^TargetManagement:\n(.*?)(?=^[A-Za-z][^\n]*:\n|\Z)", tracker)
+        if target_match is None:
+            raise RuntimeError("could not parse TargetManagement block for probation override")
+        target = target_match.group(0)
+        target, n5 = re.subn(
+            r"(?m)^(\s*probationAge:)\s*[^\n]+$",
+            rf"\1 {spec['probation_age']}",
+            target,
+            count=1,
+        )
+        if n5 != 1:
+            raise RuntimeError("recall experiment probationAge was not uniquely resolved")
+        tracker = tracker[:target_match.start()] + target + tracker[target_match.end():]
+
+    if tracker_lifecycle_diagnostics:
+        target_match = re.search(r"(?ms)^TargetManagement:\n(.*?)(?=^[A-Za-z][^\n]*:\n|\Z)", tracker)
+        if target_match is None:
+            raise RuntimeError("could not parse TargetManagement block for lifecycle diagnostics")
+        target = target_match.group(0)
+        if re.search(r"(?m)^\s*outputShadowTracks:", target):
+            target, n1 = re.subn(
+                r"(?m)^(\s*outputShadowTracks:)\s*[^\n]+$",
+                r"\1 1",
+                target,
+                count=1,
+            )
+        else:
+            target = target.rstrip() + "\n  outputShadowTracks: 1\n"
+            n1 = 1
+        if n1 != 1:
+            raise RuntimeError("outputShadowTracks was not uniquely resolved")
+        tracker = tracker[:target_match.start()] + target + tracker[target_match.end():]
+
     tracker_path.write_text(tracker)
 
     (run_root / "experiment_overrides.json").write_text(json.dumps({
         "experiment": experiment,
         "production_profile_modified": False,
+        "tracker_lifecycle_diagnostics": tracker_lifecycle_diagnostics,
         **spec,
     }, indent=2))
 
@@ -357,12 +706,28 @@ def deepstream_command(stage: Path, binary: Path, image: str, source_mode: str, 
         "-e", "PN263_BBOX_LOG_DIR=/workspace/experiments/logs/probe",
         "-e", "NVDS_ENABLE_LATENCY_MEASUREMENT=1",
         "-e", "NVDS_ENABLE_COMPONENT_LATENCY_MEASUREMENT=1",
+        "-e", f"MV3DT_TEST_DECODER_LOW_LATENCY={os.getenv('MV3DT_TEST_DECODER_LOW_LATENCY', '0')}",
         "-v", f"{binary}:/workspace/proto-app:ro",
         "-v", f"{Path('/home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/models')}:/workspace/models:ro",
         "-v", f"{PROFILE / 'camInfo'}:/workspace/inputs/camInfo:ro",
         "-v", f"{stage}:/workspace/experiments:rw",
         "-w", "/workspace/experiments",
     ]
+    extra_surfaces_override = os.getenv(
+        "MV3DT_TEST_CAM04_DECODER_EXTRA_SURFACES", ""
+    ).strip()
+    if extra_surfaces_override:
+        if not re.fullmatch(r"\d{1,2}", extra_surfaces_override) or int(extra_surfaces_override) > 55:
+            raise ValueError("MV3DT_TEST_CAM04_DECODER_EXTRA_SURFACES must be 0..55")
+        command += [
+            "-e",
+            f"MV3DT_TEST_CAM04_DECODER_EXTRA_SURFACES={extra_surfaces_override}",
+        ]
+    if os.getenv("MV3DT_DUMP_DECODER_AU_SAMPLE", "0") == "1":
+        command += [
+            "-e",
+            "MV3DT_DECODER_AU_DUMP_DIR=/workspace/experiments/logs/probe/bitstream-sample",
+        ]
     command += [
         "-e", "MV3DT_CROP_SOCKET=/workspace/experiments/logs/crops.sock",
         "-e", "MV3DT_CROP_LOG_DIR=/workspace/experiments/logs/probe",
@@ -376,6 +741,10 @@ def deepstream_command(stage: Path, binary: Path, image: str, source_mode: str, 
         command += [
             "-e", f"MV3DT_AUDIT_CAMERA_MAP={audit_camera_mapping(stage)}",
         ]
+    if os.getenv("MV3DT_CAPTURE_NATIVE_LATENCY") == "1":
+        command += [
+            "-e", "MV3DT_NATIVE_LATENCY_LOG=/workspace/experiments/logs/probe/native_decoder_latency.jsonl",
+        ]
     if os.getenv("MV3DT_SOURCE_HEALTH_DIR"):
         command += [
             "-e", "MV3DT_SOURCE_HEALTH_DIR=/workspace/experiments/logs/probe",
@@ -385,11 +754,10 @@ def deepstream_command(stage: Path, binary: Path, image: str, source_mode: str, 
         command += [
             "--ipc=host",
             "-e", "MV3DT_UI_PREVIEW_DIR=/dev/shm",
+            "-e", "MV3DT_UI_PREVIEW_DIAGNOSTICS=/workspace/experiments/logs/probe/preview_decoder_timing.jsonl",
         ]
     if not live:
-        video_dir = Path(load_profile()["replay"]["video_dir"])
-        if not video_dir.is_absolute():
-            video_dir = ROOT / video_dir
+        video_dir = replay_video_dir(load_profile())
         command += ["-v", f"{video_dir}:/workspace/inputs/videos:ro"]
     command += [image, "/workspace/proto-app", "-c", "/workspace/experiments/config_deepstream.txt"]
     return command
@@ -420,42 +788,53 @@ def make_crop_socket_alias(stage: Path, process_id: int | None = None) -> tuple[
         raise RuntimeError("crop socket alias exceeds AF_UNIX path limit")
     return alias, socket_path
 
-def run(mode: str, duration: float | None, skip_render: bool, experiment: str | None = None) -> Path:
+def run(
+    mode: str,
+    duration: float | None,
+    skip_render: bool,
+    experiment: str | None = None,
+    tracker_lifecycle_diagnostics: bool = False,
+) -> Path:
     mode = "replay" if mode == "offline" else mode
     if mode not in {"replay", "live"}:
         raise ValueError(f"unsupported source mode: {mode}")
     profile = load_profile()
-    binary = Path(os.getenv("MV3DT_BINARY", profile["runtime"]["binary"]))
-    # A custom binary is permitted only for the temporary frame-path audit;
-    # normal runs continue to enforce the accepted binary hash. The audit
-    # source itself is the one deliberate, environment-gated exception.
+    accepted_binary = Path(profile["runtime"]["binary"]).resolve()
+    binary = Path(os.getenv("MV3DT_BINARY", str(accepted_binary))).resolve()
     audit_mode = bool(os.getenv("MV3DT_FRAME_AUDIT_LOG"))
     health_mode = bool(os.getenv("MV3DT_SOURCE_HEALTH_DIR"))
     diagnostic_mode = audit_mode or health_mode
-    identity_guard_mode = bool(os.getenv("MV3DT_DIAGNOSTIC_IDENTITY_GUARD"))
-    check = verify(ROOT, None if diagnostic_mode else binary)
-    if diagnostic_mode:
-        check["errors"] = [
-            error for error in check["errors"]
-            if "native/deepstream_test5_app_main.c" not in error
-            and "native/bbox_correction.c" not in error
-            and not (identity_guard_mode
-                     and "services/mv3dt_room/global_identity_manager.py" in error)
-        ]
-        check["ok"] = not check["errors"]
+    # Always validate the accepted production binary and all frozen source/config
+    # assets, even for diagnostics. A separate runtime-only binary is allowed
+    # solely for a diagnostic run and must be explicitly hash-pinned.
+    check = verify(ROOT, accepted_binary)
     if not check["ok"]:
         raise SystemExit("validated room-pair asset check failed")
+    diagnostic_binary = binary != accepted_binary
+    if diagnostic_binary:
+        expected_diagnostic_hash = os.getenv("MV3DT_DIAGNOSTIC_BINARY_SHA256")
+        if not diagnostic_mode or not binary.is_relative_to(ROOT / ".runtime"):
+            raise SystemExit("custom binaries are restricted to .runtime diagnostics")
+        if not binary.is_file() or not expected_diagnostic_hash or sha256(binary) != expected_diagnostic_hash:
+            raise SystemExit("diagnostic binary is missing or does not match MV3DT_DIAGNOSTIC_BINARY_SHA256")
     run_root = ROOT / profile["runtime"]["runtime_root"] / f"{mode}-{time.strftime('%Y%m%d-%H%M%S')}"
     stage = run_root / "run"
     identity_dir = run_root / "identity-live"
     logs = run_root / "logs"
     copy_profile(stage)
-    apply_experiment_overrides(stage, run_root, experiment)
+    apply_experiment_overrides(stage, run_root, experiment, tracker_lifecycle_diagnostics)
     session_id = run_root.name
     (run_root / "source_mode.json").write_text(json.dumps({
         "source_mode": mode,
         "session_id": session_id,
+        "replay_video_dir": str(replay_video_dir(profile)) if mode == "replay" else None,
         "started_at_epoch": time.time(),
+        "binary_path": str(binary),
+        "binary_sha256": sha256(binary),
+        "accepted_binary_path": str(accepted_binary),
+        "accepted_binary_sha256": sha256(accepted_binary),
+        "diagnostic_binary": diagnostic_binary,
+        "decoder_low_latency_mode_test": os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY", "0") == "1",
     }, indent=2))
     (run_root / "running").touch()
     container_name = f"ai-surveillance-dev-room-{os.getpid()}"
@@ -464,7 +843,11 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
         uris = camera_uris()
         if set(uris) != {"CAM-01", "CAM-04"}:
             raise RuntimeError("live scope did not resolve exactly CAM-01 and CAM-04")
-        live_config(stage, uris)
+        live_config(stage, uris, apply_test_camera_latency_overrides(camera_latency_values()))
+        timeout_override = apply_test_streammux_timeout(stage)
+        record_test_streammux_timeout_override(
+            run_root, timeout_override, experiment, tracker_lifecycle_diagnostics
+        )
     else:
         (run_root / "replay").touch()
         replay_config(stage)
@@ -511,8 +894,9 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
             stdout=(logs / "deepstream.log").open("w"), stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        if mode == "live":
-            deadline = time.monotonic() + requested_duration
+        if mode in {"live", "replay"}:
+            run_started = time.monotonic()
+            deadline = run_started + requested_duration
             while time.monotonic() < deadline and deepstream.poll() is None and sidecar.poll() is None:
                 time.sleep(0.25)
             if sidecar.poll() is not None and deepstream.poll() is None:
@@ -520,6 +904,16 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
             if deepstream.poll() is None:
                 stop_deepstream_container(container_name)
                 deepstream.wait(timeout=20)
+            else:
+                return_code = deepstream.wait()
+                elapsed = time.monotonic() - run_started
+                if return_code != 0:
+                    raise RuntimeError(f"DeepStream exited with {return_code}; see {logs / 'deepstream.log'}")
+                if elapsed < requested_duration:
+                    raise RuntimeError(
+                        f"DeepStream ended before the requested {mode} duration "
+                        f"({elapsed:.1f}s < {requested_duration:.1f}s); inspect {logs / 'deepstream.log'}"
+                    )
         else:
             return_code = deepstream.wait()
             if return_code != 0:
@@ -550,9 +944,7 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
         crop_socket_alias.unlink(missing_ok=True)
 
     if mode == "replay" and not skip_render:
-        video_dir = Path(profile["replay"]["video_dir"])
-        if not video_dir.is_absolute():
-            video_dir = ROOT / video_dir
+        video_dir = replay_video_dir(profile)
         dataset = ROOT / ".runtime/mv3dt/calibration/dev-room-cam01-cam04-vggt-v1"
         output = run_root / "visual/dev-room-cam01-cam04-production.mp4"
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -577,8 +969,13 @@ def main() -> None:
         "--experiment", choices=tuple(RECALL_EXPERIMENTS), default=None,
         help="Apply an experiment-only overlay to the staged runtime config; production files stay unchanged",
     )
+    parser.add_argument(
+        "--tracker-lifecycle-diagnostics", action="store_true",
+        help="Export terminated NvDCF tracks for diagnosis without changing tracker decision thresholds",
+    )
     args = parser.parse_args()
-    print(run(args.mode, args.duration, args.skip_render, args.experiment))
+    print(run(args.mode, args.duration, args.skip_render, args.experiment,
+              args.tracker_lifecycle_diagnostics))
 
 
 if __name__ == "__main__":

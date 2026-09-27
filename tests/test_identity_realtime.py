@@ -116,6 +116,142 @@ def test_recent_same_camera_target_blocks_old_historical_reid_match():
     assert trace[0]["exact_rejection_reason"] == "same_camera_simultaneous"
 
 
+def test_stale_pending_track_is_hidden_from_current_presence_without_ending_identity_lifecycle(tmp_path):
+    import io
+    import json
+    import time
+    from types import SimpleNamespace
+
+    from services.mv3dt_room.identity_metrics import IdentityMetrics
+    from services.mv3dt_room.live_identity_worker import LiveIdentityWorker, TrackState
+
+    worker = LiveIdentityWorker.__new__(LiveIdentityWorker)
+    worker.args = SimpleNamespace(termination_gap=10, source_mode="live", session_id="test")
+    worker.output_dir = tmp_path
+    worker.audit_handle = io.StringIO()
+    worker.manager = GlobalIdentityManager(np.empty((0, 2), np.float32))
+    worker.metrics = IdentityMetrics()
+    worker.pending_crop_waiting = {("CAM-01", 8)}
+    worker.latest_camera_frame = {"CAM-01": 900, "CAM-04": 0}
+    stale_ns = time.monotonic_ns() - 2_000_000_000
+    observation = {
+        "camera_id": "CAM-01",
+        "native_track_id": 8,
+        "frame": 700,
+        "receive_monotonic_ns": stale_ns,
+        "bbox": [300.0, 300.0, 400.0, 600.0],
+        "world": [20.0, -15.0],
+        "confidence": 0.8,
+    }
+    state = TrackState("CAM-01", 8)
+    state.last_seen_frame = 700
+    state.last_seen_receive_monotonic_ns = stale_ns
+    state.latest = observation
+    state.identity_state = "PENDING"
+    worker.track_states = {("CAM-01", 8): state}
+    worker.latest_camera_rows = {"CAM-01": [observation], "CAM-04": []}
+    worker.last_published_presence = {("CAM-01", 8, "Unknown")}
+
+    worker._publish_state()
+
+    current = json.loads((tmp_path / "current_state.json").read_text())
+    assert current["people"] == []
+    assert ("CAM-01", 8) not in worker.pending_crop_waiting
+    assert not state.terminated
+    assert '"event":"stale_pending_suppressed"' in worker.audit_handle.getvalue()
+    assert '"event":"pending_candidate_not_renderable"' in worker.audit_handle.getvalue()
+    assert '"reason":"stale observation timeout"' in worker.audit_handle.getvalue()
+
+
+def test_fresh_pending_candidate_is_not_published_as_person_or_bev_presence(tmp_path):
+    import io
+    import json
+    import time
+    from types import SimpleNamespace
+
+    from services.mv3dt_room.identity_metrics import IdentityMetrics
+    from services.mv3dt_room.live_identity_worker import LiveIdentityWorker, TrackState
+
+    worker = LiveIdentityWorker.__new__(LiveIdentityWorker)
+    worker.args = SimpleNamespace(termination_gap=10, source_mode="live", session_id="test")
+    worker.output_dir = tmp_path
+    worker.audit_handle = io.StringIO()
+    worker.manager = GlobalIdentityManager(np.empty((0, 2), np.float32))
+    worker.metrics = IdentityMetrics()
+    worker.pending_crop_waiting = set()
+    worker.latest_camera_frame = {"CAM-01": 17, "CAM-04": 0}
+    worker.last_published_presence = set()
+    observation = {
+        "camera_id": "CAM-01",
+        "native_track_id": 9,
+        "frame": 17,
+        "receive_monotonic_ns": time.monotonic_ns(),
+        "bbox": [300.0, 300.0, 400.0, 600.0],
+        "world": [20.0, -15.0],
+        "confidence": 0.8,
+    }
+    state = TrackState("CAM-01", 9)
+    state.last_seen_frame = 17
+    state.last_seen_receive_monotonic_ns = observation["receive_monotonic_ns"]
+    state.latest = observation
+    state.identity_state = "PENDING"
+    worker.track_states = {("CAM-01", 9): state}
+    worker.latest_camera_rows = {"CAM-01": [observation], "CAM-04": []}
+
+    worker._publish_state()
+
+    current = json.loads((tmp_path / "current_state.json").read_text())
+    assert current["people"] == []
+    assert not state.terminated
+    assert state.pending_presence_suppressed
+    assert worker.last_published_presence == set()
+    assert '"event":"pending_candidate_not_renderable"' in worker.audit_handle.getvalue()
+
+
+def test_fresh_confirmed_identity_remains_in_current_presence(tmp_path):
+    import io
+    import json
+    import time
+    from types import SimpleNamespace
+
+    from services.mv3dt_room.live_identity_worker import LiveIdentityWorker, TrackState
+
+    manager = GlobalIdentityManager(np.empty((0, 2), np.float32))
+    observation = obs(native=10, frame=42, world=(10.0, 20.0))
+    internal, _, _ = manager.process(observation, np.asarray([1.0, 0.0], np.float32), [])
+
+    worker = LiveIdentityWorker.__new__(LiveIdentityWorker)
+    worker.args = SimpleNamespace(termination_gap=10, source_mode="live", session_id="test")
+    worker.output_dir = tmp_path
+    worker.audit_handle = io.StringIO()
+    worker.manager = manager
+    worker.metrics = IdentityMetrics()
+    worker.public_ids = {}
+    worker.next_public = 1
+    worker.pending_crop_waiting = set()
+    worker.latest_camera_frame = {"CAM-01": 42, "CAM-04": 0}
+    worker.last_published_presence = set()
+    observation.update({
+        "receive_monotonic_ns": time.monotonic_ns(),
+        "receive_wall_timestamp_ns": time.time_ns(),
+    })
+    state = TrackState("CAM-01", 10)
+    state.last_seen_frame = 42
+    state.last_seen_receive_monotonic_ns = observation["receive_monotonic_ns"]
+    state.latest = observation
+    state.identity_state = "ACTIVE"
+    state.canonical_internal_identity = internal
+    worker.track_states = {("CAM-01", 10): state}
+    worker.latest_camera_rows = {"CAM-01": [observation], "CAM-04": []}
+
+    worker._publish_state()
+
+    current = json.loads((tmp_path / "current_state.json").read_text())
+    assert len(current["people"]) == 1
+    assert current["people"][0]["application_id"] == "Person_01"
+    assert worker.last_published_presence == {("CAM-01", 10, "Person_01")}
+
+
 def test_recent_camera_fragment_can_reassociate_with_contemporaneous_peer_evidence():
     manager = GlobalIdentityManager(np.empty((0, 2), np.float32))
     gallery = np.asarray([1.0, 0.0], np.float32)

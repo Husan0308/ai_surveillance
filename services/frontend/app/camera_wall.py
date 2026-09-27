@@ -104,6 +104,9 @@ class CameraTile(QFrame):
         self.fullscreen_video: QLabel | None = None
         self.fullscreen_shortcut: QShortcut | None = None
         self.show_native = os.getenv("FRONTEND_SHOW_NATIVE_IDS", "0") == "1"
+        self.fast_preview_scale = os.getenv("FRONTEND_PREVIEW_FAST_SCALE", "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
         self.source_mode = "live"
         self.dev_room_canvas_width, self.dev_room_canvas_height = overlay_source_dimensions(camera_id)
 
@@ -199,8 +202,13 @@ class CameraTile(QFrame):
         target = self.video.size()
         pixmap = self.current_frame_pixmap
         if target.width() > 0 and target.height() > 0:
+            transformation = (
+                Qt.TransformationMode.FastTransformation
+                if self.fast_preview_scale
+                else Qt.TransformationMode.SmoothTransformation
+            )
             pixmap = pixmap.scaled(
-                target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                target, Qt.AspectRatioMode.KeepAspectRatio, transformation
             )
         else:
             pixmap = pixmap.copy()
@@ -250,7 +258,10 @@ class CameraTile(QFrame):
 
     def refresh(self) -> None:
         if self.preview_reader is not None:
-            frame = self.preview_reader.read_latest(max_age_sec=0.25)
+            frame = self.preview_reader.read_latest(
+                max_age_sec=0.25,
+                after_sequence=self.last_version,
+            )
             if frame is not None and frame.sequence != self.last_version:
                 self.current_payload = frame.payload
                 image = QImage(self.current_payload, frame.width, frame.height, frame.stride, QImage.Format.Format_RGB32)
@@ -283,6 +294,7 @@ class CameraTile(QFrame):
                         "t0_decoder_reference_monotonic_ns": frame.decoder_reference_ns,
                         "t1_decoder_out_monotonic_ns": frame.decoder_out_ns,
                         "pts_ns": frame.pts_ns,
+                        "decoder_dts_ns": frame.decoder_dts_ns,
                         "source_frame_num": frame.source_frame_num,
                         "t7_ui_receive_monotonic_ns": time.monotonic_ns(),
                         "t7_ui_receive_wall_ns": time.time_ns(),

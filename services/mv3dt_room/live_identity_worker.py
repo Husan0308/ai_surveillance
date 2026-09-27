@@ -66,6 +66,7 @@ class TrackState:
     pending_request_frame: int = -1
     pending_was_reacquisition: bool = False
     crop_health_timeout_emitted: bool = False
+    pending_presence_suppressed: bool = False
     pending_crop_request_frames: list[int] = field(default_factory=list)
     pending_crop_received_frames: list[int] = field(default_factory=list)
     pending_crop_quality_rejected: int = 0
@@ -175,6 +176,7 @@ class LiveIdentityWorker:
 
     def _begin_pending(self, state: TrackState, frame: int, reacquisition: bool = False) -> None:
         state.identity_state = "PENDING"
+        state.pending_presence_suppressed = False
         state.pending_started_frame = int(frame)
         state.pending_deadline_frame = int(frame) + self.pending_window_frames
         state.pending_attempts = 0
@@ -231,6 +233,21 @@ class LiveIdentityWorker:
             if not state.termination_emitted:
                 state.termination_emitted = True
                 self.metrics.inc("native_track_terminations", camera_id=camera)
+
+    def _track_stale_timeout_ns(self) -> int:
+        gap_frames = max(1, int(getattr(getattr(self, "args", None), "termination_gap", 10)))
+        return int(gap_frames * 1_000_000_000 / float(IDENTITY_GATES["source_fps"]))
+
+    def _track_observation_is_stale(self, state: TrackState, now_ns: int | None = None) -> bool:
+        received_ns = int(state.last_seen_receive_monotonic_ns or 0)
+        if received_ns <= 0 and state.latest is not None:
+            received_ns = int(state.latest.get("receive_monotonic_ns", 0) or 0)
+        # Legacy/unit-created states without a monotonic receive timestamp
+        # retain the existing frame-based lifecycle behavior.
+        if received_ns <= 0:
+            return False
+        now_ns = monotonic_ns() if now_ns is None else int(now_ns)
+        return now_ns - received_ns >= self._track_stale_timeout_ns()
 
     def _ingest_frame(self, camera: str, frame: int, payload: dict, receive_mono: int, receive_wall: int) -> None:
         self.latest_camera_frame[camera] = frame
@@ -523,13 +540,40 @@ class LiveIdentityWorker:
 
     def _publish_state(self) -> None:
         started = monotonic_ns()
+        now_ns = monotonic_ns()
         people = []
         for camera in CAMS:
             for obs in self.latest_camera_rows[camera]:
                 state = self.track_states.get((camera, int(obs["native_track_id"])))
                 if state is None or state.terminated:
                     continue
+                if state.canonical_internal_identity is None and not state.pending_presence_suppressed:
+                    self._audit(
+                        "pending_candidate_not_renderable",
+                        camera_id=camera,
+                        native_track_id=state.native_track_id,
+                        frame=state.last_seen_frame,
+                        identity_state=state.identity_state,
+                        reason="canonical identity required for production camera/BEV presence",
+                    )
+                    state.pending_presence_suppressed = True
+                if self._track_observation_is_stale(state, now_ns):
+                    key = (camera, int(obs["native_track_id"]))
+                    if state.identity_state == "PENDING" and key in self.pending_crop_waiting:
+                        self.pending_crop_waiting.discard(key)
+                        self._audit(
+                            "stale_pending_suppressed", camera_id=camera,
+                            native_track_id=state.native_track_id,
+                            last_frame=state.last_seen_frame,
+                            observation_age_ms=max(
+                                0.0, (now_ns - state.last_seen_receive_monotonic_ns) / 1_000_000.0
+                            ),
+                            reason="not a current production presence; retained only for lifecycle/reacquisition",
+                        )
+                    continue
                 internal = state.canonical_internal_identity
+                if internal is None:
+                    continue
                 people.append({
                     **obs,
                     "internal_identity_at_event": internal,
@@ -569,10 +613,12 @@ class LiveIdentityWorker:
                                   and int(row.get("native_track_id", -1)) == native_id), None),
             )
         for camera, native_id, app_id in sorted(self.last_published_presence - current_presence):
+            prior_state = self.track_states.get((camera, native_id))
+            stale = prior_state is not None and self._track_observation_is_stale(prior_state, published_mono)
             self._audit(
                 "production_presence_removed", camera_id=camera,
                 native_track_id=native_id, application_id=app_id,
-                reason="not in current camera observations",
+                reason="stale observation timeout" if stale else "not in current camera observations",
             )
         self.last_published_presence = current_presence
         temp = self.output_dir / "current_state.json.tmp"

@@ -250,6 +250,15 @@ def test_stale_gallery_aggregate_only_score_cannot_reuse_identity(tmp_path, monk
         np.asarray([1.0, 0.0], np.float32),
         "test_stale_anchor",
     )
+    # The captured failure went through rolling_reid, which requires a
+    # multi-sample identity. Give this regression the same eligibility while
+    # keeping its current-camera and persisted-anchor evidence unsupported.
+    manager.accept_existing(
+        gid,
+        make_obs("CAM-01", 1, 101, anchor_time + timedelta(seconds=1), (24.1, -20.0)),
+        np.asarray([1.0, 0.0], np.float32),
+        {"reason": "test_second_gallery_sample"},
+    )
     manager.identities[gid].persisted_anchor = {
         "world": (24.0, -20.0),
         "timestamp": anchor_time.isoformat(),

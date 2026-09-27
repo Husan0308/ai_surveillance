@@ -565,11 +565,54 @@ class GlobalIdentityManager:
             candidate = 5.0 + app - (historical_d or 0.0) / 10.0
             if candidate > score:
                 accepted, score, reason = True, candidate, "historical_same_camera_reid"
+        camera_gallery_similarity = per_camera.get(obs["camera_id"])
+        current_camera_gallery_supported = (
+            camera_gallery_similarity is not None
+            and camera_gallery_similarity >= IDENTITY_GATES["gallery_only_similarity_min"]
+        )
+        anchor = ident.persisted_anchor
+        anchor_age_ms = (
+            observation_time_ms(obs, anchor)
+            if anchor and obs.get("timestamp") and anchor.get("timestamp") else None
+        )
+        anchor_distance = distance(obs.get("world"), anchor.get("world")) if anchor else None
+        recent_anchor_supported = (
+            anchor_age_ms is not None
+            and anchor_age_ms <= IDENTITY_GATES["recent_anchor_max_age_ms"]
+            and anchor_distance is not None
+            and anchor_distance <= IDENTITY_GATES["cross_camera_world_candidate_m"]
+        )
+        recent_cross_spatial_supported = (
+            cross_dist is not None
+            and cross_time is not None
+            and cross_time <= IDENTITY_GATES["cross_camera_time_ms"]
+            and cross_dist <= IDENTITY_GATES["cross_camera_world_candidate_m"]
+        )
+        recent_same_camera_spatial_supported = (
+            same_camera_continuity is not None
+            or top_edge_handoff
+            or historical is not None
+            or (same_camera_fragment_distance is not None
+                and same_camera_fragment_distance <= IDENTITY_GATES["cross_camera_world_candidate_m"])
+        )
+        rolling_reid_has_support = (
+            current_camera_gallery_supported
+            or recent_anchor_supported
+            or recent_cross_spatial_supported
+            or recent_same_camera_spatial_supported
+        )
         if vector is not None and app is not None and ident.samples >= 2:
-            if app >= IDENTITY_GATES["gallery_only_similarity_min"]:
+            if (app >= IDENTITY_GATES["gallery_only_similarity_min"]
+                    and rolling_reid_has_support):
                 candidate = 2.0 + app
                 if candidate > score:
                     accepted, score, reason = True, candidate, "rolling_reid"
+            elif (app >= IDENTITY_GATES["gallery_only_similarity_min"]
+                  and not rolling_reid_has_support and not accepted):
+                # Aggregate appearance alone can be a stale cross-camera
+                # gallery match. Require current-camera gallery evidence or
+                # recent spatial continuity before rolling ReID can reacquire.
+                reason = "stale_gallery_missing_current_camera_support"
             elif not accepted and app >= IDENTITY_GATES["cross_camera_similarity_min"]:
                 reason = "appearance_below_gallery_only_gate"
         evidence = {
@@ -585,6 +628,10 @@ class GlobalIdentityManager:
             "historical_same_camera_world_distance": distance(obs.get("world"), historical.get("world")) if historical else None,
             "historical_same_camera_frame": historical.get("frame") if historical else None,
             "cross_camera_candidate": cross_camera_candidate,
+            "current_camera_gallery_supported": current_camera_gallery_supported,
+            "recent_anchor_supported": recent_anchor_supported,
+            "recent_cross_spatial_supported": recent_cross_spatial_supported,
+            "recent_same_camera_spatial_supported": recent_same_camera_spatial_supported,
             "reason": reason,
         }
         return (score if accepted else None), evidence

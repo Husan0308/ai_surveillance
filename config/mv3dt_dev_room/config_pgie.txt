@@ -13,3 +13,6 @@ infer-dims=3;544;960
 model-color-format=0
 maintain-aspect-ratio=0
 output-tensor-meta=0
+
+[class-attrs-0]
+pre-cluster-threshold=0.03

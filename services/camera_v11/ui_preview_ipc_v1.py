@@ -9,15 +9,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MAGIC = b"V11UI01\0"
-VERSION = 3
+VERSION = 4
 HEADER_SIZE_V1 = 64
-HEADER_SIZE = 96
+HEADER_SIZE_V3 = 96
+HEADER_SIZE = 104
 HEADER_V1 = struct.Struct("<8sIQQIIIIII")
 # Version 2 used eight bytes that were padding in the 64-byte v1 header.
 # Version 3 has a 96-byte header carrying decoder input/output timing, PTS and
 # source frame number. Readers remain compatible with native v1 publishers.
 HEADER_V2 = struct.Struct("<8sIQQIIIIIIQ")
 HEADER_V3 = struct.Struct("<8sIQQIIIIIIQQQII")
+HEADER_V4 = struct.Struct("<8sIQQIIIIIIQQQQII")
 DEFAULT_PATH = "/dev/shm/v11_ui_preview_cam01_v1.bin"
 
 
@@ -34,6 +36,7 @@ class PreviewFrame:
     decoder_reference_ns: int = 0
     decoder_out_ns: int = 0
     pts_ns: int = 0
+    decoder_dts_ns: int = 0
     source_frame_num: int = 0
 
 
@@ -59,12 +62,14 @@ class PreviewFrameWriter:
 
     def _write_header(self, timestamp_ns: int, object_count: int, fps_milli: int,
                       decoder_reference_ns: int = 0, decoder_out_ns: int = 0,
-                      pts_ns: int = 0, source_frame_num: int = 0) -> None:
-        packed = HEADER_V3.pack(
+                      pts_ns: int = 0, decoder_dts_ns: int = 0,
+                      source_frame_num: int = 0) -> None:
+        packed = HEADER_V4.pack(
             MAGIC, VERSION, self.sequence, int(timestamp_ns), self.width, self.height,
             self.stride, self.payload_size, max(0, int(object_count)), max(0, int(fps_milli)),
             max(0, int(decoder_reference_ns)), max(0, int(decoder_out_ns)),
-            max(0, int(pts_ns)), max(0, int(source_frame_num)), 0,
+            max(0, int(pts_ns)), max(0, int(decoder_dts_ns)),
+            max(0, int(source_frame_num)), 0,
         )
         self.mm.seek(0)
         self.mm.write(packed)
@@ -74,6 +79,7 @@ class PreviewFrameWriter:
     def publish(self, payload, object_count: int = 0, timestamp_ns: int | None = None,
                 fps: float | None = None, decoder_reference_ns: int = 0,
                 decoder_out_ns: int = 0, pts_ns: int = 0,
+                decoder_dts_ns: int = 0,
                 source_frame_num: int = 0) -> int:
         view = memoryview(payload)
         if view.nbytes < self.payload_size:
@@ -93,7 +99,8 @@ class PreviewFrameWriter:
             self.mm.write(view[: self.payload_size])
             self._write_header(
                 stamp, object_count, int(round(self._fps_ema * 1000.0)),
-                decoder_reference_ns, decoder_out_ns, pts_ns, source_frame_num,
+                decoder_reference_ns, decoder_out_ns, pts_ns, decoder_dts_ns,
+                source_frame_num,
             )
         finally:
             fcntl.flock(self.fd, fcntl.LOCK_UN)
@@ -144,7 +151,11 @@ class PreviewFrameReader:
         self.fd, self.mm, self.size = fd, mm, size
         return True
 
-    def read_latest(self, max_age_sec: float = 1.20) -> PreviewFrame | None:
+    def read_latest(
+        self,
+        max_age_sec: float = 1.20,
+        after_sequence: int | None = None,
+    ) -> PreviewFrame | None:
         if not self._ensure_open():
             return None
         assert self.fd is not None and self.mm is not None
@@ -156,22 +167,37 @@ class PreviewFrameReader:
             raw = self.mm.read(min(HEADER_SIZE, self.size))
             prefix = HEADER_V1.unpack(raw[: HEADER_V1.size])
             magic, version, sequence, timestamp_ns, width, height, stride, payload_size, object_count, fps_milli = prefix
-            if magic != MAGIC or version not in (1, 2, VERSION) or sequence <= 0:
+            if magic != MAGIC or version not in (1, 2, 3, VERSION) or sequence <= 0:
+                return None
+            # The camera wall polls every GUI tick. Avoid copying megabytes of
+            # unchanged pixels into Python bytes while the shared slot still
+            # contains the frame we already painted. A smaller sequence is a
+            # writer restart (its mmap inode was recreated), so accept it.
+            if after_sequence is not None and sequence == int(after_sequence):
                 return None
             header_size = HEADER_SIZE_V1
             decoder_reference_ns = 0
             decoder_out_ns = 0
             pts_ns = 0
+            decoder_dts_ns = 0
             source_frame_num = 0
             if version == 2:
                 decoder_out_ns = int(HEADER_V2.unpack(raw[: HEADER_V2.size])[-1])
-            elif version >= 3:
-                header_size = HEADER_SIZE
+            elif version == 3:
+                header_size = HEADER_SIZE_V3
                 unpacked = HEADER_V3.unpack(raw[: HEADER_V3.size])
                 decoder_reference_ns = int(unpacked[10])
                 decoder_out_ns = int(unpacked[11])
                 pts_ns = int(unpacked[12])
                 source_frame_num = int(unpacked[13])
+            elif version >= 4:
+                header_size = HEADER_SIZE
+                unpacked_v4 = HEADER_V4.unpack(raw[: HEADER_V4.size])
+                decoder_reference_ns = int(unpacked_v4[10])
+                decoder_out_ns = int(unpacked_v4[11])
+                pts_ns = int(unpacked_v4[12])
+                decoder_dts_ns = int(unpacked_v4[13])
+                source_frame_num = int(unpacked_v4[14])
             if header_size + payload_size > self.size:
                 return None
             if timestamp_ns <= 0 or (time.monotonic_ns() - timestamp_ns) > int(max_age_sec * 1e9):
@@ -183,6 +209,7 @@ class PreviewFrameReader:
                 stride=int(stride), object_count=int(object_count), fps=float(fps_milli) / 1000.0,
                 payload=payload, decoder_reference_ns=decoder_reference_ns,
                 decoder_out_ns=decoder_out_ns, pts_ns=pts_ns,
+                decoder_dts_ns=decoder_dts_ns,
                 source_frame_num=source_frame_num,
             )
         except (BufferError, OSError, ValueError, struct.error):

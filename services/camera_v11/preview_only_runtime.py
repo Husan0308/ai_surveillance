@@ -24,6 +24,31 @@ from services.ml_service.app.deepstream.capture import DeepStreamCapture
 DEFAULT_CAMERAS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
 
 
+class PreviewPublishBudget:
+    """Rate-limit writes while tolerating a two-frame network-arrival burst.
+
+    Credits do not hold frames: every allowed write replaces the latest IPC
+    slot immediately. This avoids discarding a 20-FPS source merely because
+    consecutive arrivals alternate between shorter and longer than 50 ms.
+    """
+
+    def __init__(self, fps: int, now: float):
+        self.fps = max(1, int(fps))
+        self.last = now
+        self.credits = 2.0
+
+    def allow(self, now: float) -> bool:
+        if now < self.last:
+            # A restarted source may reset its media timeline.
+            self.credits = 2.0
+        self.credits = min(2.0, self.credits + max(0.0, now - self.last) * self.fps)
+        self.last = now
+        if self.credits < 1.0 - 1e-9:
+            return False
+        self.credits = max(0.0, self.credits - 1.0)
+        return True
+
+
 def _preview_path(camera_id: str) -> str:
     key = f"V11_UI_PREVIEW_PATH_{camera_id.replace('-', '')}"
     slug = camera_id.lower().replace("-", "")
@@ -46,6 +71,38 @@ def _camera_probe(camera: CameraConfig) -> dict:
     }
 
 
+def _test_decoder_low_latency_enabled(camera_id: str) -> bool:
+    """Select low-latency decode only for streams explicitly listed in a test.
+
+    The legacy switch remains available for one-camera experiments. When an
+    allowlist is present it takes precedence, allowing B-frame streams to stay
+    on the normal decoder path without changing production defaults.
+    """
+    allowlist = os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY_CAMERAS")
+    if allowlist is not None:
+        selected = {item.strip() for item in allowlist.split(",") if item.strip()}
+        return camera_id in selected
+    return os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY", "0") == "1"
+
+
+def _test_rtsp_transport_for_camera(camera_id: str, configured: str) -> str:
+    """Resolve an opt-in per-camera RTSP transport trial without changing config."""
+    overrides = os.getenv("MV3DT_TEST_RTSP_TRANSPORT_BY_CAMERA")
+    if not overrides:
+        return configured.lower()
+    value = configured.lower()
+    for entry in overrides.split(","):
+        camera, separator, raw_value = entry.strip().partition("=")
+        if not separator or not re.fullmatch(r"CAM-\d{2}", camera):
+            raise ValueError("RTSP transport override must use CAM-XX=tcp|udp entries")
+        candidate = raw_value.strip().lower()
+        if candidate not in {"tcp", "udp", "auto"}:
+            raise ValueError("RTSP transport override must be tcp, udp, or auto")
+        if camera == camera_id:
+            value = candidate
+    return value
+
+
 @dataclass
 class CameraStats:
     camera_id: str
@@ -60,9 +117,21 @@ class CameraStats:
     last_frame_mono: float = 0.0
     started_mono: float = field(default_factory=time.monotonic)
     codec: str = ""
+    transport: str = ""
+    effective_latency_ms: int = 0
+    drop_on_latency: bool = True
+    low_latency_mode: bool = False
+    low_latency_mode_effective: bool | None = None
+    postdecode_queue_max_buffers: int = 0
+    postdecode_queue_current_buffers: int | None = None
+    appsink_max_buffers: int = 1
+    appsink_drop: bool = True
+    appsink_sync: bool = False
+    decoder: str = "nvv4l2decoder"
     width: int = 0
     height: int = 0
     last_error: str = ""
+    decoder_pts_order: dict = field(default_factory=dict)
 
     def observe_fps(self, value: float) -> None:
         if value <= 0:
@@ -87,6 +156,23 @@ class CameraStats:
             "last_frame_age_sec": None if not self.last_frame_mono else time.monotonic() - self.last_frame_mono,
             "resolution": f"{self.width}x{self.height}" if self.width and self.height else None,
             "codec": self.codec or None,
+            "transport": self.transport or None,
+            "effective_latency_ms": self.effective_latency_ms or None,
+            "drop_on_latency": self.drop_on_latency,
+            "low_latency_mode": self.low_latency_mode,
+            "low_latency_mode_effective": self.low_latency_mode_effective,
+            "postdecode_queue": {
+                "max_buffers": self.postdecode_queue_max_buffers,
+                "current_buffers": self.postdecode_queue_current_buffers,
+                "leaky": "downstream/latest",
+            },
+            "appsink": {
+                "max_buffers": self.appsink_max_buffers,
+                "drop": self.appsink_drop,
+                "sync": self.appsink_sync,
+            },
+            "decoder": self.decoder,
+            "decoder_pts_order": dict(self.decoder_pts_order),
             "last_error": self.last_error,
         }
 
@@ -108,37 +194,64 @@ class PreviewSource(threading.Thread):
             try:
                 self.stats.state = "CONNECTING"
                 effective_latency_ms = self.camera.effective_latency_ms(self.config.latency_ms)
-                codec = detect_rtsp_codec(
-                    _camera_probe(self.camera),
-                    effective_latency_ms,
-                    timeout_sec=max(5.0, self.config.startup_grace_sec),
-                ).lower()
+                self.stats.effective_latency_ms = effective_latency_ms
+                transport = _test_rtsp_transport_for_camera(
+                    self.camera.camera_id, self.config.rtsp_transport
+                )
+                self.stats.transport = transport
+                self.stats.drop_on_latency = bool(self.config.drop_on_latency)
+                low_latency_mode = _test_decoder_low_latency_enabled(self.camera.camera_id)
+                self.stats.low_latency_mode = low_latency_mode
+                self.stats.postdecode_queue_max_buffers = int(self.config.postdecode_queue_buffers)
+                codec = None
+                for entry in os.getenv("MV3DT_TEST_CODEC_BY_CAMERA", "").split(","):
+                    key, _, value = entry.strip().partition("=")
+                    if key == self.camera.camera_id:
+                        if value.lower() not in {"h264", "h265"}:
+                            raise ValueError("codec override must be h264 or h265")
+                        codec = value.lower()
+                if codec is None:
+                    codec = detect_rtsp_codec(
+                        _camera_probe(self.camera),
+                        effective_latency_ms,
+                        timeout_sec=max(5.0, self.config.startup_grace_sec),
+                    ).lower()
                 self.stats.codec = codec
                 capture = DeepStreamCapture(
                     self.camera.camera_id,
                     self.camera.uri,
                     codec,
                     self.config,
+                    transport=transport,
                     username=self.camera.username,
                     password=self.camera.password,
                     output_bgrx=True,
                     latency_ms=effective_latency_ms,
+                    low_latency_mode=low_latency_mode,
                 )
+                self.stats.low_latency_mode_effective = capture.low_latency_mode_effective
                 retry = max(0.5, float(self.config.reconnect_delay_sec))
                 frame_window = 0
                 fps_window_start = time.monotonic()
                 last_progress = fps_window_start
-                next_publish = fps_window_start
-                publish_period = 1.0 / max(1, int(self.config.display_fps))
+                publish_budget = None
                 while not self.stop_event.is_set():
                     ok, frame = capture.read()
                     now = time.monotonic()
+                    self.stats.decoder_pts_order = capture.decoder_pts_order_diagnostics()
                     if not ok or frame is None:
                         if now - last_progress > max(3.0, self.config.capture_timeout_ms / 1000.0 * 2.5):
                             self.stats.stalled_periods += 1
+                            if os.getenv("MV3DT_CAPTURE_STARTUP_DIAGNOSTICS") == "1":
+                                for name, element in (("pipeline", capture.pipeline), ("decoder", capture.decoder), ("sink", capture.sink)):
+                                    status, current, pending = element.get_state(0)
+                                    print(json.dumps({"camera_id": self.camera.camera_id, "element": name,
+                                        "state_result": status.value_nick, "current_state": current.value_nick,
+                                        "pending_state": pending.value_nick}), flush=True)
                             raise RuntimeError("preview frame progression stalled")
                         continue
                     last_progress = now
+                    self.stats.postdecode_queue_current_buffers = capture.current_queue_buffers()
                     height, width = frame.shape[:2]
                     if self.writer is None:
                         self.writer = PreviewFrameWriter(
@@ -147,7 +260,11 @@ class PreviewSource(threading.Thread):
                             height,
                             width * 4,
                         )
-                    if now >= next_publish:
+                    pts_ns = capture.last_timing.pts_ns
+                    publish_clock = pts_ns / 1e9 if 0 < pts_ns < 2**63 else now
+                    if publish_budget is None:
+                        publish_budget = PreviewPublishBudget(self.config.display_fps, publish_clock)
+                    if publish_budget.allow(publish_clock):
                         # nvvideoconvert already produces BGRx. Publishing it
                         # directly avoids another full-frame allocation/copy.
                         bgra = frame
@@ -156,9 +273,9 @@ class PreviewSource(threading.Thread):
                             decoder_reference_ns=capture.last_timing.decoder_reference_ns,
                             decoder_out_ns=capture.last_timing.decoder_out_ns,
                             pts_ns=capture.last_timing.pts_ns,
+                            decoder_dts_ns=capture.last_timing.dts_ns,
                             source_frame_num=self.stats.frames + 1,
                         )
-                        next_publish = max(next_publish + publish_period, now)
                     self.stats.frames += 1
                     self.stats.last_frame_mono = now
                     self.stats.width = width

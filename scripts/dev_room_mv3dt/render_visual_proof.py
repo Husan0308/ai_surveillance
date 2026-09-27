@@ -59,6 +59,8 @@ def main():
     presence_disagreements = []
     duplicate_source_rows = 0
     presence_assertion_frames = 0
+    duplicate_actual_bev_markers = 0
+    ghost_stale_bev_markers = 0
 
     frame_num = 0
     while True:
@@ -124,6 +126,11 @@ def main():
             for identity in rendered_marker_ids
             if rendered_marker_ids.count(identity) > 1
         }
+        duplicate_actual_bev_markers += sum(
+            max(0, rendered_marker_ids.count(identity) - 1)
+            for identity in set(rendered_marker_ids)
+        )
+        ghost_stale_bev_markers += len(set(rendered_marker_ids) - active_ids)
         presence_result = assert_presence_contract(
             frame_rows,
             rendered_marker_ids,
@@ -163,6 +170,8 @@ def main():
         "frames_with_presence_disagreement": len(presence_disagreements),
         "presence_assertion_frames": presence_assertion_frames,
         "duplicate_source_rows_suppressed": duplicate_source_rows,
+        "duplicate_actual_bev_markers": duplicate_actual_bev_markers,
+        "ghost_stale_bev_markers": ghost_stale_bev_markers,
         "bev_presence_policy": "current active camera observation only; no stale last position",
         "presence_assertions": "no marker without active observation; one marker per application ID; no native/orphan/stale marker",
     }

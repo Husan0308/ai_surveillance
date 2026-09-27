@@ -39,6 +39,11 @@ def stats(values: list[float]) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", type=Path, required=True)
+    ap.add_argument(
+        "--cameras", nargs="+", choices=CAMERAS, default=list(CAMERAS),
+        help="Cameras under test; defaults to the complete six-camera gate",
+    )
+    ap.add_argument("--min-duration-seconds", type=float, default=0.0)
     args = ap.parse_args()
 
     rows: dict[str, list[dict]] = defaultdict(list)
@@ -52,7 +57,7 @@ def main() -> int:
             malformed += 1
             continue
         camera = str(row.get("camera_id", ""))
-        if camera in CAMERAS:
+        if camera in args.cameras:
             rows[camera].append(row)
 
     report = {
@@ -64,12 +69,14 @@ def main() -> int:
         "failures": [],
     }
 
-    for camera in CAMERAS:
+    for camera in args.cameras:
         e2e = []
         decoder = []
         publish = []
         ui_receive = []
         paint = []
+        pts_dts_delta = []
+        decoder_dts = []
         skipped = 0
         invalid_timing = 0
         for row in rows.get(camera, []):
@@ -87,6 +94,17 @@ def main() -> int:
             publish.append((t6 - t1) / 1e6)
             ui_receive.append((t7 - t6) / 1e6)
             paint.append((t8 - t7) / 1e6)
+            pts = int(row.get("pts_ns") or 0)
+            dts = int(row.get("decoder_dts_ns") or 0)
+            if pts > 0 and dts > 0:
+                pts_dts_delta.append((pts - dts) / 1e6)
+                decoder_dts.append(dts)
+
+        dts_regressions = sum(
+            current < previous for previous, current in zip(decoder_dts, decoder_dts[1:])
+        )
+        reorder_frame_period_ms = 50.0
+        max_positive_pts_dts_ms = max((value for value in pts_dts_delta if value > 0), default=0.0)
 
         camera_report = {
             "decoder_reference_to_ui_paint": stats(e2e),
@@ -96,8 +114,36 @@ def main() -> int:
             "ui_receive_to_paint": stats(paint),
             "ui_skipped_preview_frames": skipped,
             "invalid_timing_rows": invalid_timing,
+            "measurement_duration_seconds": (
+                (max(int(row["t8_ui_paint_monotonic_ns"]) for row in rows.get(camera, []))
+                 - min(int(row["t8_ui_paint_monotonic_ns"]) for row in rows.get(camera, []))) / 1e9
+                if len(e2e) > 1 else 0.0
+            ),
+            "displayed_fps": (
+                (len(e2e) - 1) / ((max(int(row["t8_ui_paint_monotonic_ns"]) for row in rows.get(camera, []))
+                                  - min(int(row["t8_ui_paint_monotonic_ns"]) for row in rows.get(camera, []))) / 1e9)
+                if len(e2e) > 1 and rows.get(camera) else 0.0
+            ),
+            "pts_minus_dts_ms": {
+                "samples": len(pts_dts_delta),
+                "nonzero_samples": sum(value != 0 for value in pts_dts_delta),
+                "min": min(pts_dts_delta) if pts_dts_delta else None,
+                "p50": percentile(pts_dts_delta, 0.50) if pts_dts_delta else None,
+                "p95": percentile(pts_dts_delta, 0.95) if pts_dts_delta else None,
+                "max": max(pts_dts_delta) if pts_dts_delta else None,
+                "dts_regressions_in_present_order": dts_regressions,
+                "estimated_max_reorder_frames_at_20fps": int(math.ceil(
+                    max_positive_pts_dts_ms / reorder_frame_period_ms
+                )),
+            },
         }
         report["cameras"][camera] = camera_report
+
+        if camera_report["measurement_duration_seconds"] < args.min_duration_seconds:
+            report["failures"].append(
+                f"{camera}: measurement duration {camera_report['measurement_duration_seconds']:.3f}s"
+                f" < {args.min_duration_seconds:.3f}s"
+            )
 
         if len(e2e) < MIN_SAMPLES:
             report["failures"].append(f"{camera}: insufficient timing samples {len(e2e)}<{MIN_SAMPLES}")
