@@ -584,6 +584,8 @@ static guint64 preview_last_input_pts[2];
 static guint64 preview_last_output_pts[2];
 static PreviewDecodeProbeContext preview_decode_probe_contexts[2];
 static PreviewWorker preview_workers[2];
+static GstElement *preview_mux_queues[2];
+static guint preview_mux_queue_limits[2];
 static gchar *preview_diagnostics_path;
 static gboolean preview_decoder_low_latency_known[2];
 static gboolean preview_decoder_low_latency[2];
@@ -848,6 +850,7 @@ preview_diagnostics_timer_cb (gpointer user_data)
     guint64 inputs, outputs, output_matches, matches, misses;
     guint64 input_regressions, output_regressions, input_backstep, output_backstep;
     gboolean low_latency_known, low_latency;
+    guint mux_queue_level = 0, mux_queue_limit = 0;
     g_mutex_lock (&preview_decode_timing_mutex);
     inputs = preview_decode_inputs[i];
     outputs = preview_decode_outputs[i];
@@ -861,6 +864,12 @@ preview_diagnostics_timer_cb (gpointer user_data)
     low_latency_known = preview_decoder_low_latency_known[i];
     low_latency = preview_decoder_low_latency[i];
     g_mutex_unlock (&preview_decode_timing_mutex);
+    if (preview_mux_queues[i]) {
+      g_object_get (preview_mux_queues[i],
+          "current-level-buffers", &mux_queue_level,
+          "max-size-buffers", &mux_queue_limit,
+          NULL);
+    }
     fprintf (file,
         "{\"camera_id\":\"%s\",\"decoder_input\":%" G_GUINT64_FORMAT
         ",\"decoder_output\":%" G_GUINT64_FORMAT
@@ -871,12 +880,14 @@ preview_diagnostics_timer_cb (gpointer user_data)
         ",\"input_max_backstep_ms\":%.3f"
         ",\"output_pts_backsteps\":%" G_GUINT64_FORMAT
         ",\"output_max_backstep_ms\":%.3f"
-        ",\"low_latency_mode_known\":%s,\"low_latency_mode\":%s}\n",
+        ",\"low_latency_mode_known\":%s,\"low_latency_mode\":%s"
+        ",\"analytics_queue_level\":%u,\"analytics_queue_limit\":%u}\n",
         i == 0 ? "CAM-01" : "CAM-04", inputs, outputs, output_matches,
         matches, misses, input_regressions, input_backstep / 1.0e6,
         output_regressions, output_backstep / 1.0e6,
         low_latency_known ? "true" : "false",
-        low_latency ? "true" : "false");
+        low_latency ? "true" : "false",
+        mux_queue_level, mux_queue_limit);
   }
   fflush (file);
   fclose (file);
@@ -1189,6 +1200,9 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   gboolean linked_to_mux = FALSE;
   gboolean ok = FALSE;
   GstPadLinkReturn queue_link_status = GST_PAD_LINK_OK;
+  gint camera_index = preview_camera_index (source ? source->source_id : G_MAXUINT,
+      source ? source->source_id : G_MAXUINT);
+  guint queue_buffers = camera_index == 1 ? 16u : 2u;
 
   if (!app_ctx || !source || !source->bin || !app_ctx->pipeline.pipeline)
     return FALSE;
@@ -1216,11 +1230,14 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   queue = gst_element_factory_make ("queue", queue_name);
   if (!queue)
     goto done;
-  /* Preserve every analytics frame. The small non-leaky queue absorbs only
-   * transient mux waits; preview publication happens before this queue and
-   * keeps its independent latest-only worker semantics. */
+  /* Preserve every analytics frame. CAM-04 has measured mux/MVA wait bursts
+   * close to 0.5 s at 20 FPS. Two buffers were too shallow and allowed those
+   * waits to backpressure the source/decoder. Keep CAM-01 frozen at two
+   * buffers, while CAM-04 gets 16 buffers (~0.8 s at 20 FPS) so the decoder
+   * can continue producing preview frames through the synchronization burst.
+   * This queue remains non-leaky: analytics frames are never dropped. */
   g_object_set (queue,
-      "max-size-buffers", 2u,
+      "max-size-buffers", queue_buffers,
       "max-size-bytes", 0u,
       "max-size-time", (guint64) 0,
       "leaky", 0,
@@ -1251,8 +1268,14 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   if (!gst_element_sync_state_with_parent (queue))
     goto done;
 
-  g_print ("preview: inserted bounded non-leaky mux queue camera_index=%u max_buffers=2\n",
-      source->source_id);
+  if (camera_index >= 0 && camera_index < 2) {
+    if (preview_mux_queues[camera_index])
+      gst_object_unref (preview_mux_queues[camera_index]);
+    preview_mux_queues[camera_index] = GST_ELEMENT (gst_object_ref (queue));
+    preview_mux_queue_limits[camera_index] = queue_buffers;
+  }
+  g_print ("preview: inserted bounded non-leaky mux queue camera_index=%u max_buffers=%u\n",
+      source->source_id, queue_buffers);
   ok = TRUE;
 
 done:
@@ -1370,6 +1393,11 @@ preview_close (void)
       g_cond_clear (&worker->condition);
       g_mutex_clear (&worker->mutex);
       worker->initialized = FALSE;
+    }
+    if (preview_mux_queues[i]) {
+      gst_object_unref (preview_mux_queues[i]);
+      preview_mux_queues[i] = NULL;
+      preview_mux_queue_limits[i] = 0;
     }
   }
   for (guint i = 0; i < 2; i++) {
