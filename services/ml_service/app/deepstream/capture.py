@@ -64,6 +64,7 @@ class DeepStreamCapture:
         username: str = "",
         password: str = "",
         output_bgrx: bool = False,
+        latency_ms: int | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.uri = uri
@@ -73,6 +74,9 @@ class DeepStreamCapture:
         self.username = username
         self.password = password
         self.output_bgrx = bool(output_bgrx)
+        self.latency_ms = int(config.latency_ms if latency_ms is None else latency_ms)
+        if self.latency_ms < 1:
+            raise ValueError(f"{camera_id}: latency_ms must be >= 1")
         self._opened = False
         self._last_error = ""
         self._last_warning = ""
@@ -156,7 +160,7 @@ class DeepStreamCapture:
         queue_buffers = max(1, int(c.postdecode_queue_buffers))
         source_options = [
             f"location={_gst_quote(self.uri)}",
-            f"latency={max(1, c.latency_ms)}",
+            f"latency={self.latency_ms}",
             f"drop-on-latency={'true' if c.drop_on_latency else 'false'}",
             "buffer-mode=auto",
         ]
@@ -280,6 +284,7 @@ class DeepStreamCapture:
             "backend": self.backend,
             "transport": self.transport,
             "codec": self.codec,
+            "latency_ms": self.latency_ms,
             "auth_configured": bool(self.username),
             "pipeline": _redact(self.pipeline_text),
             "last_error": self._last_error,
