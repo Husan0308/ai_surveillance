@@ -568,6 +568,168 @@ def test_recent_conflicting_track_blocks_bounded_history_reid():
     assert manager.next_number == 2
 
 
+def test_stale_same_camera_fragment_handoff_reuses_existing_identity():
+    manager = GlobalIdentityManager(np.empty((0, 2), np.float32))
+    strong = np.asarray([1.0, 0.0], np.float32)
+    gid = manager.confirm_new(
+        obs(native=31, frame=100, world=(39.8, -25.2)), strong, "test_initial"
+    )
+    # This observation replaces the cache, but its native track is no longer
+    # in current tracker outputs when the detector-backed fragment appears.
+    manager.accept_existing(
+        gid,
+        obs(native=32, frame=150, world=(10.8, -11.8)),
+        np.asarray([0.9, 0.1], np.float32),
+        {"reason": "test_inactive_fragment"},
+    )
+    candidate = {
+        **obs(native=33, frame=160, world=(39.3, -27.0)),
+        "detector_associated": True,
+    }
+
+    resolved, evidence = manager.resolve_existing(candidate, strong, [])
+
+    assert resolved == gid
+    assert evidence["reason"] == "historical_same_camera_reid"
+    assert manager.next_number == 2
+
+
+def test_current_simultaneous_same_camera_track_still_blocks_stale_history_reid():
+    manager = GlobalIdentityManager(np.empty((0, 2), np.float32))
+    strong = np.asarray([1.0, 0.0], np.float32)
+    current = obs(native=31, frame=100, world=(39.8, -25.2))
+    gid = manager.confirm_new(current, strong, "test_initial")
+    candidate = {
+        **obs(native=33, frame=101, world=(20.0, -15.0)),
+        "detector_associated": True,
+        "bbox": (250.0, 10.0, 350.0, 200.0),
+    }
+    current_assignment = {**current, "frame": 101, "global_person_id_num": gid}
+
+    resolved, evidence = manager.resolve_existing(candidate, strong, [current_assignment])
+
+    assert resolved is None
+    assert evidence["reason"] == "pending_no_acceptable_candidate"
+    trace = manager.candidate_trace(candidate, strong, [current_assignment])
+    assert trace[0]["exact_rejection_reason"] == "same_camera_simultaneous"
+    assert manager.next_number == 2
+
+
+def test_late_same_camera_observation_is_not_simultaneous_or_novel():
+    manager = GlobalIdentityManager(np.empty((0, 2), np.float32))
+    white = np.asarray([1.0, 0.0], np.float32)
+    black = np.asarray([0.97, 0.243], np.float32)
+    white_obs = {
+        **obs(native=1, frame=90, world=(21.8566, -27.8930)),
+        "timestamp": "2026-09-28T07:20:22.667Z",
+    }
+    black_obs = {
+        **obs(native=10, frame=90, world=(35.6327, -18.3724)),
+        "timestamp": "2026-09-28T07:20:22.667Z",
+    }
+    white_id = manager.confirm_new(white_obs, white, "test_white_person")
+    black_id = manager.confirm_new(black_obs, black, "test_black_person")
+    current = [
+        {**white_obs, "frame": 91, "global_person_id_num": white_id},
+        {**black_obs, "frame": 91, "global_person_id_num": black_id},
+    ]
+    # This detector-backed crop arrived late for a terminated CAM-01 fragment.
+    # Its timestamp is 3.1 s older than the current native outputs; visually
+    # it is the black-shirt person who is later represented by native track 10.
+    candidate = {
+        **obs(native=6, frame=15, world=(31.3182, -12.9751)),
+        "timestamp": "2026-09-28T07:20:19.565Z",
+        "detector_associated": True,
+        "pending_good_crops": 2,
+    }
+    candidate_vector = np.asarray([0.5608, (1.0 - 0.5608**2) ** 0.5], np.float32)
+
+    possible, rejection, _ = manager.hard_possible(
+        manager.identities[black_id], candidate, current, candidate_vector
+    )
+    assert possible
+    assert rejection == ""
+    trace = manager.candidate_trace(candidate, candidate_vector, current)
+    black_candidate = next(row for row in trace if row["global_person_id"] == black_id)
+    assert black_candidate["temporal_gate_reason"] == "future_observation"
+    assert black_candidate["exact_rejection_reason"] != "same_camera_simultaneous"
+
+    novelty = manager.novelty_evidence(candidate, candidate_vector, current, 2, 2)
+    assert not novelty["positive"]
+    assert novelty["reason"] == "non_positive_or_stale_evidence"
+    assert manager.next_number == 3
+
+
+def test_fresh_cross_camera_observation_supports_stale_same_camera_fragment_handoff():
+    manager = GlobalIdentityManager(np.empty((0, 2), np.float32))
+    strong = np.asarray([1.0, 0.0], np.float32)
+    gid = manager.confirm_new(
+        {
+            **obs(native=31, frame=100, world=(39.8, -25.2)),
+            "timestamp": "2026-09-23T11:45:50.000Z",
+        },
+        strong,
+        "test_initial",
+    )
+    manager.accept_existing(
+        gid,
+        {
+            **obs(native=32, frame=150, world=(10.8, -11.8)),
+            "timestamp": "2026-09-23T11:46:00.000Z",
+        },
+        np.asarray([0.9, 0.1], np.float32),
+        {"reason": "test_inactive_fragment"},
+    )
+    manager.accept_existing(
+        gid,
+        {
+            **obs(camera="CAM-04", native=44, frame=200, world=(39.4, -27.1)),
+            "timestamp": "2026-09-23T11:46:00.200Z",
+        },
+        strong,
+        {"reason": "test_current_cross_camera_observation"},
+    )
+    candidate = {
+        **obs(native=33, frame=154, world=(39.3, -27.0)),
+        "timestamp": "2026-09-23T11:46:00.250Z",
+        "detector_associated": True,
+    }
+
+    resolved, evidence = manager.resolve_existing(candidate, strong, [])
+
+    assert resolved == gid
+    assert evidence["reason"] == "cross_camera_geometry_time"
+    assert manager.next_number == 2
+
+
+def test_identity_observation_uses_serialized_3d_detector_confidence_for_association():
+    from types import SimpleNamespace
+
+    from services.mv3dt_room.live_identity_worker import LiveIdentityWorker
+
+    worker = LiveIdentityWorker.__new__(LiveIdentityWorker)
+    worker.metrics = SimpleNamespace(observe=lambda *_args, **_kwargs: None)
+    payload = {"timestamp": "2026-09-23T11:45:50.250Z"}
+    detected = {
+        "id": "33",
+        "bbox": {"leftX": 10, "topY": 20, "rightX": 110, "bottomY": 220},
+        "confidence": 0.06,
+        "bbox3d": {"coordinates": [1.0, 2.0], "confidence": 0.94},
+    }
+    predicted = {
+        **detected,
+        "id": "34",
+        "bbox3d": {"coordinates": [1.0, 2.0], "confidence": -0.1},
+    }
+
+    detected_obs = worker._make_observation("CAM-01", 154, payload, detected, 1, 1)
+    predicted_obs = worker._make_observation("CAM-01", 154, payload, predicted, 1, 1)
+
+    assert detected_obs["detector_confidence"] == 0.94
+    assert detected_obs["detector_associated"] is True
+    assert predicted_obs["detector_associated"] is False
+
+
 def test_active_cross_camera_impossibility_blocks_historical_same_camera_reid():
     manager = GlobalIdentityManager(np.empty((0, 4), np.float32))
     vector = np.asarray([1.0, 0.0, 0.0, 0.0], np.float32)

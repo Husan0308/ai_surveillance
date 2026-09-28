@@ -3,16 +3,24 @@
     "CAM-01",
     "CAM-04"
   ],
-  "accepted_binary_sha256": "555541b73468147743ae7cdfc7f48df9e365eb22f08fbab3ade8124820ee3c7d",
+  "accepted_binary_sha256": "d7dc4c88fba7d652d5d590fa2425043efacb8af45f6a8db7f4f4d1656fe98398",
+  "accepted_binary_metadata": {
+    "source_sha256": "0762ee5f2f16feeb9d430714296f0a386d046103dc6f03fe8e6e85f022393b8f",
+    "identity_manager_sha256": "2f2047d3ef5c4bb7c5b38ee75421c294b59676bbb153bf2e602ae8ec9a9736a9",
+    "build_toolchain": "DeepStream SDK 9.1; nvcr.io/nvidia/deepstream:9.1-triton-multiarch; native build via scripts/dev_room_mv3dt/build_cam04_latency_diagnostic.sh",
+    "validation_revision": "2b05976f3eee316ffaa4dd3ef7c870dd3491c17c plus the validated working-tree identity fix (global_identity_manager.py SHA256 2f2047d3ef5c4bb7c5b38ee75421c294b59676bbb153bf2e602ae8ec9a9736a9)",
+    "validation_date_utc": "2026-09-28",
+    "rollback_backup": "/home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/experiments/deepstream/dev-room-pn263-global-identity-20260921/bin/deepstream-test5-pn263-global-id-proto.pre-stale-fragment-promotion-20260928T085843Z"
+  },
   "validated_assets": {
-    "global_identity_manager.py": "81a4211f290e5804bda16d2904e101f7b1099447bdf5225b52b98dedc4ce91c4",
+    "global_identity_manager.py": "2f2047d3ef5c4bb7c5b38ee75421c294b59676bbb153bf2e602ae8ec9a9736a9",
     "reid_embedder.py": "baf4361a00172a0203437991d4eca42ac6e0e28aa778bb48f53bbc1baedfdc2d",
     "extract_osnet.py": "00b81c8df683fba197b5671be489cd69eff7a78f070adbde53278831c3900437",
     "native/bbox_correction.c": "19265e94ae071b19694e013a2d0764a59f7bb5ba4899852ac4b185d0ab5b84de",
     "native/bbox_history_lifecycle.c": "3cd37e549dfe18d7ac751197bc9eeb2e355888e6ea8024ea585fe701ddcc3a5f",
     "native/bbox_history_lifecycle.h": "f25e9ca30290b5e6b6036a3e2cce69d39f51c2e4eee6b1d4232b5428ceba84a4",
     "native/bbox_correction.h": "b57974e18430cc329b37ecc61f7d2ff560e06463a399e8a02983b19317d12edd",
-    "native/deepstream_test5_app_main.c": "33cb9bd79b16d724502f9928bdc182fb6a59e93ff49b38c9cb0f673eaf3284d6"
+    "native/deepstream_test5_app_main.c": "0762ee5f2f16feeb9d430714296f0a386d046103dc6f03fe8e6e85f022393b8f"
   },
   "accepted_config_sha256": {
     "config_tracker.yml": "80b3af583270f55d9dc976e3e350422ce89faeb14ec0312c643e58d2fce95729",
@@ -31,9 +39,9 @@
   "calibration_note": "camInfo/cam_00.yml and cam_01.yml retain the existing VGGT projection matrices; class-0 PeopleNet model metadata is included as in the accepted PN2.6.3 run.",
   "rebaseline_metadata": {
     "global_identity_manager.py": {
-      "previous_sha256": "6df11973f9ce8d8aa1e521362ee0fa682e80edf990620f4a4551ba617411fe9d",
-      "current_sha256": "81a4211f290e5804bda16d2904e101f7b1099447bdf5225b52b98dedc4ce91c4",
-      "reason": "Require current-camera gallery or recent spatial support for rolling ReID; blocks the observed empty-room pooled-gallery false reuse while preserving supported CAM-04 reacquisition."
+      "previous_sha256": "81a4211f290e5804bda16d2904e101f7b1099447bdf5225b52b98dedc4ce91c4",
+      "current_sha256": "2f2047d3ef5c4bb7c5b38ee75421c294b59676bbb153bf2e602ae8ec9a9736a9",
+      "reason": "Validated source-time-compatible same-camera conflict handling: inactive/stale NvDCF fragments no longer veto a strong detector-backed candidate with compatible history, while current co-visible tracks remain a hard conflict. Candidate replay passed 10/10 with exactly Person_01 and Person_02; Person_06 stale-reuse and genuine reacquisition regression passed."
     },
     "native/bbox_correction.c": {
       "previous_sha256": "72c71eebbc892108ff5271e89fbba292313c9f3ea76eefcf13da50d92f97e3c4",
@@ -41,9 +49,9 @@
       "reason": "Validated bounded bbox-history lifecycle and stale-slot retirement, preventing history-capacity assertion and out-of-bounds behavior."
     },
     "native/deepstream_test5_app_main.c": {
-      "previous_sha256": "5b3c5c04d6f8ec7f666f2c812889144ea7642575f33c7e379bf4fa9cb8a1c465",
-      "current_sha256": "900bc3e4faa546d583a90337d33eaa7c36da134dd0856269a31e2d25c619779c",
-      "reason": "Preserve the bounded two-buffer non-leaky queue before nvstreammux and opt-in CAM-04 test overrides used to diagnose latency; add an opt-in NVIDIA nvds_measure_buffer_latency probe at nvstreammux output to compare decoder-reference-to-mux timing against actual UI paint timing. No production analytics decisions or thresholds change."
+      "previous_sha256": "33cb9bd79b16d724502f9928bdc182fb6a59e93ff49b38c9cb0f673eaf3284d6",
+      "current_sha256": "0762ee5f2f16feeb9d430714296f0a386d046103dc6f03fe8e6e85f022393b8f",
+      "reason": "Accept the native source used to build the candidate after the fresh 620-second six-camera PySide6 latency gate passed with every camera below 40 ms P95, zero reconnects, and replay identity/BEV regressions passing; the installed binary was hash-matched to this source build."
     },
     "config_pgie.txt": {
       "previous_sha256": "c9cb107445ba2b6c52c8602dd00a7d638f7b35e7706507772995d1b88f837abf",

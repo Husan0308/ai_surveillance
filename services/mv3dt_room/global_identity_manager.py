@@ -269,12 +269,33 @@ class GlobalIdentityManager:
         cam, world = obs["camera_id"], obs["world"]
         appearance, _ = self.appearance(vector, ident) if vector is not None else (None, {})
         same_camera_fragment = False
-        # ReID/gallery resolution is asynchronous; the current frame's active
-        # assignment list can be empty even though this identity was observed
-        # from another native target in this same camera only milliseconds
-        # earlier. Honor that retained observation exactly like a simultaneous
-        # entry in frame_assignments, or a visually similar different person
-        # can steal the canonical ID and create a map-position jump.
+        active_cross_compatible = False
+        for other in frame_assignments:
+            if self.root(other["global_person_id_num"]) != ident.number or other["camera_id"] == cam:
+                continue
+            cross_d = distance(world, other.get("world"))
+            cross_dt = observation_time_ms(obs, other)
+            if (cross_d is not None and cross_dt is not None
+                    and cross_d <= IDENTITY_GATES["cross_camera_world_candidate_m"]
+                    and cross_dt <= IDENTITY_GATES["cross_camera_time_ms"]):
+                active_cross_compatible = True
+                break
+        if not active_cross_compatible:
+            for other_camera, other in ident.last_by_camera.items():
+                if other_camera == cam:
+                    continue
+                cross_d = distance(world, other.get("world"))
+                cross_dt = observation_time_ms(obs, other)
+                if (cross_d is not None and cross_dt is not None
+                        and cross_d <= IDENTITY_GATES["cross_camera_world_candidate_m"]
+                        and cross_dt <= IDENTITY_GATES["cross_camera_time_ms"]):
+                    active_cross_compatible = True
+                    break
+        historical_same_camera = self._historical_same_camera_candidate(ident, obs)
+        # ReID/gallery resolution is asynchronous, so a cached same-camera
+        # observation can outlive its NvDCF output. Recent source-time and
+        # spatial evidence may still support a conflict, but frame age alone
+        # is not proof that two native tracks were simultaneously visible.
         last_same_camera = ident.last_by_camera.get(cam)
         if (
             last_same_camera is not None
@@ -285,6 +306,11 @@ class GlobalIdentityManager:
             last_distance = distance(world, last_same_camera.get("world"))
             recently_co_visible = (
                 0 <= same_camera_gap <= IDENTITY_GATES["same_camera_direct_gap_frames"]
+                and same_camera_dt is not None
+                and same_camera_dt <= (
+                    IDENTITY_GATES["same_camera_direct_gap_frames"]
+                    * 1000.0 / IDENTITY_GATES["source_fps"]
+                )
             )
             image_overlap = bbox_iou(obs.get("bbox"), last_same_camera.get("bbox"))
             retained_fragment = (
@@ -312,6 +338,17 @@ class GlobalIdentityManager:
                     same_camera_gap,
                 )
             )
+            cached_native_is_current = any(
+                other["camera_id"] == cam
+                and other["native_track_id"] == last_same_camera.get("native_track_id")
+                and self.root(other["global_person_id_num"]) == ident.number
+                for other in frame_assignments
+            )
+            stale_fragment_supported = (
+                not cached_native_is_current
+                and obs.get("detector_associated") is True
+                and (active_cross_compatible or historical_same_camera is not None)
+            )
             if recently_co_visible and not (retained_fragment or image_supported_motion_fragment):
                 # A historical embedding/world sample must not pull a second,
                 # spatially distinct same-camera target into an identity whose
@@ -319,15 +356,26 @@ class GlobalIdentityManager:
                 # window. This was observed live: a target ~11 m from the
                 # retained native track reused an older 1.9 m historical
                 # sample and produced duplicate simultaneous Person_XX tracks.
-                return False, "same_camera_simultaneous", False
+                if not stale_fragment_supported:
+                    return False, "same_camera_simultaneous", False
             if retained_fragment or image_supported_motion_fragment:
                 same_camera_fragment = True
-            elif same_camera_dt is not None and same_camera_dt <= IDENTITY_GATES["cross_camera_time_ms"]:
-                return False, "same_camera_simultaneous", False
+            elif (cached_native_is_current and same_camera_dt is not None
+                  and same_camera_dt <= IDENTITY_GATES["cross_camera_time_ms"]):
+                if not stale_fragment_supported:
+                    return False, "same_camera_simultaneous", False
         for other in frame_assignments:
             if self.root(other["global_person_id_num"]) != ident.number:
                 continue
             if other["camera_id"] == cam and other["native_track_id"] != obs["native_track_id"]:
+                # The assignment cache is latest-state, not a same-frame
+                # snapshot. A delayed embedding can be evaluated against a
+                # tracker output several seconds newer than its observation;
+                # that does not prove the two native tracks were co-visible.
+                source_dt = observation_time_ms(obs, other)
+                if (source_dt is None
+                        or source_dt > IDENTITY_GATES["cross_camera_time_ms"]):
+                    continue
                 # A tracker fragment can coexist briefly with its predecessor.
                 # Treat it as the same track only when all existing evidence
                 # agrees: tight world proximity, a usable appearance match,
@@ -370,28 +418,6 @@ class GlobalIdentityManager:
             ):
                 return False, "cross_camera_spatial_impossibility", False
         last = ident.last_by_camera.get(cam)
-        active_cross_compatible = False
-        for other in frame_assignments:
-            if self.root(other["global_person_id_num"]) != ident.number or other["camera_id"] == cam:
-                continue
-            cross_d = distance(world, other.get("world"))
-            cross_dt = observation_time_ms(obs, other)
-            if (cross_d is not None and cross_dt is not None
-                    and cross_d <= IDENTITY_GATES["cross_camera_world_candidate_m"]
-                    and cross_dt <= IDENTITY_GATES["cross_camera_time_ms"]):
-                active_cross_compatible = True
-                break
-        if not active_cross_compatible:
-            for other_camera, other in ident.last_by_camera.items():
-                if other_camera == cam:
-                    continue
-                cross_d = distance(world, other.get("world"))
-                cross_dt = observation_time_ms(obs, other)
-                if (cross_d is not None and cross_dt is not None
-                        and cross_d <= IDENTITY_GATES["cross_camera_world_candidate_m"]
-                        and cross_dt <= IDENTITY_GATES["cross_camera_time_ms"]):
-                    active_cross_compatible = True
-                    break
         if last is not None and not active_cross_compatible and not allow_long_gap:
             gap = obs["frame"] - last["frame"]
             d = distance(world, last["world"])
@@ -1044,10 +1070,19 @@ class GlobalIdentityManager:
                 and last_same_camera.get("native_track_id") != obs["native_track_id"]
                 and 0 <= int(obs["frame"]) - int(last_same_camera.get("frame", -1))
                 <= IDENTITY_GATES["same_camera_direct_gap_frames"]
+                and observation_time_ms(obs, last_same_camera) is not None
+                and observation_time_ms(obs, last_same_camera)
+                <= (
+                    IDENTITY_GATES["same_camera_direct_gap_frames"]
+                    * 1000.0 / IDENTITY_GATES["source_fps"]
+                )
             )
             same_camera_conflict = retained_same_camera_conflict or any(
                 item["camera_id"] == obs["camera_id"]
                 and item["native_track_id"] != obs["native_track_id"]
+                and observation_time_ms(obs, item) is not None
+                and observation_time_ms(obs, item)
+                <= IDENTITY_GATES["cross_camera_time_ms"]
                 for item in active
             )
             same_camera_fragment = bool(evidence.get("same_camera_fragment"))

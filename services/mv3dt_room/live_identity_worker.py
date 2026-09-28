@@ -156,6 +156,12 @@ class LiveIdentityWorker:
 
     def _make_observation(self, camera: str, frame: int, payload: dict, obj: dict, receive_mono: int, receive_wall: int) -> dict:
         started = monotonic_ns()
+        bbox3d = obj.get("bbox3d") or {}
+        detector_confidence = bbox3d.get("confidence")
+        try:
+            detector_confidence = float(detector_confidence)
+        except (TypeError, ValueError):
+            detector_confidence = None
         obs = {
             "camera_id": camera,
             "frame": frame,
@@ -166,6 +172,11 @@ class LiveIdentityWorker:
             "bbox": bbox_of(obj),
             "world": world_of(obj),
             "confidence": float(obj.get("confidence", 0.0)),
+            # NvDsEventMsgMeta.bbox3d confidence preserves NvDsObjectMeta's
+            # detector confidence; a negative/unavailable value denotes a
+            # tracker-only output in the native post-tracker audit contract.
+            "detector_confidence": detector_confidence,
+            "detector_associated": detector_confidence is not None and detector_confidence >= 0.0,
             "visibility": float(obj.get("info", {}).get("visibility", 0.0)),
             "receive_timestamp": iso_timestamp(receive_wall),
             "receive_wall_timestamp_ns": receive_wall,
