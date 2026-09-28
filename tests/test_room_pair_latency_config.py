@@ -2,12 +2,41 @@ import json
 from pathlib import Path
 
 from scripts.dev_room_mv3dt.run_room_pair import (
+    configured_camera_decoder_settings,
     deepstream_command,
     live_config,
     apply_test_camera_latency_overrides,
     apply_test_streammux_timeout,
     record_test_streammux_timeout_override,
 )
+
+
+def test_live_profile_decoder_settings_match_validated_camera_sources() -> None:
+    low_latency, extra_surfaces = configured_camera_decoder_settings(
+        {"CAM-01", "CAM-04"}
+    )
+
+    assert low_latency == ("CAM-01", "CAM-04")
+    assert extra_surfaces == {"CAM-04": 8}
+
+
+def test_live_deepstream_command_forwards_profile_decoder_settings(
+    monkeypatch, tmp_path: Path
+) -> None:
+    (tmp_path / "config_deepstream.txt").write_text(
+        "[source0]\nenable=1\n[source1]\nenable=1\n"
+    )
+    (tmp_path / "config_msgconv.txt").write_text(
+        "[sensor0]\nid=CAM-01\n[sensor1]\nid=CAM-04\n"
+    )
+    monkeypatch.delenv("MV3DT_TEST_DECODER_LOW_LATENCY", raising=False)
+    monkeypatch.delenv("MV3DT_TEST_CAM04_DECODER_LOW_LATENCY", raising=False)
+    command = deepstream_command(
+        tmp_path, tmp_path / "binary", "ds-image", "live", "latency-test"
+    )
+
+    assert "MV3DT_DECODER_LOW_LATENCY_CAMERAS=CAM-01,CAM-04" in command
+    assert "MV3DT_DECODER_EXTRA_SURFACES_BY_CAMERA=CAM-04=8" in command
 
 
 def test_live_room_pair_staging_uses_each_camera_latency(tmp_path: Path) -> None:

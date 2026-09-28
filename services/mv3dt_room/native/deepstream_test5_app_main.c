@@ -738,6 +738,59 @@ preview_decoder_output_probe (GstPad *pad, GstPadProbeInfo *info,
   return GST_PAD_PROBE_OK;
 }
 
+static gboolean
+preview_camera_in_csv (const gchar *csv, const gchar *camera_id)
+{
+  gchar **items;
+  gboolean found = FALSE;
+
+  if (!csv || !*csv || !camera_id)
+    return FALSE;
+  items = g_strsplit (csv, ",", -1);
+  for (guint i = 0; items[i] != NULL; i++) {
+    if (g_str_equal (g_strstrip (items[i]), camera_id)) {
+      found = TRUE;
+      break;
+    }
+  }
+  g_strfreev (items);
+  return found;
+}
+
+static gboolean
+preview_camera_extra_surfaces_from_config (const gchar *map,
+    const gchar *camera_id, guint *value)
+{
+  gchar **items;
+  gboolean found = FALSE;
+
+  if (!map || !*map || !camera_id || !value)
+    return FALSE;
+  items = g_strsplit (map, ",", -1);
+  for (guint i = 0; items[i] != NULL; i++) {
+    gchar *entry = g_strstrip (items[i]);
+    gchar *separator = strchr (entry, '=');
+    gchar *raw_value;
+    gchar *end = NULL;
+    guint64 parsed;
+
+    if (!separator)
+      continue;
+    *separator = '\0';
+    if (!g_str_equal (g_strstrip (entry), camera_id))
+      continue;
+    raw_value = g_strstrip (separator + 1);
+    parsed = g_ascii_strtoull (raw_value, &end, 10);
+    if (!end || end == raw_value || *end != '\0' || parsed > 55)
+      break;
+    *value = (guint) parsed;
+    found = TRUE;
+    break;
+  }
+  g_strfreev (items);
+  return found;
+}
+
 static void
 preview_decoder_child_added (GstChildProxy *child_proxy, GObject *object,
     gchar *name, gpointer user_data)
@@ -779,10 +832,16 @@ preview_decoder_child_added (GstChildProxy *child_proxy, GObject *object,
     gboolean low_latency = FALSE;
     guint extra_surfaces = 0;
     gchar *extra_surfaces_end = NULL;
+    const gchar *camera_id = context->camera_index == 0 ? "CAM-01" : "CAM-04";
+    guint configured_extra_surfaces = 0;
     guint64 requested_extra_surfaces = 0;
     const gchar *test_extra_surfaces =
         g_getenv ("MV3DT_TEST_CAM04_DECODER_EXTRA_SURFACES");
+    const gchar *configured_extra_surfaces_map =
+        g_getenv ("MV3DT_DECODER_EXTRA_SURFACES_BY_CAMERA");
     gboolean request_low_latency =
+        preview_camera_in_csv (g_getenv ("MV3DT_DECODER_LOW_LATENCY_CAMERAS"),
+            camera_id) ||
         (context->camera_index == 1 &&
          g_strcmp0 (g_getenv ("MV3DT_TEST_CAM04_DECODER_LOW_LATENCY"), "1") == 0) ||
         g_strcmp0 (g_getenv ("MV3DT_TEST_DECODER_LOW_LATENCY"), "1") == 0;
@@ -803,9 +862,7 @@ preview_decoder_child_added (GstChildProxy *child_proxy, GObject *object,
       preview_decoder_low_latency[context->camera_index] = low_latency;
       g_mutex_unlock (&preview_decode_timing_mutex);
     }
-    /* CAM-04's measured decoder delay tracks eight in-flight frames. Allow a
-     * one-variable diagnostic matching the existing preview-capture default;
-     * production behavior is unchanged unless explicitly requested. */
+    /* Test-only CAM-04 override wins over the validated per-camera profile. */
     if (context->camera_index == 1 && test_extra_surfaces &&
         *test_extra_surfaces && extra_surfaces_property) {
       requested_extra_surfaces = g_ascii_strtoull (test_extra_surfaces,
@@ -814,6 +871,12 @@ preview_decoder_child_added (GstChildProxy *child_proxy, GObject *object,
           requested_extra_surfaces <= 55)
         g_object_set (object, "num-extra-surfaces",
             (guint) requested_extra_surfaces, NULL);
+    } else if (extra_surfaces_property &&
+        preview_camera_extra_surfaces_from_config (
+            configured_extra_surfaces_map, camera_id,
+            &configured_extra_surfaces)) {
+      g_object_set (object, "num-extra-surfaces",
+          configured_extra_surfaces, NULL);
     }
     if (extra_surfaces_property)
       g_object_get (object, "num-extra-surfaces", &extra_surfaces, NULL);
@@ -1256,15 +1319,17 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   if (!source_parent || !GST_IS_BIN (source_parent))
     goto done;
 
-  if (camera_index == 1) {
+  if (camera_index == 0 || camera_index == 1) {
     copy_name = g_strdup_printf ("preview_analytics_copy_%u", source->source_id);
     failure_stage = "analytics_copy_create";
     analytics_copy = gst_element_factory_make ("nvvideoconvert", copy_name);
     if (!analytics_copy)
       goto done;
-    /* Force a real NVMM->NVMM copy for CAM-04 so the analytics queue owns
+    /* Force a real NVMM->NVMM copy before the analytics queue so it owns
      * converter-pool surfaces instead of retaining NVDEC output surfaces.
-     * This is the actual decoder/analytics surface-pool decoupling boundary. */
+     * CAM-01 measurements showed the direct two-buffer queue repeatedly
+     * overran and held NVDEC output nine frames behind; CAM-04 uses the same
+     * boundary and passed with decoder P95 below 5 ms. */
     g_object_set (analytics_copy,
         "gpu-id", 0u,
         "disable-passthrough", TRUE,
@@ -1280,11 +1345,10 @@ preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
   if (!queue)
     goto done;
   /* Preserve every analytics frame. CAM-04 has measured mux/MVA wait bursts
-   * close to 0.5 s at 20 FPS. Two buffers were too shallow and allowed those
-   * waits to backpressure the source/decoder. Keep CAM-01 frozen at two
-   * buffers, while CAM-04 gets 16 buffers (~0.8 s at 20 FPS) so the decoder
-   * can continue producing preview frames through the synchronization burst.
-   * This queue remains non-leaky: analytics frames are never dropped. */
+   * close to 0.5 s at 20 FPS, so it retains 16 buffers. CAM-01 stays at its
+   * existing two-buffer limit. The copy above decouples either queue from the
+   * decoder surfaces without dropping analytics frames; both queues remain
+   * non-leaky. */
   g_object_set (queue,
       "max-size-buffers", queue_buffers,
       "max-size-bytes", 0u,

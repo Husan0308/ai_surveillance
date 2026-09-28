@@ -71,18 +71,18 @@ def _camera_probe(camera: CameraConfig) -> dict:
     }
 
 
-def _test_decoder_low_latency_enabled(camera_id: str) -> bool:
-    """Select low-latency decode only for streams explicitly listed in a test.
-
-    The legacy switch remains available for one-camera experiments. When an
-    allowlist is present it takes precedence, allowing B-frame streams to stay
-    on the normal decoder path without changing production defaults.
-    """
+def _decoder_low_latency_enabled(
+    camera_id: str, configured: bool = False
+) -> bool:
+    """Use the validated camera profile, with explicit test overrides."""
     allowlist = os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY_CAMERAS")
     if allowlist is not None:
         selected = {item.strip() for item in allowlist.split(",") if item.strip()}
         return camera_id in selected
-    return os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY", "0") == "1"
+    legacy_override = os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY")
+    if legacy_override is not None:
+        return legacy_override == "1"
+    return bool(configured)
 
 
 def _test_rtsp_transport_for_camera(camera_id: str, configured: str) -> str:
@@ -200,7 +200,10 @@ class PreviewSource(threading.Thread):
                 )
                 self.stats.transport = transport
                 self.stats.drop_on_latency = bool(self.config.drop_on_latency)
-                low_latency_mode = _test_decoder_low_latency_enabled(self.camera.camera_id)
+                low_latency_mode = _decoder_low_latency_enabled(
+                    self.camera.camera_id,
+                    self.camera.decoder_low_latency_mode,
+                )
                 self.stats.low_latency_mode = low_latency_mode
                 self.stats.postdecode_queue_max_buffers = int(self.config.postdecode_queue_buffers)
                 codec = None
@@ -228,6 +231,7 @@ class PreviewSource(threading.Thread):
                     output_bgrx=True,
                     latency_ms=effective_latency_ms,
                     low_latency_mode=low_latency_mode,
+                    decoder_extra_surfaces=self.camera.decoder_extra_surfaces,
                 )
                 self.stats.low_latency_mode_effective = capture.low_latency_mode_effective
                 retry = max(0.5, float(self.config.reconnect_delay_sec))
@@ -243,11 +247,38 @@ class PreviewSource(threading.Thread):
                         if now - last_progress > max(3.0, self.config.capture_timeout_ms / 1000.0 * 2.5):
                             self.stats.stalled_periods += 1
                             if os.getenv("MV3DT_CAPTURE_STARTUP_DIAGNOSTICS") == "1":
-                                for name, element in (("pipeline", capture.pipeline), ("decoder", capture.decoder), ("sink", capture.sink)):
+                                snapshot = capture.debug_info()
+                                # Keep the diagnostic useful but never write a source URI or credentials.
+                                snapshot.pop("pipeline", None)
+                                for key in ("last_error", "last_warning"):
+                                    if snapshot.get(key):
+                                        snapshot[key] = _safe_error(RuntimeError(snapshot[key]))
+                                elements = {}
+                                for name in ("source", "depay", "parser", "decoder", "latest_queue", "converter", "sink"):
+                                    element = capture.pipeline.get_by_name(name)
+                                    if element is None:
+                                        continue
                                     status, current, pending = element.get_state(0)
-                                    print(json.dumps({"camera_id": self.camera.camera_id, "element": name,
-                                        "state_result": status.value_nick, "current_state": current.value_nick,
-                                        "pending_state": pending.value_nick}), flush=True)
+                                    item = {
+                                        "state_result": status.value_nick,
+                                        "current_state": current.value_nick,
+                                        "pending_state": pending.value_nick,
+                                    }
+                                    if name in {"latest_queue", "sink"}:
+                                        for prop in ("current-level-buffers", "current-level-bytes"):
+                                            try:
+                                                item[prop.replace("-", "_")] = int(element.get_property(prop))
+                                            except Exception:
+                                                pass
+                                    elements[name] = item
+                                print(json.dumps({
+                                    "event": "preview_frame_progression_stalled",
+                                    "camera_id": self.camera.camera_id,
+                                    "monotonic_ns": time.monotonic_ns(),
+                                    "no_frame_seconds": round(now - last_progress, 3),
+                                    "elements": elements,
+                                    "capture": snapshot,
+                                }), flush=True)
                             raise RuntimeError("preview frame progression stalled")
                         continue
                     last_progress = now

@@ -8,7 +8,7 @@ from services.ml_service.app.deepstream.capture import (
     _decoder_extra_surfaces_for_camera,
 )
 from services.camera_v11.preview_only_runtime import (
-    _test_decoder_low_latency_enabled,
+    _decoder_low_latency_enabled,
     _test_rtsp_transport_for_camera,
 )
 
@@ -36,8 +36,12 @@ def test_camera_latency_falls_back_to_global():
     assert camera.effective_latency_ms(150) == 150
 
 
-def test_decoder_low_latency_mode_is_explicitly_opt_in():
+def test_decoder_low_latency_mode_uses_validated_camera_profile():
     settings = load_settings()
+    cameras = {camera.camera_id: camera for camera in settings.cameras}
+    assert all(cameras[camera_id].decoder_low_latency_mode for camera_id in cameras)
+    assert cameras["CAM-04"].decoder_extra_surfaces == 8
+    assert cameras["CAM-01"].decoder_extra_surfaces is None
 
     def pipeline(low_latency: bool) -> str:
         capture = DeepStreamCapture.__new__(DeepStreamCapture)
@@ -51,31 +55,55 @@ def test_decoder_low_latency_mode_is_explicitly_opt_in():
         capture.output_bgrx = True
         capture.latency_ms = 20
         capture.low_latency_mode = low_latency
+        capture.decoder_extra_surfaces = settings.deepstream.decoder_extra_surfaces
         return capture._build_pipeline()
 
     assert "low-latency-mode=true" not in pipeline(False)
     assert "low-latency-mode=true" in pipeline(True)
 
+    capture = DeepStreamCapture.__new__(DeepStreamCapture)
+    capture.camera_id = "CAM-04"
+    capture.uri = "rtsp://camera.invalid/live"
+    capture.codec = "h265"
+    capture.config = settings.deepstream
+    capture.transport = "tcp"
+    capture.username = ""
+    capture.password = ""
+    capture.output_bgrx = True
+    capture.latency_ms = 80
+    capture.low_latency_mode = True
+    capture.decoder_extra_surfaces = cameras["CAM-04"].decoder_extra_surfaces
+    assert "num-extra-surfaces=8" in capture._build_pipeline()
+
 
 def test_preview_low_latency_allowlist_keeps_unlisted_cameras_on_default(monkeypatch):
+    settings = load_settings()
+    cameras = {camera.camera_id: camera for camera in settings.cameras}
     monkeypatch.setenv("MV3DT_TEST_DECODER_LOW_LATENCY", "1")
     monkeypatch.setenv(
         "MV3DT_TEST_DECODER_LOW_LATENCY_CAMERAS", "CAM-01,CAM-04,CAM-05,CAM-06"
     )
 
-    assert _test_decoder_low_latency_enabled("CAM-01") is True
-    assert _test_decoder_low_latency_enabled("CAM-02") is False
-    assert _test_decoder_low_latency_enabled("CAM-03") is False
-    assert _test_decoder_low_latency_enabled("CAM-04") is True
+    assert _decoder_low_latency_enabled("CAM-01", cameras["CAM-01"].decoder_low_latency_mode) is True
+    assert _decoder_low_latency_enabled("CAM-02", cameras["CAM-02"].decoder_low_latency_mode) is False
+    assert _decoder_low_latency_enabled("CAM-03", cameras["CAM-03"].decoder_low_latency_mode) is False
+    assert _decoder_low_latency_enabled("CAM-04", cameras["CAM-04"].decoder_low_latency_mode) is True
 
 
 def test_preview_low_latency_legacy_switch_is_unchanged_without_allowlist(monkeypatch):
     monkeypatch.delenv("MV3DT_TEST_DECODER_LOW_LATENCY_CAMERAS", raising=False)
     monkeypatch.setenv("MV3DT_TEST_DECODER_LOW_LATENCY", "1")
-    assert _test_decoder_low_latency_enabled("CAM-02") is True
+    assert _decoder_low_latency_enabled("CAM-02", False) is True
 
     monkeypatch.setenv("MV3DT_TEST_DECODER_LOW_LATENCY", "0")
-    assert _test_decoder_low_latency_enabled("CAM-02") is False
+    assert _decoder_low_latency_enabled("CAM-02", True) is False
+
+
+def test_preview_low_latency_defaults_to_camera_profile_without_override(monkeypatch):
+    monkeypatch.delenv("MV3DT_TEST_DECODER_LOW_LATENCY_CAMERAS", raising=False)
+    monkeypatch.delenv("MV3DT_TEST_DECODER_LOW_LATENCY", raising=False)
+    assert _decoder_low_latency_enabled("CAM-01", True) is True
+    assert _decoder_low_latency_enabled("CAM-01", False) is False
 
 
 def test_rtsp_transport_override_is_test_only_and_camera_scoped(monkeypatch):

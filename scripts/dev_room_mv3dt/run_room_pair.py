@@ -697,6 +697,34 @@ def audit_camera_mapping(stage: Path) -> str:
     return ";".join(aliases)
 
 
+def configured_camera_decoder_settings(
+    camera_ids: set[str],
+) -> tuple[tuple[str, ...], dict[str, int]]:
+    """Return validated per-camera decoder settings for the selected sources."""
+    with (ROOT / "config/cameras.yaml").open() as handle:
+        rows = yaml.safe_load(handle).get("cameras", [])
+    low_latency_ids: list[str] = []
+    extra_surfaces: dict[str, int] = {}
+    for row in rows:
+        camera_id = str(row.get("id", ""))
+        if camera_id not in camera_ids:
+            continue
+        enabled = row.get("decoder_low_latency_mode", False)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}
+        if bool(enabled):
+            low_latency_ids.append(camera_id)
+        raw_surfaces = row.get("decoder_extra_surfaces")
+        if raw_surfaces is not None:
+            surfaces = int(raw_surfaces)
+            if not 0 <= surfaces <= 24:
+                raise ValueError(
+                    f"{camera_id}: decoder_extra_surfaces must be 0..24"
+                )
+            extra_surfaces[camera_id] = surfaces
+    return tuple(sorted(low_latency_ids)), extra_surfaces
+
+
 def deepstream_command(stage: Path, binary: Path, image: str, source_mode: str, container_name: str) -> list[str]:
     live = source_mode == "live"
     command = [
@@ -713,6 +741,20 @@ def deepstream_command(stage: Path, binary: Path, image: str, source_mode: str, 
         "-v", f"{PROFILE / 'camInfo'}:/workspace/inputs/camInfo:ro",
         "-v", f"{stage}:/workspace/experiments:rw",
         "-w", "/workspace/experiments",
+    ]
+    low_latency_camera_ids, decoder_extra_surfaces = (
+        configured_camera_decoder_settings({"CAM-01", "CAM-04"})
+        if live
+        else ((), {})
+    )
+    command += [
+        "-e",
+        f"MV3DT_DECODER_LOW_LATENCY_CAMERAS={','.join(low_latency_camera_ids)}",
+        "-e",
+        "MV3DT_DECODER_EXTRA_SURFACES_BY_CAMERA=" + ",".join(
+            f"{camera_id}={surfaces}"
+            for camera_id, surfaces in sorted(decoder_extra_surfaces.items())
+        ),
     ]
     queue_override = os.getenv(
         "MV3DT_TEST_CAM04_ANALYTICS_QUEUE_BUFFERS", ""
@@ -853,6 +895,11 @@ def run(
     copy_profile(stage)
     apply_experiment_overrides(stage, run_root, experiment, tracker_lifecycle_diagnostics)
     session_id = run_root.name
+    decoder_low_latency_camera_ids, decoder_extra_surfaces_by_camera = (
+        configured_camera_decoder_settings({"CAM-01", "CAM-04"})
+        if mode == "live"
+        else ((), {})
+    )
     (run_root / "source_mode.json").write_text(json.dumps({
         "source_mode": mode,
         "session_id": session_id,
@@ -867,6 +914,8 @@ def run(
             os.getenv("MV3DT_DIAGNOSTIC_SOURCE_SHA256") if diagnostic_binary else None
         ),
         "decoder_low_latency_mode_test": os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY", "0") == "1",
+        "decoder_low_latency_camera_ids": list(decoder_low_latency_camera_ids),
+        "decoder_extra_surfaces_by_camera": decoder_extra_surfaces_by_camera,
     }, indent=2))
     (run_root / "running").touch()
     container_name = f"ai-surveillance-dev-room-{os.getpid()}"

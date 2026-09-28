@@ -1,35 +1,42 @@
 cameras:
   - id: CAM-01
+    decoder_low_latency_mode: true
     name: Dev Room 2
     room: Devs
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/101
     latency_ms: 20
   - id: CAM-02
+    decoder_low_latency_mode: true
     name: Entrance 2
     room: Entrance
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/201
     latency_ms: 20
   - id: CAM-03
+    decoder_low_latency_mode: true
     name: Main Room 1
     room: Main Rooms
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/301
     latency_ms: 20
   - id: CAM-04
+    decoder_low_latency_mode: true
+    decoder_extra_surfaces: 8
     name: Dev Room 1
     room: Devs
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/601
     latency_ms: 80
   - id: CAM-05
+    decoder_low_latency_mode: true
     name: Entrance 1
     room: Entrance
     enabled: true
     uri: rtsp://192.168.1.210:554/Streaming/Channels/501
     latency_ms: 80
   - id: CAM-06
+    decoder_low_latency_mode: true
     name: Main Room 2
     room: Main Rooms
     enabled: true

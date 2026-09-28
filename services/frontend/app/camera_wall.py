@@ -43,6 +43,13 @@ def _preview_path(camera_id: str) -> str:
     return os.getenv(key, f"/dev/shm/v11_ui_preview_{slug}_v1.bin")
 
 
+def _fast_preview_scale_enabled() -> bool:
+    """Use fast tile scaling by default; fullscreen keeps its smooth scaler."""
+    return os.getenv("FRONTEND_PREVIEW_FAST_SCALE", "1").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def overlay_source_dimensions(camera_id: str, source_mode: str = "live") -> tuple[int, int]:
     """Return the pixel coordinate space used by MV3DT boxes for this source.
 
@@ -104,9 +111,7 @@ class CameraTile(QFrame):
         self.fullscreen_video: QLabel | None = None
         self.fullscreen_shortcut: QShortcut | None = None
         self.show_native = os.getenv("FRONTEND_SHOW_NATIVE_IDS", "0") == "1"
-        self.fast_preview_scale = os.getenv("FRONTEND_PREVIEW_FAST_SCALE", "0").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
+        self.fast_preview_scale = _fast_preview_scale_enabled()
         self.source_mode = "live"
         self.dev_room_canvas_width, self.dev_room_canvas_height = overlay_source_dimensions(camera_id)
 

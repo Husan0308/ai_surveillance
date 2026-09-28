@@ -91,6 +91,7 @@ class DeepStreamCapture:
         output_bgrx: bool = False,
         latency_ms: int | None = None,
         low_latency_mode: bool = False,
+        decoder_extra_surfaces: int | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.uri = uri
@@ -103,6 +104,11 @@ class DeepStreamCapture:
         self.low_latency_mode = bool(low_latency_mode)
         self.low_latency_mode_effective: bool | None = None
         self.latency_ms = int(config.latency_ms if latency_ms is None else latency_ms)
+        self.decoder_extra_surfaces = int(
+            config.decoder_extra_surfaces
+            if decoder_extra_surfaces is None
+            else decoder_extra_surfaces
+        )
         if self.latency_ms < 1:
             raise ValueError(f"{camera_id}: latency_ms must be >= 1")
         self._opened = False
@@ -263,7 +269,7 @@ class DeepStreamCapture:
         queue_buffers = max(1, int(c.postdecode_queue_buffers))
         decoder_extra_surfaces = _decoder_extra_surfaces_for_camera(
             self.camera_id,
-            c.decoder_extra_surfaces,
+            self.decoder_extra_surfaces,
             os.getenv("MV3DT_TEST_DECODER_EXTRA_SURFACES_BY_CAMERA"),
         )
         source_options = [
