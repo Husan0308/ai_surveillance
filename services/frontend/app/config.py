@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from services.runtime_ports import API_BASE_URL_DEFAULT, ML_BASE_URL_DEFAULT
+
 
 @dataclass(frozen=True)
 class FrontendSettings:
@@ -14,8 +16,8 @@ class FrontendSettings:
 
 def load_settings() -> FrontendSettings:
     return FrontendSettings(
-        api_base_url=os.getenv("FRONTEND_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/"),
-        ml_video_base_url=os.getenv("FRONTEND_ML_VIDEO_BASE_URL", "http://127.0.0.1:8001").rstrip("/"),
+        api_base_url=os.getenv("FRONTEND_API_BASE_URL", API_BASE_URL_DEFAULT).rstrip("/"),
+        ml_video_base_url=os.getenv("FRONTEND_ML_VIDEO_BASE_URL", ML_BASE_URL_DEFAULT).rstrip("/"),
         refresh_interval_ms=int(os.getenv("FRONTEND_REFRESH_INTERVAL_MS", "200")),
         frame_refresh_interval_ms=int(os.getenv("FRONTEND_FRAME_REFRESH_INTERVAL_MS", "8")),
     )

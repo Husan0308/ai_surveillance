@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from services.camera_v11.monitoring_telemetry_ipc_v1 import MonitoringTelemetryReader
 from services.ml_service.app.config import load_settings
 from services.ml_service.app.room_pair import router as room_pair_router, state as room_pair_state
+from services.runtime_ports import ML_PORT_DEFAULT
 
 settings = load_settings()
 camera_ids = tuple(camera.camera_id for camera in settings.cameras)
@@ -60,7 +61,7 @@ def main() -> None:
     uvicorn.run(
         app,
         host=os.getenv("ML_HOST", "0.0.0.0"),
-        port=int(os.getenv("ML_PORT", "8001")),
+        port=int(os.getenv("ML_PORT", str(ML_PORT_DEFAULT))),
         reload=False,
         access_log=False,
     )
