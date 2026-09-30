@@ -2,6 +2,7 @@
 """Run the three consecutive production CAM-01/CAM-04 startup checks."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -13,6 +14,10 @@ RUNNER = ROOT / "scripts/dev_room_mv3dt/run_room_pair.py"
 REPORTER = ROOT / "scripts/dev_room_mv3dt/report_startup_run.py"
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--staging-profile", type=Path,
+                        help="Forward explicit candidate pins; diagnostics never bypass hashes")
+    args = parser.parse_args()
     duration = os.environ.get("MV3DT_STARTUP_RUN_SEC", "50")
     env = dict(os.environ)
     env["MV3DT_SOURCE_HEALTH_DIR"] = "1"
@@ -21,8 +26,11 @@ def main() -> int:
     runs = []
     for index in range(1, 4):
         print(f"STARTUP_GATE run={index}/3 duration={duration}s", flush=True)
+        command = [sys.executable, str(RUNNER), "--mode", "live", "--duration", duration, "--skip-render"]
+        if args.staging_profile:
+            command += ["--staging-profile", str(args.staging_profile)]
         result = subprocess.run(
-            [sys.executable, str(RUNNER), "--mode", "live", "--duration", duration, "--skip-render"],
+            command,
             cwd=ROOT, env=env, check=True, capture_output=True, text=True,
         )
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]

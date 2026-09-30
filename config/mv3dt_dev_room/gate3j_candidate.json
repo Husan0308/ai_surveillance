@@ -1,0 +1,22 @@
+{
+  "status": "staged_pending_live_recall",
+  "validation_revision": "8a4769b8f9f2ddbc70f449b8dbd23bc0b511ee54",
+  "source_sha256": "6b7470245be42193bbe58f59476fd20422d02278860f681681ee661c398318cc",
+  "binary_sha256": "6e9604d1aa31e2473303edcc2ef05f3e7812989361b8aad98de703a56a3c8817",
+  "binary": ".runtime/validated-assets/gate3j/6e9604d1aa31e2473303edcc2ef05f3e7812989361b8aad98de703a56a3c8817/deepstream-test5-pn263-global-id-proto",
+  "toolchain_image": "nvcr.io/nvidia/deepstream@sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b",
+  "elf_build_id": "666f6452dac25d37bb452cc64842bc749484fa5b",
+  "frozen_inputs_sha256": {
+    "config/cameras.yaml": "a85ee9cc2fc58abcc4360c650252d8bd4d6f7d16a5a334b89cd060a2f0bbb6f4",
+    "config/mv3dt_dev_room/config_pgie.txt": "c9cb107445ba2b6c52c8602dd00a7d638f7b35e7706507772995d1b88f837abf",
+    "config/mv3dt_dev_room/config_tracker.yml": "9b7b9bddb96abafdb5fdb80b09ea88d7d8804b5f48cd9ee3f5e8296aae945ac0",
+    "config/mv3dt_dev_room/config_deepstream.txt": "32e89cd1fd2be8ffd0599403b994a804229fe1e2a8732d7f382b52401a580c28",
+    "config/mv3dt_dev_room/camInfo/cam_00.yml": "a66ebfed2b7c89ae7727b3c370cc935f389845993d367b3c423ebc833459444b",
+    "config/mv3dt_dev_room/camInfo/cam_01.yml": "4a4cb8decb8fc5182fdfdda4b3778a4f2fa7921b6385b42c6de6cf9bdd239ee2",
+    "services/mv3dt_room/publication_readiness.py": "87aa4949d189f5d44e6f59daba18118f3cea99d86d7610389453298b3364e1b5",
+    "services/mv3dt_room/live_identity_worker.py": "f31bd518c43ed53697ed8359e30ee2bf59fe7d0a88fdcb39ce8e85146e940647",
+    "services/mv3dt_room/room_pair_state.py": "b4a0f09bd63df1c9c8cd2eaeff4c4ff1c014c76510a24f44577a7252c075d29c",
+    "services/mv3dt_room/native/deepstream_crop_encoder.c": "e02339c9be3f896ec42693f1217dc57893f8a72cd49f2f02ad6c782153f6c155"
+  },
+  "production_acceptance": "WITHHELD: real-person live PeopleNet recall is pending; this profile does not rebaseline accepted assets"
+}

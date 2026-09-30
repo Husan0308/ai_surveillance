@@ -25,9 +25,9 @@ import yaml
 from dotenv import dotenv_values
 
 try:
-    from .verify_validated_assets import verify
+    from .verify_validated_assets import load_staging_profile, resolve_binary, verify
 except ImportError:  # Direct script execution.
-    from verify_validated_assets import verify
+    from verify_validated_assets import load_staging_profile, resolve_binary, verify
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -467,36 +467,45 @@ def make_crop_socket_alias(stage: Path, process_id: int | None = None) -> tuple[
         raise RuntimeError("crop socket alias exceeds AF_UNIX path limit")
     return alias, socket_path
 
-def run(mode: str, duration: float | None, skip_render: bool, experiment: str | None = None) -> Path:
+def check_runtime_assets(profile: dict, staging_profile: Path | None = None) -> dict:
+    """Diagnostics collect evidence; they never turn off asset verification."""
+    binary_override = os.getenv("MV3DT_BINARY")
+    source_pin = os.getenv("MV3DT_DIAGNOSTIC_SOURCE_SHA256")
+    binary_pin = os.getenv("MV3DT_DIAGNOSTIC_BINARY_SHA256")
+    image = profile.get("runtime", {}).get("deepstream_image")
+    if os.getenv("MV3DT_DIAGNOSTIC_IDENTITY_GUARD"):
+        raise ValueError("identity asset bypass is not permitted")
+    if staging_profile is not None:
+        if binary_override or source_pin or binary_pin:
+            raise ValueError("choose a staging profile or explicit environment pins, not both")
+        staging = load_staging_profile(ROOT, staging_profile)
+        binary, source_pin, binary_pin = (staging["binary"], staging["source_sha256"],
+                                          staging["binary_sha256"])
+        image = staging["toolchain_image"]
+    else:
+        binary = resolve_binary(ROOT, binary_override or profile["runtime"]["binary"])
+        if (source_pin or binary_pin) and not binary_override:
+            raise ValueError("diagnostic hash pins require an explicit MV3DT_BINARY")
+    return {**verify(ROOT, binary, candidate_source_sha256=source_pin,
+                     candidate_binary_sha256=binary_pin), "deepstream_image": image}
+
+
+def run(mode: str, duration: float | None, skip_render: bool, experiment: str | None = None,
+        staging_profile: Path | None = None) -> Path:
     mode = "replay" if mode == "offline" else mode
     if mode not in {"replay", "live"}:
         raise ValueError(f"unsupported source mode: {mode}")
     profile = load_profile()
-    binary = Path(os.getenv("MV3DT_BINARY", profile["runtime"]["binary"]))
-    # A custom binary is permitted only for the temporary frame-path audit;
-    # normal runs continue to enforce the accepted binary hash. The audit
-    # source itself is the one deliberate, environment-gated exception.
-    audit_mode = bool(os.getenv("MV3DT_FRAME_AUDIT_LOG"))
-    health_mode = bool(os.getenv("MV3DT_SOURCE_HEALTH_DIR"))
-    diagnostic_mode = audit_mode or health_mode
-    identity_guard_mode = bool(os.getenv("MV3DT_DIAGNOSTIC_IDENTITY_GUARD"))
-    check = verify(ROOT, None if diagnostic_mode else binary)
-    if diagnostic_mode:
-        check["errors"] = [
-            error for error in check["errors"]
-            if "native/deepstream_test5_app_main.c" not in error
-            and "native/bbox_correction.c" not in error
-            and not (identity_guard_mode
-                     and "services/mv3dt_room/global_identity_manager.py" in error)
-        ]
-        check["ok"] = not check["errors"]
+    check = check_runtime_assets(profile, staging_profile)
     if not check["ok"]:
         raise SystemExit("validated room-pair asset check failed")
+    binary = Path(check["binary"])
     run_root = ROOT / profile["runtime"]["runtime_root"] / f"{mode}-{time.strftime('%Y%m%d-%H%M%S')}"
     stage = run_root / "run"
     identity_dir = run_root / "identity-live"
     logs = run_root / "logs"
     copy_profile(stage)
+    (run_root / "execution_assets.json").write_text(json.dumps(check, indent=2))
     apply_experiment_overrides(stage, run_root, experiment)
     session_id = run_root.name
     (run_root / "source_mode.json").write_text(json.dumps({
@@ -554,7 +563,7 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
             start_new_session=True,
         )
         deepstream = subprocess.Popen(
-            deepstream_command(stage, binary, profile["runtime"]["deepstream_image"], mode, container_name),
+            deepstream_command(stage, binary, check["deepstream_image"], mode, container_name),
             stdout=(logs / "deepstream.log").open("w"), stderr=subprocess.STDOUT,
             start_new_session=True,
         )
@@ -620,12 +629,14 @@ def main() -> None:
     )
     parser.add_argument("--duration", type=float, default=None)
     parser.add_argument("--skip-render", action="store_true")
+    parser.add_argument("--staging-profile", type=Path, default=None,
+                        help="Validate an exact unaccepted candidate; production acceptance remains pending")
     parser.add_argument(
         "--experiment", choices=tuple(RECALL_EXPERIMENTS), default=None,
         help="Apply an experiment-only overlay to the staged runtime config; production files stay unchanged",
     )
     args = parser.parse_args()
-    print(run(args.mode, args.duration, args.skip_render, args.experiment))
+    print(run(args.mode, args.duration, args.skip_render, args.experiment, args.staging_profile))
 
 
 if __name__ == "__main__":

@@ -27,7 +27,10 @@ identity:
 runtime:
   source_mode_env: MV3DT_DEV_ROOM_SOURCE_MODE
   source_modes: [replay, live]
-  binary: /home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/experiments/deepstream/dev-room-pn263-global-identity-20260921/bin/deepstream-test5-pn263-global-id-proto
+  # This branch accepts the original 555541... artifact, not the shared d7dc...
+  # WIP deployment. Preserve both; Gate 3J uses an explicit pinned staging
+  # profile until person-present recall and later asset acceptance are complete.
+  binary: /home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/experiments/deepstream/dev-room-pn263-global-identity-20260921/bin/deepstream-test5-pn263-global-id-proto.pre-stale-fragment-promotion-20260928T085843Z
   deepstream_image: nvcr.io/nvidia/deepstream:9.1-triton-multiarch
   models_root: /home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/models
   osnet_model: /home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/experiments/deepstream/dev-room-pn263-global-identity-20260921/models/reid/osnet_ain_x1_0_msmt17.pth
