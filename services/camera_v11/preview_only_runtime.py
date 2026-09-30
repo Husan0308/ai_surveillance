@@ -21,7 +21,16 @@ from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameWriter
 from services.ml_service.app.config import CameraConfig, load_settings
 from services.ml_service.app.deepstream.capture import DeepStreamCapture
 
-DEFAULT_CAMERAS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
+DEFAULT_CAMERAS = ("CAM-02", "CAM-03", "CAM-05", "CAM-06")
+
+
+def preview_camera_ids(specification: str) -> tuple[str, ...]:
+    selected = tuple(item.strip() for item in specification.split(",") if item.strip())
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("select distinct preview-only camera IDs")
+    if set(selected) & {"CAM-01", "CAM-04"}:
+        raise ValueError("CAM-01/CAM-04 belong to the MV3DT owner, not preview_only_runtime")
+    return selected
 
 
 class PreviewPublishBudget:
@@ -251,7 +260,10 @@ def main() -> int:
     parser.add_argument("--stats", type=Path)
     parser.add_argument("--duration", type=float, default=0.0)
     args = parser.parse_args()
-    selected = tuple(item.strip() for item in args.cameras.split(",") if item.strip())
+    try:
+        selected = preview_camera_ids(args.cameras)
+    except ValueError as exc:
+        parser.error(str(exc))
     settings = load_settings()
     cameras = {camera.camera_id: camera for camera in settings.cameras}
     missing = sorted(set(selected) - set(cameras))

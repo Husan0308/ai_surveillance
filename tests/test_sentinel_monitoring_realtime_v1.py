@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -10,14 +9,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = ROOT / "services/camera_v11/deepstream_trt86_multi_v1.py"
 CLIENT = ROOT / "services/frontend/sentinel_v1/monitoring_client_v1.py"
 UI_PARTS = ROOT / "services/frontend/sentinel_v1/ui_parts"
-FROZEN_BASE_SHA256 = "5372d7e64b7bed43aabf7947f404973e310138629ecbb8f176b67b5967922cdc"
 
 
-def test_frozen_runtime_and_telemetry_client_architecture() -> None:
-    assert hashlib.sha256(BASE.read_bytes()).hexdigest() == FROZEN_BASE_SHA256
+def test_current_runtime_and_telemetry_client_architecture() -> None:
+    # 9bfb805 deliberately removed the TRT8.6 experiment. Do not restore or
+    # test that obsolete capture owner in the DeepStream 9.1 production graph.
+    from services.camera_v11.preview_only_runtime import DEFAULT_CAMERAS
+
+    assert not (ROOT / "services/camera_v11/deepstream_trt86_multi_v1.py").exists()
+    assert DEFAULT_CAMERAS == ("CAM-02", "CAM-03", "CAM-05", "CAM-06")
+    assert (ROOT / "services/mv3dt_room/native/deepstream_test5_app_main.c").is_file()
     source = CLIENT.read_text().lower()
     assert "qwebsocket" in source
     assert "snapshotchanged" in source

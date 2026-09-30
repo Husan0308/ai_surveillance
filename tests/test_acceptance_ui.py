@@ -278,8 +278,11 @@ def test_fullscreen_uses_full_shared_preview_without_stretching(app, monkeypatch
     tile.deleteLater()
 
 
-def test_shared_preview_stale_frame_is_dropped_not_kept_visible(app, monkeypatch):
+def test_shared_preview_stale_frame_is_dropped_not_kept_visible(app, tmp_path, monkeypatch):
     monkeypatch.setenv("FRONTEND_USE_V11_SHARED_MEMORY", "1")
+    # The stale-frame scenario must not consume a live producer's /dev/shm
+    # frame when the unit suite is run alongside real camera validation.
+    monkeypatch.setenv("V11_UI_PREVIEW_PATH_CAM01", str(tmp_path / "absent-preview.bin"))
     tile = CameraTile("CAM-01", "http://127.0.0.1:8101")
     tile.video.setPixmap(QPixmap(320, 180))
     tile.last_version = 1

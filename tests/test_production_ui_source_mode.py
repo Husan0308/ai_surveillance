@@ -79,9 +79,9 @@ def test_frontend_declares_all_six_camera_tiles() -> None:
     assert "self.camera_wall.set_cameras(list(ALL_CAMERAS))" in text
 
 
-def test_preview_only_runtime_owns_all_ui_preview_cameras() -> None:
+def test_preview_only_runtime_excludes_production_room_pair_owner() -> None:
     from services.camera_v11.preview_only_runtime import DEFAULT_CAMERAS
-    assert set(DEFAULT_CAMERAS) == {f"CAM-{index:02d}" for index in range(1, 7)}
+    assert set(DEFAULT_CAMERAS) == {"CAM-02", "CAM-03", "CAM-05", "CAM-06"}
 
 
 def test_crop_socket_host_alias_stays_within_af_unix_limit(tmp_path: Path) -> None:

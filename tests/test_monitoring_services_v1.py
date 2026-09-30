@@ -93,6 +93,15 @@ def test_ml_health_and_monitoring_endpoint_are_telemetry_only(tmp_path: Path, mo
         assert client.get("/video/CAM-01").status_code == 503
 
 
+def test_ml_health_fails_closed_on_contradictory_readiness(monkeypatch):
+    import services.ml_service.app.main as ml_main
+
+    monkeypatch.setattr(ml_main.room_pair_state, "readiness",
+                        lambda: {"status": "ready", "ready": False})
+    with TestClient(ml_main.app) as client:
+        assert client.get("/health").json()["status"] == "degraded"
+
+
 class FakeMLClient:
     def __init__(self, payload: dict | None = None, error: str | None = None) -> None:
         self.payload = payload
