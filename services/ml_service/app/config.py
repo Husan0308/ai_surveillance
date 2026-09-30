@@ -24,6 +24,8 @@ class CameraConfig:
     room: str = ""
     enabled: bool = True
     latency_ms: int | None = None
+    decoder_low_latency_mode: bool = False
+    decoder_extra_surfaces: int | None = None
 
     def effective_latency_ms(self, fallback_ms: int) -> int:
         value = int(fallback_ms if self.latency_ms is None else self.latency_ms)
@@ -140,6 +142,14 @@ def load_settings(path: str | Path | None = None) -> Settings:
                     if row.get("latency_ms") is not None
                     else None
                 ),
+                decoder_low_latency_mode=_as_bool(
+                    row.get("decoder_low_latency_mode", False)
+                ),
+                decoder_extra_surfaces=(
+                    int(row["decoder_extra_surfaces"])
+                    if row.get("decoder_extra_surfaces") is not None
+                    else None
+                ),
             )
         )
 
@@ -148,6 +158,10 @@ def load_settings(path: str | Path | None = None) -> Settings:
     for camera in cameras:
         if camera.latency_ms is not None and camera.latency_ms < 1:
             raise ValueError(f"{camera.camera_id}: latency_ms must be >= 1")
+        if camera.decoder_extra_surfaces is not None and not 0 <= camera.decoder_extra_surfaces <= 24:
+            raise ValueError(
+                f"{camera.camera_id}: decoder_extra_surfaces must be 0..24"
+            )
 
     ds = raw.get("deepstream") or {}
     display = raw.get("display") or {}

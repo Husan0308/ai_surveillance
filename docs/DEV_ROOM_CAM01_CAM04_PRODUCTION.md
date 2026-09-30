@@ -26,6 +26,27 @@ CAM-02/03/05/06 configured RTSP sources
   -> preview-only production UI tiles
 ```
 
+### Independent room-pair preview prerequisite
+
+The room-pair preview is tapped before analytics, not from tracker output.
+CAM-01 uses the decoded source-bin output; CAM-04 fans out at decoder output
+before its source queue. CAM-04 requests the preview tee pad first and uses a
+forced GPU surface copy on the analytics leg. Both cameras detach the decoded
+surface before the non-leaky analytics handoff (2 buffers for CAM-01, 16 for
+CAM-04). These bounded queues preserve analytics frames; they are not leaky.
+Mux, PGIE, tracker, calibration, and identity configuration is unchanged.
+
+Each preview worker has one replaceable pending frame. Conversion uses a
+direct CUDA copy into registered shared memory without a full-frame CPU BGRA
+copy. Protocol v4 carries camera-local PTS, decoder reference/output times,
+and source sequence through actual UI paint. Decoder readiness gating is a
+separate prerequisite consumer: no WARMING/READY barrier is implemented here.
+
+`config/cameras.yaml` selects the validated IP-only low-latency decoder
+profiles, including CAM-04's eight extra surfaces. It does not change RTSP
+latencies or transport. Do not apply these profiles to a new B-frame stream
+without validating decoder compatibility first.
+
 The detector, tracker, projection, calibration, MVA, identity, and BEV code is
 identical in replay and live modes. Only the CAM-01/CAM-04 source URI staging
 changes.
@@ -63,7 +84,8 @@ Start the local API/ML services using the deployment's configured ports, then
 start the preview-only worker and desktop frontend:
 
 ```bash
-python -m services.camera_v11.preview_only_runtime
+python -m services.camera_v11.preview_only_runtime \
+  --cameras CAM-02,CAM-03,CAM-05,CAM-06
 FRONTEND_USE_V11_SHARED_MEMORY=1 \
 FRONTEND_SHOW_NATIVE_IDS=0 \
 python -m services.frontend.app.main
@@ -93,8 +115,12 @@ python scripts/dev_room_mv3dt/audit_replay_acceptance.py \
 
 The auditor checks canonical allocation, cross-camera coverage, switches,
 merges, unresolved final state, strict presence, BEV movement, FPS, queue
-bounds, crop delivery, CUDA OSNet, Kafka/MQTT, and all four preview-only
-cameras.
+bounds, crop delivery, CUDA OSNet, Kafka/MQTT, source readiness, and reconnects.
+Preview-only health is non-applicable to a scoped URI replay unless explicitly
+supplied. Missing visual telemetry is non-applicable only for skip-render
+replay; computed current-presence/BEV remains gating. Supplied incomplete or
+failed telemetry cannot be made non-applicable. Native fragment overlap is
+diagnostic, not by itself a physical merge or duplicated rendered marker.
 
 The visible identity is always the GlobalIdentityManager application alias.
 Face recognition remains separate. Missing or poor crop evidence does not

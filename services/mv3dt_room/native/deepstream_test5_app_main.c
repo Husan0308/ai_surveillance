@@ -50,6 +50,7 @@
 
 #include "gstnvdsmeta.h"
 #include "nvdsmeta_schema.h"
+#include "nvds_latency_meta.h"
 
 #include "deepstream_test5_app.h"
 #include "bbox_correction.h"
@@ -523,19 +524,91 @@ typedef struct {
   guint height;
   guint stride;
   guint payload_size;
+  gboolean map_cuda_registered;
   guint64 sequence;
   gdouble fps_ema;
   gint64 last_publish_us;
   GMutex mutex;
 } PreviewWriter;
 
+typedef struct {
+  guint64 pts;
+  guint64 dts;
+  guint64 decoder_reference_ns;
+  guint64 decoder_out_ns;
+  gboolean valid;
+} PreviewDecodeTiming;
+
+typedef struct {
+  gint camera_index;
+  guint source_id;
+  GstElement *source_bin;
+  GstElement *analytics_queue;
+  gboolean early_decoder_preview;
+  gboolean early_branch_attached;
+  GstPad *early_decoded_src_pad;
+  gboolean prequeue_surface_copy_enabled;
+} PreviewDecodeProbeContext;
+
+typedef struct {
+  GstBuffer *buffer;
+  guint64 decoder_reference_ns;
+  guint64 decoder_out_ns;
+  guint64 pts_ns;
+  guint64 dts_ns;
+  guint32 source_frame_num;
+} PreviewPendingFrame;
+
+typedef struct {
+  gint camera_index;
+  gboolean stopping;
+  gboolean initialized;
+  guint32 source_frame_num;
+  GMutex mutex;
+  GCond condition;
+  PreviewPendingFrame latest;
+  GThread *thread;
+} PreviewWorker;
+
 static PreviewWriter preview_writers[2];
 static gboolean preview_initialized;
-static GMutex preview_transform_mutex;
+static GMutex preview_transform_session_mutex;
+static GMutex preview_decode_timing_mutex;
+static PreviewDecodeTiming preview_decode_timings[2][512];
+static guint preview_decode_write_index[2];
+static guint64 preview_decode_inputs[2];
+static guint64 preview_decode_outputs[2];
+static guint64 preview_decode_output_matches[2];
+static guint64 preview_decode_matches[2];
+static guint64 preview_decode_misses[2];
+static guint64 preview_input_pts_regressions[2];
+static guint64 preview_output_pts_regressions[2];
+static guint64 preview_input_max_pts_backstep[2];
+static guint64 preview_output_max_pts_backstep[2];
+static FILE *preview_decoder_samples[2];
+static guint64 preview_decoder_sample_bytes[2];
+#define PREVIEW_DECODER_SAMPLE_MAX_BYTES (2U * 1024U * 1024U)
+static guint64 preview_last_input_pts[2];
+static guint64 preview_last_output_pts[2];
+static PreviewDecodeProbeContext preview_decode_probe_contexts[2];
+static PreviewWorker preview_workers[2];
+static GstElement *preview_mux_queues[2];
+static guint preview_mux_queue_limits[2];
+static guint preview_mux_queue_overruns[2];
+static gchar *preview_diagnostics_path;
+static gboolean preview_decoder_low_latency_known[2];
+static gboolean preview_decoder_low_latency[2];
+static FILE *native_latency_file;
+static GMutex native_latency_mutex;
+static gboolean native_latency_initialized;
+
+static gpointer preview_worker_thread (gpointer user_data);
+static GstPadProbeReturn preview_source_pad_probe (GstPad *pad,
+    GstPadProbeInfo *info, gpointer user_data);
 
 #define PREVIEW_MAGIC "V11UI01\0"
-#define PREVIEW_VERSION 1
-#define PREVIEW_HEADER_SIZE 64
+#define PREVIEW_VERSION 4
+#define PREVIEW_HEADER_SIZE 104
 #define PREVIEW_WIDTH 1920
 #define PREVIEW_HEIGHT 1080
 #define PREVIEW_STRIDE (PREVIEW_WIDTH * 4)
@@ -553,19 +626,384 @@ preview_camera_index (guint source_id, guint pad_index)
 
 static gboolean
 preview_write_header (PreviewWriter *writer, guint object_count, guint fps_milli,
-    guint64 timestamp_ns)
+    guint64 timestamp_ns, guint64 decoder_reference_ns,
+    guint64 decoder_out_ns, guint64 pts_ns, guint64 dts_ns,
+    guint source_frame_num)
 {
   guint8 header[PREVIEW_HEADER_SIZE] = {0};
   guint32 version = PREVIEW_VERSION;
   guint64 sequence = writer->sequence;
   guint32 values[6] = {writer->width, writer->height, writer->stride,
       writer->payload_size, object_count, fps_milli};
+  guint32 reserved = 0;
   memcpy (header, PREVIEW_MAGIC, 8);
   memcpy (header + 8, &version, sizeof (version));
   memcpy (header + 12, &sequence, sizeof (sequence));
   memcpy (header + 20, &timestamp_ns, sizeof (timestamp_ns));
   memcpy (header + 28, values, sizeof (values));
+  memcpy (header + 52, &decoder_reference_ns, sizeof (decoder_reference_ns));
+  memcpy (header + 60, &decoder_out_ns, sizeof (decoder_out_ns));
+  memcpy (header + 68, &pts_ns, sizeof (pts_ns));
+  memcpy (header + 76, &dts_ns, sizeof (dts_ns));
+  memcpy (header + 84, &source_frame_num, sizeof (source_frame_num));
+  memcpy (header + 88, &reserved, sizeof (reserved));
   return pwrite (writer->fd, header, PREVIEW_HEADER_SIZE, 0) == PREVIEW_HEADER_SIZE;
+}
+
+static GstPadProbeReturn
+preview_decoder_input_probe (GstPad *pad, GstPadProbeInfo *info,
+    gpointer user_data)
+{
+  GstBuffer *buffer = info ? GST_PAD_PROBE_INFO_BUFFER (info) : NULL;
+  PreviewDecodeProbeContext *context = (PreviewDecodeProbeContext *) user_data;
+  guint64 pts;
+  guint slot;
+  (void) pad;
+
+  if (!buffer || !context || context->camera_index < 0 ||
+      context->camera_index >= 2)
+    return GST_PAD_PROBE_OK;
+  if (preview_decoder_samples[context->camera_index] &&
+      preview_decoder_sample_bytes[context->camera_index] <
+          PREVIEW_DECODER_SAMPLE_MAX_BYTES) {
+    GstMapInfo sample_map = GST_MAP_INFO_INIT;
+    if (gst_buffer_map (buffer, &sample_map, GST_MAP_READ)) {
+      guint64 remaining = PREVIEW_DECODER_SAMPLE_MAX_BYTES -
+          preview_decoder_sample_bytes[context->camera_index];
+      gsize amount = (gsize) MIN ((guint64) sample_map.size, remaining);
+      if (amount > 0) {
+        preview_decoder_sample_bytes[context->camera_index] += fwrite (
+            sample_map.data, 1, amount,
+            preview_decoder_samples[context->camera_index]);
+        fflush (preview_decoder_samples[context->camera_index]);
+      }
+      gst_buffer_unmap (buffer, &sample_map);
+    }
+  }
+  pts = GST_BUFFER_PTS (buffer);
+  if (!GST_CLOCK_TIME_IS_VALID (pts))
+    return GST_PAD_PROBE_OK;
+  g_mutex_lock (&preview_decode_timing_mutex);
+  slot = preview_decode_write_index[context->camera_index]++ %
+      G_N_ELEMENTS (preview_decode_timings[0]);
+  PreviewDecodeTiming *timing = &preview_decode_timings[context->camera_index][slot];
+  timing->pts = pts;
+  timing->dts = GST_CLOCK_TIME_IS_VALID (GST_BUFFER_DTS (buffer)) ? GST_BUFFER_DTS (buffer) : 0;
+  timing->decoder_reference_ns = (guint64) g_get_monotonic_time () * 1000;
+  timing->decoder_out_ns = 0;
+  timing->valid = TRUE;
+  preview_decode_inputs[context->camera_index]++;
+  if (preview_last_input_pts[context->camera_index] > pts) {
+    guint64 backstep = preview_last_input_pts[context->camera_index] - pts;
+    preview_input_pts_regressions[context->camera_index]++;
+    preview_input_max_pts_backstep[context->camera_index] = MAX (
+        preview_input_max_pts_backstep[context->camera_index], backstep);
+  }
+  preview_last_input_pts[context->camera_index] = pts;
+  g_mutex_unlock (&preview_decode_timing_mutex);
+  return GST_PAD_PROBE_OK;
+}
+
+static GstPadProbeReturn
+preview_decoder_output_probe (GstPad *pad, GstPadProbeInfo *info,
+    gpointer user_data)
+{
+  GstBuffer *buffer = info ? GST_PAD_PROBE_INFO_BUFFER (info) : NULL;
+  PreviewDecodeProbeContext *context = (PreviewDecodeProbeContext *) user_data;
+  guint64 pts;
+  gboolean found = FALSE;
+  (void) pad;
+
+  if (!buffer || !context || context->camera_index < 0 || context->camera_index >= 2)
+    return GST_PAD_PROBE_OK;
+  pts = GST_BUFFER_PTS (buffer);
+  if (!GST_CLOCK_TIME_IS_VALID (pts))
+    return GST_PAD_PROBE_OK;
+  g_mutex_lock (&preview_decode_timing_mutex);
+  preview_decode_outputs[context->camera_index]++;
+  if (preview_last_output_pts[context->camera_index] > pts) {
+    guint64 backstep = preview_last_output_pts[context->camera_index] - pts;
+    preview_output_pts_regressions[context->camera_index]++;
+    preview_output_max_pts_backstep[context->camera_index] = MAX (
+        preview_output_max_pts_backstep[context->camera_index], backstep);
+  }
+  preview_last_output_pts[context->camera_index] = pts;
+  for (guint slot = 0; slot < G_N_ELEMENTS (preview_decode_timings[0]); slot++) {
+    PreviewDecodeTiming *timing = &preview_decode_timings[context->camera_index][slot];
+    if (timing->valid && timing->pts == pts && timing->decoder_out_ns == 0 &&
+        timing->decoder_reference_ns > 0) {
+      timing->decoder_out_ns = (guint64) g_get_monotonic_time () * 1000;
+      preview_decode_output_matches[context->camera_index]++;
+      found = TRUE;
+      break;
+    }
+  }
+  g_mutex_unlock (&preview_decode_timing_mutex);
+  if (!found) {
+    static gint unmatched_logs[2];
+    if (g_atomic_int_add (&unmatched_logs[context->camera_index], 1) < 5)
+      g_printerr ("preview: decoder output PTS had no input timestamp camera_index=%d pts=%" G_GUINT64_FORMAT "\n",
+          context->camera_index, pts);
+  }
+  return GST_PAD_PROBE_OK;
+}
+
+static gboolean
+preview_camera_in_csv (const gchar *csv, const gchar *camera_id)
+{
+  gchar **items;
+  gboolean found = FALSE;
+
+  if (!csv || !*csv || !camera_id)
+    return FALSE;
+  items = g_strsplit (csv, ",", -1);
+  for (guint i = 0; items[i] != NULL; i++) {
+    if (g_str_equal (g_strstrip (items[i]), camera_id)) {
+      found = TRUE;
+      break;
+    }
+  }
+  g_strfreev (items);
+  return found;
+}
+
+static gboolean
+preview_camera_extra_surfaces_from_config (const gchar *map,
+    const gchar *camera_id, guint *value)
+{
+  gchar **items;
+  gboolean found = FALSE;
+
+  if (!map || !*map || !camera_id || !value)
+    return FALSE;
+  items = g_strsplit (map, ",", -1);
+  for (guint i = 0; items[i] != NULL; i++) {
+    gchar *entry = g_strstrip (items[i]);
+    gchar *separator = strchr (entry, '=');
+    gchar *raw_value;
+    gchar *end = NULL;
+    guint64 parsed;
+
+    if (!separator)
+      continue;
+    *separator = '\0';
+    if (!g_str_equal (g_strstrip (entry), camera_id))
+      continue;
+    raw_value = g_strstrip (separator + 1);
+    parsed = g_ascii_strtoull (raw_value, &end, 10);
+    if (!end || end == raw_value || *end != '\0' || parsed > 55)
+      break;
+    *value = (guint) parsed;
+    found = TRUE;
+    break;
+  }
+  g_strfreev (items);
+  return found;
+}
+
+static void
+preview_decoder_child_added (GstChildProxy *child_proxy, GObject *object,
+    gchar *name, gpointer user_data)
+{
+  PreviewDecodeProbeContext *context = (PreviewDecodeProbeContext *) user_data;
+  guint children;
+  (void) child_proxy;
+  if (!object || !name || !context)
+    return;
+
+  /* decodebin may create its decoder before preview_attach() connects to the
+   * child-added signal. Walk existing descendants as well as watching future
+   * children, and mark every proxy so nested trees are hooked only once. */
+  if (GST_IS_CHILD_PROXY (object) &&
+      !g_object_get_data (object, "mv3dt-preview-child-proxy-hooked")) {
+    g_object_set_data (object, "mv3dt-preview-child-proxy-hooked",
+        GINT_TO_POINTER (1));
+    g_signal_connect (object, "child-added",
+        G_CALLBACK (preview_decoder_child_added), user_data);
+    children = gst_child_proxy_get_children_count (GST_CHILD_PROXY (object));
+    for (guint i = 0; i < children; i++) {
+      GObject *child = gst_child_proxy_get_child_by_index (
+          GST_CHILD_PROXY (object), i);
+      if (child) {
+        const gchar *child_name = GST_IS_OBJECT (child) ?
+            GST_OBJECT_NAME (child) : "";
+        preview_decoder_child_added (GST_CHILD_PROXY (object), child,
+            (gchar *) child_name, user_data);
+        g_object_unref (child);
+      }
+    }
+  }
+
+  if (g_str_has_prefix (name, "nvv4l2decoder") &&
+      !g_object_get_data (object, "mv3dt-preview-decoder-probes-installed")) {
+    GstElement *decoder = GST_ELEMENT (object);
+    GstPad *sink = gst_element_get_static_pad (decoder, "sink");
+    GstPad *src = gst_element_get_static_pad (decoder, "src");
+    gboolean low_latency = FALSE;
+    guint extra_surfaces = 0;
+    gchar *extra_surfaces_end = NULL;
+    const gchar *camera_id = context->camera_index == 0 ? "CAM-01" : "CAM-04";
+    guint configured_extra_surfaces = 0;
+    guint64 requested_extra_surfaces = 0;
+    const gchar *test_extra_surfaces =
+        g_getenv ("MV3DT_TEST_CAM04_DECODER_EXTRA_SURFACES");
+    const gchar *configured_extra_surfaces_map =
+        g_getenv ("MV3DT_DECODER_EXTRA_SURFACES_BY_CAMERA");
+    gboolean request_low_latency =
+        preview_camera_in_csv (g_getenv ("MV3DT_DECODER_LOW_LATENCY_CAMERAS"),
+            camera_id) ||
+        (context->camera_index == 1 &&
+         g_strcmp0 (g_getenv ("MV3DT_TEST_CAM04_DECODER_LOW_LATENCY"), "1") == 0) ||
+        g_strcmp0 (g_getenv ("MV3DT_TEST_DECODER_LOW_LATENCY"), "1") == 0;
+    GParamSpec *low_latency_property =
+        g_object_class_find_property (G_OBJECT_GET_CLASS (object), "low-latency-mode");
+    GParamSpec *extra_surfaces_property =
+        g_object_class_find_property (G_OBJECT_GET_CLASS (object),
+            "num-extra-surfaces");
+    g_object_set_data (object, "mv3dt-preview-decoder-probes-installed",
+        GINT_TO_POINTER (1));
+    if (request_low_latency && low_latency_property) {
+      g_object_set (object, "low-latency-mode", TRUE, NULL);
+    }
+    if (low_latency_property) {
+      g_object_get (object, "low-latency-mode", &low_latency, NULL);
+      g_mutex_lock (&preview_decode_timing_mutex);
+      preview_decoder_low_latency_known[context->camera_index] = TRUE;
+      preview_decoder_low_latency[context->camera_index] = low_latency;
+      g_mutex_unlock (&preview_decode_timing_mutex);
+    }
+    /* Test-only CAM-04 override wins over the validated per-camera profile. */
+    if (context->camera_index == 1 && test_extra_surfaces &&
+        *test_extra_surfaces && extra_surfaces_property) {
+      requested_extra_surfaces = g_ascii_strtoull (test_extra_surfaces,
+          &extra_surfaces_end, 10);
+      if (extra_surfaces_end && *extra_surfaces_end == '\0' &&
+          requested_extra_surfaces <= 55)
+        g_object_set (object, "num-extra-surfaces",
+            (guint) requested_extra_surfaces, NULL);
+    } else if (extra_surfaces_property &&
+        preview_camera_extra_surfaces_from_config (
+            configured_extra_surfaces_map, camera_id,
+            &configured_extra_surfaces)) {
+      g_object_set (object, "num-extra-surfaces",
+          configured_extra_surfaces, NULL);
+    }
+    if (extra_surfaces_property)
+      g_object_get (object, "num-extra-surfaces", &extra_surfaces, NULL);
+    g_print ("preview: decoder low-latency-mode camera_index=%d requested=%s available=%s effective=%s\n",
+        context->camera_index, request_low_latency ? "true" : "false",
+        low_latency_property ? "true" : "false",
+        low_latency ? "true" : "false");
+    g_print ("preview: decoder extra-surfaces camera_index=%d effective=%u\n",
+        context->camera_index, extra_surfaces);
+    if (sink) {
+      gst_pad_add_probe (sink, GST_PAD_PROBE_TYPE_BUFFER,
+          preview_decoder_input_probe, user_data, NULL);
+      gst_object_unref (sink);
+    }
+    if (src) {
+      gst_pad_add_probe (src, GST_PAD_PROBE_TYPE_BUFFER,
+          preview_decoder_output_probe, user_data, NULL);
+      gst_object_unref (src);
+    }
+    g_print ("preview: exact decoder pads instrumented camera_index=%d name=%s\n",
+        context->camera_index, name);
+  }
+}
+
+static gboolean
+preview_diagnostics_timer_cb (gpointer user_data)
+{
+  FILE *file;
+  (void) user_data;
+
+  if (!preview_diagnostics_path || !*preview_diagnostics_path)
+    return G_SOURCE_CONTINUE;
+  file = fopen (preview_diagnostics_path, "a");
+  if (!file)
+    return G_SOURCE_CONTINUE;
+  for (guint i = 0; i < 2; i++) {
+    guint64 inputs, outputs, output_matches, matches, misses;
+    guint64 input_regressions, output_regressions, input_backstep, output_backstep;
+    gboolean low_latency_known, low_latency;
+    guint mux_queue_level = 0, mux_queue_limit = 0;
+    guint mux_queue_overruns = 0;
+    g_mutex_lock (&preview_decode_timing_mutex);
+    inputs = preview_decode_inputs[i];
+    outputs = preview_decode_outputs[i];
+    output_matches = preview_decode_output_matches[i];
+    matches = preview_decode_matches[i];
+    misses = preview_decode_misses[i];
+    input_regressions = preview_input_pts_regressions[i];
+    output_regressions = preview_output_pts_regressions[i];
+    input_backstep = preview_input_max_pts_backstep[i];
+    output_backstep = preview_output_max_pts_backstep[i];
+    low_latency_known = preview_decoder_low_latency_known[i];
+    low_latency = preview_decoder_low_latency[i];
+    g_mutex_unlock (&preview_decode_timing_mutex);
+    if (preview_mux_queues[i]) {
+      g_object_get (preview_mux_queues[i],
+          "current-level-buffers", &mux_queue_level,
+          "max-size-buffers", &mux_queue_limit,
+          NULL);
+    }
+    mux_queue_overruns = (guint) g_atomic_int_get (
+        (volatile gint *) &preview_mux_queue_overruns[i]);
+    fprintf (file,
+        "{\"camera_id\":\"%s\",\"decoder_input\":%" G_GUINT64_FORMAT
+        ",\"decoder_output\":%" G_GUINT64_FORMAT
+        ",\"output_pts_matches\":%" G_GUINT64_FORMAT
+        ",\"preview_pts_matches\":%" G_GUINT64_FORMAT
+        ",\"preview_pts_misses\":%" G_GUINT64_FORMAT
+        ",\"input_pts_backsteps\":%" G_GUINT64_FORMAT
+        ",\"input_max_backstep_ms\":%.3f"
+        ",\"output_pts_backsteps\":%" G_GUINT64_FORMAT
+        ",\"output_max_backstep_ms\":%.3f"
+        ",\"low_latency_mode_known\":%s,\"low_latency_mode\":%s"
+        ",\"analytics_queue_level\":%u,\"analytics_queue_limit\":%u"
+        ",\"analytics_queue_overruns\":%u}\n",
+        i == 0 ? "CAM-01" : "CAM-04", inputs, outputs, output_matches,
+        matches, misses, input_regressions, input_backstep / 1.0e6,
+        output_regressions, output_backstep / 1.0e6,
+        low_latency_known ? "true" : "false",
+        low_latency ? "true" : "false",
+        mux_queue_level, mux_queue_limit, mux_queue_overruns);
+  }
+  fflush (file);
+  fclose (file);
+  return G_SOURCE_CONTINUE;
+}
+
+static gboolean
+preview_get_decode_timing (gint camera_index, guint64 pts,
+    guint64 *decoder_reference_ns, guint64 *decoder_out_ns, guint64 *dts_ns)
+{
+  gboolean found = FALSE;
+
+  if (camera_index < 0 || camera_index >= 2 || !GST_CLOCK_TIME_IS_VALID (pts))
+    return FALSE;
+  g_mutex_lock (&preview_decode_timing_mutex);
+  /* PTS modulo a small ring size is not a valid hash: common frame periods
+   * share only a handful of slots and overwrite timestamps before matching.
+   * Search the bounded 512-entry ring by exact PTS instead. */
+  for (guint slot = 0; slot < G_N_ELEMENTS (preview_decode_timings[0]); slot++) {
+    PreviewDecodeTiming *timing = &preview_decode_timings[camera_index][slot];
+    if (timing->valid && timing->pts == pts && timing->decoder_reference_ns > 0 &&
+        timing->decoder_out_ns > 0) {
+      *decoder_reference_ns = timing->decoder_reference_ns;
+      *decoder_out_ns = timing->decoder_out_ns;
+      *dts_ns = timing->dts;
+      timing->valid = FALSE;
+      found = TRUE;
+      break;
+    }
+  }
+  if (found)
+    preview_decode_matches[camera_index]++;
+  else
+    preview_decode_misses[camera_index]++;
+  g_mutex_unlock (&preview_decode_timing_mutex);
+  return found;
 }
 
 static gboolean
@@ -604,9 +1042,21 @@ preview_open_writer (PreviewWriter *writer, const gchar *directory,
     writer->map = NULL;
     return FALSE;
   }
+  {
+    cudaError_t register_error = cudaHostRegister (writer->map,
+        writer->map_size, 0);
+    if (register_error != cudaSuccess) {
+      g_printerr ("preview: required cudaHostRegister failed path=%s error=%s; preview disabled\n",
+          path, cudaGetErrorString (register_error));
+      return FALSE;
+    }
+    writer->map_cuda_registered = TRUE;
+  }
   memset (writer->map, 0, writer->map_size);
   writer->enabled = TRUE;
-  preview_write_header (writer, 0, 0, 0);
+  g_print ("preview: production CUDA shared-memory copy enabled path=%s bytes=%u\n",
+      path, writer->payload_size);
+  preview_write_header (writer, 0, 0, 0, 0, 0, 0, 0, 0);
   return TRUE;
 }
 
@@ -614,12 +1064,30 @@ static gboolean
 preview_open (void)
 {
   const gchar *directory = g_getenv ("MV3DT_UI_PREVIEW_DIR");
+  const gchar *sample_directory = g_getenv ("MV3DT_DECODER_AU_DUMP_DIR");
+  preview_diagnostics_path = g_strdup (g_getenv ("MV3DT_UI_PREVIEW_DIAGNOSTICS"));
   NvBufSurfaceCreateParams params;
 
   if (preview_initialized)
     return preview_writers[0].enabled || preview_writers[1].enabled;
   preview_initialized = TRUE;
-  g_mutex_init (&preview_transform_mutex);
+  g_mutex_init (&preview_transform_session_mutex);
+  g_mutex_init (&preview_decode_timing_mutex);
+  if (sample_directory && *sample_directory) {
+    g_mkdir_with_parents (sample_directory, 0755);
+    for (guint i = 0; i < 2; i++) {
+      gchar *sample_path = g_build_filename (sample_directory,
+          i == 0 ? "cam_00.h264" : "cam_01.h265", NULL);
+      preview_decoder_samples[i] = fopen (sample_path, "wb");
+      if (preview_decoder_samples[i])
+        g_print ("preview: decoder bitstream sample enabled camera_index=%u\n", i);
+      else
+        g_printerr ("preview: could not open decoder bitstream sample camera_index=%u\n", i);
+      g_free (sample_path);
+    }
+  }
+  preview_workers[0].camera_index = -1;
+  preview_workers[1].camera_index = -1;
   if (!directory || !*directory)
     return FALSE;
   g_mkdir_with_parents (directory, 0755);
@@ -640,14 +1108,18 @@ preview_open (void)
       preview_writers[i].enabled = FALSE;
       continue;
     }
-    g_print ("preview: enabled camera_index=%u path=%s\n", i, preview_writers[i].path);
+    g_print ("preview: enabled camera_index=%u path=%s target_memtype=%u pitch=%u\n",
+        i, preview_writers[i].path, preview_writers[i].target->memType,
+        preview_writers[i].target->surfaceList[0].pitch);
   }
+  g_print ("preview: production architecture latest_slot=1 direct_cuda_copy=true CAM-01=sourcebin_tap CAM-04=early_decoder_tee+analytics_surface_detach\n");
   return preview_writers[0].enabled || preview_writers[1].enabled;
 }
 
 static void
-preview_publish (NvBufSurface *surface, NvDsFrameMeta *frame_meta,
-    guint object_count)
+preview_publish_surface (NvBufSurface *surface, gint camera_index,
+    guint64 decoder_reference_ns, guint64 decoder_out_ns, guint64 pts_ns,
+    guint64 dts_ns, guint32 source_frame_num)
 {
   NvBufSurface src;
   NvBufSurfTransformConfigParams config;
@@ -656,36 +1128,16 @@ preview_publish (NvBufSurface *surface, NvDsFrameMeta *frame_meta,
   NvBufSurfaceParams *src_params;
   NvBufSurfaceParams *dst_params;
   PreviewWriter *writer;
-  gint camera_index;
   gint64 now_us;
-  guint8 *dst;
-  guint y;
 
-  if (!surface || !frame_meta)
+  if (!surface || camera_index < 0 || camera_index >= 2 ||
+      !preview_writers[camera_index].enabled || surface->batchSize < 1)
     return;
-  camera_index = preview_camera_index (frame_meta->source_id, frame_meta->pad_index);
-  if (frame_meta->batch_id >= surface->batchSize) {
-    static gboolean logged_invalid_batch[2];
-    if (camera_index >= 0 && camera_index < 2 && !logged_invalid_batch[camera_index]) {
-      g_printerr ("preview: invalid batch index camera_index=%d source=%u pad=%u batch_id=%u batch_size=%u\n",
-          camera_index, frame_meta->source_id, frame_meta->pad_index, frame_meta->batch_id, surface->batchSize);
-      logged_invalid_batch[camera_index] = TRUE;
-    }
-    return;
-  }
-  if (camera_index < 0 || !preview_writers[camera_index].enabled) {
-    static gboolean logged_unmapped[2];
-    if (camera_index >= 0 && !logged_unmapped[camera_index]) {
-      g_printerr ("preview: writer disabled camera_index=%d source=%u pad=%u\n", camera_index, frame_meta->source_id, frame_meta->pad_index);
-      logged_unmapped[camera_index] = TRUE;
-    }
-    return;
-  }
   writer = &preview_writers[camera_index];
   src = *surface;
   src.numFilled = 1;
   src.batchSize = 1;
-  src.surfaceList = &surface->surfaceList[frame_meta->batch_id];
+  src.surfaceList = &surface->surfaceList[0];
   src_params = &src.surfaceList[0];
   dst_params = &writer->target->surfaceList[0];
   memset (&config, 0, sizeof (config));
@@ -702,7 +1154,7 @@ preview_publish (NvBufSurface *surface, NvDsFrameMeta *frame_meta,
   transform.dst_rect = &dst_rect;
   transform.transform_flag = NVBUFSURF_TRANSFORM_FILTER;
   transform.transform_filter = NvBufSurfTransformInter_Default;
-  g_mutex_lock (&preview_transform_mutex);
+  g_mutex_lock (&preview_transform_session_mutex);
   {
     NvBufSurfTransform_Error session_error = NvBufSurfTransformSetSessionParams (&config);
     NvBufSurfTransform_Error transform_error = session_error == NvBufSurfTransformError_Success ?
@@ -710,21 +1162,25 @@ preview_publish (NvBufSurface *surface, NvDsFrameMeta *frame_meta,
     if (transform_error != NvBufSurfTransformError_Success) {
       static gboolean logged_transform[2];
       if (!logged_transform[camera_index]) {
-        g_printerr ("preview: transform failed camera_index=%d source=%u pad=%u batch_id=%u batch_size=%u src=%ux%u format=%d error=%d\n",
-            camera_index, frame_meta->source_id, frame_meta->pad_index, frame_meta->batch_id,
-            surface->batchSize, src_params->width, src_params->height, src_params->colorFormat, transform_error);
+        g_printerr ("preview: transform failed camera_index=%d batch_size=%u src=%ux%u format=%d error=%d\n",
+            camera_index, surface->batchSize, src_params->width, src_params->height,
+            src_params->colorFormat, transform_error);
         logged_transform[camera_index] = TRUE;
       }
-      g_mutex_unlock (&preview_transform_mutex);
+      g_mutex_unlock (&preview_transform_session_mutex);
       return;
     }
   }
-  if (NvBufSurfaceMap (writer->target, 0, 0, NVBUF_MAP_READ) != 0) {
-    g_mutex_unlock (&preview_transform_mutex);
+  g_mutex_unlock (&preview_transform_session_mutex);
+  if (NvBufSurfaceMap (writer->target, 0, 0, NVBUF_MAP_READ) != 0)
+    return;
+  NvBufSurfaceSyncForCpu (writer->target, 0, 0);
+  if (!writer->map_cuda_registered) {
+    g_printerr ("preview: required CUDA shared-memory copy is unavailable camera_index=%d\n",
+        camera_index);
+    NvBufSurfaceUnMap (writer->target, 0, 0);
     return;
   }
-  NvBufSurfaceSyncForCpu (writer->target, 0, 0);
-  dst = (guint8 *) dst_params->mappedAddr.addr[0];
   now_us = g_get_monotonic_time ();
   g_mutex_lock (&writer->mutex);
   if (writer->last_publish_us > 0) {
@@ -734,80 +1190,761 @@ preview_publish (NvBufSurface *surface, NvDsFrameMeta *frame_meta,
   writer->last_publish_us = now_us;
   writer->sequence++;
   flock (writer->fd, LOCK_EX);
-  for (y = 0; y < PREVIEW_HEIGHT; y++)
-    memcpy ((guint8 *) writer->map + PREVIEW_HEADER_SIZE + y * writer->stride,
-        dst + y * dst_params->pitch, writer->stride);
-  preview_write_header (writer, object_count,
+  {
+    cudaError_t copy_error = cudaMemcpy2D (
+        (guint8 *) writer->map + PREVIEW_HEADER_SIZE,
+        writer->stride, dst_params->dataPtr, dst_params->pitch,
+        writer->stride, PREVIEW_HEIGHT, cudaMemcpyDefault);
+    if (copy_error != cudaSuccess) {
+      g_printerr ("preview: direct CUDA copy failed camera_index=%d error=%s\n",
+          camera_index, cudaGetErrorString (copy_error));
+      /* A timestamp of zero prevents readers from accepting partial data. */
+      preview_write_header (writer, 0,
+          (guint) MAX (0, (gint) (writer->fps_ema * 1000.0)),
+          0, 0, 0, 0, 0, source_frame_num);
+      flock (writer->fd, LOCK_UN);
+      g_mutex_unlock (&writer->mutex);
+      NvBufSurfaceUnMap (writer->target, 0, 0);
+      return;
+    }
+  }
+  preview_write_header (writer, 0,
       (guint) MAX (0, (gint) (writer->fps_ema * 1000.0)),
-      (guint64) g_get_monotonic_time () * 1000);
+      (guint64) g_get_monotonic_time () * 1000, decoder_reference_ns,
+      decoder_out_ns, pts_ns, dts_ns, source_frame_num);
   flock (writer->fd, LOCK_UN);
   g_mutex_unlock (&writer->mutex);
   NvBufSurfaceUnMap (writer->target, 0, 0);
-  g_mutex_unlock (&preview_transform_mutex);
 }
 
 static GstPadProbeReturn
-preview_pad_probe (GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+preview_source_pad_probe (GstPad *pad, GstPadProbeInfo *info,
+    gpointer user_data)
 {
   GstBuffer *buffer;
-  GstMapInfo map;
-  NvBufSurface *surface;
-  NvDsBatchMeta *batch_meta;
-  NvDsMetaList *l_frame;
-  (void) pad; (void) user_data;
+  PreviewDecodeProbeContext *context = (PreviewDecodeProbeContext *) user_data;
+  PreviewWorker *worker;
+  PreviewPendingFrame pending = { 0 };
+  PreviewPendingFrame replaced = { 0 };
+  guint64 pts_ns;
+  (void) pad;
 
-  if (!info || !(buffer = GST_PAD_PROBE_INFO_BUFFER (info)))
+  if (!info || !(buffer = GST_PAD_PROBE_INFO_BUFFER (info)) || !context ||
+      context->camera_index < 0 || context->camera_index >= 2)
     return GST_PAD_PROBE_OK;
-  memset (&map, 0, sizeof (map));
-  if (!gst_buffer_map (buffer, &map, GST_MAP_READ))
+  worker = &preview_workers[context->camera_index];
+  if (!preview_writers[context->camera_index].enabled)
     return GST_PAD_PROBE_OK;
-  surface = (NvBufSurface *) map.data;
-  batch_meta = gst_buffer_get_nvds_batch_meta (buffer);
-  if (surface && batch_meta) {
-    for (l_frame = batch_meta->frame_meta_list; l_frame; l_frame = l_frame->next) {
-      NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) l_frame->data;
-      if (frame_meta)
-        preview_publish (surface, frame_meta, frame_meta->num_obj_meta);
+  pts_ns = GST_BUFFER_PTS (buffer);
+  pending.pts_ns = GST_CLOCK_TIME_IS_VALID (pts_ns) ? pts_ns : 0;
+  preview_get_decode_timing (context->camera_index, pts_ns,
+      &pending.decoder_reference_ns, &pending.decoder_out_ns,
+      &pending.dts_ns);
+  pending.buffer = gst_buffer_ref (buffer);
+
+  /* Keep one replaceable frame only. The conversion/copy runs off-pipeline;
+   * a slow preview consumer can never block the analytics branch. */
+  g_mutex_lock (&worker->mutex);
+  if (worker->stopping) {
+    g_mutex_unlock (&worker->mutex);
+    gst_buffer_unref (pending.buffer);
+    return GST_PAD_PROBE_OK;
+  }
+  replaced = worker->latest;
+  pending.source_frame_num = ++worker->source_frame_num;
+  worker->latest = pending;
+  g_cond_signal (&worker->condition);
+  g_mutex_unlock (&worker->mutex);
+  if (replaced.buffer)
+    gst_buffer_unref (replaced.buffer);
+  return GST_PAD_PROBE_OK;
+}
+
+static gpointer
+preview_worker_thread (gpointer user_data)
+{
+  PreviewWorker *worker = (PreviewWorker *) user_data;
+
+  while (TRUE) {
+    PreviewPendingFrame pending = { 0 };
+    GstMapInfo map;
+    gboolean mapped = FALSE;
+
+    g_mutex_lock (&worker->mutex);
+    while (!worker->stopping && !worker->latest.buffer)
+      g_cond_wait (&worker->condition, &worker->mutex);
+    if (worker->stopping && !worker->latest.buffer) {
+      g_mutex_unlock (&worker->mutex);
+      break;
+    }
+    pending = worker->latest;
+    memset (&worker->latest, 0, sizeof (worker->latest));
+    g_mutex_unlock (&worker->mutex);
+
+    memset (&map, 0, sizeof (map));
+    if (gst_buffer_map (pending.buffer, &map, GST_MAP_READ)) {
+      mapped = TRUE;
+      preview_publish_surface ((NvBufSurface *) map.data,
+          worker->camera_index, pending.decoder_reference_ns,
+          pending.decoder_out_ns, pending.pts_ns, pending.dts_ns,
+          pending.source_frame_num);
+    }
+    if (mapped)
+      gst_buffer_unmap (pending.buffer, &map);
+    gst_buffer_unref (pending.buffer);
+  }
+  return NULL;
+}
+
+static void
+preview_mux_queue_overrun_cb (GstElement *queue, gpointer user_data)
+{
+  gint camera_index = GPOINTER_TO_INT (user_data);
+  (void) queue;
+  if (camera_index >= 0 && camera_index < 2)
+    g_atomic_int_inc ((volatile gint *) &preview_mux_queue_overruns[camera_index]);
+}
+
+static gboolean
+preview_insert_bounded_mux_queue (AppCtx *app_ctx, NvDsSrcBin *source)
+{
+  GstElement *queue = NULL;
+  GstElement *analytics_copy = NULL;
+  GstObject *source_parent = NULL;
+  GstPad *source_pad = NULL;
+  GstPad *queue_src_pad = NULL;
+  GstPad *mux_sink_pad = NULL;
+  gchar *queue_name = NULL;
+  gchar *copy_name = NULL;
+  const gchar *failure_stage = "source_pad";
+  gboolean source_unlinked = FALSE;
+  gboolean source_linked_to_queue = FALSE;
+  gboolean source_linked_to_copy = FALSE;
+  gboolean copy_linked_to_queue = FALSE;
+  gboolean linked_to_mux = FALSE;
+  gboolean ok = FALSE;
+  GstPadLinkReturn queue_link_status = GST_PAD_LINK_OK;
+  gint camera_index = preview_camera_index (source ? source->source_id : G_MAXUINT,
+      source ? source->source_id : G_MAXUINT);
+  guint queue_buffers = camera_index == 1 ? 16u : 2u;
+
+  if (!app_ctx || !source || !source->bin || !app_ctx->pipeline.pipeline)
+    return FALSE;
+
+  queue_name = g_strdup_printf ("preview_mux_queue_%u", source->source_id);
+  source_pad = gst_element_get_static_pad (source->bin, "src");
+  if (!source_pad)
+    goto done;
+  failure_stage = "mux_sink_peer";
+  mux_sink_pad = gst_pad_get_peer (source_pad);
+  if (!mux_sink_pad)
+    goto done;
+
+  /* The source bins are children of the MV3DT source container, not always
+   * direct children of the top-level pipeline. Keep the queue beside the
+   * source bin so both its upstream and mux-facing pad links stay within the
+   * same GStreamer hierarchy. Adding it to app_ctx->pipeline.pipeline can
+   * make the final queue->mux link fail with GST_PAD_LINK_WRONG_HIERARCHY. */
+  failure_stage = "source_parent";
+  source_parent = gst_object_get_parent (GST_OBJECT (source->bin));
+  if (!source_parent || !GST_IS_BIN (source_parent))
+    goto done;
+
+  if (camera_index == 0 || camera_index == 1) {
+    copy_name = g_strdup_printf ("preview_analytics_copy_%u", source->source_id);
+    failure_stage = "analytics_copy_create";
+    analytics_copy = gst_element_factory_make ("nvvideoconvert", copy_name);
+    if (!analytics_copy)
+      goto done;
+    /* Force a real NVMM->NVMM copy before the analytics queue so it owns
+     * converter-pool surfaces instead of retaining NVDEC output surfaces.
+     * CAM-01 measurements showed the direct two-buffer queue repeatedly
+     * overran and held NVDEC output nine frames behind; CAM-04 uses the same
+     * boundary and passed with decoder P95 below 5 ms. */
+    g_object_set (analytics_copy,
+        "gpu-id", 0u,
+        "disable-passthrough", TRUE,
+        "output-buffers", 24u,
+        NULL);
+    failure_stage = "analytics_copy_add";
+    if (!gst_bin_add (GST_BIN (source_parent), analytics_copy))
+      goto done;
+  }
+
+  failure_stage = "queue_create";
+  queue = gst_element_factory_make ("queue", queue_name);
+  if (!queue)
+    goto done;
+  /* Preserve every analytics frame. CAM-04 has measured mux/MVA wait bursts
+   * close to 0.5 s at 20 FPS, so it retains 16 buffers. CAM-01 stays at its
+   * existing two-buffer limit. The copy above decouples either queue from the
+   * decoder surfaces without dropping analytics frames; both queues remain
+   * non-leaky. */
+  g_object_set (queue,
+      "max-size-buffers", queue_buffers,
+      "max-size-bytes", 0u,
+      "max-size-time", (guint64) 0,
+      "leaky", 0,
+      NULL);
+  failure_stage = "queue_add";
+  if (!gst_bin_add (GST_BIN (source_parent), queue))
+    goto done;
+  if (camera_index >= 0 && camera_index < 2)
+    g_signal_connect (queue, "overrun",
+        G_CALLBACK (preview_mux_queue_overrun_cb), GINT_TO_POINTER (camera_index));
+
+  failure_stage = "unlink_source_mux";
+  source_unlinked = gst_pad_unlink (source_pad, mux_sink_pad);
+  if (!source_unlinked)
+    goto done;
+  if (analytics_copy) {
+    failure_stage = "link_source_copy";
+    if (!gst_element_link (source->bin, analytics_copy))
+      goto done;
+    source_linked_to_copy = TRUE;
+    failure_stage = "link_copy_queue";
+    if (!gst_element_link (analytics_copy, queue))
+      goto done;
+    copy_linked_to_queue = TRUE;
+  } else {
+    failure_stage = "link_source_queue";
+    if (!gst_element_link (source->bin, queue))
+      goto done;
+    source_linked_to_queue = TRUE;
+  }
+
+  failure_stage = "queue_src_pad";
+  queue_src_pad = gst_element_get_static_pad (queue, "src");
+  if (!queue_src_pad)
+    goto done;
+  failure_stage = "link_queue_mux";
+  queue_link_status = gst_pad_link (queue_src_pad, mux_sink_pad);
+  if (queue_link_status != GST_PAD_LINK_OK)
+    goto done;
+  linked_to_mux = TRUE;
+  if (analytics_copy) {
+    failure_stage = "sync_analytics_copy_state";
+    if (!gst_element_sync_state_with_parent (analytics_copy))
+      goto done;
+  }
+  failure_stage = "sync_queue_state";
+  if (!gst_element_sync_state_with_parent (queue))
+    goto done;
+
+  if (camera_index >= 0 && camera_index < 2) {
+    if (preview_mux_queues[camera_index])
+      gst_object_unref (preview_mux_queues[camera_index]);
+    preview_mux_queues[camera_index] = GST_ELEMENT (gst_object_ref (queue));
+    preview_mux_queue_limits[camera_index] = queue_buffers;
+  }
+  g_print ("preview: inserted bounded non-leaky mux queue camera_index=%u max_buffers=%u detached_copy=%s\n",
+      source->source_id, queue_buffers, analytics_copy ? "true" : "false");
+  ok = TRUE;
+
+done:
+  if (!ok) {
+    g_printerr ("preview: bounded mux queue insertion failed camera_index=%u stage=%s pad_link_status=%d\n",
+        source->source_id, failure_stage, queue_link_status);
+    if (queue)
+      gst_element_set_state (queue, GST_STATE_NULL);
+    if (analytics_copy)
+      gst_element_set_state (analytics_copy, GST_STATE_NULL);
+    if (linked_to_mux && queue_src_pad)
+      gst_pad_unlink (queue_src_pad, mux_sink_pad);
+    if (source_linked_to_queue)
+      gst_element_unlink (source->bin, queue);
+    if (copy_linked_to_queue)
+      gst_element_unlink (analytics_copy, queue);
+    if (source_linked_to_copy)
+      gst_element_unlink (source->bin, analytics_copy);
+    if (source_unlinked) {
+      GstPadLinkReturn restore_status = gst_pad_link (source_pad, mux_sink_pad);
+      if (restore_status != GST_PAD_LINK_OK)
+        GST_ELEMENT_ERROR (source->bin, CORE, PAD,
+            ("Failed to restore analytics link after preview queue insertion"),
+            ("source_id=%u pad_link_status=%d", source->source_id, restore_status));
+    }
+    if (queue) {
+      if (GST_OBJECT_PARENT (queue) == source_parent)
+        gst_bin_remove (GST_BIN (source_parent), queue);
+      else
+        gst_object_unref (queue);
+    }
+    if (analytics_copy) {
+      if (GST_OBJECT_PARENT (analytics_copy) == source_parent)
+        gst_bin_remove (GST_BIN (source_parent), analytics_copy);
+      else
+        gst_object_unref (analytics_copy);
     }
   }
-  gst_buffer_unmap (buffer, &map);
-  return GST_PAD_PROBE_OK;
+  if (queue_src_pad)
+    gst_object_unref (queue_src_pad);
+  if (mux_sink_pad)
+    gst_object_unref (mux_sink_pad);
+  if (source_pad)
+    gst_object_unref (source_pad);
+  if (source_parent)
+    gst_object_unref (source_parent);
+  g_free (copy_name);
+  g_free (queue_name);
+  return ok;
+}
+
+/* CAM-04's source queue can retain decoded NVMM surfaces while analytics is
+ * momentarily waiting. Fan preview out at the decoder pad and detach the
+ * analytics surface before that queue. The preview request pad is created
+ * first so a blocked analytics push cannot delay the latest-frame enqueue. */
+static gboolean
+preview_restore_early_decoder_branch (PreviewDecodeProbeContext *context,
+    GstPad *decoded_src_pad)
+{
+  GstElement *tee = NULL, *surface_copy = NULL;
+  GstPad *tee_sink = NULL, *surface_copy_src = NULL;
+  GstPad *analytics_sink = NULL, *original_peer = NULL;
+  gchar *tee_name = NULL, *copy_name = NULL;
+  gboolean decoder_unlinked = FALSE, decoder_linked = FALSE;
+  gboolean ok = FALSE;
+  GstPadLinkReturn link_status = GST_PAD_LINK_OK;
+
+  if (!context || !context->early_branch_attached || !decoded_src_pad ||
+      !context->source_bin || !context->analytics_queue)
+    return FALSE;
+  tee_name = g_strdup_printf ("mv3dt_early_preview_tee_%u", context->source_id);
+  copy_name = g_strdup_printf ("mv3dt_cam04_prequeue_surface_copy_%u",
+      context->source_id);
+  tee = gst_bin_get_by_name (GST_BIN (context->source_bin), tee_name);
+  surface_copy = gst_bin_get_by_name (GST_BIN (context->source_bin), copy_name);
+  if (!tee || !surface_copy)
+    goto done;
+  tee_sink = gst_element_get_static_pad (tee, "sink");
+  surface_copy_src = gst_element_get_static_pad (surface_copy, "src");
+  analytics_sink = gst_element_get_static_pad (context->analytics_queue, "sink");
+  original_peer = gst_pad_get_peer (decoded_src_pad);
+  if (!tee_sink || !surface_copy_src || !analytics_sink)
+    goto done;
+  if (original_peer == tee_sink) {
+    ok = TRUE;
+    goto done;
+  }
+  /* pad-removed freed the analytics sink for the SDK's normal pad-added
+   * callback. Reuse the existing tee and surface pool after that callback
+   * links the replacement decoder pad to the analytics queue. */
+  if (original_peer != analytics_sink ||
+      !gst_pad_unlink (decoded_src_pad, analytics_sink))
+    goto done;
+  decoder_unlinked = TRUE;
+  link_status = gst_pad_link (decoded_src_pad, tee_sink);
+  if (link_status != GST_PAD_LINK_OK)
+    goto done;
+  decoder_linked = TRUE;
+  link_status = gst_pad_link (surface_copy_src, analytics_sink);
+  if (link_status != GST_PAD_LINK_OK)
+    goto done;
+  ok = TRUE;
+
+done:
+  if (ok) {
+    if (context->early_decoded_src_pad != decoded_src_pad) {
+      if (context->early_decoded_src_pad)
+        gst_object_unref (context->early_decoded_src_pad);
+      context->early_decoded_src_pad = gst_object_ref (decoded_src_pad);
+    }
+  } else {
+    if (decoder_linked)
+      gst_pad_unlink (decoded_src_pad, tee_sink);
+    if (decoder_unlinked) {
+      GstPadLinkReturn restore_status = gst_pad_link (decoded_src_pad, analytics_sink);
+      if (restore_status != GST_PAD_LINK_OK)
+        GST_ELEMENT_ERROR (context->source_bin, CORE, PAD,
+            ("Failed to restore analytics link after preview branch reconnect"),
+            ("source_id=%u pad_link_status=%d", context->source_id, restore_status));
+    }
+    GST_ELEMENT_ERROR (context->source_bin, CORE, PAD,
+        ("Failed to reconnect existing CAM-04 preview branch"),
+        ("source_id=%u pad_link_status=%d", context->source_id, link_status));
+  }
+  if (original_peer) gst_object_unref (original_peer);
+  if (analytics_sink) gst_object_unref (analytics_sink);
+  if (surface_copy_src) gst_object_unref (surface_copy_src);
+  if (tee_sink) gst_object_unref (tee_sink);
+  if (surface_copy) gst_object_unref (surface_copy);
+  if (tee) gst_object_unref (tee);
+  g_free (copy_name);
+  g_free (tee_name);
+  return ok;
+}
+
+static gboolean
+preview_insert_early_decoder_branch (PreviewDecodeProbeContext *context,
+    GstPad *decoded_src_pad)
+{
+  GstElement *tee = NULL, *queue = NULL, *sink = NULL, *surface_copy = NULL;
+  GstPad *original_peer = NULL, *analytics_sink = NULL, *tee_sink = NULL;
+  GstPad *tee_analytics_src = NULL, *tee_preview_src = NULL;
+  GstPad *queue_sink = NULL, *queue_src = NULL, *sink_pad = NULL;
+  GstPad *surface_copy_sink = NULL, *surface_copy_src = NULL;
+  GstCaps *caps = NULL;
+  gboolean tee_added = FALSE, queue_added = FALSE, sink_added = FALSE;
+  gboolean surface_copy_added = FALSE, preview_linked = FALSE;
+  gboolean sink_linked = FALSE, decoder_unlinked = FALSE;
+  gboolean decoder_to_tee_linked = FALSE, analytics_linked = FALSE;
+  gboolean surface_copy_to_original_linked = FALSE, ok = FALSE;
+  gchar *tee_name = NULL, *queue_name = NULL, *sink_name = NULL;
+  gchar *surface_copy_name = NULL;
+  const gchar *media_name = NULL;
+  GstPadLinkReturn link_status = GST_PAD_LINK_OK;
+
+  if (!context || !context->early_decoder_preview ||
+      context->camera_index != 1 || !context->source_bin ||
+      !context->analytics_queue || !decoded_src_pad)
+    return FALSE;
+  if (context->early_branch_attached)
+    return preview_restore_early_decoder_branch (context, decoded_src_pad);
+
+  caps = gst_pad_get_current_caps (decoded_src_pad);
+  if (caps) {
+    const GstStructure *structure = gst_caps_get_structure (caps, 0);
+    if (structure)
+      media_name = gst_structure_get_name (structure);
+  }
+  if (!media_name || !g_str_has_prefix (media_name, "video/x-raw")) {
+    if (caps) gst_caps_unref (caps);
+    return FALSE;
+  }
+  gst_caps_unref (caps);
+
+  original_peer = gst_pad_get_peer (decoded_src_pad);
+  analytics_sink = gst_element_get_static_pad (context->analytics_queue, "sink");
+  if (!original_peer || !analytics_sink || original_peer != analytics_sink) {
+    g_printerr ("preview: CAM-04 early branch expected decoder linked to source queue\n");
+    goto done;
+  }
+
+  tee_name = g_strdup_printf ("mv3dt_early_preview_tee_%u", context->source_id);
+  queue_name = g_strdup_printf ("mv3dt_early_preview_queue_%u", context->source_id);
+  sink_name = g_strdup_printf ("mv3dt_early_preview_sink_%u", context->source_id);
+  surface_copy_name = g_strdup_printf (
+      "mv3dt_cam04_prequeue_surface_copy_%u", context->source_id);
+  tee = gst_element_factory_make ("tee", tee_name);
+  queue = gst_element_factory_make ("queue", queue_name);
+  sink = gst_element_factory_make ("fakesink", sink_name);
+  surface_copy = gst_element_factory_make ("nvvideoconvert", surface_copy_name);
+  if (!tee || !queue || !sink || !surface_copy)
+    goto done;
+  g_object_set (surface_copy, "gpu-id", 0u, "disable-passthrough", TRUE,
+      "output-buffers", 24u, NULL);
+  g_object_set (queue, "max-size-buffers", 1u, "max-size-bytes", 0u,
+      "max-size-time", (guint64) 0, "leaky", 2, "silent", TRUE, NULL);
+  g_object_set (sink, "sync", FALSE, "async", FALSE, "qos", FALSE,
+      "enable-last-sample", FALSE, NULL);
+
+  if (!gst_bin_add (GST_BIN (context->source_bin), tee)) goto done;
+  tee_added = TRUE;
+  if (!gst_bin_add (GST_BIN (context->source_bin), queue)) goto done;
+  queue_added = TRUE;
+  if (!gst_bin_add (GST_BIN (context->source_bin), sink)) goto done;
+  sink_added = TRUE;
+  if (!gst_bin_add (GST_BIN (context->source_bin), surface_copy)) goto done;
+  surface_copy_added = TRUE;
+
+  tee_sink = gst_element_get_static_pad (tee, "sink");
+  tee_preview_src = gst_element_request_pad_simple (tee, "src_%u");
+  tee_analytics_src = gst_element_request_pad_simple (tee, "src_%u");
+  queue_sink = gst_element_get_static_pad (queue, "sink");
+  queue_src = gst_element_get_static_pad (queue, "src");
+  sink_pad = gst_element_get_static_pad (sink, "sink");
+  surface_copy_sink = gst_element_get_static_pad (surface_copy, "sink");
+  surface_copy_src = gst_element_get_static_pad (surface_copy, "src");
+  if (!tee_sink || !tee_preview_src || !tee_analytics_src || !queue_sink ||
+      !queue_src || !sink_pad || !surface_copy_sink || !surface_copy_src)
+    goto done;
+
+  link_status = gst_pad_link (tee_preview_src, queue_sink);
+  if (link_status != GST_PAD_LINK_OK) goto done;
+  preview_linked = TRUE;
+  link_status = gst_pad_link (queue_src, sink_pad);
+  if (link_status != GST_PAD_LINK_OK) goto done;
+  sink_linked = TRUE;
+  if (!gst_pad_add_probe (sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
+          preview_source_pad_probe, context, NULL))
+    goto done;
+
+  if (!gst_pad_unlink (decoded_src_pad, original_peer)) goto done;
+  decoder_unlinked = TRUE;
+  link_status = gst_pad_link (decoded_src_pad, tee_sink);
+  if (link_status != GST_PAD_LINK_OK) goto done;
+  decoder_to_tee_linked = TRUE;
+  link_status = gst_pad_link (tee_analytics_src, surface_copy_sink);
+  if (link_status != GST_PAD_LINK_OK) goto done;
+  analytics_linked = TRUE;
+  link_status = gst_pad_link (surface_copy_src, original_peer);
+  if (link_status != GST_PAD_LINK_OK) goto done;
+  surface_copy_to_original_linked = TRUE;
+
+  if (!gst_element_sync_state_with_parent (tee) ||
+      !gst_element_sync_state_with_parent (queue) ||
+      !gst_element_sync_state_with_parent (sink) ||
+      !gst_element_sync_state_with_parent (surface_copy))
+    goto done;
+  context->early_branch_attached = TRUE;
+  context->early_decoded_src_pad = gst_object_ref (decoded_src_pad);
+  g_print ("preview: production CAM-04 decoder preview branch attached source_id=%u max_buffers=1 leaky=downstream surface_detach=true\n",
+      context->source_id);
+  ok = TRUE;
+
+done:
+  if (!ok) {
+    if (surface_copy_to_original_linked)
+      gst_pad_unlink (surface_copy_src, original_peer);
+    if (analytics_linked)
+      gst_pad_unlink (tee_analytics_src, surface_copy_sink);
+    if (decoder_to_tee_linked)
+      gst_pad_unlink (decoded_src_pad, tee_sink);
+    if (decoder_unlinked) {
+      GstPadLinkReturn restore_status = gst_pad_link (decoded_src_pad, original_peer);
+      if (restore_status != GST_PAD_LINK_OK)
+        GST_ELEMENT_ERROR (context->source_bin, CORE, PAD,
+            ("Failed to restore analytics link after preview branch insertion"),
+            ("source_id=%u pad_link_status=%d", context->source_id, restore_status));
+    }
+    if (sink_linked) gst_pad_unlink (queue_src, sink_pad);
+    if (preview_linked) gst_pad_unlink (tee_preview_src, queue_sink);
+    if (tee_analytics_src && tee)
+      gst_element_release_request_pad (tee, tee_analytics_src);
+    if (tee_preview_src && tee)
+      gst_element_release_request_pad (tee, tee_preview_src);
+    if (queue && queue_added) {
+      gst_element_set_state (queue, GST_STATE_NULL);
+      gst_bin_remove (GST_BIN (context->source_bin), queue);
+    }
+    if (sink && sink_added) {
+      gst_element_set_state (sink, GST_STATE_NULL);
+      gst_bin_remove (GST_BIN (context->source_bin), sink);
+    }
+    if (surface_copy && surface_copy_added) {
+      gst_element_set_state (surface_copy, GST_STATE_NULL);
+      gst_bin_remove (GST_BIN (context->source_bin), surface_copy);
+    }
+    if (tee && tee_added) {
+      gst_element_set_state (tee, GST_STATE_NULL);
+      gst_bin_remove (GST_BIN (context->source_bin), tee);
+    }
+    g_printerr ("preview: CAM-04 early decoder branch install failed status=%d\n",
+        link_status);
+  } else {
+    if (tee_analytics_src) gst_object_unref (tee_analytics_src);
+    if (tee_preview_src) gst_object_unref (tee_preview_src);
+    tee_analytics_src = tee_preview_src = NULL;
+  }
+  if (original_peer) gst_object_unref (original_peer);
+  if (analytics_sink) gst_object_unref (analytics_sink);
+  if (tee_sink) gst_object_unref (tee_sink);
+  if (tee_analytics_src) gst_object_unref (tee_analytics_src);
+  if (tee_preview_src) gst_object_unref (tee_preview_src);
+  if (queue_sink) gst_object_unref (queue_sink);
+  if (queue_src) gst_object_unref (queue_src);
+  if (sink_pad) gst_object_unref (sink_pad);
+  if (surface_copy_sink) gst_object_unref (surface_copy_sink);
+  if (surface_copy_src) gst_object_unref (surface_copy_src);
+  if (tee && !tee_added) gst_object_unref (tee);
+  if (queue && !queue_added) gst_object_unref (queue);
+  if (sink && !sink_added) gst_object_unref (sink);
+  if (surface_copy && !surface_copy_added) gst_object_unref (surface_copy);
+  g_free (tee_name); g_free (queue_name); g_free (sink_name);
+  g_free (surface_copy_name);
+  return ok;
+}
+
+static void
+preview_early_decodebin_pad_removed (GstElement *decodebin, GstPad *pad,
+    gpointer user_data)
+{
+  PreviewDecodeProbeContext *context = user_data;
+  GstElement *surface_copy;
+  GstPad *copy_src = NULL, *analytics_sink = NULL, *peer = NULL;
+  gchar *copy_name;
+  (void) decodebin;
+
+  if (!context || pad != context->early_decoded_src_pad)
+    return;
+  gst_object_unref (context->early_decoded_src_pad);
+  context->early_decoded_src_pad = NULL;
+  /* decodebin removes its dynamic video pad on a source-bin NULL reset, but
+   * the tee/copy branch remains in the source bin. Free the original sink
+   * before the SDK links the next video pad, then reuse this branch. */
+  copy_name = g_strdup_printf ("mv3dt_cam04_prequeue_surface_copy_%u",
+      context->source_id);
+  surface_copy = gst_bin_get_by_name (GST_BIN (context->source_bin), copy_name);
+  g_free (copy_name);
+  if (!surface_copy)
+    return;
+  copy_src = gst_element_get_static_pad (surface_copy, "src");
+  analytics_sink = gst_element_get_static_pad (context->analytics_queue, "sink");
+  if (copy_src)
+    peer = gst_pad_get_peer (copy_src);
+  if (peer && peer == analytics_sink && !gst_pad_unlink (copy_src, analytics_sink))
+    GST_ELEMENT_ERROR (context->source_bin, CORE, PAD,
+        ("Failed to detach analytics sink for decoder replacement"),
+        ("source_id=%u", context->source_id));
+  if (peer) gst_object_unref (peer);
+  if (analytics_sink) gst_object_unref (analytics_sink);
+  if (copy_src) gst_object_unref (copy_src);
+  gst_object_unref (surface_copy);
+}
+
+static void
+preview_early_decodebin_pad_added (GstElement *decodebin, GstPad *pad,
+    gpointer user_data)
+{
+  PreviewDecodeProbeContext *context = user_data;
+  GstCaps *caps;
+  const GstStructure *structure;
+  const gchar *media_name;
+  (void) decodebin;
+  if (!context || !context->early_decoder_preview)
+    return;
+  caps = gst_pad_get_current_caps (pad);
+  if (!caps) caps = gst_pad_query_caps (pad, NULL);
+  structure = caps ? gst_caps_get_structure (caps, 0) : NULL;
+  media_name = structure ? gst_structure_get_name (structure) : NULL;
+  if (media_name && g_str_has_prefix (media_name, "video/x-raw"))
+    preview_insert_early_decoder_branch (context, pad);
+  if (caps) gst_caps_unref (caps);
 }
 
 static void
 preview_attach (AppCtx *app_ctx)
 {
-  GstElement *element;
-  GstPad *pad;
-
   if (!preview_open () || !app_ctx)
     return;
-  /* The configured display sink is source-id=0 and therefore cannot carry
-   * CAM-04.  Attach at the existing tracker output so the V11 preview sees
-   * every source frame in the production batch before the single-camera EGL
-   * sink filter. */
-  element = app_ctx->pipeline.common_elements.tracker_bin.tracker;
-  pad = element ? gst_element_get_static_pad (element, "src") : NULL;
-  if (!pad) {
-    element = app_ctx->pipeline.instance_bins[0].osd_bin.nvosd;
-    if (element)
-      pad = gst_element_get_static_pad (element, "src");
+  /* CAM-01 publishes from the source-bin output before the detached analytics
+   * handoff. CAM-04 publishes from an immediate decoder tee because its
+   * source queue was the measured residence point. Both use one latest slot. */
+  for (guint i = 0; i < app_ctx->pipeline.multi_src_bin.num_bins; i++) {
+    NvDsSrcBin *source = &app_ctx->pipeline.multi_src_bin.sub_bins[i];
+    gint camera_index = preview_camera_index (source->source_id, source->source_id);
+    GstPad *decoded_output_pad;
+    if (camera_index < 0 || camera_index >= 2 || !source->decodebin || !source->bin)
+      continue;
+    if (!preview_insert_bounded_mux_queue (app_ctx, source)) {
+      g_printerr ("preview: failed to insert bounded mux queue camera_index=%u\n",
+          source->source_id);
+      continue;
+    }
+    PreviewWorker *worker = &preview_workers[camera_index];
+    worker->camera_index = camera_index;
+    g_mutex_init (&worker->mutex);
+    g_cond_init (&worker->condition);
+    worker->initialized = TRUE;
+    worker->thread = g_thread_new (camera_index == 0 ? "preview-cam01" : "preview-cam04",
+        preview_worker_thread, worker);
+    preview_decode_probe_contexts[camera_index].camera_index = camera_index;
+    preview_decode_probe_contexts[camera_index].source_id = source->source_id;
+    preview_decode_probe_contexts[camera_index].source_bin = source->bin;
+    preview_decode_probe_contexts[camera_index].analytics_queue = source->cap_filter;
+    preview_decode_probe_contexts[camera_index].early_decoder_preview =
+        camera_index == 1;
+    preview_decode_probe_contexts[camera_index].early_branch_attached = FALSE;
+    preview_decode_probe_contexts[camera_index].prequeue_surface_copy_enabled =
+        camera_index == 1;
+    if (camera_index == 1) {
+      g_signal_connect (source->decodebin, "pad-removed",
+          G_CALLBACK (preview_early_decodebin_pad_removed),
+          &preview_decode_probe_contexts[camera_index]);
+      g_signal_connect_after (source->decodebin, "pad-added",
+          G_CALLBACK (preview_early_decodebin_pad_added),
+          &preview_decode_probe_contexts[camera_index]);
+    }
+    preview_decoder_child_added (NULL, G_OBJECT (source->decodebin),
+        "decodebin", &preview_decode_probe_contexts[camera_index]);
+    if (camera_index == 1) {
+      g_print ("preview: production CAM-04 early decoder preview requested source_id=%u\n",
+          source->source_id);
+      continue;
+    }
+    decoded_output_pad = gst_element_get_static_pad (source->bin, "src");
+    if (decoded_output_pad) {
+      gst_pad_add_probe (decoded_output_pad, GST_PAD_PROBE_TYPE_BUFFER,
+          preview_source_pad_probe,
+          &preview_decode_probe_contexts[camera_index], NULL);
+      gst_object_unref (decoded_output_pad);
+    }
   }
-  if (!pad) {
-    element = app_ctx->pipeline.instance_bins[0].sink_bin.bin;
-    pad = gst_element_get_static_pad (element, "sink");
-  }
-  if (!pad)
-    return;
-  gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER, preview_pad_probe, NULL, NULL);
-  gst_object_unref (pad);
+  if (preview_diagnostics_path && *preview_diagnostics_path)
+    g_timeout_add_seconds (1, preview_diagnostics_timer_cb, NULL);
 }
 
 static void
 preview_close (void)
 {
+  /* Stop publishers before releasing mapped memory or GPU surfaces. */
+  for (guint i = 0; i < 2; i++) {
+    PreviewWorker *worker = &preview_workers[i];
+    if (preview_decode_probe_contexts[i].early_decoded_src_pad) {
+      gst_object_unref (preview_decode_probe_contexts[i].early_decoded_src_pad);
+      preview_decode_probe_contexts[i].early_decoded_src_pad = NULL;
+    }
+    if (worker->thread) {
+      g_mutex_lock (&worker->mutex);
+      worker->stopping = TRUE;
+      g_cond_broadcast (&worker->condition);
+      g_mutex_unlock (&worker->mutex);
+      g_thread_join (worker->thread);
+      worker->thread = NULL;
+    }
+    if (worker->latest.buffer) {
+      gst_buffer_unref (worker->latest.buffer);
+      memset (&worker->latest, 0, sizeof (worker->latest));
+    }
+    g_mutex_lock (&preview_decode_timing_mutex);
+    guint64 inputs = preview_decode_inputs[i];
+    guint64 outputs = preview_decode_outputs[i];
+    guint64 output_matches = preview_decode_output_matches[i];
+    guint64 matches = preview_decode_matches[i];
+    guint64 misses = preview_decode_misses[i];
+    guint64 input_regressions = preview_input_pts_regressions[i];
+    guint64 output_regressions = preview_output_pts_regressions[i];
+    guint64 input_backstep = preview_input_max_pts_backstep[i];
+    guint64 output_backstep = preview_output_max_pts_backstep[i];
+    g_mutex_unlock (&preview_decode_timing_mutex);
+    if (inputs || outputs || matches || misses) {
+      g_print ("preview: decoder_timestamp_correlation camera_index=%u input=%" G_GUINT64_FORMAT
+          " output=%" G_GUINT64_FORMAT " output_matched=%" G_GUINT64_FORMAT
+          " source_matched=%" G_GUINT64_FORMAT " source_unmatched=%" G_GUINT64_FORMAT
+          " input_pts_backsteps=%" G_GUINT64_FORMAT " input_max_backstep_ms=%.3f"
+          " output_pts_backsteps=%" G_GUINT64_FORMAT " output_max_backstep_ms=%.3f\n",
+          i, inputs, outputs, output_matches, matches, misses,
+          input_regressions, input_backstep / 1.0e6,
+          output_regressions, output_backstep / 1.0e6);
+    }
+    if (preview_decoder_samples[i]) {
+      g_print ("preview: decoder bitstream sample camera_index=%u bytes=%" G_GUINT64_FORMAT "\n",
+          i, preview_decoder_sample_bytes[i]);
+      fclose (preview_decoder_samples[i]);
+      preview_decoder_samples[i] = NULL;
+    }
+    if (worker->initialized) {
+      g_cond_clear (&worker->condition);
+      g_mutex_clear (&worker->mutex);
+      worker->initialized = FALSE;
+    }
+    if (preview_mux_queues[i]) {
+      gst_object_unref (preview_mux_queues[i]);
+      preview_mux_queues[i] = NULL;
+      preview_mux_queue_limits[i] = 0;
+      g_atomic_int_set ((volatile gint *) &preview_mux_queue_overruns[i], 0);
+    }
+  }
   for (guint i = 0; i < 2; i++) {
     PreviewWriter *writer = &preview_writers[i];
+    if (writer->map_cuda_registered) {
+      cudaError_t unregister_error = cudaHostUnregister (writer->map);
+      if (unregister_error != cudaSuccess)
+        g_printerr ("preview: cudaHostUnregister failed path=%s error=%s\n",
+            writer->path ? writer->path : "",
+            cudaGetErrorString (unregister_error));
+      writer->map_cuda_registered = FALSE;
+    }
     if (writer->target) {
       NvBufSurfaceDestroy (writer->target);
       writer->target = NULL;
@@ -825,6 +1962,13 @@ preview_close (void)
       g_free (writer->path);
       writer->path = NULL;
     }
+  }
+  g_mutex_clear (&preview_transform_session_mutex);
+  g_clear_pointer (&preview_diagnostics_path, g_free);
+  if (native_latency_file) {
+    fflush (native_latency_file);
+    fclose (native_latency_file);
+    native_latency_file = NULL;
   }
 }
 
@@ -974,6 +2118,81 @@ frame_audit_attach_pad (GstElement *element, const gchar *stage)
   context->stage = stage;
   gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER, frame_audit_pad_probe,
       context, (GDestroyNotify) g_free);
+  gst_object_unref (pad);
+}
+
+/* Optional NVIDIA reference measurement at the mux boundary. This is kept
+ * separate from the decoder-pad/UI-paint timestamps and only enabled when a
+ * diagnostic path is explicitly supplied. */
+static gboolean
+native_latency_open (void)
+{
+  const gchar *path = g_getenv ("MV3DT_NATIVE_LATENCY_LOG");
+  gchar *directory;
+
+  if (native_latency_initialized)
+    return native_latency_file != NULL;
+  native_latency_initialized = TRUE;
+  g_mutex_init (&native_latency_mutex);
+  if (!path || !*path)
+    return FALSE;
+  directory = g_path_get_dirname (path);
+  g_mkdir_with_parents (directory, 0755);
+  g_free (directory);
+  native_latency_file = fopen (path, "w");
+  if (!native_latency_file) {
+    g_printerr ("native latency: failed to open diagnostic log: %s\n",
+        g_strerror (errno));
+    return FALSE;
+  }
+  setvbuf (native_latency_file, NULL, _IOLBF, 0);
+  return TRUE;
+}
+
+static GstPadProbeReturn
+native_latency_mux_probe (GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+  GstBuffer *buffer = info ? GST_PAD_PROBE_INFO_BUFFER (info) : NULL;
+  NvDsFrameLatencyInfo latency_info[128] = {{0}};
+  guint count;
+  guint64 observed_mono_ns;
+  (void) pad;
+  (void) user_data;
+
+  if (!native_latency_file || !buffer)
+    return GST_PAD_PROBE_OK;
+  count = nvds_measure_buffer_latency (buffer, latency_info);
+  observed_mono_ns = (guint64) g_get_monotonic_time () * 1000;
+  g_mutex_lock (&native_latency_mutex);
+  for (guint i = 0; i < count && i < G_N_ELEMENTS (latency_info); i++) {
+    gchar camera_id[128];
+    frame_audit_camera_id (latency_info[i].source_id,
+        latency_info[i].source_id, camera_id, sizeof (camera_id));
+    fprintf (native_latency_file,
+        "{\"camera_id\":\"%s\",\"source_id\":%u,\"frame_num\":%u,"
+        "\"observed_monotonic_ns\":\"%" G_GUINT64_FORMAT "\","
+        "\"decoder_reference_to_mux_ms\":%.6f}\n",
+        camera_id, latency_info[i].source_id, latency_info[i].frame_num,
+        observed_mono_ns, latency_info[i].latency);
+  }
+  g_mutex_unlock (&native_latency_mutex);
+  return GST_PAD_PROBE_OK;
+}
+
+static void
+native_latency_attach_pad (GstElement *element)
+{
+  GstPad *pad;
+
+  if (!element || !native_latency_open ())
+    return;
+  pad = gst_element_get_static_pad (element, "src");
+  if (!pad) {
+    g_printerr ("native latency: no nvstreammux src pad\n");
+    return;
+  }
+  gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER,
+      native_latency_mux_probe, NULL, NULL);
   gst_object_unref (pad);
 }
 
@@ -2681,6 +3900,8 @@ main (int argc, char *argv[])
     }
     frame_audit_attach_pad (
         appCtx[i]->pipeline.multi_src_bin.streammux, "nvstreammux");
+    native_latency_attach_pad (
+        appCtx[i]->pipeline.multi_src_bin.streammux);
     frame_audit_attach_pad (
         appCtx[i]->pipeline.common_elements.primary_gie_bin.primary_gie,
         "pgie");
@@ -2861,7 +4082,6 @@ main (int argc, char *argv[])
   g_main_loop_run (main_loop);
 
   changemode (0);
-  preview_close ();
   source_health_close ();
 
 done:
@@ -2915,6 +4135,10 @@ done:
 
     g_free (appCtx[i]);
   }
+
+  /* Source pad probes have stopped with destroy_pipeline(); only now is it
+   * safe to stop the latest-only preview workers and release shared memory. */
+  preview_close ();
 
   g_mutex_lock (&disp_lock);
   if (display)

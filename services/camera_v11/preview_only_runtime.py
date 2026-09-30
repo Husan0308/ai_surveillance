@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Hardware-decoded V11 shared-memory previews for non-Dev-Room cameras.
 
-CAM-01 and CAM-04 are intentionally excluded: their previews come from the
-production MV3DT tracker-output probe, so no camera is opened twice.
+CAM-01 and CAM-04 are intentionally excluded: their independent previews come
+from the production MV3DT source owner, so no camera is opened twice.
 """
 from __future__ import annotations
 
@@ -22,6 +22,29 @@ from services.ml_service.app.config import CameraConfig, load_settings
 from services.ml_service.app.deepstream.capture import DeepStreamCapture
 
 DEFAULT_CAMERAS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
+
+
+class PreviewPublishBudget:
+    """Rate-limit writes while tolerating a two-frame arrival burst.
+
+    Credits never queue frames: each allowed write replaces the single latest
+    shared-memory slot immediately.
+    """
+
+    def __init__(self, fps: int, now: float):
+        self.fps = max(1, int(fps))
+        self.last = now
+        self.credits = 2.0
+
+    def allow(self, now: float) -> bool:
+        if now < self.last:
+            self.credits = 2.0
+        self.credits = min(2.0, self.credits + max(0.0, now - self.last) * self.fps)
+        self.last = now
+        if self.credits < 1.0 - 1e-9:
+            return False
+        self.credits = max(0.0, self.credits - 1.0)
+        return True
 
 
 def _preview_path(camera_id: str) -> str:
@@ -46,6 +69,20 @@ def _camera_probe(camera: CameraConfig) -> dict:
     }
 
 
+def _decoder_low_latency_enabled(
+    camera_id: str, configured: bool = False
+) -> bool:
+    """Use the validated camera profile, with explicit test overrides."""
+    allowlist = os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY_CAMERAS")
+    if allowlist is not None:
+        selected = {item.strip() for item in allowlist.split(",") if item.strip()}
+        return camera_id in selected
+    legacy_override = os.getenv("MV3DT_TEST_DECODER_LOW_LATENCY")
+    if legacy_override is not None:
+        return legacy_override == "1"
+    return bool(configured)
+
+
 @dataclass
 class CameraStats:
     camera_id: str
@@ -63,6 +100,16 @@ class CameraStats:
     width: int = 0
     height: int = 0
     last_error: str = ""
+    last_failure_error: str = ""
+    last_failure_monotonic_ns: int = 0
+
+    def record_failure(self, exc: BaseException) -> None:
+        self.state = "DISCONNECTED"
+        self.failures += 1
+        self.last_error = _safe_error(exc)
+        # Recovery clears current health, not the evidence for a reconnect.
+        self.last_failure_error = self.last_error
+        self.last_failure_monotonic_ns = time.monotonic_ns()
 
     def observe_fps(self, value: float) -> None:
         if value <= 0:
@@ -88,6 +135,8 @@ class CameraStats:
             "resolution": f"{self.width}x{self.height}" if self.width and self.height else None,
             "codec": self.codec or None,
             "last_error": self.last_error,
+            "last_failure_error": self.last_failure_error,
+            "last_failure_monotonic_ns": self.last_failure_monotonic_ns,
         }
 
 
@@ -114,6 +163,10 @@ class PreviewSource(threading.Thread):
                     timeout_sec=max(5.0, self.config.startup_grace_sec),
                 ).lower()
                 self.stats.codec = codec
+                low_latency_mode = _decoder_low_latency_enabled(
+                    self.camera.camera_id,
+                    self.camera.decoder_low_latency_mode,
+                )
                 capture = DeepStreamCapture(
                     self.camera.camera_id,
                     self.camera.uri,
@@ -123,13 +176,14 @@ class PreviewSource(threading.Thread):
                     password=self.camera.password,
                     output_bgrx=True,
                     latency_ms=effective_latency_ms,
+                    low_latency_mode=low_latency_mode,
+                    decoder_extra_surfaces=self.camera.decoder_extra_surfaces,
                 )
                 retry = max(0.5, float(self.config.reconnect_delay_sec))
                 frame_window = 0
                 fps_window_start = time.monotonic()
                 last_progress = fps_window_start
-                next_publish = fps_window_start
-                publish_period = 1.0 / max(1, int(self.config.display_fps))
+                publish_budget = None
                 while not self.stop_event.is_set():
                     ok, frame = capture.read()
                     now = time.monotonic()
@@ -147,7 +201,13 @@ class PreviewSource(threading.Thread):
                             height,
                             width * 4,
                         )
-                    if now >= next_publish:
+                    pts_ns = capture.last_timing.pts_ns
+                    publish_clock = pts_ns / 1e9 if 0 < pts_ns < 2**63 else now
+                    if publish_budget is None:
+                        publish_budget = PreviewPublishBudget(
+                            self.config.display_fps, publish_clock
+                        )
+                    if publish_budget.allow(publish_clock):
                         # nvvideoconvert already produces BGRx. Publishing it
                         # directly avoids another full-frame allocation/copy.
                         bgra = frame
@@ -156,9 +216,9 @@ class PreviewSource(threading.Thread):
                             decoder_reference_ns=capture.last_timing.decoder_reference_ns,
                             decoder_out_ns=capture.last_timing.decoder_out_ns,
                             pts_ns=capture.last_timing.pts_ns,
+                            decoder_dts_ns=capture.last_timing.dts_ns,
                             source_frame_num=self.stats.frames + 1,
                         )
-                        next_publish = max(next_publish + publish_period, now)
                     self.stats.frames += 1
                     self.stats.last_frame_mono = now
                     self.stats.width = width
@@ -172,9 +232,7 @@ class PreviewSource(threading.Thread):
                         frame_window = 0
                         fps_window_start = now
             except Exception as exc:
-                self.stats.state = "DISCONNECTED"
-                self.stats.failures += 1
-                self.stats.last_error = _safe_error(exc)
+                self.stats.record_failure(exc)
             finally:
                 if capture is not None:
                     capture.close()
