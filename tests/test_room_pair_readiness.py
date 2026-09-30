@@ -233,3 +233,29 @@ def test_runner_enables_native_health_without_a_diagnostic_flag(tmp_path, monkey
     assert "MV3DT_SOURCE_HEALTH_DIR=/workspace/experiments/logs/probe" in deepstream_command(
         tmp_path, tmp_path / "binary", "image", "live", "test"
     )
+
+def test_native_recovery_requires_sustained_all_stage_progress_and_retries_safely():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "services/mv3dt_room/native/deepstream_test5_app_main.c"
+    ).read_text()
+
+    assert "SOURCE_HEALTH_RECOVERY_MIN_FRAMES 5" in source
+    assert "if (health->recovery_active)\n      return FALSE;" in source
+    assert "health->recovery_start_frames[recovery_stage]" in source
+    assert "health->frames[recovery_stage] <" in source
+    assert "SOURCE_HEALTH_RETRY_SEC * G_USEC_PER_SEC" in source
+    assert "src_bin->reconfiguring ? \"RECONFIGURING\" : \"RECONNECTING\"" in source
+    assert "g_timeout_add (0, reset_source_pipeline, src_bin);" in source
+    assert "health->recovery_active && !src_bin->reconfiguring" not in source
+
+
+def test_native_recovery_does_not_reset_sources_while_parent_pipeline_is_paused():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "services/mv3dt_room/native/deepstream_test5_app_main.c"
+    ).read_text()
+
+    assert "pipeline_playing = pipeline_state == GST_STATE_PLAYING;" in source
+    assert "health->recovery_active && mux_stalled && pipeline_playing" in source
+
