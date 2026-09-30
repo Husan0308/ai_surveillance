@@ -167,6 +167,7 @@ typedef struct {
   gint64 stall_started_us;
   gint64 reconnect_attempt_us;
   guint reconnect_attempts;
+  guint64 recovery_start_frames[3];
   guint sub_bin_index;
 } SourceHealth;
 
@@ -194,6 +195,9 @@ static guint source_health_watchdog_id;
 #define SOURCE_HEALTH_STALL_SEC 5
 #define SOURCE_HEALTH_STARTUP_SEC 10
 #define SOURCE_HEALTH_RECOVERY_SEC 15
+#define SOURCE_HEALTH_RECOVERY_GRACE_SEC 1
+#define SOURCE_HEALTH_RETRY_SEC 5
+#define SOURCE_HEALTH_RECOVERY_MIN_FRAMES 5
 #define SOURCE_HEALTH_MAX_RECONNECT_ATTEMPTS 3
 
 static gint
@@ -287,6 +291,8 @@ source_health_ready_locked (gint64 now_us)
     SourceHealth *health = &source_health[i];
     if (!health->configured)
       continue;
+    if (health->recovery_active)
+      return FALSE;
     if (!health->seen[SOURCE_HEALTH_MUX] ||
         !health->seen[SOURCE_HEALTH_PGIE] ||
         !health->seen[SOURCE_HEALTH_TRACKER])
@@ -433,13 +439,28 @@ source_health_update (const gchar *stage, NvDsBatchMeta *batch_meta)
         }
       }
     }
-    if (stage_index == SOURCE_HEALTH_MUX && health->recovery_active) {
-      gint64 recovery_us = now_us - health->stall_started_us;
-      health->recovery_active = FALSE;
-      health->stall_logged = FALSE;
-      health->recovery_failure_logged = FALSE;
-      source_health_event_locked ("reconnect_success", frame_meta->source_id,
-          "PLAYING", recovery_us);
+    if (health->recovery_active) {
+      gboolean all_stages_recovered = TRUE;
+      guint recovery_stage;
+      for (recovery_stage = 0;
+           recovery_stage < SOURCE_HEALTH_STAGE_COUNT; recovery_stage++) {
+        if (health->frames[recovery_stage] <
+            health->recovery_start_frames[recovery_stage] +
+                SOURCE_HEALTH_RECOVERY_MIN_FRAMES) {
+          all_stages_recovered = FALSE;
+          break;
+        }
+      }
+      if (all_stages_recovered) {
+        gint64 recovery_us = now_us - health->stall_started_us;
+        health->recovery_active = FALSE;
+        health->stall_logged = FALSE;
+        health->recovery_failure_logged = FALSE;
+        health->reconnect_attempt_us = 0;
+        health->reconnect_attempts = 0;
+        source_health_event_locked ("reconnect_success", frame_meta->source_id,
+            "PLAYING", recovery_us);
+      }
     }
   }
   source_health_write_readiness_locked (now_us, FALSE);
@@ -450,11 +471,19 @@ static gboolean
 source_health_watchdog_cb (gpointer data)
 {
   AppCtx *app_ctx = (AppCtx *) data;
+  GstState pipeline_state = GST_STATE_NULL;
+  GstState pending_state = GST_STATE_NULL;
   gint64 now_us = g_get_monotonic_time ();
+  gboolean pipeline_playing;
   guint i;
 
   if (!source_health_enabled || !app_ctx)
     return G_SOURCE_CONTINUE;
+
+  gst_element_get_state (app_ctx->pipeline.pipeline, &pipeline_state,
+      &pending_state, 0);
+  pipeline_playing = pipeline_state == GST_STATE_PLAYING;
+
   g_mutex_lock (&source_health_mutex);
   for (i = 0; i < MAX_SOURCE_BINS; i++) {
     SourceHealth *health = &source_health[i];
@@ -467,24 +496,49 @@ source_health_watchdog_cb (gpointer data)
     mux_stalled = !health->seen[SOURCE_HEALTH_MUX] ?
         (now_us - source_health_started_us >= SOURCE_HEALTH_STARTUP_SEC * G_USEC_PER_SEC) :
         (now_us - health->last_progress_us[SOURCE_HEALTH_MUX] >= SOURCE_HEALTH_STALL_SEC * G_USEC_PER_SEC);
-    if (mux_stalled && !health->stall_logged && !src_bin->reconfiguring) {
+
+    if (mux_stalled && !health->stall_logged) {
+      guint recovery_stage;
       health->stall_logged = TRUE;
       health->recovery_active = TRUE;
       health->recovery_failure_logged = FALSE;
       health->stall_started_us = now_us;
+      health->reconnect_attempt_us = 0;
       health->reconnect_attempts = 0;
+      for (recovery_stage = 0;
+           recovery_stage < SOURCE_HEALTH_STAGE_COUNT; recovery_stage++)
+        health->recovery_start_frames[recovery_stage] =
+            health->frames[recovery_stage];
       source_health_event_locked ("source_stall_detected", i, "DEGRADED", -1);
     }
-    if (health->recovery_active && !src_bin->reconfiguring &&
+
+    /*
+     * Do not reset a child source while the parent pipeline itself is paused.
+     * Once PLAYING resumes, give natural dataflow a short grace period before
+     * touching the RTSP source bin. If recovery still has not produced fresh
+     * mux/PGIE/tracker frames, retry the existing DeepStream source reset even
+     * when the bin is already marked reconfiguring. NVIDIA's reference source
+     * watcher also retries while reconfiguring; permanently suppressing those
+     * retries can strand a source after a transient, partial recovery.
+     *
+     * Schedule the reset back onto the GLib main loop instead of calling the
+     * state-changing helper while holding source_health_mutex.
+     */
+    if (health->recovery_active && mux_stalled && pipeline_playing &&
+        now_us - health->stall_started_us >=
+            SOURCE_HEALTH_RECOVERY_GRACE_SEC * G_USEC_PER_SEC &&
         (health->reconnect_attempt_us == 0 ||
-         now_us - health->reconnect_attempt_us >= G_USEC_PER_SEC)) {
+         now_us - health->reconnect_attempt_us >=
+            SOURCE_HEALTH_RETRY_SEC * G_USEC_PER_SEC)) {
       if (health->reconnect_attempts < SOURCE_HEALTH_MAX_RECONNECT_ATTEMPTS) {
         health->reconnect_attempts++;
         health->reconnect_attempt_us = now_us;
-        source_health_event_locked ("reconnect_attempt", i, "RECONNECTING", -1);
-        reset_source_pipeline (src_bin);
+        source_health_event_locked ("reconnect_attempt", i,
+            src_bin->reconfiguring ? "RECONFIGURING" : "RECONNECTING", -1);
+        g_timeout_add (0, reset_source_pipeline, src_bin);
       } else if (!health->recovery_failure_logged &&
-          now_us - health->stall_started_us >= SOURCE_HEALTH_RECOVERY_SEC * G_USEC_PER_SEC) {
+          now_us - health->stall_started_us >=
+              SOURCE_HEALTH_RECOVERY_SEC * G_USEC_PER_SEC) {
         health->recovery_failure_logged = TRUE;
         source_health_event_locked ("reconnect_failure", i, "DEGRADED", -1);
       }
