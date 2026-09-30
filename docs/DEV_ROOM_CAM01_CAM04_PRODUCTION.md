@@ -97,6 +97,35 @@ CAM-04 are badged `REPLAY` in replay mode. Normal overlays show
 The BEV renders one marker per canonical ID, lists its currently active camera
 sources, and removes it as soon as neither Dev Room camera observes it.
 
+### Production publication readiness
+
+The native `run/logs/probe/readiness.json` is the single room-pair readiness
+signal. Both sources must have current mux, PGIE, and tracker progress; the
+existing native five-second stall/recovery policy is unchanged. The runner
+always enables this signal, including when diagnostics are not requested.
+
+The identity sidecar starts in **WARMING**. Source ingestion, inference,
+tracking, crops, OSNet, identity resolution, and independent camera previews
+continue normally. Production identity rows/events and current presence are
+withheld; `current_state.json` explicitly contains an empty `people` list and
+`publication.ready=false`. PENDING/Unknown observations are diagnostic, not
+production canonical presence.
+
+When native readiness becomes ready, publication enters **READY**. Only
+observations received after that opening can be published. Withheld rows and
+events are discarded, not queued or flushed; valid identity/gallery state is
+not reset. A loss of native readiness closes the same barrier and clears
+current presence. Recovery opens a new publication epoch and requires fresh
+observations again. The API independently checks the same native readiness,
+including the native age limit if its producer stops, so a frozen worker's
+old snapshot cannot remain current BEV/overlay output.
+
+Transitions and monotonic opening times are recorded in
+`identity-live/identity_path_trace.jsonl`; the state/report includes
+`publication`/`publication_barrier`, its epoch, and zero deferred-event queue
+depth. This is a Python publication boundary only: no video pad, native
+preview worker, decoder, analytics queue, or identity threshold is gated.
+
 ## Validation
 
 Verify frozen Dev Room assets:
