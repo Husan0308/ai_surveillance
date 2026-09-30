@@ -418,10 +418,11 @@ def deepstream_command(stage: Path, binary: Path, image: str, source_mode: str, 
         command += [
             "-e", f"MV3DT_AUDIT_CAMERA_MAP={audit_camera_mapping(stage)}",
         ]
-    if os.getenv("MV3DT_SOURCE_HEALTH_DIR"):
-        command += [
-            "-e", "MV3DT_SOURCE_HEALTH_DIR=/workspace/experiments/logs/probe",
-        ]
+    # Production publication readiness requires this existing native signal,
+    # not an opt-in diagnostic flag. Its watchdog/recovery policy is unchanged.
+    command += [
+        "-e", "MV3DT_SOURCE_HEALTH_DIR=/workspace/experiments/logs/probe",
+    ]
     if os.getenv("MV3DT_UI_PREVIEW_DIAGNOSTICS"):
         command += [
             "-e", "MV3DT_UI_PREVIEW_DIAGNOSTICS=/workspace/experiments/logs/probe/preview_diagnostics.jsonl",

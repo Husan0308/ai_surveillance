@@ -16,6 +16,7 @@ from services.mv3dt_room.presence import (
     application_id as row_application_id,
     assert_presence_contract,
 )
+from services.mv3dt_room.publication_readiness import read_readiness
 
 
 # Verified live RTSP dimensions for the Dev Room acceptance profile. Runtime
@@ -224,15 +225,7 @@ class RoomPairState:
     def readiness(self) -> dict[str, Any]:
         with self._lock:
             self._refresh_active_root()
-            candidates = (
-                self.root / "run/logs/probe/readiness.json",
-                self.root / "logs/probe/readiness.json",
-            )
-            for path in candidates:
-                payload = _json(path, None)
-                if isinstance(payload, dict):
-                    return payload
-        return {"status": "not_ready", "ready": False, "reason": "readiness_missing"}
+            return read_readiness(self.root)
 
     def _identity_rows(self) -> list[dict[str, Any]]:
         self._refresh_active_root()
@@ -341,6 +334,13 @@ class RoomPairState:
             current_state = self._current_state()
             rows = list(self._identity_rows()) if current_state is None else list(current_state.get("people", []))
             report = _json(self.identity_dir / "runtime_report.json", {})
+            readiness = read_readiness(self.root)
+        # Fail closed even if the worker froze before clearing its last state.
+        publication = (current_state or {}).get("publication", {})
+        if not readiness.get("ready") or publication.get("ready") is False:
+            rows = []
+        rows = [row for row in rows if row_application_id(row).startswith("Person_")
+                and row.get("identity_state") != "PENDING"]
         if current_state is not None:
             active_rows = rows
             frames = [
@@ -403,7 +403,8 @@ class RoomPairState:
             "status": status,
             "source_mode": source_mode,
             "session_id": session_id,
-            "readiness": self.readiness(),
+            "readiness": readiness,
+            "publication": publication,
             "cameras": list(CAMERAS),
             "face_recognition": False,
             "people": people,

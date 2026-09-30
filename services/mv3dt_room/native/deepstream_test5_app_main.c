@@ -2083,6 +2083,122 @@ frame_audit_log_batch (const gchar *stage, NvDsBatchMeta *batch_meta)
   g_mutex_unlock (&frame_audit_mutex);
 }
 
+typedef struct {
+  gboolean seen;
+  guint64 offset;
+  gint last_raw;
+  gint last_output;
+} SourceFrameContinuity;
+
+static SourceFrameContinuity source_frame_continuity[MAX_SOURCE_BINS];
+
+typedef struct {
+  guint source_id;
+  gboolean continuous_rtsp;
+  gboolean trace;
+} SourceRecoveryEventContext;
+
+static GstPadProbeReturn
+source_recovery_event_probe (GstPad *pad, GstPadProbeInfo *info,
+    gpointer user_data)
+{
+  SourceRecoveryEventContext *context = user_data;
+  GstEvent *event = info ? GST_PAD_PROBE_INFO_EVENT (info) : NULL;
+  (void) pad;
+  if (!event || !context)
+    return GST_PAD_PROBE_OK;
+  if ((context->trace && GST_EVENT_TYPE (event) != GST_EVENT_TAG)
+      || GST_EVENT_TYPE (event) == GST_EVENT_EOS)
+    g_print ("SOURCE_RECOVERY_EVENT monotonic_ns=%" G_GINT64_FORMAT
+        " source_id=%u event=%s seqnum=%u terminal_eos=%s\n",
+        g_get_monotonic_time () * 1000, context->source_id,
+        GST_EVENT_TYPE_NAME (event), gst_event_get_seqnum (event),
+        context->continuous_rtsp ? "false" : "true");
+  if (context->continuous_rtsp && GST_EVENT_TYPE (event) == GST_EVENT_EOS)
+    return GST_PAD_PROBE_DROP;
+  return GST_PAD_PROBE_OK;
+}
+
+static void
+source_recovery_attach_events (AppCtx *app_ctx)
+{
+  for (guint i = 0; i < app_ctx->pipeline.multi_src_bin.num_bins; i++) {
+    NvDsSrcBin *source = &app_ctx->pipeline.multi_src_bin.sub_bins[i];
+    GstPad *pad;
+    SourceRecoveryEventContext *context;
+    GstElement *output = i < 2 && preview_mux_queues[i] ?
+        preview_mux_queues[i] : source->bin;
+    if (!output || !source->config || source->config->type != NV_DS_SOURCE_RTSP)
+      continue;
+    pad = gst_element_get_static_pad (output, "src");
+    if (!pad)
+      continue;
+    context = g_new0 (SourceRecoveryEventContext, 1);
+    context->source_id = source->source_id;
+    context->trace = g_getenv ("MV3DT_UI_PREVIEW_DIAGNOSTICS") != NULL;
+    /* A reconnect-enabled RTSP source is continuous, not a finite URI.
+     * The SDK's upstream monitor still sees the disconnect/EOS and performs
+     * its source-local reset. Do not end this paired analytics stream: mux
+     * EOS can serialize tracker/MVA behind a peer that is still reconnecting.
+     * No buffers, flushes, segments or stream-reset events are withheld. */
+    context->continuous_rtsp = source->config->rtsp_reconnect_interval_sec > 0;
+    gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+        source_recovery_event_probe, context, (GDestroyNotify) g_free);
+    gst_object_unref (pad);
+  }
+}
+
+static gint
+source_frame_continuity_update (SourceFrameContinuity *state, gint raw,
+    gboolean *reset)
+{
+  *reset = FALSE;
+  if (raw < 0)
+    return raw;
+  if (state->seen && raw < state->last_raw) {
+    state->offset = (guint64) state->last_output + 1 - raw;
+    *reset = TRUE;
+  }
+  /* NvDsFrameMeta uses a signed frame number. Never silently wrap it. */
+  if (state->offset + (guint64) raw > G_MAXINT)
+    return -1;
+  state->seen = TRUE;
+  state->last_raw = raw;
+  state->last_output = (gint) (state->offset + raw);
+  return state->last_output;
+}
+
+static void
+source_frame_continuity_apply (NvDsBatchMeta *batch_meta)
+{
+  if (!batch_meta)
+    return;
+  /* Only the mux output owns this per-source timeline. A source reset must
+   * not rewind the frame IDs consumed by MVA while its peer keeps running.
+   * PTS/NTP, buffers, tracking policy and the independent preview are intact. */
+  for (NvDsMetaList *item = batch_meta->frame_meta_list; item; item = item->next) {
+    NvDsFrameMeta *frame = (NvDsFrameMeta *) item->data;
+    gboolean reset;
+    gint raw, output;
+    if (!frame || frame->source_id >= MAX_SOURCE_BINS)
+      continue;
+    raw = frame->frame_num;
+    output = source_frame_continuity_update (
+        &source_frame_continuity[frame->source_id], raw, &reset);
+    if (output < 0) {
+      g_printerr ("source frame continuity: invalid/overflow source=%u raw=%d\n",
+          frame->source_id, raw);
+      continue;
+    }
+    frame->frame_num = output;
+    if (reset)
+      g_print ("SOURCE_FRAME_CONTINUITY monotonic_ns=%" G_GINT64_FORMAT
+          " source_id=%u raw=%d output=%d pts=%" G_GUINT64_FORMAT "\n",
+          g_get_monotonic_time () * 1000, frame->source_id, raw, output,
+          frame->buf_pts);
+  }
+}
+
 static GstPadProbeReturn
 frame_audit_pad_probe (GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
@@ -2094,6 +2210,8 @@ frame_audit_pad_probe (GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
   if (!info || !(buffer = GST_PAD_PROBE_INFO_BUFFER (info)))
     return GST_PAD_PROBE_OK;
   batch_meta = gst_buffer_get_nvds_batch_meta (buffer);
+  if (!g_strcmp0 (context->stage, "nvstreammux"))
+    source_frame_continuity_apply (batch_meta);
   source_health_update (context->stage, batch_meta);
   frame_audit_log_batch (context->stage, batch_meta);
   return GST_PAD_PROBE_OK;
@@ -3908,6 +4026,7 @@ main (int argc, char *argv[])
     frame_audit_attach_pad (
         appCtx[i]->pipeline.common_elements.tracker_bin.tracker, "tracker");
     preview_attach (appCtx[i]);
+    source_recovery_attach_events (appCtx[i]);
     source_health_configure (appCtx[i]);
     if (!pn263_bbox_correction_attach (
             appCtx[i]->pipeline.common_elements.primary_gie_bin.primary_gie,

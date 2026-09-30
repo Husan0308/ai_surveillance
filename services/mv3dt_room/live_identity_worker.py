@@ -22,6 +22,7 @@ from services.mv3dt_room.identity_gallery_store import IdentityGalleryStore
 from services.mv3dt_room.identity_metrics import IdentityMetrics, monotonic_ns, wall_timestamp_ns
 from services.mv3dt_room.identity_queue import AsyncOsnetBatcher, LatestObservationQueue, ObservationEnvelope, ReIdResult
 from services.mv3dt_room.reid_embedder import OsnetEmbedder
+from services.mv3dt_room.publication_readiness import PublicationBarrier, read_readiness
 
 
 def iso_timestamp(ns: int) -> str:
@@ -103,6 +104,12 @@ class LiveIdentityWorker:
         self.latest_camera_rows: dict[str, list[dict]] = {camera: [] for camera in CAMS}
         self.last_published_presence: set[tuple[str, int, str]] = set()
         self.output_rows: list[dict] = []
+        self.publication = PublicationBarrier()
+        self.publication_events: list[dict] = []
+        self.manager_event_cursor = 0
+        self.event_row_cursor = 0
+        self.last_readiness_check_ns = 0
+        self._audit("publication_barrier_initialized", **self.publication.snapshot())
         self.decision_trace_rows: list[dict] = []
         self.persist_embeddings = os.environ.get("MV3DT_IDENTITY_DEBUG_PERSIST_EMBEDDINGS", "0") == "1"
         self.embedding_debug_path = self.output_dir / "embedding_debug.jsonl"
@@ -141,7 +148,8 @@ class LiveIdentityWorker:
     def _audit(self, event: str, **fields) -> None:
         """Flush acceptance diagnostics as append-only JSONL in this run's .runtime."""
         self.audit_handle.write(json.dumps(
-            {"event": event, "wall_timestamp": iso_timestamp(wall_timestamp_ns()), **fields},
+            {"event": event, "monotonic_ns": monotonic_ns(),
+             "wall_timestamp": iso_timestamp(wall_timestamp_ns()), **fields},
             separators=(",", ":"), default=str,
         ) + "\n")
         self.audit_handle.flush()
@@ -521,13 +529,54 @@ class LiveIdentityWorker:
         self.metrics.observe("identity_decision_latency_ms", (end_ns - start_ns) / 1_000_000.0, obs["camera_id"])
         return row
 
+    def _refresh_publication_readiness(self, *, force: bool = False) -> None:
+        now_ns = monotonic_ns()
+        if not force and now_ns - self.last_readiness_check_ns < 50_000_000:
+            return
+        self.last_readiness_check_ns = now_ns
+        transition = self.publication.update(read_readiness(self.output_dir.parent), now_ns)
+        if transition is not None:
+            self._audit("publication_barrier_transition", **transition)
+
+    def _record_identity_row(self, row: dict) -> None:
+        """Publish accepted, fresh rows only; diagnostics remain append-only."""
+        if (not self.publication.allows(row)
+                or row.get("canonical_internal_identity") is None
+                or row.get("identity_state") not in {"KNOWN", "NEW_CONFIRMED"}):
+            self.metrics.inc("readiness_identity_rows_withheld", camera_id=row["camera_id"])
+            return
+        row["publication_epoch"] = self.publication.epoch
+        self.output_rows.append(row)
+
+    def _collect_publication_events(self) -> None:
+        events = self.manager.events[self.manager_event_cursor:]
+        rows = self.output_rows[self.event_row_cursor:]
+        self.manager_event_cursor = len(self.manager.events)
+        self.event_row_cursor = len(self.output_rows)
+        # CREATE lacks camera/native fields. Match its identity and exact frame
+        # to this accepted observation; never flush historical WARMING events.
+        for event in events:
+            published = self.publication.ready and any(
+                event.get("frame") == row["frame"]
+                and event.get("global_person_id", event.get("kept_global_person_id", row["canonical_internal_identity"])) == row["canonical_internal_identity"]
+                and event.get("camera_id", row["camera_id"]) == row["camera_id"]
+                and event.get("native_track_id", row["native_track_id"]) == row["native_track_id"]
+                for row in rows
+            )
+            self._audit("identity_manager_event", manager_event=event, published=published)
+            if published:
+                self.publication_events.append(event)
+
     def _publish_state(self) -> None:
+        self._refresh_publication_readiness(force=True)
         started = monotonic_ns()
         people = []
         for camera in CAMS:
             for obs in self.latest_camera_rows[camera]:
                 state = self.track_states.get((camera, int(obs["native_track_id"])))
-                if state is None or state.terminated:
+                if (state is None or state.terminated or not self.publication.allows(obs)
+                        or state.canonical_internal_identity is None
+                        or state.identity_state not in {"KNOWN", "NEW_CONFIRMED"}):
                     continue
                 internal = state.canonical_internal_identity
                 people.append({
@@ -552,6 +601,8 @@ class LiveIdentityWorker:
             "session_id": self.args.session_id,
             "active_frame_by_camera": dict(self.latest_camera_frame),
             "published_timestamp": iso_timestamp(wall_timestamp_ns()),
+            "publication": self.publication.snapshot(),
+            "readiness": self.publication.readiness,
             "people": people,
         }
         current_presence = {
@@ -626,7 +677,7 @@ class LiveIdentityWorker:
         state.identity_state = "KNOWN"
         state.last_accepted_frame = int(obs["frame"])
         evidence = {**evidence, "identity_state": "KNOWN"}
-        self.output_rows.append(self._row(obs, state.canonical_internal_identity, evidence, start, end, start_wall, end_wall))
+        self._record_identity_row(self._row(obs, state.canonical_internal_identity, evidence, start, end, start_wall, end_wall))
         self.metrics.inc("identity_decisions", camera_id=obs["camera_id"])
 
     def _apply_reid_results(self, results: list[ReIdResult]) -> None:
@@ -772,7 +823,7 @@ class LiveIdentityWorker:
                     self.metrics.inc("id_reacquisition_resolved", camera_id=obs["camera_id"])
                 evidence = {**evidence, "identity_state": "KNOWN"}
             state.pending_was_reacquisition = False
-            self.output_rows.append(self._row(
+            self._record_identity_row(self._row(
                 obs, state.canonical_internal_identity, evidence,
                 start, end, start_wall, end_wall, result.vector, result,
             ))
@@ -814,7 +865,7 @@ class LiveIdentityWorker:
                             self.metrics.inc("id_reacquisition_resolved", camera_id=latest["camera_id"])
                         state.pending_was_reacquisition = False
                         evidence = {**evidence, "identity_state": "KNOWN", "resolution_path": "latest_geometry_or_native"}
-                        self.output_rows.append(self._row(
+                        self._record_identity_row(self._row(
                             latest, state.canonical_internal_identity, evidence,
                             start, end, start_wall, end_wall,
                         ))
@@ -886,6 +937,7 @@ class LiveIdentityWorker:
                 for camera in CAMS
             },
             "output_observations": len(self.output_rows),
+            "publication_barrier": self.publication.snapshot(),
             "identity_gallery": self.gallery_store.stats(),
             "identity_persistence": dict(self.manager.persistence_stats),
             "embeddings_extracted": int(embedder_metrics.get("images", 0)),
@@ -968,7 +1020,7 @@ class LiveIdentityWorker:
         with (self.output_dir / "global_identity.jsonl").open("w") as handle:
             for row in self.output_rows:
                 handle.write(json.dumps(row, separators=(",", ":")) + "\n")
-        (self.output_dir / "identity_events.json").write_text(json.dumps(self.manager.events, indent=2))
+        (self.output_dir / "identity_events.json").write_text(json.dumps(self.publication_events, indent=2))
         with (self.output_dir / "identity_decision_trace.jsonl").open("w") as handle:
             for row in self.decision_trace_rows:
                 handle.write(json.dumps(row, separators=(",", ":")) + "\n")
@@ -989,11 +1041,16 @@ class LiveIdentityWorker:
         started_live = time.monotonic()
         done_idle_since: float | None = None
         try:
+            self._publish_state()
             while not self.stop_requested and time.monotonic() - started_live < self.args.duration:
+                self._refresh_publication_readiness()
                 lines = self._parse_new_kafka(self.args.kafka)
                 self._process_latest_queue()
                 self._apply_reid_results(self.reid.drain_results(None, limit=64))
                 self._process_latest_queue()
+                # Unpublished manager events are diagnostics, never a deferred
+                # production queue to replay when readiness opens again.
+                self._collect_publication_events()
                 now = time.monotonic()
                 if now - self.last_publish >= 0.05:
                     self._publish_state()
@@ -1016,6 +1073,7 @@ class LiveIdentityWorker:
         finally:
             self.reid.stop()
             self._apply_reid_results(self.reid.drain_results(None, limit=256))
+            self._collect_publication_events()
             self.crop_receiver.stop()
             self._publish_state()
             self.write()

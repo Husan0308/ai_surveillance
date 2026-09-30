@@ -97,6 +97,64 @@ CAM-04 are badged `REPLAY` in replay mode. Normal overlays show
 The BEV renders one marker per canonical ID, lists its currently active camera
 sources, and removes it as soon as neither Dev Room camera observes it.
 
+### Production publication readiness
+
+The native `run/logs/probe/readiness.json` is the single room-pair readiness
+signal. Both sources must have current mux, PGIE, and tracker progress; the
+existing native five-second stall/recovery policy is unchanged. The runner
+always enables this signal, including when diagnostics are not requested.
+
+The identity sidecar starts in **WARMING**. Source ingestion, inference,
+tracking, crops, OSNet, identity resolution, and independent camera previews
+continue normally. Production identity rows/events and current presence are
+withheld; `current_state.json` explicitly contains an empty `people` list and
+`publication.ready=false`. PENDING/Unknown observations are diagnostic, not
+production canonical presence.
+
+When native readiness becomes ready, publication enters **READY**. Only
+observations received after that opening can be published. Withheld rows and
+events are discarded, not queued or flushed; valid identity/gallery state is
+not reset. A loss of native readiness closes the same barrier and clears
+current presence. Recovery opens a new publication epoch and requires fresh
+observations again. The API independently checks the same native readiness,
+including the native age limit if its producer stops, so a frozen worker's
+old snapshot cannot remain current BEV/overlay output.
+
+Transitions and monotonic opening times are recorded in
+`identity-live/identity_path_trace.jsonl`; the state/report includes
+`publication`/`publication_barrier`, its epoch, and zero deferred-event queue
+depth. This is a Python publication boundary only: no video pad, native
+preview worker, decoder, analytics queue, or identity threshold is gated.
+
+### Sustained source-local recovery
+
+The SDK can restart one source while its paired source continues. Its mux
+metadata then restarts that source's frame number at zero. MVA consumes
+per-source frame numbers alongside NTP timestamps, so allowing just one
+timeline to rewind can stop tracker progress after an otherwise successful
+reconnect.
+
+At mux output, before PGIE/tracker, the native application preserves each
+source's frame-number continuity across a detected counter rewind. Normal
+frames keep their original numbers; the unaffected source is not renumbered.
+PTS/NTP timestamps, buffers, queue policies, SDK reconnect behavior, and
+tracking/identity thresholds are unchanged. The independent preview does not
+use this adapter. A recovery logs `SOURCE_FRAME_CONTINUITY` with the raw and
+continued frame numbers, source ID, PTS, and monotonic time.
+
+For reconnect-enabled live RTSP sources, a transient source EOS is not a
+terminal EOS for the permanent paired analytics input. The analytics-facing
+event probe withholds only that EOS; the existing upstream SDK monitor still
+detects it and resets/reconnects the source. Flush, segment, and stream-reset
+events continue normally, and no analytics buffers are dropped. Finite URI
+replay retains terminal EOS behavior. This prevents intermittent mux EOS
+draining from stranding MVA processing while its peer is reconnecting.
+
+A full-container pause freezes native streaming threads and is distinct from
+an RTSP socket interruption. Recovery acceptance tests both separately and
+requires continuously advancing mux/PGIE/tracker output for at least sixty
+seconds after READY returns, not just a brief readiness transition.
+
 ## Validation
 
 Verify frozen Dev Room assets:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from scripts.dev_room_mv3dt.run_room_pair import make_crop_socket_alias, replay_config
@@ -15,6 +16,15 @@ def _write_state(root: Path, mode: str, people: list[dict], running: bool) -> No
         "active_frame_by_camera": {"CAM-01": 10, "CAM-04": 10},
     }))
     (root / ("running" if running else "done")).touch()
+    health = root / "run/logs/probe/readiness.json"
+    health.parent.mkdir(parents=True)
+    health.write_text(json.dumps({
+        "ready": True, "status": "ready", "updated_epoch_ms": time.time() * 1000,
+        "sources": [{"source_id": source, **{
+            key: value for stage in ("mux", "pgie", "tracker")
+            for key, value in ((f"{stage}_seen", True), (f"last_{stage}_age_ms", 0))
+        }} for source in (0, 1)],
+    }))
 
 
 def test_room_pair_state_does_not_leak_replay_people_into_live(tmp_path: Path) -> None:
