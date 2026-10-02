@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention.yml"
 CANDIDATE_V2 = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention_v2.yml"
+CANDIDATE_V3 = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention_v3.yml"
 PRODUCTION = ROOT / "config/mv3dt_dev_room/config_tracker.yml"
 APP = ROOT / "config/mv3dt_dev_room/config_deepstream.txt"
 YOLO = ROOT / "config/deepstream/config_infer_primary_yolo26m_raw_otm.txt"
@@ -63,6 +64,35 @@ class NvDCFRetentionCandidateTests(unittest.TestCase):
         self.assertIn("refusing to edit non-runtime file", text)
         self.assertIn("production tracker changed during runtime patch", text)
         self.assertIn("'DataAssociator.minMatchingScore4Overall': .35", text)
+        self.assertIn('"migrated_from": migrated_from', text)
+
+
+    def test_v3_changes_only_iou_candidacy_beyond_v2(self):
+        text = CANDIDATE_V3.read_text()
+        for item in (
+            "minTrackerConfidence: 0.20",
+            "probationAge: 2",
+            "tentativeDetectorConfidence: 0.25",
+            "minMatchingScore4Overall: 0.35",
+            "minMatchingScore4Iou: 0.10",
+            "minMatchingScore4SizeSimilarity: 0.4",
+            "minMatchingScore4VisualSimilarity: 0.0520394823204932",
+            "minIouDiff4NewTarget: 0.22656630527418112",
+            "maxShadowTrackingAge: 162",
+            "earlyTerminationAge: 1",
+            "minPeerTrackletMatchScore: 0.48",
+            "maxPeerToPredDistance4Fusion: 1.35",
+            "outputShadowTracks: 0",
+        ):
+            self.assertIn(item, text)
+
+    def test_v3_patch_helper_migrates_v2_fail_closed(self):
+        text = (
+            ROOT / "scripts/dev_room_mv3dt/patch_final_detector_ab_for_nvdcf_retention_v3.py"
+        ).read_text()
+        self.assertIn("refusing to edit non-runtime file", text)
+        self.assertIn("production tracker changed during runtime patch", text)
+        self.assertIn("'DataAssociator.minMatchingScore4Iou': .10", text)
         self.assertIn('"migrated_from": migrated_from', text)
 
     def test_production_tracker_is_not_rebased_to_candidate_values(self):
