@@ -4,7 +4,59 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PY="${FULL_STACK_PYTHON:-$ROOT/.venv/bin/python}"
+resolve_python() {
+  local candidates=()
+
+  if [[ -n "${FULL_STACK_PYTHON:-}" ]]; then
+    candidates+=("$FULL_STACK_PYTHON")
+  fi
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    candidates+=("$VIRTUAL_ENV/bin/python")
+  fi
+  candidates+=(
+    "$ROOT/.venv/bin/python"
+    "$ROOT/venv/bin/python"
+  )
+
+  local path_python
+  path_python="$(command -v python3 2>/dev/null || true)"
+  [[ -n "$path_python" ]] && candidates+=("$path_python")
+  path_python="$(command -v python 2>/dev/null || true)"
+  [[ -n "$path_python" ]] && candidates+=("$path_python")
+
+  local candidate
+  local checked=""
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    checked+=" $candidate"
+    [[ -x "$candidate" ]] || continue
+
+    if "$candidate" - <<'PY' >/dev/null 2>&1
+import fastapi
+import httpx
+import numpy
+import uvicorn
+import yaml
+import dotenv
+import gi
+import PySide6
+gi.require_version("Gst", "1.0")
+from gi.repository import Gst
+PY
+    then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  echo "FULL_LIVE_STACK no Python interpreter has all required runtime modules." >&2
+  echo "Checked:$checked" >&2
+  echo "Required imports: fastapi httpx numpy uvicorn yaml dotenv gi(Gst) PySide6" >&2
+  echo "Override explicitly with FULL_STACK_PYTHON=/path/to/python if needed." >&2
+  return 1
+}
+
+PY="$(resolve_python)" || exit 1
 ROOM_PAIR_DURATION="${FULL_STACK_ROOM_PAIR_DURATION_SEC:-86400}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${FULL_STACK_OUT:-$ROOT/.runtime/full-live-stack-$STAMP}"
@@ -16,7 +68,7 @@ fail() {
   exit 1
 }
 
-[[ -x "$PY" ]] || fail "python_not_found=$PY"
+echo "FULL_LIVE_STACK python=$PY"
 command -v curl >/dev/null 2>&1 || fail "curl_not_found"
 command -v flock >/dev/null 2>&1 || fail "flock_not_found"
 
