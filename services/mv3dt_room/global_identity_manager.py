@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import time
 from datetime import datetime
@@ -135,6 +136,27 @@ def image_continuity(a, b, gap):
     return bbox_iou(a, b) >= 0.15 and foot_delta <= 0.35 * max(ah, bh) + 8.0 * gap
 
 
+def partial_bbox_continuity(a, b):
+    """A nested visible/full-body box with the same top and horizontal edge.
+
+    A changed visible-body extent can move the projected foot substantially.
+    This is image evidence only, never a replacement for peer/ReID evidence.
+    """
+    if a is None or b is None or len(a) != 4 or len(b) != 4:
+        return False
+    if not all(math.isfinite(float(v)) for v in (*a, *b)):
+        return False
+    aw, ah, bw, bh = a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1]
+    if min(aw, ah, bw, bh) <= 0:
+        return False
+    intersection = max(0., min(a[2], b[2]) - max(a[0], b[0])) * max(0., min(a[3], b[3]) - max(a[1], b[1]))
+    return (intersection / min(aw * ah, bw * bh) >= .90
+            # The full-body extent is the stable reference. A tiny head/torso
+            # proposal must not shrink the tolerance for its own top jitter.
+            and abs(a[1] - b[1]) <= .05 * max(ah, bh)
+            and min(abs(a[0] - b[0]), abs(a[2] - b[2])) <= .10 * min(aw, bw))
+
+
 @dataclass
 class GalleryEntry:
     vector: np.ndarray
@@ -159,9 +181,13 @@ class Identity:
 
 
 class GlobalIdentityManager:
-    def __init__(self, embeddings, gallery_store: IdentityGalleryStore | None = None):
+    def __init__(self, embeddings, gallery_store: IdentityGalleryStore | None = None,
+                 *, diagnostic_details: bool | None = None):
         self.embeddings = embeddings
         self.gallery_store = gallery_store
+        # Extra trace fields only; never consulted by association or novelty.
+        self.diagnostic_details = (os.getenv("MV3DT_IDENTITY_DECISION_DETAILS") == "1"
+                                   if diagnostic_details is None else diagnostic_details)
         self.identities = {}
         self.bindings = {}
         self.binding_last_frame = {}
@@ -267,7 +293,7 @@ class GlobalIdentityManager:
 
     def hard_possible(self, ident, obs, frame_assignments, vector=None, allow_long_gap=False):
         cam, world = obs["camera_id"], obs["world"]
-        appearance, _ = self.appearance(vector, ident) if vector is not None else (None, {})
+        appearance, per_camera = self.appearance(vector, ident) if vector is not None else (None, {})
         same_camera_fragment = False
         # ReID/gallery resolution is asynchronous; the current frame's active
         # assignment list can be empty even though this identity was observed
@@ -312,7 +338,10 @@ class GlobalIdentityManager:
                     same_camera_gap,
                 )
             )
-            if recently_co_visible and not (retained_fragment or image_supported_motion_fragment):
+            peer_supported_partial_fragment = self._peer_supported_partial_fragment(
+                ident, obs, last_same_camera, frame_assignments, per_camera)
+            if recently_co_visible and not (retained_fragment or image_supported_motion_fragment
+                                             or peer_supported_partial_fragment):
                 # A historical embedding/world sample must not pull a second,
                 # spatially distinct same-camera target into an identity whose
                 # native track was still observed within the local track-break
@@ -320,7 +349,7 @@ class GlobalIdentityManager:
                 # retained native track reused an older 1.9 m historical
                 # sample and produced duplicate simultaneous Person_XX tracks.
                 return False, "same_camera_simultaneous", False
-            if retained_fragment or image_supported_motion_fragment:
+            if retained_fragment or image_supported_motion_fragment or peer_supported_partial_fragment:
                 same_camera_fragment = True
             elif same_camera_dt is not None and same_camera_dt <= IDENTITY_GATES["cross_camera_time_ms"]:
                 return False, "same_camera_simultaneous", False
@@ -342,7 +371,9 @@ class GlobalIdentityManager:
                     and observation_time_ms(obs, other) is not None
                     and observation_time_ms(obs, other) <= IDENTITY_GATES["cross_camera_time_ms"]
                 )
-                if fragment:
+                partial_fragment = self._peer_supported_partial_fragment(
+                    ident, obs, other, frame_assignments, per_camera)
+                if fragment or partial_fragment:
                     same_camera_fragment = True
                     continue
                 return False, "same_camera_simultaneous", False
@@ -404,6 +435,43 @@ class GlobalIdentityManager:
                     if not self._historical_same_camera_candidate(ident, obs):
                         return False, "same_camera_temporal_speed_impossibility", False
         return True, "", same_camera_fragment
+
+    def _peer_supported_partial_fragment(self, ident, obs, previous, assignments, per_camera):
+        """Distinguish a retained fragment from an actual simultaneous target.
+
+        Retained memory alone wrongly rejected nested detector boxes after a
+        native break because their projected feet jumped. Require independent
+        same-camera image/ReID and contemporaneous peer/ReID support instead.
+        Existing global similarity, distance, and time gates stay unchanged.
+        """
+        cam = obs['camera_id']
+        gap = int(obs['frame']) - int(previous['frame'])
+        if not (0 <= gap <= IDENTITY_GATES['same_camera_direct_gap_frames']
+                and int(obs.get('pending_good_crops', 0)) >= 2
+                and per_camera.get(cam, -1.) >= IDENTITY_GATES['cross_camera_similarity_min']
+                and partial_bbox_continuity(previous.get('bbox'), obs.get('bbox'))):
+            return False
+        # Coexisting partial/full proposals are also fragments only if every
+        # current same-camera target has the same anchored nested image support.
+        # A distinct simultaneous person continues to veto the candidate.
+        relevant = [item for item in assignments
+                    if self.root(item['global_person_id_num']) == ident.number]
+        if any(item['camera_id'] == cam and item['native_track_id'] != obs['native_track_id']
+               and (not partial_bbox_continuity(item.get('bbox'), obs.get('bbox'))
+                    or observation_time_ms(obs, item) is None
+                    or observation_time_ms(obs, item) > IDENTITY_GATES['cross_camera_time_ms'])
+               for item in relevant):
+            return False
+        for peer in relevant:
+            if peer['camera_id'] == cam:
+                continue
+            dt = observation_time_ms(obs, peer)
+            d = distance(obs.get('world'), peer.get('world'))
+            if (dt is not None and dt <= IDENTITY_GATES['cross_camera_time_ms']
+                    and d is not None and d <= IDENTITY_GATES['cross_camera_world_candidate_m']
+                    and per_camera.get(peer['camera_id'], -1.) >= IDENTITY_GATES['cross_camera_similarity_min']):
+                return True
+        return False
 
     def _historical_same_camera_candidate(self, ident, obs):
         history = ident.history_by_camera.get(obs["camera_id"], ())
@@ -1098,6 +1166,24 @@ class GlobalIdentityManager:
                 "same_camera_conflict_reason": ("same_camera_fragment_handoff" if same_camera_fragment else "same_camera_simultaneous") if same_camera_conflict else None,
                 "exact_rejection_reason": rejection or (None if score is not None else evidence.get("reason", "insufficient_evidence")),
             })
+            if self.diagnostic_details:
+                def snapshot(item):
+                    if item is None:
+                        return None
+                    return {key: (list(item[key]) if key in {"bbox", "world"}
+                                  and item.get(key) is not None else item.get(key))
+                            for key in ("camera_id", "native_track_id", "frame", "timestamp", "bbox", "world")}
+                trace[-1]["diagnostic_context"] = {
+                    "retained_same_camera": snapshot(last_same_camera),
+                    "retained_frame_gap": int(obs["frame"]) - int(last_same_camera["frame"]) if last_same_camera else None,
+                    "retained_source_time_delta_ms": observation_time_ms(obs, last_same_camera) if last_same_camera else None,
+                    "retained_image_iou": bbox_iou(obs.get("bbox"), last_same_camera.get("bbox")) if last_same_camera else None,
+                    "retained_world_distance": distance(obs.get("world"), last_same_camera.get("world")) if last_same_camera else None,
+                    "retained_conflict_window": retained_same_camera_conflict,
+                    "current_assignments": [snapshot(item) for item in active],
+                    "historical_same_camera": snapshot(historical),
+                    "scoring_evidence": dict(evidence),
+                }
         return trace
 
     def novelty_evidence(self, obs, vector, frame_assignments, good_crops, attempts):
