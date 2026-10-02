@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL ONLY — YOLO26m NvDCF retention candidate v5 shadow-lifetime diagnostic.
+# This file is intentionally not referenced by the production DeepStream profile.
+#
+# Fixed detector contract for the staged A/B:
+#   YOLO26m FP16, 640x640, confidence 0.25, NMS IoU 0.45, interval 0.
+#
+# v4 left the CAM-04 1751-1914 association deficit unchanged. Frame audit
+# evidence shows four PGIE detections through the blackout, while tracker output
+# drops from four to three at frame 1751 and returns to four only when a new
+# tentative target appears at frame 1914/1915. The blackout length (~164 frames)
+# closely matches maxShadowTrackingAge=162 plus activation delay.
+#
+# v5 is DIAGNOSTIC ONLY. It keeps all v4 detector-association and identity
+# settings fixed and changes one lifecycle variable:
+#   maxShadowTrackingAge: 49 -> 49
+#
+# If the blackout duration contracts to roughly the new shadow lifetime, that
+# confirms stale shadow-target lifetime is the dominant mechanism. This is not
+# a production recommendation; shorter shadow lifetime may increase ID
+# fragmentation after real occlusions.
+
+%YAML:1.0
+
+BaseConfig:
+  minDetectorConfidence: 0.027087304322979212
+  checkClassMatch: 0
+TargetManagement:
+  enableBboxUnClipping: 1
+  preserveStreamUpdateOrder: 0
+  maxTargetsPerStream: 200
+  minIouDiff4NewTarget: 0.22656630527418112
+  minTrackerConfidence: 0.20
+  probationAge: 2
+  maxShadowTrackingAge: 162
+  earlyTerminationAge: 1
+  maxTrajectoryBufferLength: -1
+  outputTerminatedTracks: 0
+  outputShadowTracks: 0
+TrajectoryManagement:
+  useUniqueID: 0
+  enableReAssoc: 1
+  minMatchingScore4Overall: 0.9349462651721144
+  minTrackletMatchingScore: 0.2940
+  minMatchingScore4ReidSimilarity: 0
+  matchingScoreWeight4TrackletSimilarity: 0.7981
+  matchingScoreWeight4ReidSimilarity: 0
+  minTrajectoryLength4Projection: 34
+  prepLength4TrajectoryProjection: 58
+  trajectoryProjectionLength: 33
+  maxAngle4TrackletMatching: 67
+  minSpeedSimilarity4TrackletMatching: 0.0574
+  minBboxSizeSimilarity4TrackletMatching: 0.1013
+  maxTrackletMatchingTimeSearchRange: 27
+  trajectoryProjectionProcessNoiseScale: 0.0100
+  trajectoryProjectionMeasurementNoiseScale: 100
+  trackletSpacialSearchRegionScale: 0.0100
+  reidExtractionInterval: 0
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1
+  minMatchingScore4Overall: 0.35
+  minMatchingScore4SizeSimilarity: 0.30
+  minMatchingScore4Iou: 0.10
+  minMatchingScore4VisualSimilarity: 0.0520394823204932
+  matchingScoreWeight4SizeSimilarity: 0.104589699500018
+  matchingScoreWeight4Iou: 0.7844652139368062
+  matchingScoreWeight4VisualSimilarity: 0.9294872869302965
+  tentativeDetectorConfidence: 0.25
+  minMatchingScore4TentativeIou: 0.1768733030811293
+  minMatchingScore4PeerAssocIou: 0.2
+StateEstimator:
+  stateEstimatorType: 3
+  processNoiseVar4Loc: 6497.75224242603
+  processNoiseVar4Vel: 8035.858212054732
+  measurementNoiseVar4Detector: 100.0000
+  measurementNoiseVar4Tracker: 883.5847350922555
+ObjectModelProjection:
+  minPoseConfidence: 0.925
+  outputFootLocation: 1
+  outputVisibility: 1
+  outputConvexHull: 1
+  cameraModelFilepath:
+    - /workspace/inputs/camInfo/cam_00.yml
+    - /workspace/inputs/camInfo/cam_01.yml
+  objectModelType: 0
+VisualTracker:
+  visualTrackerType: 2
+  useColorNames: 1
+  useHog: 1
+  featureImgSizeLevel: 5
+  featureFocusOffsetFactor_y: -0.10525549278780495
+  filterLr: 0.025008995723548734
+  filterChannelWeightsLr: 0.09460260509799209
+  gaussianSigma: 0.44967391866177786
+MultiViewAssociator:
+  multiViewAssociatorType: 1
+  enableLatePeerReAssoc: 1
+  enableIDCorrection: 1
+  enableSeeThrough: 1
+  enableMsgSync: 1
+  maxPeerTrackletSize: 50
+  recentlyActiveAge: 178
+  minCommonFrames4MatchScore: 2
+  maxPeerToPredDistance4Fusion: 1.35
+  minPeerVisibility4Fusion: 0.15
+  minPeerTrackletMatchScore: 0.48
+  maxTrackletMatchingTimeSearchRange: 1
+  maxPeerFrameDiff4NoDet: 2
+  communicatorInitSleepTime: 0
+Communicator:
+  communicatorType: 2
+  pubSubInfoConfigPath: /workspace/experiments/pub_sub_info_config_0.yml
+  mqttProtoAdaptorConfigPath: /workspace/experiments/config_mqtt.txt
+PoseEstimator:
+  poseEstimatorType: 1
+  useVPICropScaler: 1
+  batchSize: 1
+  workspaceSize: 1000
+  inferDims: [3, 256, 192]
+  networkMode: 1
+  inputOrder: 0
+  colorFormat: 0
+  offsets: [123.6750, 116.2800, 103.5300]
+  netScaleFactor: 0.00392156
+  onnxFile: /workspace/models/BodyPose3DNet/bodypose3dnet_accuracy.onnx
+  modelEngineFile: /workspace/models/BodyPose3DNet/bodypose3dnet_accuracy.onnx_b1_gpu0_fp16.engine
+  poseInferenceInterval: 30
