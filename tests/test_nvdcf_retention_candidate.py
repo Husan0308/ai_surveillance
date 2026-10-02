@@ -10,6 +10,7 @@ CANDIDATE_V4 = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention_
 CANDIDATE_V5 = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention_v5_shadow49.yml"
 CANDIDATE_V6 = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention_v6_newtarget035.yml"
 CANDIDATE_V7 = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention_v7_trackerconf015.yml"
+CANDIDATE_V8 = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention_v8_early2.yml"
 PRODUCTION = ROOT / "config/mv3dt_dev_room/config_tracker.yml"
 APP = ROOT / "config/mv3dt_dev_room/config_deepstream.txt"
 YOLO = ROOT / "config/deepstream/config_infer_primary_yolo26m_raw_otm.txt"
@@ -210,6 +211,35 @@ class NvDCFRetentionCandidateTests(unittest.TestCase):
         self.assertIn("production tracker changed during runtime patch", text)
         self.assertIn("'TargetManagement.minTrackerConfidence': .15", text)
         self.assertIn('"TargetManagement.maxShadowTrackingAge": 162', text)
+        self.assertIn('"production_accepted": False', text)
+
+
+    def test_v8_changes_only_tentative_early_termination_beyond_v6(self):
+        text = CANDIDATE_V8.read_text()
+        for item in (
+            "minIouDiff4NewTarget: 0.35",
+            "minTrackerConfidence: 0.20",
+            "probationAge: 2",
+            "earlyTerminationAge: 2",
+            "maxShadowTrackingAge: 162",
+            "tentativeDetectorConfidence: 0.25",
+            "minMatchingScore4Overall: 0.35",
+            "minMatchingScore4Iou: 0.10",
+            "minMatchingScore4SizeSimilarity: 0.30",
+            "minMatchingScore4VisualSimilarity: 0.0520394823204932",
+            "minPeerTrackletMatchScore: 0.48",
+            "outputShadowTracks: 0",
+        ):
+            self.assertIn(item, text)
+
+    def test_v8_patch_restores_tracker_confidence_and_is_fail_closed(self):
+        text = (
+            ROOT / "scripts/dev_room_mv3dt/patch_final_detector_ab_for_nvdcf_retention_v8_early2.py"
+        ).read_text()
+        self.assertIn("refusing to edit non-runtime file", text)
+        self.assertIn("production tracker changed during runtime patch", text)
+        self.assertIn("'TargetManagement.minTrackerConfidence': .20", text)
+        self.assertIn("'TargetManagement.earlyTerminationAge': 2", text)
         self.assertIn('"production_accepted": False', text)
 
     def test_production_tracker_is_not_rebased_to_candidate_values(self):
