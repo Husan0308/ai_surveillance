@@ -891,7 +891,19 @@ class LiveIdentityWorker:
             return 0
         with path.open() as handle:
             handle.seek(self.kafka_offset)
-            lines = handle.readlines()
+            lines = []
+            while True:
+                start = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if not line.endswith("\n"):
+                    # Kafka capture appends JSONL concurrently. Leave an
+                    # unfinished record unread until its newline is written;
+                    # advancing here drops both halves as malformed JSON.
+                    handle.seek(start)
+                    break
+                lines.append(line)
             self.kafka_offset = handle.tell()
         self.metrics.observe("kafka_input_queue_depth", len(lines))
         self.metrics.set_max("kafka_input_queue_depth", len(lines))
