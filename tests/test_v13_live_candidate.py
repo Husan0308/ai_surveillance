@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import socket
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,7 +10,23 @@ from scripts.run_v13_room_candidate import verify_video_contract, complete_nativ
 from scripts.dev_room_mv3dt.verify_validated_assets import sha256
 from scripts.run_room_candidate import ROOT
 from scripts.v13_monitoring import MixedMonitoring, PAIR
-from scripts.validate_v13_full_stack import latency, clean_child_shutdown, current_websocket_samples
+from scripts.validate_v13_full_stack import (
+    latency, clean_child_shutdown, current_websocket_samples, surveillance_ports_released,
+)
+
+
+def test_surveillance_port_release_checks_listeners_not_time_wait():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    deployment = SimpleNamespace(api_host="127.0.0.1", api_port=port,
+                                 ml_host="127.0.0.1", ml_port=port)
+    try:
+        assert not surveillance_ports_released(deployment)
+    finally:
+        listener.close()
+    assert surveillance_ports_released(deployment)
 
 
 def test_exact_v13_copy_preserves_all_scored_parameters(tmp_path):
@@ -309,6 +327,19 @@ def test_drain_build_verifier_is_selected_without_weakening_existing_candidate_v
     # rather than passing this record through the older candidate schema.
     with pytest.raises(ValueError, match="remain experimental"):
         verify_native_build(path)
+
+
+def test_regular_staged_build_uses_existing_candidate_verifier(tmp_path, monkeypatch):
+    from scripts import build_v13_shutdown_candidate
+    from scripts.run_v13_room_candidate import verify_native_build
+
+    path = tmp_path / "build.json"
+    path.write_text(json.dumps({"candidate": "F5_UI_DIAGNOSTICS"}))
+    expected = {"candidate": "verified-existing-schema"}
+    monkeypatch.setattr(build_v13_shutdown_candidate, "verify_candidate",
+                        lambda supplied: expected if supplied == path else None)
+
+    assert verify_native_build(path) == expected
 
 
 def test_drain_shutdown_audit_is_live_only_and_replay_behavior_is_unchanged():

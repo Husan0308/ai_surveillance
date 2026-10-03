@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import sys
+import os
+import time
+from pathlib import Path
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
 
 from services.frontend.app.api_client import ApiClient
-from services.frontend.app.camera_wall import CameraWall
+from services.frontend.app.camera_wall import CameraWall, _write_timing_row
 from services.frontend.app.room_pair_panel import RoomPairPanel
 from services.frontend.app.config import load_settings
 
@@ -59,6 +62,10 @@ class MainWindow(QMainWindow):
         self.api.request_failed.connect(self._on_request_failed)
 
         self.acceptance_mode_enabled = False
+        self._frame_tick_previous_ns = 0
+        self._api_refresh_tick_count = 0
+        refresh_log = os.getenv("MV3DT_UI_REFRESH_DIAGNOSTICS_LOG")
+        self._refresh_diagnostics_path = Path(refresh_log) if refresh_log else None
         self.room_pair_panel.acceptance_mode_changed.connect(self._on_acceptance_mode_changed)
         self.room_pair_panel.acceptance_candidates_requested.connect(self._on_acceptance_mode_changed)
         self.room_pair_panel.acceptance_start_requested.connect(self._start_acceptance_subtest)
@@ -79,6 +86,7 @@ class MainWindow(QMainWindow):
         self.api.refresh_all()
 
     def _refresh_api(self) -> None:
+        self._api_refresh_tick_count += 1
         self.api.refresh_all(self.acceptance_mode_enabled)
 
     def _on_acceptance_mode_changed(self, enabled: bool) -> None:
@@ -102,9 +110,33 @@ class MainWindow(QMainWindow):
         self.room_pair_panel.start_subtest()
 
     def _refresh_frames(self) -> None:
-        self.camera_wall.refresh_frames()
+        tick_start = time.monotonic_ns()
+        interval_ns = int(self.settings.frame_refresh_interval_ms) * 1_000_000
+        actual_gap_ns = tick_start - self._frame_tick_previous_ns if self._frame_tick_previous_ns else None
+        event_loop_lateness_ns = max(0, actual_gap_ns - interval_ns) if actual_gap_ns is not None else 0
+        camera_metrics = self.camera_wall.refresh_frames()
         online, total = self.camera_wall.connection_counts()
         self.camera_count.setText(f"Camera wall: {online}/{total}")
+        tick_end = time.monotonic_ns()
+        if self._refresh_diagnostics_path is not None:
+            _write_timing_row(self._refresh_diagnostics_path, {
+                "type": "ui_refresh_tick",
+                "t_refresh_begin_monotonic_ns": tick_start,
+                "t_refresh_end_monotonic_ns": tick_end,
+                "scheduled_interval_ms": int(self.settings.frame_refresh_interval_ms),
+                "actual_tick_gap_ns": actual_gap_ns,
+                "event_loop_lateness_ns": event_loop_lateness_ns,
+                "timer_type": int(self.frame_timer.timerType().value),
+                "total_refresh_duration_ns": tick_end - tick_start,
+                "tiles_with_new_sequence": camera_metrics["tiles_with_new_sequence"],
+                "tiles_unchanged": camera_metrics["tiles_unchanged"],
+                "same_sequence_tile_renders": camera_metrics["same_sequence_tile_renders"],
+                "same_sequence_paint_events": camera_metrics["same_sequence_paint_events"],
+                "api_refresh_ticks_since_last_frame_tick": self._api_refresh_tick_count,
+                "per_camera": camera_metrics["cameras"],
+            })
+            self._api_refresh_tick_count = 0
+        self._frame_tick_previous_ns = tick_start
 
     def _on_api_health(self, data: dict) -> None:
         self.api_status.setText(f"API: {data.get('status', 'unknown')}")

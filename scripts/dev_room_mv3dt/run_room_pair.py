@@ -425,6 +425,10 @@ def deepstream_command(stage: Path, binary: Path, image: str, source_mode: str, 
         command += [
             "-e", "MV3DT_UI_PREVIEW_DIAGNOSTICS=/workspace/experiments/logs/probe/preview_diagnostics.jsonl",
         ]
+    if os.getenv("MV3DT_PREVIEW_STARTUP_CAPTURE"):
+        command += [
+            "-e", "MV3DT_PREVIEW_STARTUP_CAPTURE_DIR=/workspace/experiments/logs/probe/startup",
+        ]
     ui_preview_dir = os.getenv("MV3DT_UI_PREVIEW_DIR", "/dev/shm")
     if ui_preview_dir:
         command += [

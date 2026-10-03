@@ -579,6 +579,7 @@ typedef struct {
   guint stride;
   guint payload_size;
   gboolean map_cuda_registered;
+  gboolean startup_capture_done;
   guint64 sequence;
   gdouble fps_ema;
   gint64 last_publish_us;
@@ -650,6 +651,10 @@ static GstElement *preview_mux_queues[2];
 static guint preview_mux_queue_limits[2];
 static guint preview_mux_queue_overruns[2];
 static gchar *preview_diagnostics_path;
+static gchar *preview_startup_capture_dir;
+static gint preview_first_decoder_capture[2];
+static guint64 preview_session_start_ns;
+#define PREVIEW_HEADER_SIZE 104
 static gboolean preview_decoder_low_latency_known[2];
 static gboolean preview_decoder_low_latency[2];
 static FILE *native_latency_file;
@@ -660,9 +665,194 @@ static gpointer preview_worker_thread (gpointer user_data);
 static GstPadProbeReturn preview_source_pad_probe (GstPad *pad,
     GstPadProbeInfo *info, gpointer user_data);
 
+static void
+preview_capture_first_decoder_output (NvBufSurface *surface, gint camera_index,
+    guint64 pts_ns, guint64 decoder_output_index)
+{
+  NvBufSurfaceParams *params;
+  gchar *raw_path = NULL, *meta_path = NULL;
+  FILE *raw = NULL, *meta = NULL;
+  gboolean mapped = FALSE, captured = FALSE;
+  const gchar *capture_method = "unavailable";
+  gint copy_status = -1;
+  guint packed_size = 0;
+  guint8 *packed = NULL;
+  const gchar *camera = camera_index == 0 ? "CAM-01" : "CAM-04";
+
+  if (!preview_startup_capture_dir || !surface || camera_index < 0 || camera_index >= 2 ||
+      !g_atomic_int_compare_and_exchange (&preview_first_decoder_capture[camera_index], 0, 1))
+    return;
+  if (surface->batchSize < 1)
+    return;
+  params = &surface->surfaceList[0];
+  raw_path = g_strdup_printf ("%s/%s-decoder-output.raw", preview_startup_capture_dir,
+      camera_index == 0 ? "cam01" : "cam04");
+  meta_path = g_strdup_printf ("%s/%s-startup.jsonl", preview_startup_capture_dir,
+      camera_index == 0 ? "cam01" : "cam04");
+  if (NvBufSurfaceMap (surface, 0, -1, NVBUF_MAP_READ) == 0) {
+    mapped = TRUE;
+    if ((surface->memType == NVBUF_MEM_SURFACE_ARRAY || surface->memType == NVBUF_MEM_HANDLE) &&
+        NvBufSurfaceSyncForCpu (surface, 0, -1) != 0)
+      mapped = FALSE;
+  }
+  if (mapped && params->planeParams.num_planes > 0 && params->planeParams.num_planes <= 4) {
+    for (guint p = 0; p < params->planeParams.num_planes; p++)
+      packed_size += params->planeParams.width[p] * params->planeParams.height[p];
+    packed = g_malloc (packed_size);
+    guint offset = 0;
+    for (guint p = 0; p < params->planeParams.num_planes; p++) {
+      guint row_bytes = params->planeParams.width[p];
+      guint rows = params->planeParams.height[p];
+      guint pitch = params->planeParams.pitch[p];
+      guint8 *plane = (guint8 *) params->mappedAddr.addr[p];
+      if (!plane || pitch < row_bytes) {
+        packed_size = 0;
+        break;
+      }
+      for (guint y = 0; y < rows; y++) {
+        memcpy (packed + offset, plane + ((gsize) y * pitch), row_bytes);
+        offset += row_bytes;
+      }
+    }
+    if (packed_size > 0) {
+      raw = fopen (raw_path, "wb");
+      captured = raw && fwrite (packed, 1, packed_size, raw) == packed_size;
+      if (raw) fclose (raw);
+      if (captured)
+        capture_method = "cpu-map";
+    }
+  }
+  if (mapped)
+    NvBufSurfaceUnMap (surface, 0, -1);
+  /* On dGPU the decoder emits NVBUF_MEM_CUDA_DEVICE, which the SDK does not
+   * permit mapping to CPU. For this opt-in, first-frame diagnostic only, use
+   * the documented SDK surface-to-raw copy into tightly packed planes. */
+  if (!captured && surface->memType == NVBUF_MEM_CUDA_DEVICE && params->dataPtr &&
+      params->planeParams.num_planes > 0 && params->planeParams.num_planes <= 4) {
+    guint offset = 0;
+    packed_size = 0;
+    for (guint p = 0; p < params->planeParams.num_planes; p++)
+      packed_size += params->planeParams.width[p] * params->planeParams.height[p] *
+          params->planeParams.bytesPerPix[p];
+    g_free (packed);
+    packed = g_malloc (packed_size);
+    for (guint p = 0; p < params->planeParams.num_planes; p++) {
+      guint row_bytes = params->planeParams.width[p] * params->planeParams.bytesPerPix[p];
+      guint plane_bytes = row_bytes * params->planeParams.height[p];
+      guint8 *source = (guint8 *) params->dataPtr + params->planeParams.offset[p];
+      cudaError_t cuda_status = cudaMemcpy2D (packed + offset, row_bytes,
+          source, params->planeParams.pitch[p], row_bytes,
+          params->planeParams.height[p], cudaMemcpyDeviceToHost);
+      copy_status = (gint) cuda_status;
+      if (cuda_status != cudaSuccess) {
+        packed_size = 0;
+        break;
+      }
+      offset += plane_bytes;
+    }
+    if (packed_size > 0) {
+      raw = fopen (raw_path, "wb");
+      captured = raw && fwrite (packed, 1, packed_size, raw) == packed_size;
+      if (raw) fclose (raw);
+      if (captured)
+        capture_method = "cudaMemcpy2D-device-to-host-packed-planes";
+    }
+  }
+  if (!captured && (surface->memType == NVBUF_MEM_CUDA_DEVICE ||
+      surface->memType == NVBUF_MEM_CUDA_PINNED || surface->memType == NVBUF_MEM_CUDA_ARRAY) &&
+      params->planeParams.num_planes > 0 && params->planeParams.num_planes <= 4) {
+    guint offset = 0;
+    packed_size = 0;
+    for (guint p = 0; p < params->planeParams.num_planes; p++)
+      packed_size += params->planeParams.width[p] * params->planeParams.height[p] *
+          params->planeParams.bytesPerPix[p];
+    g_free (packed);
+    packed = g_malloc (packed_size);
+    for (guint p = 0; p < params->planeParams.num_planes; p++) {
+      guint plane_bytes = params->planeParams.width[p] * params->planeParams.height[p] *
+          params->planeParams.bytesPerPix[p];
+      copy_status = NvBufSurface2Raw (surface, 0, p, params->planeParams.width[p],
+          params->planeParams.height[p], packed + offset);
+      if (copy_status != 0) {
+        packed_size = 0;
+        break;
+      }
+      offset += plane_bytes;
+    }
+    if (packed_size > 0) {
+      raw = fopen (raw_path, "wb");
+      captured = raw && fwrite (packed, 1, packed_size, raw) == packed_size;
+      if (raw) fclose (raw);
+      if (captured)
+        capture_method = "NvBufSurface2Raw-packed-planes";
+    }
+  }
+  meta = fopen (meta_path, "a");
+  if (meta) {
+    fprintf (meta,
+        "{\"event\":\"first_decoder_output\",\"camera_id\":\"%s\","
+        "\"sequence\":%" G_GUINT64_FORMAT ",\"pts_ns\":%" G_GUINT64_FORMAT ","
+        "\"source_frame_num\":null,\"monotonic_ns\":%" G_GUINT64_FORMAT ","
+        "\"session_start_ns\":%" G_GUINT64_FORMAT ",\"width\":%u,\"height\":%u,"
+        "\"stride\":%u,\"format\":%d,\"mem_type\":%d,\"payload_bytes\":%u,"
+        "\"ready\":true,\"pixel_capture\":%s,\"pixel_capture_method\":\"%s\","
+        "\"surface_copy_status\":%d,\"planes\":[",
+        camera, decoder_output_index, pts_ns, (guint64) g_get_monotonic_time () * 1000,
+        preview_session_start_ns, params->width, params->height, params->pitch,
+        params->colorFormat, surface->memType, packed_size, captured ? "true" : "false",
+        capture_method, copy_status);
+    for (guint p = 0; p < params->planeParams.num_planes && p < 4; p++)
+      fprintf (meta, "%s{\"width\":%u,\"height\":%u,\"stride\":%u,"
+          "\"size\":%u,\"bytes_per_pixel\":%u}",
+          p ? "," : "", params->planeParams.width[p], params->planeParams.height[p],
+          params->planeParams.pitch[p], params->planeParams.psize[p],
+          params->planeParams.bytesPerPix[p]);
+    fprintf (meta, "]}\n");
+    fclose (meta);
+  }
+  g_free (packed);
+  g_free (raw_path);
+  g_free (meta_path);
+}
+
+static void
+preview_capture_first_published (PreviewWriter *writer, gint camera_index,
+    guint64 pts_ns, guint32 source_frame_num, guint64 publish_ns)
+{
+  gchar *raw_path, *meta_path;
+  FILE *raw, *meta;
+  gboolean captured;
+  if (!preview_startup_capture_dir || !writer || writer->startup_capture_done)
+    return;
+  writer->startup_capture_done = TRUE;
+  raw_path = g_strdup_printf ("%s/%s-native-published.raw", preview_startup_capture_dir,
+      camera_index == 0 ? "cam01" : "cam04");
+  meta_path = g_strdup_printf ("%s/%s-startup.jsonl", preview_startup_capture_dir,
+      camera_index == 0 ? "cam01" : "cam04");
+  raw = fopen (raw_path, "wb");
+  captured = raw && fwrite ((guint8 *) writer->map + PREVIEW_HEADER_SIZE, 1,
+      writer->payload_size, raw) == writer->payload_size;
+  if (raw) fclose (raw);
+  meta = fopen (meta_path, "a");
+  if (meta) {
+    fprintf (meta,
+        "{\"event\":\"first_native_preview_published\",\"camera_id\":\"%s\","
+        "\"sequence\":%" G_GUINT64_FORMAT ",\"source_frame_num\":%u,"
+        "\"pts_ns\":%" G_GUINT64_FORMAT ",\"monotonic_ns\":%" G_GUINT64_FORMAT ","
+        "\"session_start_ns\":%" G_GUINT64_FORMAT ",\"width\":%u,\"height\":%u,"
+        "\"stride\":%u,\"format\":\"BGRA\",\"payload_bytes\":%u,"
+        "\"ready\":true,\"pixel_capture\":%s}\n",
+        camera_index == 0 ? "CAM-01" : "CAM-04", writer->sequence, source_frame_num,
+        pts_ns, publish_ns, preview_session_start_ns, writer->width, writer->height,
+        writer->stride, writer->payload_size, captured ? "true" : "false");
+    fclose (meta);
+  }
+  g_free (raw_path);
+  g_free (meta_path);
+}
+
 #define PREVIEW_MAGIC "V11UI01\0"
 #define PREVIEW_VERSION 4
-#define PREVIEW_HEADER_SIZE 104
 #define PREVIEW_WIDTH 1920
 #define PREVIEW_HEIGHT 1080
 #define PREVIEW_STRIDE (PREVIEW_WIDTH * 4)
@@ -765,6 +955,7 @@ preview_decoder_output_probe (GstPad *pad, GstPadProbeInfo *info,
   GstBuffer *buffer = info ? GST_PAD_PROBE_INFO_BUFFER (info) : NULL;
   PreviewDecodeProbeContext *context = (PreviewDecodeProbeContext *) user_data;
   guint64 pts;
+  guint64 output_index;
   gboolean found = FALSE;
   (void) pad;
 
@@ -775,6 +966,7 @@ preview_decoder_output_probe (GstPad *pad, GstPadProbeInfo *info,
     return GST_PAD_PROBE_OK;
   g_mutex_lock (&preview_decode_timing_mutex);
   preview_decode_outputs[context->camera_index]++;
+  output_index = preview_decode_outputs[context->camera_index];
   if (preview_last_output_pts[context->camera_index] > pts) {
     guint64 backstep = preview_last_output_pts[context->camera_index] - pts;
     preview_output_pts_regressions[context->camera_index]++;
@@ -793,6 +985,14 @@ preview_decoder_output_probe (GstPad *pad, GstPadProbeInfo *info,
     }
   }
   g_mutex_unlock (&preview_decode_timing_mutex);
+  if (preview_startup_capture_dir) {
+    GstMapInfo capture_map = GST_MAP_INFO_INIT;
+    if (gst_buffer_map (buffer, &capture_map, GST_MAP_READ)) {
+      preview_capture_first_decoder_output ((NvBufSurface *) capture_map.data,
+          context->camera_index, pts, output_index);
+      gst_buffer_unmap (buffer, &capture_map);
+    }
+  }
   if (!found) {
     static gint unmatched_logs[2];
     if (g_atomic_int_add (&unmatched_logs[context->camera_index], 1) < 5)
@@ -1120,6 +1320,8 @@ preview_open (void)
   const gchar *directory = g_getenv ("MV3DT_UI_PREVIEW_DIR");
   const gchar *sample_directory = g_getenv ("MV3DT_DECODER_AU_DUMP_DIR");
   preview_diagnostics_path = g_strdup (g_getenv ("MV3DT_UI_PREVIEW_DIAGNOSTICS"));
+  preview_startup_capture_dir = g_strdup (g_getenv ("MV3DT_PREVIEW_STARTUP_CAPTURE_DIR"));
+  preview_session_start_ns = (guint64) g_get_monotonic_time () * 1000;
   NvBufSurfaceCreateParams params;
 
   if (preview_initialized)
@@ -1127,6 +1329,8 @@ preview_open (void)
   preview_initialized = TRUE;
   g_mutex_init (&preview_transform_session_mutex);
   g_mutex_init (&preview_decode_timing_mutex);
+  if (preview_startup_capture_dir && *preview_startup_capture_dir)
+    g_mkdir_with_parents (preview_startup_capture_dir, 0755);
   if (sample_directory && *sample_directory) {
     g_mkdir_with_parents (sample_directory, 0755);
     for (guint i = 0; i < 2; i++) {
@@ -1183,6 +1387,7 @@ preview_publish_surface (NvBufSurface *surface, gint camera_index,
   NvBufSurfaceParams *dst_params;
   PreviewWriter *writer;
   gint64 now_us;
+  guint64 publish_ns;
 
   if (!surface || camera_index < 0 || camera_index >= 2 ||
       !preview_writers[camera_index].enabled || surface->batchSize < 1)
@@ -1262,12 +1467,14 @@ preview_publish_surface (NvBufSurface *surface, gint camera_index,
       return;
     }
   }
+  publish_ns = (guint64) g_get_monotonic_time () * 1000;
   preview_write_header (writer, 0,
       (guint) MAX (0, (gint) (writer->fps_ema * 1000.0)),
-      (guint64) g_get_monotonic_time () * 1000, decoder_reference_ns,
+      publish_ns, decoder_reference_ns,
       decoder_out_ns, pts_ns, dts_ns, source_frame_num);
   flock (writer->fd, LOCK_UN);
   g_mutex_unlock (&writer->mutex);
+  preview_capture_first_published (writer, camera_index, pts_ns, source_frame_num, publish_ns);
   NvBufSurfaceUnMap (writer->target, 0, 0);
 }
 

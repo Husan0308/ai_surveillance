@@ -114,11 +114,13 @@ def audit_shutdown_drain(path: Path) -> dict:
 
 def verify_native_build(path: Path | None) -> dict:
     if path is None:
+        from scripts.build_v13_shutdown_candidate import verify_candidate
         return verify_candidate(F4 / "candidate-audit-build/build.json")
     record = json.loads(path.read_text())
     if record.get("candidate") == "F5_DRAIN_BEFORE_FLUSH":
         from scripts.build_v13_drain_shutdown_candidate import verify_build as verify_drain_build
         return verify_drain_build(path)
+    from scripts.build_v13_shutdown_candidate import verify_candidate
     return verify_candidate(path)
 
 

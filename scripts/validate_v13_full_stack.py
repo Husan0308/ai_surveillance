@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import asdict
+import errno
 import fcntl
 import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import time
 
@@ -34,6 +36,27 @@ def percentile(values, q):
     at = (len(ordered) - 1) * q / 100
     low, high = int(at), min(int(at) + 1, len(ordered) - 1)
     return ordered[low] + (ordered[high] - ordered[low]) * (at - low)
+
+
+def surveillance_ports_released(deployment) -> bool:
+    """Check for live API/ML listeners, not TIME_WAIT from completed requests."""
+    for host, port in ((deployment.api_host, deployment.api_port),
+                       (deployment.ml_host, deployment.ml_port)):
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        connect_host = {"0.0.0.0": "127.0.0.1", "::": "::1", "": "127.0.0.1"}.get(host, host)
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            try:
+                result = probe.connect_ex((connect_host, port))
+            except OSError:
+                return False
+        if result == 0:
+            return False
+        # Refusal proves there is no listener. Timeouts and other socket
+        # errors are inconclusive and therefore fail closed.
+        if result != errno.ECONNREFUSED:
+            return False
+    return True
 
 
 async def current_websocket_samples(url, bridge, writer, collector=websocket_samples, interval=.25):
@@ -175,6 +198,9 @@ def run(output: Path, duration: float, shutdown_debug=False, native_build=None) 
     env = dict(sidecar_environment(), **deployment.environment(), SURVEILLANCE_ANALYTICS_ENABLED="1",
         MV3DT_ROOM_RUNTIME_ROOT=str(output / "room-pair"), V11_MONITORING_TELEMETRY_PATH=str(output / "monitoring.json"),
         MV3DT_PREVIEW_LATENCY_LOG=str(output / "paint.jsonl"), FRONTEND_USE_V11_SHARED_MEMORY="1",
+        MV3DT_UI_REFRESH_DIAGNOSTICS_LOG=str(output / "ui-refresh.jsonl"),
+        MV3DT_UI_STARTUP_CAPTURE_DIR=str(output / "startup-captures" / "frontend"),
+        MV3DT_PREVIEW_STARTUP_CAPTURE="1",
         FRONTEND_FRAME_REFRESH_INTERVAL_MS=str(FRONTEND_SETTINGS.frame_refresh_interval_ms),
         FRONTEND_REFRESH_INTERVAL_MS=str(FRONTEND_SETTINGS.refresh_interval_ms))
     bridge = MixedMonitoring(output, started)
@@ -279,11 +305,7 @@ def run(output: Path, duration: float, shutdown_debug=False, native_build=None) 
                     for name, p in children.items()}
         save(output / "shutdown-verification.json", {"clean": shutdown, "forced": sorted(forced)})
         checks["clean_shutdown"] = all(shutdown.values())
-        try:
-            check_ports(deployment)
-            checks["surveillance_ports_released"] = True
-        except RuntimeError:
-            checks["surveillance_ports_released"] = False
+        checks["surveillance_ports_released"] = surveillance_ports_released(deployment)
     if (output / "paint.jsonl").exists():
         timing = latency(output / "paint.jsonl")
         save(output / "latency.json", timing)

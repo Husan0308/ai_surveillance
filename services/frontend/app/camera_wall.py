@@ -98,6 +98,13 @@ class CameraTile(QFrame):
         self.current_image: QImage | None = None
         self.current_payload: bytes | None = None
         self.current_frame_pixmap: QPixmap | None = None
+        self.preview_diagnostic_log = Path(os.environ["MV3DT_PREVIEW_LATENCY_LOG"]) if os.getenv("MV3DT_PREVIEW_LATENCY_LOG") else None
+        self.startup_capture_dir = Path(os.environ["MV3DT_UI_STARTUP_CAPTURE_DIR"]) if os.getenv("MV3DT_UI_STARTUP_CAPTURE_DIR") else None
+        self.startup_capture_stages: set[str] = set()
+        self.session_start_ns = time.monotonic_ns()
+        self.same_sequence_tile_renders = 0
+        self.same_sequence_paint_events = 0
+        self._last_tile_render_sequence = 0
         self.displayed_pixmap_size = None
         self.fullscreen_dialog: QDialog | None = None
         self.fullscreen_video: QLabel | None = None
@@ -141,9 +148,51 @@ class CameraTile(QFrame):
 
     def _draw_frame(self, image: QImage) -> None:
         self.current_image = image
+        timing = self.video.preview_timing_context
+        if timing is not None:
+            timing["t7c_qimage_created_monotonic_ns"] = time.monotonic_ns()
+            timing["qimage_width"] = int(image.width())
+            timing["qimage_height"] = int(image.height())
+            timing["qimage_bytes_per_line"] = int(image.bytesPerLine())
+            if "qimage" not in self.startup_capture_stages:
+                self._capture_startup_stage("qimage", image.bits().tobytes(), timing, image.bytesPerLine(), "RGB32")
+        pixmap_start = time.monotonic_ns()
         self.current_frame_pixmap = QPixmap.fromImage(image)
+        if timing is not None and "qpixmap" not in self.startup_capture_stages:
+            pixmap_image = self.current_frame_pixmap.toImage()
+            timing["t7d_qpixmap_created_monotonic_ns"] = time.monotonic_ns()
+            timing["qpixmap_create_duration_ns"] = timing["t7d_qpixmap_created_monotonic_ns"] - pixmap_start
+            self._capture_startup_stage("qpixmap", pixmap_image.bits().tobytes(), timing,
+                                        pixmap_image.bytesPerLine(), "RGB32")
+        elif timing is not None:
+            timing["t7d_qpixmap_created_monotonic_ns"] = time.monotonic_ns()
+            timing["qpixmap_create_duration_ns"] = timing["t7d_qpixmap_created_monotonic_ns"] - pixmap_start
         self._update_tile_pixmap()
         self._update_fullscreen_pixmap()
+
+    def _capture_startup_stage(
+        self, stage: str, payload: bytes, timing: dict, stride: int, pixel_format: str,
+        width: int | None = None, height: int | None = None,
+    ) -> None:
+        """Capture exactly the first consumer-side frame at selected boundaries."""
+        if self.startup_capture_dir is None or stage in self.startup_capture_stages:
+            return
+        try:
+            self.startup_capture_dir.mkdir(parents=True, exist_ok=True)
+            stem = f"{self.camera_id.lower()}-{stage}"
+            (self.startup_capture_dir / f"{stem}.raw").write_bytes(payload)
+            meta = {k: timing.get(k) for k in ("camera_id", "sequence", "source_frame_num", "pts_ns",
+                "t6_ipc_publish_monotonic_ns", "preview_width", "preview_height")}
+            meta.update({"stage": stage,
+                "width": int(width if width is not None else timing.get("preview_width", 0)),
+                "height": int(height if height is not None else timing.get("preview_height", 0)), "stride": int(stride),
+                "format": pixel_format, "payload_bytes": len(payload), "ready": True,
+                "session_start_ns": self.session_start_ns, "capture_monotonic_ns": time.monotonic_ns()})
+            (self.startup_capture_dir / f"{stem}.json").write_text(json.dumps(meta, separators=(",", ":")) + "\n")
+            self.startup_capture_stages.add(stage)
+        except OSError:
+            # Diagnostic capture must never disrupt the live preview path.
+            return
 
     def _draw_overlays(self, pixmap: QPixmap) -> None:
         painter = QPainter(pixmap)
@@ -197,15 +246,50 @@ class CameraTile(QFrame):
             return
         target = self.video.size()
         pixmap = self.current_frame_pixmap
+        scale_start = time.monotonic_ns()
         if target.width() > 0 and target.height() > 0:
             pixmap = pixmap.scaled(
                 target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
         else:
             pixmap = pixmap.copy()
+        timing = self.video.preview_timing_context
+        if timing is not None and timing.get("sequence") == self.last_version:
+            timing["t7e_scale_completed_monotonic_ns"] = time.monotonic_ns()
+            timing["scale_duration_ns"] = timing["t7e_scale_completed_monotonic_ns"] - scale_start
+            timing["tile_source_pixmap_width"] = int(self.current_frame_pixmap.width())
+            timing["tile_source_pixmap_height"] = int(self.current_frame_pixmap.height())
+            timing["tile_target_width"] = int(target.width())
+            timing["tile_target_height"] = int(target.height())
+            timing["tile_scaled_width"] = int(pixmap.width())
+            timing["tile_scaled_height"] = int(pixmap.height())
+            timing["tile_transformation"] = "SmoothTransformation"
+        elif self.last_version and self._last_tile_render_sequence == self.last_version:
+            self.same_sequence_tile_renders += 1
+        overlay_start = time.monotonic_ns()
         self._draw_overlays(pixmap)
+        if timing is not None and timing.get("sequence") == self.last_version:
+            timing["t7f_overlay_completed_monotonic_ns"] = time.monotonic_ns()
+            timing["overlay_duration_ns"] = timing["t7f_overlay_completed_monotonic_ns"] - overlay_start
+            if "displayed" not in self.startup_capture_stages:
+                display_image = pixmap.toImage()
+                self._capture_startup_stage("displayed", display_image.bits().tobytes(), timing,
+                                            display_image.bytesPerLine(), "RGB32",
+                                            display_image.width(), display_image.height())
         self.displayed_pixmap_size = pixmap.size()
+        setpixmap_start = time.monotonic_ns()
         self.video.setPixmap(pixmap)
+        if timing is not None and timing.get("sequence") == self.last_version:
+            timing["t8_setpixmap_return_monotonic_ns"] = time.monotonic_ns()
+            timing["setpixmap_duration_ns"] = timing["t8_setpixmap_return_monotonic_ns"] - setpixmap_start
+            timing["t8_label_dimensions"] = [int(self.video.width()), int(self.video.height())]
+        # QLabel normally defers this paint until the GUI event loop returns.
+        # Under the six-camera refresh timer that added a measured 10–19 ms
+        # after setPixmap. Paint the newly received latest frame now, while
+        # retaining the same pixmap, overlays, and latest-only semantics.
+        if self.video.isVisible():
+            self.video.repaint()
+        self._last_tile_render_sequence = self.last_version
 
     def _update_fullscreen_pixmap(self) -> None:
         if self.fullscreen_video is None or self.current_frame_pixmap is None:
@@ -249,9 +333,12 @@ class CameraTile(QFrame):
 
     def refresh(self) -> None:
         if self.preview_reader is not None:
-            frame = self.preview_reader.read_latest(max_age_sec=0.25)
+            refresh_start = time.monotonic_ns()
+            frame = self.preview_reader.read_latest(max_age_sec=0.25, after_sequence=self.last_version)
             if frame is not None and frame.sequence != self.last_version:
+                reader_return_ns = time.monotonic_ns()
                 self.current_payload = frame.payload
+                qimage_start = time.monotonic_ns()
                 image = QImage(self.current_payload, frame.width, frame.height, frame.stride, QImage.Format.Format_RGB32)
                 if not image.isNull():
                     skipped_frames = max(0, frame.sequence - self.last_version - 1) if self.last_version else 0
@@ -285,11 +372,23 @@ class CameraTile(QFrame):
                         "source_frame_num": frame.source_frame_num,
                         "t7_ui_receive_monotonic_ns": time.monotonic_ns(),
                         "t7_ui_receive_wall_ns": time.time_ns(),
+                        "t7a_reader_poll_begin_monotonic_ns": refresh_start,
+                        "t7b_reader_return_monotonic_ns": reader_return_ns,
+                        "t7c_qimage_create_begin_monotonic_ns": qimage_start,
                         "ui_skipped_preview_frames": skipped_frames,
                         "preview_width": frame.width,
                         "preview_height": frame.height,
+                        "preview_stride": frame.stride,
+                        "preview_format": "RGB32",
+                        "preview_payload_bytes": len(frame.payload),
+                        "preview_reader_poll_duration_ns": reader_return_ns - refresh_start,
+                        "session_start_ns": self.session_start_ns,
                     }
+                    if "shared-memory" not in self.startup_capture_stages:
+                        self._capture_startup_stage("shared-memory", frame.payload, self.video.preview_timing_context,
+                                                    frame.stride, "BGRA/RGB32 shared payload")
                     self._draw_frame(image)
+                    self.video.preview_timing_context["camera_refresh_duration_ns"] = time.monotonic_ns() - refresh_start
                     state = "REPLAY" if self.source_mode == "replay" and self.camera_id in {"CAM-01", "CAM-04"} else "LIVE"
                     displayed_fps = self.measured_fps if self.measured_fps > 0.0 else frame.fps
                     self.status.setText(f"{state} · {displayed_fps:.1f} FPS")
@@ -405,6 +504,9 @@ class _ClickableVideoLabel(QLabel):
             return
         sequence = int(timing.get("sequence", 0))
         if sequence <= self.preview_last_logged_sequence:
+            tile = self.parentWidget()
+            if isinstance(tile, CameraTile):
+                tile.same_sequence_paint_events += 1
             return
         self.preview_last_logged_sequence = sequence
         row = {
@@ -454,9 +556,39 @@ class CameraWall(QWidget):
             row, column = divmod(index, 3)
             self.grid.addWidget(tile, row, column)
 
-    def refresh_frames(self) -> None:
+    def refresh_frames(self) -> dict:
+        tick_start = time.monotonic_ns()
+        per_camera = {}
+        changed = 0
+        same_sequence_renders_before = 0
+        same_sequence_paints_before = 0
         for tile in self.tiles.values():
+            previous = tile.last_version
+            render_count = tile.same_sequence_tile_renders
+            paint_count = tile.same_sequence_paint_events
+            camera_start = time.monotonic_ns()
             tile.refresh()
+            per_camera[tile.camera_id] = {
+                "duration_ns": time.monotonic_ns() - camera_start,
+                "sequence_before": previous,
+                "sequence_after": tile.last_version,
+                "new_sequence": tile.last_version != previous,
+                "same_sequence_tile_renders": tile.same_sequence_tile_renders - render_count,
+                "same_sequence_paint_events": tile.same_sequence_paint_events - paint_count,
+                "image_dimensions": [tile.current_image.width(), tile.current_image.height()] if tile.current_image else None,
+                "target_dimensions": [tile.video.width(), tile.video.height()],
+            }
+            changed += int(tile.last_version != previous)
+            same_sequence_renders_before += tile.same_sequence_tile_renders - render_count
+            same_sequence_paints_before += tile.same_sequence_paint_events - paint_count
+        return {
+            "duration_ns": time.monotonic_ns() - tick_start,
+            "tiles_with_new_sequence": changed,
+            "tiles_unchanged": len(self.tiles) - changed,
+            "same_sequence_tile_renders": same_sequence_renders_before,
+            "same_sequence_paint_events": same_sequence_paints_before,
+            "cameras": per_camera,
+        }
 
     def connection_counts(self) -> tuple[int, int]:
         return sum(tile.is_connected() for tile in self.tiles.values()), len(self.tiles)

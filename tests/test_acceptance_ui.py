@@ -291,3 +291,55 @@ def test_shared_preview_stale_frame_is_dropped_not_kept_visible(app, monkeypatch
     assert tile.status.text().startswith("STALE")
     tile.close_reader()
     tile.deleteLater()
+
+
+def test_preview_stage_timing_and_one_shot_startup_capture(app, monkeypatch, tmp_path):
+    from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameWriter
+
+    preview_path = tmp_path / "preview.bin"
+    capture_dir = tmp_path / "capture"
+    timing_path = tmp_path / "paint.jsonl"
+    monkeypatch.setenv("V11_UI_PREVIEW_PATH_CAM01", str(preview_path))
+    monkeypatch.setenv("MV3DT_UI_STARTUP_CAPTURE_DIR", str(capture_dir))
+    monkeypatch.setenv("MV3DT_PREVIEW_LATENCY_LOG", str(timing_path))
+    writer = PreviewFrameWriter(str(preview_path), width=16, height=8)
+    tile = CameraTile("CAM-01", "http://invalid")
+    try:
+        writer.publish(bytes([17]) * (16 * 8 * 4), timestamp_ns=time.monotonic_ns(),
+                       decoder_reference_ns=time.monotonic_ns() - 3_000_000,
+                       decoder_out_ns=time.monotonic_ns() - 2_000_000,
+                       pts_ns=1234, source_frame_num=1)
+        tile.show()
+        tile.refresh()
+        app.processEvents()
+        row = tile.video.preview_timing_context
+        assert row["t7a_reader_poll_begin_monotonic_ns"] <= row["t7b_reader_return_monotonic_ns"]
+        assert row["t7c_qimage_create_begin_monotonic_ns"] <= row["t7c_qimage_created_monotonic_ns"]
+        assert row["t7d_qpixmap_created_monotonic_ns"] <= row["t7e_scale_completed_monotonic_ns"]
+        assert row["t7e_scale_completed_monotonic_ns"] <= row["t7f_overlay_completed_monotonic_ns"]
+        assert row["t7f_overlay_completed_monotonic_ns"] <= row["t8_setpixmap_return_monotonic_ns"]
+        paint = __import__("json").loads(timing_path.read_text().splitlines()[-1])
+        assert paint["t8_ui_paint_monotonic_ns"] >= row["t8_setpixmap_return_monotonic_ns"]
+        assert (row["preview_width"], row["preview_height"], row["preview_stride"]) == (16, 8, 64)
+        for stage in ("shared-memory", "qimage", "qpixmap", "displayed"):
+            metadata = __import__("json").loads((capture_dir / f"cam-01-{stage}.json").read_text())
+            raw = (capture_dir / f"cam-01-{stage}.raw").read_bytes()
+            assert metadata["sequence"] == 1 and metadata["source_frame_num"] == 1
+            assert metadata["pts_ns"] == 1234 and metadata["ready"] is True
+            assert metadata["payload_bytes"] == len(raw) > 0
+        assert (capture_dir / "cam-01-shared-memory.raw").read_bytes() == bytes([17]) * (16 * 8 * 4)
+        assert timing_path.exists()
+        read_latest = tile.preview_reader.read_latest
+        observed_after_sequence = []
+        def spy_read_latest(*, max_age_sec=1.20, after_sequence=None, metadata_only=False):
+            observed_after_sequence.append(after_sequence)
+            return read_latest(max_age_sec=max_age_sec, after_sequence=after_sequence,
+                               metadata_only=metadata_only)
+        tile.preview_reader.read_latest = spy_read_latest
+        tile.refresh()
+        assert observed_after_sequence == [1]
+        assert tile.last_version == 1
+    finally:
+        tile.close_reader()
+        tile.deleteLater()
+        writer.close()
