@@ -54,7 +54,7 @@ NATIVE_DESTROY_FLUSH = """    if (appCtx[i]->return_value == -1)
     if (f5_live_flush && appCtx[i]->pipeline.pipeline) {
       g_print ("F5 experimental live teardown: FLUSH_START before destroy_pipeline\\n");
       if (!gst_element_send_event (appCtx[i]->pipeline.pipeline,
-              gst_event_new_flush_start ()))) {
+              gst_event_new_flush_start ())) {
         g_printerr ("F5 experimental live teardown: FLUSH_START rejected\\n");
       } else {
         g_print ("F5 experimental live teardown: FLUSH_START completed\\n");

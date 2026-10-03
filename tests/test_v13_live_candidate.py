@@ -240,6 +240,8 @@ def test_shutdown_experiment_only_changes_explicit_live_teardown_points():
     assert native == NATIVE_DESTROY_FLUSH
     assert "NV_DS_SOURCE_RTSP" in native
     assert "gst_event_new_flush_start" in native
+    assert "gst_event_new_flush_start ())) {" in native
+    assert "gst_event_new_flush_start ()))) {" not in native
     assert "FLUSH_START completed" in native
     assert "sleep (" not in native
     assert native.count("destroy_pipeline (appCtx[i]);") == 1
