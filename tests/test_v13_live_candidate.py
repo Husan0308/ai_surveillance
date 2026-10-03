@@ -188,7 +188,10 @@ def test_debugger_only_changes_container_inspection_permissions():
 def test_mutex_diagnostic_is_read_only_and_does_not_claim_register_guess_is_owner():
     from scripts.native_shutdown_diagnostics import debugger_arguments, MUTEX_DIAGNOSTIC
     args = debugger_arguments()
-    assert args[args.index("attach 1") + 2] == "thread apply all bt"
+    attach_at = args.index("attach 1")
+    info_at = args.index("info threads")
+    backtrace_at = args.index("thread apply all bt")
+    assert attach_at < info_at < backtrace_at
     assert args[-1] == "detach"
     assert "frame-arguments none" in " ".join(args)
     assert "UNPROVEN_UNTIL_ARGUMENT_OR_DISASSEMBLY_MATCH" in MUTEX_DIAGNOSTIC
