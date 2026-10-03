@@ -1,5 +1,9 @@
 # AI Surveillance V2 — Audited Camera Pipeline
 
+Historical branch design only, not current setup instructions. For the current
+host runtime use [Runtime foundation](RUNTIME_FOUNDATION.md); do not execute the
+retired Python 3.10/TRT86 commands below on the DeepStream 9.1 deployment.
+
 Branch: `cleanup/camera-v2-audited-20260825`
 
 ## Current milestone

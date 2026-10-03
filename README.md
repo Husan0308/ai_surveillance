@@ -127,6 +127,11 @@ belong under `.runtime/` and are not committed.
 
 ## Validation commands
 
+Host API/ML/UI/preview/orchestration Python setup and camera-free import preflight
+are documented in [Runtime foundation](docs/RUNTIME_FOUNDATION.md). Use the
+project runtime there; the retired Python 3.10/TRT86 setup is not a deployment
+instruction. This setup does not install or change NVIDIA/system libraries.
+
 Static/unit checks:
 
 ```bash

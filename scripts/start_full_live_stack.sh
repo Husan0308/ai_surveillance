@@ -4,116 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-resolve_python() {
-  local candidates=()
-
-  if [[ -n "${FULL_STACK_PYTHON:-}" ]]; then
-    candidates+=("$FULL_STACK_PYTHON")
-  fi
-  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
-    candidates+=("$VIRTUAL_ENV/bin/python")
-  fi
-  candidates+=(
-    "$ROOT/.venv/bin/python"
-    "$ROOT/venv/bin/python"
-  )
-
-  local path_python
-  path_python="$(command -v python3 2>/dev/null || true)"
-  [[ -n "$path_python" ]] && candidates+=("$path_python")
-  path_python="$(command -v python 2>/dev/null || true)"
-  [[ -n "$path_python" ]] && candidates+=("$path_python")
-
-  local candidate
-  local checked=""
-  for candidate in "${candidates[@]}"; do
-    [[ -n "$candidate" ]] || continue
-    checked+=" $candidate"
-    [[ -x "$candidate" ]] || continue
-
-    if "$candidate" - <<'PY' >/dev/null 2>&1
-import fastapi
-import httpx
-import numpy
-import uvicorn
-import yaml
-import dotenv
-import gi
-import PySide6
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
-PY
-    then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  echo "FULL_LIVE_STACK no Python interpreter has all required runtime modules." >&2
-  echo "Checked:$checked" >&2
-  echo "Required imports: fastapi httpx numpy uvicorn yaml dotenv gi(Gst) PySide6" >&2
-  echo "Override explicitly with FULL_STACK_PYTHON=/path/to/python if needed." >&2
-  return 1
-}
-
-bootstrap_full_stack_python() {
-  local base
-  base="$(command -v python3 2>/dev/null || true)"
-  [[ -n "$base" ]] || {
-    echo "FULL_LIVE_STACK cannot bootstrap: python3 not found" >&2
-    return 1
-  }
-
-  # PyGObject/GStreamer on Ubuntu is normally supplied by the system Python
-  # packages. Keep access to those while isolating pip-installed app deps.
-  if ! "$base" - <<'PY' >/dev/null 2>&1
-import gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
-PY
-  then
-    echo "FULL_LIVE_STACK system Python is missing gi/GStreamer." >&2
-    echo "Install Ubuntu packages: sudo apt install python3-gi gir1.2-gstreamer-1.0 python3-venv" >&2
-    return 1
-  fi
-
-  local env_dir="$ROOT/.runtime/full-stack-venv"
-  local py="$env_dir/bin/python"
-
-  if [[ ! -x "$py" ]]; then
-    echo "FULL_LIVE_STACK creating runtime venv=$env_dir"
-    "$base" -m venv --system-site-packages "$env_dir" || {
-      echo "FULL_LIVE_STACK venv creation failed." >&2
-      echo "If Ubuntu reports ensurepip/venv missing: sudo apt install python3-venv" >&2
-      return 1
-    }
-  fi
-
-  echo "FULL_LIVE_STACK installing/updating Python service dependencies..."
-  "$py" -m pip install --disable-pip-version-check -q     -r services/ml_service/requirements.txt     -r services/api_service/requirements.txt     -r services/frontend/requirements.txt || return 1
-
-  if ! "$py" - <<'PY' >/dev/null 2>&1
-import fastapi
-import httpx
-import numpy
-import uvicorn
-import yaml
-import dotenv
-import gi
-import PySide6
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
-PY
-  then
-    echo "FULL_LIVE_STACK bootstrapped venv still misses a required module" >&2
-    return 1
-  fi
-
-  printf '%s\n' "$py"
-}
-
-if ! PY="$(resolve_python)"; then
-  PY="$(bootstrap_full_stack_python)" || exit 1
+# One explicit project runtime; never discover a different Python or install on
+# launch. Helpers return only the interpreter on stdout.
+source "$ROOT/scripts/runtime_python.sh"
+if [[ "${1:-}" != "" && "${1:-}" != "--preflight" ]]; then
+  printf 'Usage: %s [--preflight]\n' "$0" >&2
+  exit 2
+fi
+PY="$(resolve_python)" || exit 1
+export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
+unset PYTHONHOME PYTHONPATH
+if [[ "${1:-}" == "--preflight" ]]; then
+  exec "$PY" -I -B "$ROOT/scripts/runtime_foundation.py" check --root "$ROOT"
 fi
 ROOM_PAIR_DURATION="${FULL_STACK_ROOM_PAIR_DURATION_SEC:-86400}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

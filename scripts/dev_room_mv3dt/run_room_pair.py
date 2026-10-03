@@ -37,11 +37,9 @@ ACCEPTED_EXP = Path(
     "deepstream-tracker-3d-multi-view/experiments/deepstream/"
     "dev-room-pn263-global-identity-20260921"
 )
-KAFKA_PYTHON = Path(
-    "/home/apsidal/nvidia/DeepStream/src/apps/reference_apps/"
-    "deepstream-tracker-3d-multi-view/mv3dt_venv/bin/python"
-)
-OSNET_PYTHON = Path("/home/apsidal/.local/share/Trash/files/ai_surveillance.2/venv/bin/python")
+# Direct script execution also uses the declared project runtime for workers.
+sys.path.insert(0, str(ROOT))
+from services.shared.runtime_python import preflight_python
 
 
 def load_profile() -> dict:
@@ -471,6 +469,9 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
     mode = "replay" if mode == "offline" else mode
     if mode not in {"replay", "live"}:
         raise ValueError(f"unsupported source mode: {mode}")
+    # Fail before monitor/capture/camera processes or run artifacts are created.
+    capture_python = preflight_python(ROOT, "kafka")
+    osnet_python = preflight_python(ROOT, "identity")
     profile = load_profile()
     binary = Path(os.getenv("MV3DT_BINARY", profile["runtime"]["binary"]))
     # A custom binary is permitted only for the temporary frame-path audit;
@@ -517,8 +518,9 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
         replay_config(stage)
     monitor_processes = start_monitors(run_root)
     kafka_log = logs / "kafka_current.jsonl"
-    capture_python = Path(os.getenv("MV3DT_KAFKA_PYTHON", str(KAFKA_PYTHON)))
-    capture_env = dict(os.environ, PYTHONPATH=str(ROOT / "services/mv3dt_room"))
+    capture_env = dict(os.environ, PYTHONPATH=str(ROOT / "services/mv3dt_room"),
+                       PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
+    capture_env.pop("PYTHONHOME", None)
     capture = subprocess.Popen(
         [str(capture_python), str(ROOT / "services/mv3dt_room/capture_kafka.py")],
         stdout=kafka_log.open("w"), stderr=(logs / "kafka_capture.err").open("w"),
@@ -540,9 +542,12 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
             PYTHONPATH=str(ROOT),
             MV3DT_DEV_ROOM_SOURCE_MODE=mode,
             MV3DT_DEV_ROOM_SESSION_ID=session_id,
+            PYTHONNOUSERSITE="1",
+            PYTHONDONTWRITEBYTECODE="1",
         )
+        sidecar_env.pop("PYTHONHOME", None)
         sidecar = subprocess.Popen(
-            [str(OSNET_PYTHON), str(ROOT / "services/mv3dt_room/live_identity_worker.py"),
+            [str(osnet_python), str(ROOT / "services/mv3dt_room/live_identity_worker.py"),
              "--kafka", str(kafka_log), "--output-dir", str(identity_dir),
              "--osnet-model", str(profile["runtime"]["osnet_model"]),
              "--duration", str(sidecar_duration), "--interval", "10",
@@ -603,8 +608,9 @@ def run(mode: str, duration: float | None, skip_render: bool, experiment: str | 
         dataset = ROOT / ".runtime/mv3dt/calibration/dev-room-cam01-cam04-vggt-v1"
         output = run_root / "visual/dev-room-cam01-cam04-production.mp4"
         output.parent.mkdir(parents=True, exist_ok=True)
-        render_env = dict(os.environ, PYTHONPATH=str(ROOT))
-        run_checked([str(OSNET_PYTHON), str(ROOT / "scripts/dev_room_mv3dt/render_visual_proof.py"),
+        render_env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
+        render_env.pop("PYTHONHOME", None)
+        run_checked([str(osnet_python), str(ROOT / "scripts/dev_room_mv3dt/render_visual_proof.py"),
                      "--identity-jsonl", str(identity_dir / "global_identity.jsonl"),
                      "--video-dir", str(video_dir), "--dataset-dir", str(dataset),
                      "--output", str(output)], env=render_env)
