@@ -14,10 +14,24 @@ BASE = ROOT / "services/camera_v11/deepstream_trt86_multi_v1.py"
 CLIENT = ROOT / "services/frontend/sentinel_v1/monitoring_client_v1.py"
 UI_PARTS = ROOT / "services/frontend/sentinel_v1/ui_parts"
 FROZEN_BASE_SHA256 = "5372d7e64b7bed43aabf7947f404973e310138629ecbb8f176b67b5967922cdc"
+LEGACY_REMOVAL_COMMIT = "9bfb8055d3f5c9a86ba06b8caf323d77db8170ef"
 
 
-def test_frozen_runtime_and_telemetry_client_architecture() -> None:
-    assert hashlib.sha256(BASE.read_bytes()).hexdigest() == FROZEN_BASE_SHA256
+def test_frozen_legacy_source_and_telemetry_client_architecture() -> None:
+    if BASE.exists():
+        frozen_source = BASE.read_bytes()
+    else:
+        # The TRT86 experiment was deliberately removed during the DS9.1
+        # cleanup, not renamed or accepted with a new hash. Preserve its exact
+        # historic freeze assertion; do not confuse it with today's runtime.
+        relative = str(BASE.relative_to(ROOT))
+        assert not subprocess.check_output(["git", "ls-files", "--", relative], cwd=ROOT)
+        subprocess.run(["git", "merge-base", "--is-ancestor", LEGACY_REMOVAL_COMMIT, "HEAD"],
+                       cwd=ROOT, check=True)
+        frozen_source = subprocess.check_output(
+            ["git", "show", f"{LEGACY_REMOVAL_COMMIT}^:{relative}"], cwd=ROOT,
+        )
+    assert hashlib.sha256(frozen_source).hexdigest() == FROZEN_BASE_SHA256
     source = CLIENT.read_text().lower()
     assert "qwebsocket" in source
     assert "snapshotchanged" in source
