@@ -290,3 +290,24 @@ def test_candidate_preserves_frontend_settings_before_credential_dotenv(override
     command = [sys.executable, "-B", "-c", "from scripts.validate_v13_full_stack import FRONTEND_SETTINGS; import json; print(json.dumps([FRONTEND_SETTINGS.frame_refresh_interval_ms, FRONTEND_SETTINGS.refresh_interval_ms]))"]
     result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, check=True)
     assert tuple(json.loads(result.stdout)) == expected
+
+
+def test_teardown_cycle_gate_requires_clean_exit_and_no_leaks():
+    from scripts.run_v13_teardown_cycles import cycle_pass
+    row = {
+        "runner_returncode": 0,
+        "result": {"status": "PASS", "native_exit": 0, "identity_exit": 0, "capture_exit": 0},
+        "shutdown_backtrace_present": False,
+        "rtsp_sockets_after": [],
+        "candidate_containers_after": [],
+    }
+    assert cycle_pass(row)
+    for key, bad in (
+        ("runner_returncode", 1),
+        ("shutdown_backtrace_present", True),
+        ("rtsp_sockets_after", ["socket"]),
+        ("candidate_containers_after", ["container"]),
+    ):
+        changed = dict(row)
+        changed[key] = bad
+        assert not cycle_pass(changed)
