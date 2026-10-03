@@ -41,7 +41,11 @@ def evidence_save(path, value):
 def same_candidate_chain(manifests):
     """Require the live run and every replay to validate identical assets."""
     def key(row):
-        return (row["native"]["binary_sha256"], row["native"]["source_sha256"],
+        native = row["native"]
+        source_sha = native.get("source_sha256", native.get("staged_source_sha256"))
+        if not native.get("binary_sha256") or not source_sha:
+            raise ValueError("candidate provenance requires exact binary and source SHA256 values")
+        return (native["binary_sha256"], source_sha,
                 row["tracker_sha256"], row["pose"]["engine_sha256"], row["configs"]["config_pgie.txt"])
     return bool(manifests) and len({key(row) for row in manifests}) == 1 and all(
         row["gallery_preexisting"] is False for row in manifests) and len(

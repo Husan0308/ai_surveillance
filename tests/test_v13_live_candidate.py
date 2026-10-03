@@ -335,6 +335,14 @@ def test_final_gate_requires_same_binary_and_fresh_gallery_in_every_run():
     second["native"]["binary_sha256"] = "binary"
     second["gallery"] = "one"
     assert not same_candidate_chain([first, second])
+    drain_first = {"native": {"binary_sha256": "binary", "staged_source_sha256": "source"},
+             "tracker_sha256": "tracker", "pose": {"engine_sha256": "pose"},
+             "configs": {"config_pgie.txt": "pgie"}, "gallery_preexisting": False, "gallery": "one"}
+    drain_second = copy.deepcopy(drain_first)
+    drain_second["gallery"] = "two"
+    assert same_candidate_chain([drain_first, drain_second])
+    drain_second["native"]["staged_source_sha256"] = "different"
+    assert not same_candidate_chain([drain_first, drain_second])
     assert not same_candidate_chain([])
 
 
