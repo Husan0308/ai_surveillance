@@ -78,6 +78,50 @@ def complete_native_frames(report: dict, dataset: str) -> bool:
         row["pgie_frames"] == row["tracker_frames"] == expected for row in report["cameras"].values())
 
 
+def audit_shutdown_drain(path: Path) -> dict:
+    required = ("shutdown_requested", "source_admission_stopped", "drain_completed",
+                "flush_start", "destroy_pipeline", "native_exit")
+    try:
+        events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    except (OSError, ValueError) as error:
+        return {"status": "FAIL", "reason": f"missing or malformed drain log: {error}", "events": []}
+    names = [row.get("event") for row in events]
+    positions = {name: names.index(name) for name in required if name in names}
+    if set(positions) != set(required) or [positions[name] for name in required] != sorted(positions.values()):
+        return {"status": "FAIL", "reason": "required drain/flush/destroy lifecycle events missing or out of order",
+                "events": events}
+    terminal = events[positions["native_exit"]]
+    sources = terminal.get("sources") or []
+    def source_drained(row: dict) -> bool:
+        last_pts = row.get("last_admitted_pts")
+        return (row.get("blocked") is True and last_pts not in (None, 0)
+            and row.get("mux_last_pts") == last_pts
+            and row.get("pgie_last_pts") == last_pts
+            and row.get("tracker_last_pts") == last_pts
+            and row.get("pgie_frames") == row.get("tracker_frames"))
+    source_results = [dict(row, drained=source_drained(row)) for row in sources]
+    if len(source_results) != 2 or not all(row["drained"] for row in source_results):
+        return {"status": "FAIL", "reason": "terminal counters or PTS do not prove full drain for both sources",
+                "events": events, "sources": source_results}
+    times = [events[positions[name]].get("mono_ns", 0) for name in required]
+    if not all(isinstance(value, int) and value > 0 for value in times) or times != sorted(times):
+        return {"status": "FAIL", "reason": "monotonic lifecycle timestamps are missing or inconsistent",
+                "events": events, "sources": source_results}
+    return {"status": "PASS", "events": events, "sources": source_results,
+            "terminal_tracker_equals_pgie_per_source": all(
+                row["tracker_frames"] == row["pgie_frames"] for row in source_results)}
+
+
+def verify_native_build(path: Path | None) -> dict:
+    if path is None:
+        return verify_candidate(F4 / "candidate-audit-build/build.json")
+    record = json.loads(path.read_text())
+    if record.get("candidate") == "F5_DRAIN_BEFORE_FLUSH":
+        from scripts.build_v13_drain_shutdown_candidate import verify_build as verify_drain_build
+        return verify_drain_build(path)
+    return verify_candidate(path)
+
+
 def verify_pose(path: Path) -> dict:
     record = json.loads(path.read_text())
     if sha256(Path(record["engine"])) != record["engine_sha256"]:
@@ -114,7 +158,7 @@ def run(output: Path, dataset: str, duration: float, pose_path: Path, shutdown_d
     output = output.resolve()
     output.relative_to(ROOT / ".runtime")
     from scripts.build_v13_shutdown_candidate import verify_candidate
-    native = verify_candidate(native_build or F4 / "candidate-audit-build/build.json")
+    native = verify_native_build(native_build)
     validate_artifacts(ROOT)
     pose = verify_pose(pose_path.resolve())
     python = preflight_python(ROOT, "identity")
@@ -149,6 +193,13 @@ def run(output: Path, dataset: str, duration: float, pose_path: Path, shutdown_d
     done = output / "logs/deepstream.done"
     container = f"ai-surveillance-v13-candidate-{os.getpid()}"
     cmd = command(stage, native, mode, container)
+    if native.get("candidate") == "F5_DRAIN_BEFORE_FLUSH":
+        image = json.loads((ROOT / "config/deepstream-platform.json").read_text())["image"]
+        at = cmd.index(image)
+        cmd[at:at] = [
+            "-e", "MV3DT_SHUTDOWN_DRAIN_LOG=/workspace/experiments/logs/probe/shutdown-drain.jsonl",
+            "-e", "MV3DT_SHUTDOWN_DRAIN_TIMEOUT_SEC=10",
+        ]
     if shutdown_debug:
         from scripts.native_shutdown_diagnostics import debugger_command
         image = json.loads((ROOT / "config/deepstream-platform.json").read_text())["image"]
@@ -275,6 +326,10 @@ def run(output: Path, dataset: str, duration: float, pose_path: Path, shutdown_d
         save(output / "samples.json", samples)
         save(output / "protected-after.json", protected_v13())
     report = audit_retention(output)
+    drain_path = stage / "logs/probe/shutdown-drain.jsonl"
+    drain_report = audit_shutdown_drain(drain_path) if native.get("candidate") == "F5_DRAIN_BEFORE_FLUSH" else None
+    if drain_report is not None:
+        save(output / "shutdown-drain-audit.json", drain_report)
     gpu = [list(map(float, s["gpu"].split(","))) for s in samples]
     save(output / "resource_metrics.json", {"gpu_utilization_percent": {"mean": sum(g[0] for g in gpu) / len(gpu), "peak": max(g[0] for g in gpu)},
         "gpu_memory_mib": {"mean": sum(g[1] for g in gpu) / len(gpu), "peak": max(g[1] for g in gpu)},
@@ -291,10 +346,12 @@ def run(output: Path, dataset: str, duration: float, pose_path: Path, shutdown_d
         "pipeline_errors": faults, "all_error_level_messages": error_lines,
         "stderr_warnings": [l for l in stderr.splitlines() if "WARNING" in l or "WARN" in l], "canonical_ids": ids,
         "retention": report, "loaded_tracker_sha256": sha256(stage / "config_tracker.yml"),
+        "shutdown_drain": drain_report,
         "staged_configs_unchanged": hashes == {p.name: sha256(p) for p in stage.iterdir() if p.is_file()},
         "protected_unchanged": json.loads((output / "protected-before.json").read_text()) == protected_v13()}
     result["complete_native_frame_processing"] = mode == "live" or complete_native_frames(report, dataset)
-    result["status"] = "PASS" if not faults and not timed_out and result["native_exit"] == result["identity_exit"] == 0 and result["protected_unchanged"] and result["staged_configs_unchanged"] and report["audit_integrity_pass"] and result["complete_native_frame_processing"] else "FAIL"
+    drain_ok = drain_report is None or drain_report["status"] == "PASS"
+    result["status"] = "PASS" if not faults and not timed_out and result["native_exit"] == result["identity_exit"] == 0 and result["protected_unchanged"] and result["staged_configs_unchanged"] and report["audit_integrity_pass"] and result["complete_native_frame_processing"] and drain_ok else "FAIL"
     save(output / "result.json", result)
     return result
 

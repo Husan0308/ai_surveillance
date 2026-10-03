@@ -252,6 +252,65 @@ def test_shutdown_experiment_only_changes_explicit_live_teardown_points():
         native_shutdown_source("different source")
 
 
+def test_drain_builder_requires_all_admitted_pts_to_reach_tracker_before_flush():
+    from scripts.build_v13_drain_shutdown_candidate import (
+        drain_source, drained, NATIVE_DESTROY_DRAIN, C_DRAIN,
+    )
+    complete = {"blocked": True, "last_admitted_pts": 120,
+        "mux_last_pts": 120, "pgie_last_pts": 120, "tracker_last_pts": 120,
+        "pgie_frames": 20, "tracker_frames": 20}
+    assert drained(complete)
+    assert not drained(dict(complete, tracker_last_pts=0, tracker_frames=19))
+    assert "gst_element_get_static_pad (bin->bin, \"src\")" in C_DRAIN
+    assert "GST_PAD_PROBE_TYPE_IDLE" in C_DRAIN
+    assert "last_pts[SOURCE_HEALTH_MUX] == source->last_admitted_pts" in C_DRAIN
+    assert "last_pts[SOURCE_HEALTH_PGIE] == source->last_admitted_pts" in C_DRAIN
+    assert "last_pts[SOURCE_HEALTH_TRACKER] == source->last_admitted_pts" in C_DRAIN
+    assert "admission_buffers_since_barrier" in C_DRAIN
+    assert "last_admitted_source_frame" not in C_DRAIN
+    assert "g_usleep (1000)" in C_DRAIN
+    assert "g_get_monotonic_time () < deadline" in C_DRAIN
+    assert NATIVE_DESTROY_DRAIN.index("f5_drain_admitted_frames") < NATIVE_DESTROY_DRAIN.index("gst_event_new_flush_start")
+    failed = NATIVE_DESTROY_DRAIN.split("} else {", 1)[1]
+    assert "return_value = -1" in failed
+    assert "gst_event_new_flush_start" not in failed
+    staged = drain_source((ROOT / "services/mv3dt_room/native/deepstream_test5_app_main.c").read_text())
+    assert staged.count("f5_drain_admitted_frames (appCtx[i])") == 1
+    assert staged.count("f5_release_drain_probes ();") == 1
+    assert "last_pts[stage_index] = frame_meta->buf_pts" in staged
+
+
+def test_drain_log_audit_requires_ordered_events_and_equal_terminal_pts(tmp_path):
+    from scripts.run_v13_room_candidate import audit_shutdown_drain
+    path = tmp_path / "shutdown-drain.jsonl"
+    names = ("shutdown_requested", "source_admission_stopped", "drain_completed",
+             "flush_start", "destroy_pipeline", "native_exit")
+    source = {"blocked": True, "last_admitted_pts": 7, "mux_last_pts": 7,
+        "pgie_last_pts": 7, "tracker_last_pts": 7, "pgie_frames": 9, "tracker_frames": 9}
+    path.write_text("\n".join(json.dumps({"event": name, "mono_ns": i + 10,
+        "sources": [source, source]}) for i, name in enumerate(names)))
+    assert audit_shutdown_drain(path)["status"] == "PASS"
+    bad = dict(source, tracker_last_pts=6)
+    path.write_text("\n".join(json.dumps({"event": name, "mono_ns": i + 10,
+        "sources": [source, bad]}) for i, name in enumerate(names)))
+    assert audit_shutdown_drain(path)["status"] == "FAIL"
+    path.write_text("\n".join(json.dumps({"event": name, "mono_ns": i + 10,
+        "sources": [source, source]}) for i, name in enumerate(reversed(names))))
+    assert audit_shutdown_drain(path)["status"] == "FAIL"
+
+
+def test_drain_build_verifier_is_selected_without_weakening_existing_candidate_verifier(tmp_path):
+    from scripts.run_v13_room_candidate import verify_native_build
+
+    record = {"candidate": "F5_DRAIN_BEFORE_FLUSH"}
+    path = tmp_path / "build.json"
+    path.write_text(json.dumps(record))
+    # The drain-specific verifier is selected; it fails on its provenance checks,
+    # rather than passing this record through the older candidate schema.
+    with pytest.raises(ValueError, match="remain experimental"):
+        verify_native_build(path)
+
+
 def test_final_gate_requires_same_binary_and_fresh_gallery_in_every_run():
     import copy
     from scripts.freeze_v13_live import same_candidate_chain
@@ -293,7 +352,7 @@ def test_candidate_preserves_frontend_settings_before_credential_dotenv(override
 
 
 def test_teardown_cycle_gate_requires_clean_exit_and_no_leaks():
-    from scripts.run_v13_teardown_cycles import cycle_pass
+    from scripts.run_v13_teardown_cycles import cycle_pass, safe_to_continue_after_failure
     row = {
         "runner_returncode": 0,
         "result": {
@@ -303,13 +362,21 @@ def test_teardown_cycle_gate_requires_clean_exit_and_no_leaks():
                            "association_deficit_windows": [{"frames": 5}]},
                 "CAM-04": {"association_retention_gate": True,
                            "association_deficit_windows": [{"frames": 1}]},
-            }},
-        },
+                }},
+                "shutdown_drain": {"status": "PASS", "sources": [
+                    {"pgie_frames": 12, "tracker_frames": 12},
+                    {"pgie_frames": 12, "tracker_frames": 12},
+                ]},
+            },
         "shutdown_backtrace_present": False,
         "rtsp_sockets_after": [],
         "candidate_containers_after": [],
     }
     assert cycle_pass(row)
+    assert safe_to_continue_after_failure(row)
+    row["result"]["shutdown_drain"]["sources"][1]["tracker_frames"] = 11
+    assert not cycle_pass(row)
+    row["result"]["shutdown_drain"]["sources"][1]["tracker_frames"] = 12
     for key, bad in (
         ("runner_returncode", 1),
         ("shutdown_backtrace_present", True),

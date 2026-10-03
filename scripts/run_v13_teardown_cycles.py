@@ -50,6 +50,13 @@ def cycle_pass(row: dict) -> bool:
         and all(cameras[camera].get("association_retention_gate") is True
                 for camera in ("CAM-01", "CAM-04"))
     )
+    drain = result.get("shutdown_drain") or {}
+    terminal_frames_ok = (
+        drain.get("status") == "PASS"
+        and len(drain.get("sources") or []) == 2
+        and all(source.get("pgie_frames") == source.get("tracker_frames")
+                for source in drain.get("sources") or [])
+    )
     max_gap = _max_gap_frames(result)
     return (
         row.get("runner_returncode") == 0
@@ -57,9 +64,25 @@ def cycle_pass(row: dict) -> bool:
         and result.get("native_exit") == 0
         and result.get("identity_exit") == 0
         and result.get("capture_exit") == 0
+        and terminal_frames_ok
         and retention_ok
         and max_gap is not None
         and max_gap <= 10
+        and not row.get("shutdown_backtrace_present")
+        and not row.get("rtsp_sockets_after")
+        and not row.get("candidate_containers_after")
+    )
+
+
+def safe_to_continue_after_failure(row: dict) -> bool:
+    """Continue diagnostics only when a failed acceptance run shut down cleanly."""
+    result = row.get("result") or {}
+    drain = result.get("shutdown_drain") or {}
+    return (
+        result.get("native_exit") == 0
+        and result.get("identity_exit") == 0
+        and result.get("capture_exit") == 0
+        and drain.get("status") == "PASS"
         and not row.get("shutdown_backtrace_present")
         and not row.get("rtsp_sockets_after")
         and not row.get("candidate_containers_after")
@@ -128,15 +151,21 @@ def main() -> None:
             "max_gap_frames": row["max_gap_frames"],
             "rtsp_sockets_after": len(row["rtsp_sockets_after"]),
             "candidate_containers_after": row["candidate_containers_after"],
+            "continuing_diagnostics_after_acceptance_failure": (
+                not row["pass"] and safe_to_continue_after_failure(row)),
         }), flush=True)
-        if not row["pass"]:
+        if not row["pass"] and not safe_to_continue_after_failure(row):
             raise SystemExit(1)
 
+    campaign_pass = len(rows) == args.cycles and all(row["pass"] for row in rows)
     print(json.dumps({
-        "status": "PASS",
-        "cycles": args.cycles,
+        "status": "PASS" if campaign_pass else "FAIL",
+        "cycles": len(rows),
+        "required_cycles": args.cycles,
         "evidence": str(output_root / "teardown-cycles.json"),
     }), flush=True)
+    if not campaign_pass:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
