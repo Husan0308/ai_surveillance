@@ -42,6 +42,38 @@ for thread in threads:
                           (source, hex(address), words))
                 except gdb.error as error:
                     print("F5_MEMORY_UNAVAILABLE %s %s" % (source, error))
+
+                # When libc pthread types are available, read the mutex owner
+                # from the actual pthread_mutex_t layout instead of guessing
+                # from raw register/memory words.  An owner is considered
+                # confirmed only when this typed read succeeds AND a GDB thread
+                # with the same LWP/TID exists in the inferior.
+                try:
+                    mutex_type = gdb.lookup_type("pthread_mutex_t").pointer()
+                    mutex = gdb.Value(address).cast(mutex_type).dereference()
+                    owner = int(mutex["__data"]["__owner"])
+                    lock_word = int(mutex["__data"]["__lock"])
+                    owner_threads = []
+                    for candidate_thread in threads:
+                        ptid = candidate_thread.ptid
+                        lwp = int(ptid[1]) if len(ptid) > 1 and ptid[1] else 0
+                        tid = int(ptid[2]) if len(ptid) > 2 and ptid[2] else 0
+                        if owner > 0 and owner in (lwp, tid):
+                            owner_threads.append(candidate_thread)
+                    print("F5_MUTEX_TYPED candidate=%s address=%s lock=%s owner=%s owner_thread_matches=%s" %
+                          (source, hex(address), lock_word, owner,
+                           [t.num for t in owner_threads]))
+                    if owner_threads:
+                        waiter = thread
+                        for owner_thread in owner_threads:
+                            owner_thread.switch()
+                            print("F5_MUTEX_OWNER_CONFIRMED waiter_thread=%s owner_thread=%s owner_ptid=%s address=%s" %
+                                  (waiter.num, owner_thread.num, owner_thread.ptid, hex(address)))
+                            print(gdb.execute("bt", to_string=True))
+                        waiter.switch()
+                except (gdb.error, KeyError, TypeError, ValueError) as error:
+                    print("F5_MUTEX_TYPED_UNAVAILABLE candidate=%s address=%s error=%s" %
+                          (source, hex(address), error))
             try:
                 print(gdb.execute("disassemble /r " + name, to_string=True))
             except gdb.error as error:
@@ -57,7 +89,7 @@ def debugger_arguments():
     return ["--data-directory=/diag/gdb-data", "-nx", "-batch",
         "-iex", "set auto-load off", "-iex", "set debuginfod enabled off",
         "-ex", "set pagination off", "-ex", "set print frame-arguments none",
-        "-ex", "attach 1", "-ex", "thread apply all bt",
+        "-ex", "attach 1", "-ex", "info threads", "-ex", "thread apply all bt",
         "-ex", "python exec(" + repr(MUTEX_DIAGNOSTIC) + ")", "-ex", "detach"]
 
 
