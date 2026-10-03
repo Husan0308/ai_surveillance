@@ -296,7 +296,15 @@ def test_teardown_cycle_gate_requires_clean_exit_and_no_leaks():
     from scripts.run_v13_teardown_cycles import cycle_pass
     row = {
         "runner_returncode": 0,
-        "result": {"status": "PASS", "native_exit": 0, "identity_exit": 0, "capture_exit": 0},
+        "result": {
+            "status": "PASS", "native_exit": 0, "identity_exit": 0, "capture_exit": 0,
+            "retention": {"cameras": {
+                "CAM-01": {"association_retention_gate": True,
+                           "association_deficit_windows": [{"frames": 5}]},
+                "CAM-04": {"association_retention_gate": True,
+                           "association_deficit_windows": [{"frames": 1}]},
+            }},
+        },
         "shutdown_backtrace_present": False,
         "rtsp_sockets_after": [],
         "candidate_containers_after": [],
@@ -311,3 +319,12 @@ def test_teardown_cycle_gate_requires_clean_exit_and_no_leaks():
         changed = dict(row)
         changed[key] = bad
         assert not cycle_pass(changed)
+
+
+    too_long = json.loads(json.dumps(row))
+    too_long["result"]["retention"]["cameras"]["CAM-04"]["association_deficit_windows"] = [{"frames": 11}]
+    assert not cycle_pass(too_long)
+
+    retention_fail = json.loads(json.dumps(row))
+    retention_fail["result"]["retention"]["cameras"]["CAM-01"]["association_retention_gate"] = False
+    assert not cycle_pass(retention_fail)

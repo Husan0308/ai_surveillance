@@ -26,14 +26,40 @@ def _candidate_containers() -> list[str]:
             if name.startswith("ai-surveillance-v13-candidate-")]
 
 
+def _max_gap_frames(result: dict) -> int | None:
+    retention = (result or {}).get("retention") or {}
+    cameras = retention.get("cameras") or {}
+    if not cameras:
+        return None
+    gaps = []
+    for camera in ("CAM-01", "CAM-04"):
+        row = cameras.get(camera)
+        if not row:
+            return None
+        windows = row.get("association_deficit_windows") or []
+        gaps.append(max((int(w.get("frames", 0)) for w in windows), default=0))
+    return max(gaps)
+
+
 def cycle_pass(row: dict) -> bool:
     result = row.get("result") or {}
+    retention = result.get("retention") or {}
+    cameras = retention.get("cameras") or {}
+    retention_ok = (
+        set(cameras) == {"CAM-01", "CAM-04"}
+        and all(cameras[camera].get("association_retention_gate") is True
+                for camera in ("CAM-01", "CAM-04"))
+    )
+    max_gap = _max_gap_frames(result)
     return (
         row.get("runner_returncode") == 0
         and result.get("status") == "PASS"
         and result.get("native_exit") == 0
         and result.get("identity_exit") == 0
         and result.get("capture_exit") == 0
+        and retention_ok
+        and max_gap is not None
+        and max_gap <= 10
         and not row.get("shutdown_backtrace_present")
         and not row.get("rtsp_sockets_after")
         and not row.get("candidate_containers_after")
@@ -82,6 +108,7 @@ def main() -> None:
             "rtsp_sockets_after": _rtsp_sockets(),
             "candidate_containers_after": _candidate_containers(),
         }
+        row["max_gap_frames"] = _max_gap_frames(result or {})
         row["pass"] = cycle_pass(row)
         rows.append(row)
         (output_root / "teardown-cycles.json").write_text(
@@ -98,6 +125,7 @@ def main() -> None:
             "native_exit": (result or {}).get("native_exit"),
             "status": (result or {}).get("status"),
             "shutdown_backtrace_present": row["shutdown_backtrace_present"],
+            "max_gap_frames": row["max_gap_frames"],
             "rtsp_sockets_after": len(row["rtsp_sockets_after"]),
             "candidate_containers_after": row["candidate_containers_after"],
         }), flush=True)
