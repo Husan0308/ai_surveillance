@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Hardware-decoded V11 shared-memory previews for non-Dev-Room cameras.
+"""Camera-only NVDEC previews. Select only cameras not owned by analytics.
 
-CAM-01 and CAM-04 are intentionally excluded: their independent previews come
-from the production MV3DT source owner, so no camera is opened twice.
+The camera-only foundation can own all six. In the analytics topology explicitly
+select CAM-02,03,05,06; CAM-01/04 belong to the room-pair owner instead.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from pathlib import Path
 
 from scripts.capture_dev_room_mv3dt import detect_rtsp_codec
 from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameWriter
+from services.camera_v11.source_ownership import SourceOwnership
 from services.ml_service.app.config import CameraConfig, load_settings
 from services.ml_service.app.deepstream.capture import DeepStreamCapture
 
@@ -102,6 +103,16 @@ class CameraStats:
     last_error: str = ""
     last_failure_error: str = ""
     last_failure_monotonic_ns: int = 0
+    published_frames: int = 0
+    decoder_inputs: int = 0
+    decoder_outputs: int = 0
+    queue_buffers: int = 0
+    queue_high_water: int = 0
+    bus_errors: int = 0
+    bus_warnings: int = 0
+    timing_invalid: int = 0
+    controlled_restarts: int = 0
+    runtime_graph: dict = field(default_factory=dict)
 
     def record_failure(self, exc: BaseException) -> None:
         self.state = "DISCONNECTED"
@@ -137,6 +148,16 @@ class CameraStats:
             "last_error": self.last_error,
             "last_failure_error": self.last_failure_error,
             "last_failure_monotonic_ns": self.last_failure_monotonic_ns,
+            "published_frames": self.published_frames,
+            "decoder_inputs": self.decoder_inputs,
+            "decoder_outputs": self.decoder_outputs,
+            "queue_buffers": self.queue_buffers,
+            "queue_high_water": self.queue_high_water,
+            "bus_errors": self.bus_errors,
+            "bus_warnings": self.bus_warnings,
+            "timing_invalid": self.timing_invalid,
+            "controlled_restarts": self.controlled_restarts,
+            "runtime_graph": self.runtime_graph,
         }
 
 
@@ -148,6 +169,7 @@ class PreviewSource(threading.Thread):
         self.stop_event = stop
         self.stats = CameraStats(camera.camera_id)
         self.writer: PreviewFrameWriter | None = None
+        self.restart_event = threading.Event()
 
     def run(self) -> None:
         retry = max(0.5, float(self.config.reconnect_delay_sec))
@@ -179,12 +201,19 @@ class PreviewSource(threading.Thread):
                     low_latency_mode=low_latency_mode,
                     decoder_extra_surfaces=self.camera.decoder_extra_surfaces,
                 )
+                input_base, output_base = self.stats.decoder_inputs, self.stats.decoder_outputs
+                error_base, warning_base = self.stats.bus_errors, self.stats.bus_warnings
+                self.stats.runtime_graph = capture.graph_summary()
                 retry = max(0.5, float(self.config.reconnect_delay_sec))
                 frame_window = 0
                 fps_window_start = time.monotonic()
                 last_progress = fps_window_start
                 publish_budget = None
                 while not self.stop_event.is_set():
+                    if self.restart_event.is_set():
+                        self.restart_event.clear()
+                        self.stats.controlled_restarts += 1
+                        raise RuntimeError("controlled source teardown/reconnect test")
                     ok, frame = capture.read()
                     now = time.monotonic()
                     if not ok or frame is None:
@@ -219,6 +248,10 @@ class PreviewSource(threading.Thread):
                             decoder_dts_ns=capture.last_timing.dts_ns,
                             source_frame_num=self.stats.frames + 1,
                         )
+                        self.stats.published_frames += 1
+                    timing = capture.last_timing
+                    if not (0 < timing.decoder_reference_ns <= timing.decoder_out_ns <= time.monotonic_ns()):
+                        self.stats.timing_invalid += 1
                     self.stats.frames += 1
                     self.stats.last_frame_mono = now
                     self.stats.width = width
@@ -228,6 +261,13 @@ class PreviewSource(threading.Thread):
                     frame_window += 1
                     interval = now - fps_window_start
                     if interval >= 1.0:
+                        capture.debug_info()  # Consume and count bus messages, not just timeouts.
+                        self.stats.decoder_inputs = input_base + capture.decoder_input_count
+                        self.stats.decoder_outputs = output_base + capture.decoder_output_count
+                        self.stats.bus_errors = error_base + capture.bus_errors
+                        self.stats.bus_warnings = warning_base + capture.bus_warnings
+                        self.stats.queue_buffers = capture.current_queue_buffers() or 0
+                        self.stats.queue_high_water = max(self.stats.queue_high_water, self.stats.queue_buffers)
                         self.stats.observe_fps(frame_window / interval)
                         frame_window = 0
                         fps_window_start = now
@@ -235,6 +275,10 @@ class PreviewSource(threading.Thread):
                 self.stats.record_failure(exc)
             finally:
                 if capture is not None:
+                    self.stats.decoder_inputs = input_base + capture.decoder_input_count
+                    self.stats.decoder_outputs = output_base + capture.decoder_output_count
+                    self.stats.bus_errors = error_base + capture.bus_errors
+                    self.stats.bus_warnings = warning_base + capture.bus_warnings
                     capture.close()
                     capture = None
             if not self.stop_event.is_set():
@@ -250,8 +294,12 @@ def main() -> int:
     parser.add_argument("--cameras", default=",".join(DEFAULT_CAMERAS))
     parser.add_argument("--stats", type=Path)
     parser.add_argument("--duration", type=float, default=0.0)
+    parser.add_argument("--test-reconnect-camera", choices=DEFAULT_CAMERAS)
+    parser.add_argument("--test-reconnect-at", type=float, default=20.0)
     args = parser.parse_args()
     selected = tuple(item.strip() for item in args.cameras.split(",") if item.strip())
+    if args.test_reconnect_camera and args.test_reconnect_camera not in selected:
+        parser.error("reconnect test camera must be selected")
     settings = load_settings()
     cameras = {camera.camera_id: camera for camera in settings.cameras}
     missing = sorted(set(selected) - set(cameras))
@@ -265,10 +313,12 @@ def main() -> int:
         PreviewSource(cameras[camera_id], settings.deepstream, stop)
         for camera_id in selected
     ]
+    started = time.monotonic()
+    ownership = SourceOwnership(selected, Path(os.getenv("CAMERA_OWNER_LOCK_DIR", ".runtime/camera-owner-locks")))
+    ownership.__enter__()  # Fail before any codec probe/RTSP open.
     for worker in workers:
         worker.start()
-
-    started = time.monotonic()
+    reconnect_requested = False
     try:
         while not stop.wait(1.0):
             snapshot = {worker.camera.camera_id: worker.stats.snapshot() for worker in workers}
@@ -277,6 +327,10 @@ def main() -> int:
                 temp = args.stats.with_suffix(args.stats.suffix + ".tmp")
                 temp.write_text(json.dumps(snapshot, indent=2))
                 temp.replace(args.stats)
+            if (args.test_reconnect_camera and not reconnect_requested
+                    and time.monotonic() - started >= args.test_reconnect_at):
+                next(w for w in workers if w.camera.camera_id == args.test_reconnect_camera).restart_event.set()
+                reconnect_requested = True
             if args.duration > 0 and time.monotonic() - started >= args.duration:
                 break
     finally:
@@ -286,6 +340,11 @@ def main() -> int:
         if args.stats:
             snapshot = {worker.camera.camera_id: worker.stats.snapshot() for worker in workers}
             args.stats.write_text(json.dumps(snapshot, indent=2))
+        if any(worker.is_alive() for worker in workers):
+            # Retain ownership until process exit; never release a camera while
+            # a worker could still be streaming into a replacement owner's slot.
+            raise RuntimeError("preview worker did not shut down within 10 seconds")
+        ownership.__exit__(None, None, None)
     return 0
 
 

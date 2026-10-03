@@ -114,6 +114,10 @@ class DeepStreamCapture:
         self._last_warning = ""
         self._frame_intervals_ms = deque(maxlen=300)
         self._last_frame_mono: float | None = None
+        self.decoder_input_count = 0
+        self.decoder_output_count = 0
+        self.bus_errors = 0
+        self.bus_warnings = 0
         self.last_timing = CaptureTiming(0, 0, 0, 0, 0)
         self._decoder_input_times: dict[int, tuple[int, int]] = {}
         self._decoder_output_times: dict[int, tuple[int, int, int]] = {}
@@ -177,6 +181,7 @@ class DeepStreamCapture:
         buffer = info.get_buffer()
         if buffer is None:
             return Gst.PadProbeReturn.OK
+        self.decoder_input_count = getattr(self, "decoder_input_count", 0) + 1
         dts = int(buffer.dts) if buffer.dts != Gst.CLOCK_TIME_NONE else -1
         self._remember(
             self._decoder_input_times, self._decoder_input_order,
@@ -188,6 +193,7 @@ class DeepStreamCapture:
         buffer = info.get_buffer()
         if buffer is None:
             return Gst.PadProbeReturn.OK
+        self.decoder_output_count = getattr(self, "decoder_output_count", 0) + 1
         pts = self._buffer_pts(buffer)
         out_ns = time.monotonic_ns()
         input_timing = self._decoder_input_times.pop(pts, None)
@@ -260,10 +266,12 @@ class DeepStreamCapture:
                 break
             source = message.src.get_name() if message.src is not None else "unknown"
             if message.type == Gst.MessageType.ERROR:
+                self.bus_errors += 1
                 err, debug = message.parse_error()
                 self._last_error = f"{source}: {err.message} | {debug or ''}"
                 terminal = self._last_error
             elif message.type == Gst.MessageType.WARNING:
+                self.bus_warnings += 1
                 err, debug = message.parse_warning()
                 self._last_warning = f"{source}: {err.message} | {debug or ''}"
             elif message.type == Gst.MessageType.EOS:
@@ -350,6 +358,32 @@ class DeepStreamCapture:
             "last_error": self._last_error,
             "last_warning": self._last_warning,
             "queue_buffers": self.current_queue_buffers(),
+        }
+
+    def graph_summary(self) -> dict:
+        counts = {}
+        iterator = self.pipeline.iterate_elements()
+        while True:
+            result, element = iterator.next()
+            if result == Gst.IteratorResult.DONE:
+                break
+            if result == Gst.IteratorResult.RESYNC:
+                counts.clear()
+                iterator.resync()
+                continue
+            if result != Gst.IteratorResult.OK:
+                raise RuntimeError("could not inspect capture graph")
+            factory = element.get_factory()
+            if factory:
+                name = factory.get_name()
+                counts[name] = counts.get(name, 0) + 1
+        return {
+            "factories": counts,
+            "decoder_plugin": self.decoder.get_factory().get_plugin().get_filename(),
+            "queue_max_buffers": self.latest_queue.get_property("max-size-buffers"),
+            "queue_leaky": int(self.latest_queue.get_property("leaky")),
+            "appsink_max_buffers": self.sink.get_property("max-buffers"),
+            "appsink_drop": self.sink.get_property("drop"),
         }
 
     def close(self) -> None:

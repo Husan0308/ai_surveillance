@@ -21,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -35,7 +36,8 @@ from services.shared.camera_config import load_settings  # noqa: E402
 try:
     import gi
     gi.require_version("Gst", "1.0")
-    from gi.repository import Gst  # noqa: E402
+    gi.require_version("GstSdp", "1.0")
+    from gi.repository import Gst, GstSdp  # noqa: E402,F401
 except ModuleNotFoundError as exc:
     raise SystemExit(
         "Python GStreamer bindings are missing. "
@@ -144,14 +146,30 @@ def source_options(cam: dict, latency_ms: int) -> list[str]:
     ]
 
 
+def _codec_from_sdp(sdp) -> str:
+    encodings = set()
+    for i in range(sdp.medias_len()):
+        media = sdp.get_media(i)
+        if media.get_media() != "video":
+            continue
+        j = 0
+        while (value := media.get_attribute_val_n("rtpmap", j)) is not None:
+            pieces = value.split()
+            if len(pieces) >= 2:
+                encodings.add(pieces[1].split("/")[0].upper())
+            j += 1
+    if len(encodings) != 1 or not encodings.issubset({"H264", "H265"}):
+        raise ValueError("RTSP SDP must identify one supported H264/H265 video encoding")
+    return encodings.pop()
+
+
 def detect_rtsp_codec(cam: dict, latency_ms: int, timeout_sec: float = 10.0) -> str:
-    # Link any RTP video stream to fakesink first, then inspect the negotiated
-    # SDP-derived RTP caps. This avoids assuming H264/H265 in advance.
+    # DESCRIBE/SDP already establishes the codec. Remain PAUSED: PLAYING an
+    # unneeded RTP/fakesink branch caused intermittent not-linked errors on
+    # CAM-05. No decoded/video data or extra decoder is needed for discovery.
     pipeline_text = " ".join(
         [
             "rtspsrc", "name=source", *source_options(cam, latency_ms),
-            "!", "application/x-rtp,media=video",
-            "!", "fakesink", "name=codec_sink", "sync=false",
         ]
     )
     try:
@@ -161,19 +179,38 @@ def detect_rtsp_codec(cam: dict, latency_ms: int, timeout_sec: float = 10.0) -> 
             f"{cam['id']}: failed to construct codec-probe pipeline: {exc}"
         ) from exc
 
-    sink = pipeline.get_by_name("codec_sink")
-    if sink is None:
-        pipeline.set_state(Gst.State.NULL)
-        raise RuntimeError(f"{cam['id']}: codec probe sink was not created")
+    # A single-element parse_launch may return rtspsrc rather than a pipeline.
+    if not isinstance(pipeline, Gst.Pipeline):
+        source = pipeline
+        pipeline = Gst.Pipeline.new(None)
+        pipeline.add(source)
+    else:
+        source = pipeline.get_by_name("source")
+    ready = threading.Event()
+    result_holder = []
+
+    def on_sdp(_source, sdp):
+        try:
+            result_holder.append(_codec_from_sdp(sdp))
+        except ValueError as exc:
+            result_holder.append(exc)
+        ready.set()  # Only signal; never change Gst state from this callback.
+
+    source.connect("on-sdp", on_sdp)
 
     try:
-        result = pipeline.set_state(Gst.State.PLAYING)
+        result = pipeline.set_state(Gst.State.PAUSED)
         if result == Gst.StateChangeReturn.FAILURE:
-            raise RuntimeError(f"{cam['id']}: codec probe failed to enter PLAYING")
+            raise RuntimeError(f"{cam['id']}: codec probe failed to enter PAUSED")
 
         bus = pipeline.get_bus()
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
+            if ready.is_set():
+                codec = result_holder[0]
+                if isinstance(codec, Exception):
+                    raise RuntimeError(f"{cam['id']}: {codec}") from codec
+                return codec
             message = bus.timed_pop_filtered(
                 100 * Gst.MSECOND,
                 Gst.MessageType.ERROR,
@@ -190,24 +227,12 @@ def detect_rtsp_codec(cam: dict, latency_ms: int, timeout_sec: float = 10.0) -> 
                     f"{err.message} | {debug or ''}"
                 )
 
-            pad = sink.get_static_pad("sink")
-            caps = pad.get_current_caps() if pad is not None else None
-            if caps is None or caps.get_size() == 0:
-                continue
-            structure = caps.get_structure(0)
-            encoding = str(structure.get_value("encoding-name") or "").upper()
-            if encoding in {"H264", "H265"}:
-                return encoding
-            if encoding:
-                raise RuntimeError(
-                    f"{cam['id']}: unsupported RTP video encoding {encoding}"
-                )
-
         raise RuntimeError(
             f"{cam['id']}: timed out detecting RTSP video codec"
         )
     finally:
         pipeline.set_state(Gst.State.NULL)
+        pipeline.get_state(5 * Gst.SECOND)  # Complete teardown before decoder owner opens.
 
 
 def build_camera_pipeline(

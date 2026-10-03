@@ -155,6 +155,7 @@ class PreviewFrameReader:
         self,
         max_age_sec: float = 1.20,
         after_sequence: int | None = None,
+        metadata_only: bool = False,
     ) -> PreviewFrame | None:
         if not self._ensure_open():
             return None
@@ -198,12 +199,17 @@ class PreviewFrameReader:
                 pts_ns = int(unpacked_v4[12])
                 decoder_dts_ns = int(unpacked_v4[13])
                 source_frame_num = int(unpacked_v4[14])
-            if header_size + payload_size > self.size:
+            if (width <= 0 or height <= 0 or stride < width * 4
+                    or payload_size != stride * height
+                    or header_size + payload_size > self.size):
                 return None
-            if timestamp_ns <= 0 or (time.monotonic_ns() - timestamp_ns) > int(max_age_sec * 1e9):
+            age_ns = time.monotonic_ns() - timestamp_ns
+            if timestamp_ns <= 0 or age_ns < 0 or age_ns > int(max_age_sec * 1e9):
                 return None
             self.mm.seek(header_size)
-            payload = self.mm.read(payload_size)
+            # Health observers need sequence/time evidence, not another full
+            # pixel copy. The UI's default read path is unchanged.
+            payload = b"" if metadata_only else self.mm.read(payload_size)
             return PreviewFrame(
                 sequence=int(sequence), timestamp_ns=int(timestamp_ns), width=int(width), height=int(height),
                 stride=int(stride), object_count=int(object_count), fps=float(fps_milli) / 1000.0,
