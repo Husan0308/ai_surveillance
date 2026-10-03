@@ -196,6 +196,9 @@ def test_mutex_diagnostic_is_read_only_and_does_not_claim_register_guess_is_owne
     assert "frame-arguments none" in " ".join(args)
     assert "UNPROVEN_UNTIL_ARGUMENT_OR_DISASSEMBLY_MATCH" in MUTEX_DIAGNOSTIC
     assert "F5_MUTEX_OWNER_CONFIRMED" in MUTEX_DIAGNOSTIC
+    assert "F5_MUTEX_OWNER_INFERRED_GLIBC_X86_64" in MUTEX_DIAGNOSTIC
+    assert "thread_by_lwp" in MUTEX_DIAGNOSTIC
+    assert "source == \"register_rdi\"" in MUTEX_DIAGNOSTIC
     assert "__owner" in MUTEX_DIAGNOSTIC
     assert "owner_thread_matches" in MUTEX_DIAGNOSTIC
     assert "read_memory" in MUTEX_DIAGNOSTIC

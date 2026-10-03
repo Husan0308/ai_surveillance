@@ -10,6 +10,13 @@ MUTEX_DIAGNOSTIC = r'''
 import gdb
 threads = gdb.selected_inferior().threads()
 print("F5_MUTEX_SNAPSHOT_BEGIN")
+thread_by_lwp = {}
+for candidate_thread in threads:
+    ptid = candidate_thread.ptid
+    lwp = int(ptid[1]) if len(ptid) > 1 and ptid[1] else 0
+    if lwp:
+        thread_by_lwp[lwp] = candidate_thread
+
 for thread in threads:
     thread.switch()
     frame = gdb.newest_frame()
@@ -40,6 +47,32 @@ for thread in threads:
                              for i in range(0, 24, 4)]
                     print("F5_MUTEX_MEMORY candidate=%s address=%s words=%s UNPROVEN_UNTIL_ARGUMENT_OR_DISASSEMBLY_MATCH" %
                           (source, hex(address), words))
+
+                    # Ubuntu's stripped libc may omit the pthread_mutex_t debug
+                    # type.  On x86-64, RDI is the first integer/pointer
+                    # argument and glibc's public ABI layout begins
+                    # __lock, __count, __owner, __nusers, __kind.  Use that
+                    # combination only as an explicitly labeled inference,
+                    # never as a typed/confirmed owner claim.
+                    try:
+                        arch = frame.architecture().name()
+                    except gdb.error:
+                        arch = ""
+                    if source == "register_rdi" and "x86-64" in arch and len(words) >= 5:
+                        lock_word, count, owner, nusers, kind = words[:5]
+                        owner_thread = thread_by_lwp.get(owner)
+                        plausible = (lock_word in (1, 2) and 0 <= count <= 1024 and
+                                     owner > 0 and 0 <= nusers <= 1024 and
+                                     0 <= kind <= 4096 and owner_thread is not None)
+                        if plausible:
+                            waiter = thread
+                            print("F5_MUTEX_OWNER_INFERRED_GLIBC_X86_64 waiter_thread=%s owner_thread=%s owner_lwp=%s owner_name=%s address=%s lock=%s count=%s nusers=%s kind=%s" %
+                                  (waiter.num, owner_thread.num, owner,
+                                   owner_thread.name, hex(address), lock_word,
+                                   count, nusers, kind))
+                            owner_thread.switch()
+                            print(gdb.execute("bt", to_string=True))
+                            waiter.switch()
                 except gdb.error as error:
                     print("F5_MEMORY_UNAVAILABLE %s %s" % (source, error))
 
