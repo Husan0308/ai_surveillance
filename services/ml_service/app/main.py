@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import os
-
 import uvicorn
 from fastapi import FastAPI, HTTPException
+
+from services.shared.deployment import analytics_enabled, load_deployment
+deployment = load_deployment()  # Service settings precede legacy credential dotenv.
 
 from services.camera_v11.monitoring_telemetry_ipc_v1 import MonitoringTelemetryReader
 from services.ml_service.app.config import load_settings
@@ -20,11 +21,14 @@ app.include_router(room_pair_router)
 @app.get("/health")
 def health() -> dict:
     snapshot = telemetry.read()
-    readiness = room_pair_state.readiness()
+    readiness = room_pair_state.readiness() if analytics_enabled() else {"status": "disabled", "ready": False}
     room_status = str(readiness.get("status", "not_ready"))
     return {
         "service": "ml_service",
-        "status": "ok" if room_status == "ready" else "degraded",
+        "status": "ok" if (snapshot["telemetry_status"] == "fresh"
+            and all(row["online"] for row in snapshot["cameras"])
+            and (not analytics_enabled() or room_status == "ready")) else "degraded",
+        "analytics_enabled": analytics_enabled(),
         "monitoring_status": snapshot["telemetry_status"],
         "camera_count": len(snapshot["cameras"]),
         "online_camera_count": sum(bool(row["online"]) for row in snapshot["cameras"]),
@@ -59,10 +63,11 @@ def video(camera_id: str):
 def main() -> None:
     uvicorn.run(
         app,
-        host=os.getenv("ML_HOST", "0.0.0.0"),
-        port=int(os.getenv("ML_PORT", "8001")),
+        host=deployment.ml_host,
+        port=deployment.ml_port,
         reload=False,
         access_log=False,
+        timeout_graceful_shutdown=2,
     )
 
 

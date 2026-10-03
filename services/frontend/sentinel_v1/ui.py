@@ -12,6 +12,7 @@ _source = "".join(path.read_text(encoding="utf-8") for path in sorted(_parts_dir
 exec(compile(_source, str(_parts_dir / "sentinel_ui_combined.py"), "exec"), globals(), globals())
 
 from services.frontend.sentinel_v1.monitoring_client_v1 import MonitoringTelemetryClient
+from services.shared.deployment import load_deployment
 
 # Keep the supplied page/widget construction untouched. CAM-01 and CAM-02 become
 # real at the CameraView boundary itself, so Monitoring/fullscreen/expand views
@@ -30,7 +31,7 @@ MONITORING_REALTIME = _os.environ.get("SENTINEL_MONITORING_REALTIME", "0").strip
     "1", "true", "yes", "on"
 }
 MONITORING_WS_URL = _os.environ.get(
-    "SENTINEL_MONITORING_WS_URL", "ws://127.0.0.1:8000/ws/v1/monitoring"
+    "SENTINEL_MONITORING_WS_URL", load_deployment().monitoring_ws_url
 )
 _camera_view_init = CameraView.__init__
 

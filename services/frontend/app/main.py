@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
 
     def _on_cameras(self, data: dict) -> None:
         cameras = data.get("cameras", [])
-        camera_ids = [str(camera.get("id", "unknown")) for camera in cameras]
+        camera_ids = [str(camera.get("camera_id", "unknown")) for camera in cameras]
         # API camera registry status is not the V11 preview transport status.
         # The wall header is updated from frames actually displayed below.
         ordered_camera_ids = [camera_id for camera_id in ALL_CAMERAS if camera_id in camera_ids]
@@ -124,7 +124,8 @@ class MainWindow(QMainWindow):
     def _on_room_pair(self, data: dict) -> None:
         self.room_pair_panel.update_snapshot(data)
         readiness = data.get("readiness", {})
-        self.dev_room_status.setText("Dev Room: ready" if readiness.get("ready") else "Dev Room: not ready")
+        self.dev_room_status.setText("Dev Room: disabled (preview only)" if readiness.get("status") == "disabled"
+                                    else "Dev Room: ready" if readiness.get("ready") else "Dev Room: not ready")
         self.camera_wall.set_source_mode(str(data.get("source_mode", "live")))
         self.camera_wall.set_identity_snapshot(data.get("people", []))
 

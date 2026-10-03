@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from services.shared.deployment import load_deployment
 
 
 @dataclass(frozen=True)
@@ -13,10 +14,10 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    ml_base_url = os.getenv("ML_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
+    deployment = load_deployment()
     return Settings(
-        host=os.getenv("API_HOST", "0.0.0.0"),
-        port=int(os.getenv("API_PORT", "8000")),
-        ml_base_url=ml_base_url,
+        host=deployment.api_host,
+        port=deployment.api_port,
+        ml_base_url=deployment.ml_service_url,
         ml_timeout_seconds=float(os.getenv("ML_SERVICE_TIMEOUT_SECONDS", "4.0")),
     )

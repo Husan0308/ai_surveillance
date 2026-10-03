@@ -11,7 +11,6 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap,
 from PySide6.QtWidgets import QDialog, QFrame, QGridLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameReader
-from services.frontend.app.mjpeg_reader import SmoothMjpegReader
 
 
 _TIMING_HANDLES: dict[Path, TextIO] = {}
@@ -81,11 +80,11 @@ class CameraTile(QFrame):
     def __init__(self, camera_id: str, ml_video_base_url: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.camera_id = camera_id
-        self.use_shared_memory = os.getenv("FRONTEND_USE_V11_SHARED_MEMORY", "1").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
-        self.preview_reader = PreviewFrameReader(_preview_path(camera_id)) if self.use_shared_memory else None
-        self.reader = None if self.use_shared_memory else SmoothMjpegReader(camera_id, ml_video_base_url)
+        # Shared memory is the sole video contract. The old MJPEG endpoint is
+        # intentionally unsupported; never open another network video reader.
+        self.use_shared_memory = True
+        self.preview_reader = PreviewFrameReader(_preview_path(camera_id))
+        self.reader = None
         self.last_version = 0
         self.last_frame_mono = 0.0
         self.fps_sample_version = 0
@@ -157,8 +156,8 @@ class CameraTile(QFrame):
                     self.camera_id, self.source_mode
                 )
             else:
-                coordinate_width = image.width()
-                coordinate_height = image.height()
+                coordinate_width = self.current_image.width() if self.current_image is not None else pixmap.width()
+                coordinate_height = self.current_image.height() if self.current_image is not None else pixmap.height()
             left, top, right, bottom = scale_overlay_bbox(
                 bbox,
                 pixmap.width(),
@@ -305,24 +304,10 @@ class CameraTile(QFrame):
                 self.video.clear()
             return
 
-        assert self.reader is not None
-        image, version = self.reader.latest()
-        if image is not None and version > self.last_version:
-            self.last_version = version
-            self._draw_frame(image)
-            self.status.setText(f"LIVE {self.reader.frames}")
-            return
-        if self.reader.last_error:
-            self.status.setText("RECONNECTING")
-            if self.video.pixmap() is None:
-                self.video.setText(self.reader.last_error)
-        elif self.last_version == 0:
-            self.status.setText("CONNECTING")
-
     def is_connected(self) -> bool:
         if self.preview_reader is not None:
             return self.last_version > 0 and time.monotonic() - self.last_frame_mono <= 0.25
-        return bool(self.reader is not None and self.reader.frames > 0 and not self.reader.last_error)
+        return False
 
     def close_reader(self) -> None:
         if self.fullscreen_dialog is not None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from services.shared.deployment import load_deployment
 
 
 @dataclass(frozen=True)
@@ -13,9 +14,10 @@ class FrontendSettings:
 
 
 def load_settings() -> FrontendSettings:
+    deployment = load_deployment()
     return FrontendSettings(
-        api_base_url=os.getenv("FRONTEND_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/"),
-        ml_video_base_url=os.getenv("FRONTEND_ML_VIDEO_BASE_URL", "http://127.0.0.1:8001").rstrip("/"),
+        api_base_url=deployment.frontend_api_base_url,
+        ml_video_base_url=deployment.frontend_ml_video_base_url,
         refresh_interval_ms=int(os.getenv("FRONTEND_REFRESH_INTERVAL_MS", "200")),
         frame_refresh_interval_ms=int(os.getenv("FRONTEND_FRAME_REFRESH_INTERVAL_MS", "16")),
     )

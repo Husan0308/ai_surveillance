@@ -49,11 +49,13 @@ def service_unavailable(exc: MLServiceUnavailable) -> HTTPException:
 
 
 @app.get("/health")
-async def health() -> dict:
-    return {
-        "service": "api_service",
-        "status": "ok",
-    }
+async def health(request: Request) -> dict:
+    try:
+        ml = await get_ml_client(request).health()
+        return {"service": "api_service", "status": "ok" if ml.get("status") == "ok" else "degraded",
+                "ml_status": ml.get("status", "unknown")}
+    except MLServiceUnavailable:
+        return {"service": "api_service", "status": "degraded", "ml_status": "unavailable"}
 
 
 @app.get("/api/v1/ml/health")
