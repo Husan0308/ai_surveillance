@@ -223,8 +223,11 @@ def test_deficit_diagnosis_preserves_missing_proposals_and_unknown_private_reaso
     assert len(proposals) == 3
 
 
-def test_shutdown_experiment_only_changes_explicit_live_eos_injection():
-    from scripts.build_v13_shutdown_candidate import shutdown_source, EOS, LIVE_CLOSE
+def test_shutdown_experiment_only_changes_explicit_live_teardown_points():
+    from scripts.build_v13_shutdown_candidate import (
+        shutdown_source, native_shutdown_source, EOS, LIVE_CLOSE,
+        NATIVE_DESTROY, NATIVE_DESTROY_FLUSH,
+    )
     text = "prefix\n" + EOS + "\nsuffix"
     changed = shutdown_source(text)
     assert changed.replace(LIVE_CLOSE, EOS) == text
@@ -232,8 +235,19 @@ def test_shutdown_experiment_only_changes_explicit_live_eos_injection():
     assert "if (!live_close)" in LIVE_CLOSE
     assert LIVE_CLOSE.count("gst_element_send_event(appCtx->pipeline.pipeline, gst_event_new_eos());") == 1
     assert "sleep (1);" in LIVE_CLOSE
+
+    native = native_shutdown_source(NATIVE_DESTROY)
+    assert native == NATIVE_DESTROY_FLUSH
+    assert "NV_DS_SOURCE_RTSP" in native
+    assert "gst_event_new_flush_start" in native
+    assert "FLUSH_START completed" in native
+    assert "sleep (" not in native
+    assert native.count("destroy_pipeline (appCtx[i]);") == 1
+
     with pytest.raises(ValueError, match="exact SDK"):
         shutdown_source("different source")
+    with pytest.raises(ValueError, match="exact native"):
+        native_shutdown_source("different source")
 
 
 def test_final_gate_requires_same_binary_and_fresh_gallery_in_every_run():
