@@ -311,6 +311,16 @@ def test_drain_build_verifier_is_selected_without_weakening_existing_candidate_v
         verify_native_build(path)
 
 
+def test_drain_shutdown_audit_is_live_only_and_replay_behavior_is_unchanged():
+    from scripts.run_v13_room_candidate import shutdown_drain_required
+
+    candidate = {"candidate": "F5_DRAIN_BEFORE_FLUSH"}
+    assert shutdown_drain_required("live", candidate)
+    assert not shutdown_drain_required("canonical", candidate)
+    assert not shutdown_drain_required("person-present", candidate)
+    assert not shutdown_drain_required("empty-room", candidate)
+
+
 def test_final_gate_requires_same_binary_and_fresh_gallery_in_every_run():
     import copy
     from scripts.freeze_v13_live import same_candidate_chain

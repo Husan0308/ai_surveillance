@@ -122,6 +122,11 @@ def verify_native_build(path: Path | None) -> dict:
     return verify_candidate(path)
 
 
+def shutdown_drain_required(dataset: str, native: dict) -> bool:
+    """Drain telemetry applies only to RTSP-live teardown; replay teardown is unchanged."""
+    return dataset == "live" and native.get("candidate") == "F5_DRAIN_BEFORE_FLUSH"
+
+
 def verify_pose(path: Path) -> dict:
     record = json.loads(path.read_text())
     if sha256(Path(record["engine"])) != record["engine_sha256"]:
@@ -327,7 +332,7 @@ def run(output: Path, dataset: str, duration: float, pose_path: Path, shutdown_d
         save(output / "protected-after.json", protected_v13())
     report = audit_retention(output)
     drain_path = stage / "logs/probe/shutdown-drain.jsonl"
-    drain_report = audit_shutdown_drain(drain_path) if native.get("candidate") == "F5_DRAIN_BEFORE_FLUSH" else None
+    drain_report = audit_shutdown_drain(drain_path) if shutdown_drain_required(dataset, native) else None
     if drain_report is not None:
         save(output / "shutdown-drain-audit.json", drain_report)
     gpu = [list(map(float, s["gpu"].split(","))) for s in samples]
