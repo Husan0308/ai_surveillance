@@ -7,6 +7,7 @@ from services.shared.deployment import analytics_enabled, load_deployment
 deployment = load_deployment()  # Service settings precede legacy credential dotenv.
 
 from services.camera_v11.monitoring_telemetry_ipc_v1 import MonitoringTelemetryReader
+from services.camera_v11.tracked_object_ipc_v1 import read_snapshot as read_tracked_objects
 from services.ml_service.app.config import load_settings
 from services.ml_service.app.room_pair import router as room_pair_router, state as room_pair_state
 
@@ -45,6 +46,12 @@ def cameras() -> dict:
 @app.get("/api/v1/monitoring/snapshot")
 def monitoring_snapshot() -> dict:
     return telemetry.read()
+
+
+@app.get("/api/v1/tracked-objects")
+def tracked_objects() -> dict:
+    """Expose the same latest-only native post-NvDCF feed consumed by the UI."""
+    return read_tracked_objects(camera_ids=camera_ids)
 
 
 @app.get("/video/{camera_id}")

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import mmap
 import os
+import socket
+import stat
 import struct
 import time
 from dataclasses import dataclass
@@ -13,6 +16,8 @@ VERSION = 4
 HEADER_SIZE_V1 = 64
 HEADER_SIZE_V3 = 96
 HEADER_SIZE = 104
+HEADER_SIZE_V5 = 65536
+HEADER_V5_EXT = struct.Struct("<QQQII")
 HEADER_V1 = struct.Struct("<8sIQQIIIIII")
 # Version 2 used eight bytes that were padding in the 64-byte v1 header.
 # Version 3 has a 96-byte header carrying decoder input/output timing, PTS and
@@ -21,6 +26,75 @@ HEADER_V2 = struct.Struct("<8sIQQIIIIIIQ")
 HEADER_V3 = struct.Struct("<8sIQQIIIIIIQQQII")
 HEADER_V4 = struct.Struct("<8sIQQIIIIIIQQQQII")
 DEFAULT_PATH = "/dev/shm/v11_ui_preview_cam01_v1.bin"
+DEFAULT_NOTIFY_PATH = "/dev/shm/v11_ui_preview_notify_v1.sock"
+
+
+class PreviewFrameNotifyReceiver:
+    """Bounded event wakeup for newly published shared-memory camera frames.
+
+    The normal timer remains a stale-state safety net. Native publication sends
+    a two-byte Unix datagram (tile/fullscreen, source index) so Qt can render
+    only the changed camera immediately instead of waiting for the next tick.
+    """
+
+    def __init__(self, path: str | Path = DEFAULT_NOTIFY_PATH) -> None:
+        self.path = Path(path)
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+        self._lock_fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(self._lock_fd)
+            self._lock_fd = -1
+            raise RuntimeError("another preview UI owns the notification socket") from exc
+
+        self.socket: socket.socket | None = socket.socket(
+            socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK
+        )
+        try:
+            if self.path.exists():
+                if not stat.S_ISSOCK(self.path.lstat().st_mode):
+                    raise RuntimeError(f"refusing to replace non-socket preview path: {self.path}")
+                self.path.unlink()
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+            self.socket.bind(str(self.path))
+        except Exception:
+            self.socket.close()
+            self.socket = None
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = -1
+            raise
+
+    def fileno(self) -> int:
+        return self.socket.fileno()
+
+    def drain(self) -> set[tuple[str, int]]:
+        """Drain queued events, coalescing them to one refresh per source."""
+        pending: set[tuple[str, int]] = set()
+        while True:
+            try:
+                payload = self.socket.recv(16)
+            except BlockingIOError:
+                break
+            if len(payload) != 2 or payload[0:1] not in (b"T", b"F") or payload[1] >= 6:
+                continue
+            pending.add(("tile" if payload[0:1] == b"T" else "fullscreen", payload[1]))
+        return pending
+
+    def close(self) -> None:
+        if self.socket is not None:
+            self.socket.close()
+            self.socket = None
+        try:
+            if self.path.exists() and stat.S_ISSOCK(self.path.lstat().st_mode):
+                self.path.unlink()
+        except OSError:
+            pass
+        if self._lock_fd >= 0:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = -1
 
 
 @dataclass(frozen=True)
@@ -38,6 +112,11 @@ class PreviewFrame:
     pts_ns: int = 0
     decoder_dts_ns: int = 0
     source_frame_num: int = 0
+    tracker_frame_num: int = 0
+    preview_prepare_start_ns: int = 0
+    preview_prepare_complete_ns: int = 0
+    tracker_ready_ns: int = 0
+    tracker_snapshot: dict | None = None
 
 
 class PreviewFrameWriter:
@@ -165,10 +244,10 @@ class PreviewFrameReader:
             fcntl.flock(self.fd, fcntl.LOCK_SH)
             locked = True
             self.mm.seek(0)
-            raw = self.mm.read(min(HEADER_SIZE, self.size))
+            raw = self.mm.read(min(HEADER_SIZE_V5, self.size))
             prefix = HEADER_V1.unpack(raw[: HEADER_V1.size])
             magic, version, sequence, timestamp_ns, width, height, stride, payload_size, object_count, fps_milli = prefix
-            if magic != MAGIC or version not in (1, 2, 3, VERSION) or sequence <= 0:
+            if magic != MAGIC or version not in (1, 2, 3, 4, 5) or sequence <= 0:
                 return None
             # The camera wall polls every GUI tick. Avoid copying megabytes of
             # unchanged pixels into Python bytes while the shared slot still
@@ -182,6 +261,11 @@ class PreviewFrameReader:
             pts_ns = 0
             decoder_dts_ns = 0
             source_frame_num = 0
+            tracker_frame_num = 0
+            preview_prepare_start_ns = 0
+            preview_prepare_complete_ns = 0
+            tracker_ready_ns = 0
+            tracker_snapshot = None
             if version == 2:
                 decoder_out_ns = int(HEADER_V2.unpack(raw[: HEADER_V2.size])[-1])
             elif version == 3:
@@ -192,13 +276,29 @@ class PreviewFrameReader:
                 pts_ns = int(unpacked[12])
                 source_frame_num = int(unpacked[13])
             elif version >= 4:
-                header_size = HEADER_SIZE
+                header_size = HEADER_SIZE_V5 if version == 5 else HEADER_SIZE
                 unpacked_v4 = HEADER_V4.unpack(raw[: HEADER_V4.size])
                 decoder_reference_ns = int(unpacked_v4[10])
                 decoder_out_ns = int(unpacked_v4[11])
                 pts_ns = int(unpacked_v4[12])
                 decoder_dts_ns = int(unpacked_v4[13])
                 source_frame_num = int(unpacked_v4[14])
+                if version == 5:
+                    ext = HEADER_V5_EXT.unpack(raw[92:92 + HEADER_V5_EXT.size])
+                    preview_prepare_start_ns = int(ext[0])
+                    preview_prepare_complete_ns = int(ext[1])
+                    tracker_ready_ns = int(ext[2])
+                    tracker_frame_num = int(ext[3])
+                    metadata_size = int(ext[4])
+                    if metadata_size > HEADER_SIZE_V5 - 128:
+                        return None
+                    if metadata_size:
+                        tracker_snapshot = json.loads(raw[128:128 + metadata_size].decode("utf-8"))
+                        if (not isinstance(tracker_snapshot, dict)
+                                or int(tracker_snapshot.get("pts_ns", -1)) != pts_ns
+                                or int(tracker_snapshot.get("frame_num", -1)) != tracker_frame_num
+                                or int(tracker_snapshot.get("source_frame_num", -1)) != source_frame_num):
+                            return None
             if (width <= 0 or height <= 0 or stride < width * 4
                     or payload_size != stride * height
                     or header_size + payload_size > self.size):
@@ -217,6 +317,11 @@ class PreviewFrameReader:
                 decoder_out_ns=decoder_out_ns, pts_ns=pts_ns,
                 decoder_dts_ns=decoder_dts_ns,
                 source_frame_num=source_frame_num,
+                tracker_frame_num=tracker_frame_num,
+                preview_prepare_start_ns=preview_prepare_start_ns,
+                preview_prepare_complete_ns=preview_prepare_complete_ns,
+                tracker_ready_ns=tracker_ready_ns,
+                tracker_snapshot=tracker_snapshot,
             )
         except (BufferError, OSError, ValueError, struct.error):
             self.close()

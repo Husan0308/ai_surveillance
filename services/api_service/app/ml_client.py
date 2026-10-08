@@ -30,6 +30,9 @@ class MLServiceClient:
     async def monitoring_snapshot(self) -> dict[str, Any]:
         return await self._get_json("/api/v1/monitoring/snapshot")
 
+    async def tracked_objects(self) -> dict[str, Any]:
+        return await self._get_json("/api/v1/tracked-objects")
+
     async def room_pair_identity(self) -> dict[str, Any]:
         return await self._get_json("/api/v1/room-pair/identity")
 

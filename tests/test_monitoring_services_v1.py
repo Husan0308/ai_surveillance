@@ -109,6 +109,11 @@ class FakeMLClient:
         result["generated_epoch_ms"] = time.time_ns() // 1_000_000
         return result
 
+    async def tracked_objects(self) -> dict:
+        if self.error:
+            raise MLServiceUnavailable(self.error)
+        return {"status": "fresh", "supported": True, "tracked_objects": []}
+
     async def close(self) -> None:
         return None
 
@@ -123,6 +128,8 @@ def test_api_proxy_websocket_latest_payload_and_clean_disconnect(tmp_path: Path)
         response = client.get("/api/v1/monitoring/snapshot")
         assert response.status_code == 200
         assert len(response.json()["cameras"]) == 6
+        tracked = client.get("/api/v1/tracked-objects")
+        assert tracked.status_code == 200 and tracked.json()["supported"] is True
         sequences = []
         with client.websocket_connect("/ws/v1/monitoring") as websocket:
             for _ in range(5):

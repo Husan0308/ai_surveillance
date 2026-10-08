@@ -24,9 +24,19 @@ from services.mv3dt_room.identity_queue import AsyncOsnetBatcher, LatestObservat
 from services.mv3dt_room.reid_embedder import OsnetEmbedder
 from services.mv3dt_room.publication_readiness import PublicationBarrier, read_readiness
 
+SOURCE_FRAME_DIMS = {"CAM-01": (2560, 1440), "CAM-04": (3200, 1800)}
+
 
 def iso_timestamp(ns: int) -> str:
     return datetime.fromtimestamp(ns / 1_000_000_000.0, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _optional_float(value) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def matching_only_crop_quality(quality: dict) -> bool:
@@ -167,12 +177,21 @@ class LiveIdentityWorker:
             "camera_id": camera,
             "frame": frame,
             "source_frame_number": frame,
+            # The standard NvDs event carries a source frame number and wall
+            # timestamp, but not GstBuffer PTS. Keep PTS explicitly nullable;
+            # never mislabel wall/NTP time as media PTS.
+            "pts_ns": payload.get("pts_ns", payload.get("pts")),
             "timestamp": payload.get("timestamp"),
             "source_timestamp": payload.get("timestamp"),
             "native_track_id": int(obj["id"]),
             "bbox": bbox_of(obj),
             "world": world_of(obj),
             "confidence": float(obj.get("confidence", 0.0)),
+            # NvDs event v4's person confidence is the tracker confidence;
+            # bbox3d.confidence is the detector confidence. Preserve both
+            # without changing the identity manager's existing confidence use.
+            "tracker_confidence": float(obj.get("confidence", 0.0)),
+            "detector_confidence": _optional_float((obj.get("bbox3d") or {}).get("confidence")),
             "visibility": float(obj.get("info", {}).get("visibility", 0.0)),
             "receive_timestamp": iso_timestamp(receive_wall),
             "receive_wall_timestamp_ns": receive_wall,
@@ -594,12 +613,45 @@ class LiveIdentityWorker:
             age = max(0.0, (published_mono - int(row["receive_monotonic_ns"])) / 1_000_000.0)
             row["age_at_publication_ms"] = age
             self.metrics.observe("age_at_publication_ms", age, row["camera_id"])
+        # The current tracker observation stream is a separate, bounded
+        # display channel. It contains only objects from each camera's latest
+        # processed source frame. Identity fields are added only after the
+        # normal publication barrier has accepted that same observation.
+        tracked_objects = []
+        for camera in CAMS:
+            current_frame = self.latest_camera_frame[camera]
+            for obs in self.latest_camera_rows[camera]:
+                track = self.track_states.get((camera, int(obs["native_track_id"])))
+                if (track is None or track.terminated or track.latest is None
+                        or int(obs["frame"]) != current_frame
+                        or int(track.latest["frame"]) != current_frame):
+                    continue
+                item = {key: obs.get(key) for key in (
+                    "camera_id", "frame", "source_frame_number", "pts_ns",
+                    "timestamp", "source_timestamp", "native_track_id", "bbox",
+                    "detector_confidence", "tracker_confidence", "visibility",
+                )}
+                item["track_generation"] = track.generation
+                item["source_frame_width"], item["source_frame_height"] = SOURCE_FRAME_DIMS[camera]
+                item["world"] = obs.get("world")
+                item["identity"] = None
+                if (self.publication.allows(obs)
+                        and track.canonical_internal_identity is not None
+                        and track.identity_state in {"KNOWN", "NEW_CONFIRMED"}):
+                    internal = self.manager.root(track.canonical_internal_identity)
+                    item["identity"] = {
+                        "application_id": self.public_id(internal),
+                        "identity_state": track.identity_state,
+                    }
+                tracked_objects.append(item)
         state = {
             "profile": "dev-room-cam01-cam04",
             "status": "running",
             "source_mode": self.args.source_mode,
             "session_id": self.args.session_id,
             "active_frame_by_camera": dict(self.latest_camera_frame),
+            "tracked_object_cameras": list(CAMS),
+            "tracked_objects": tracked_objects,
             "published_timestamp": iso_timestamp(wall_timestamp_ns()),
             "publication": self.publication.snapshot(),
             "readiness": self.publication.readiness,

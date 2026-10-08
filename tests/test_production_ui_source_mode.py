@@ -119,6 +119,40 @@ def test_frontend_scales_dev_room_overlays_from_per_camera_source_dimensions(mon
     assert "self.camera_id, self.source_mode" in text
 
 
+def test_live_overlay_uses_exact_source_dimensions_from_current_snapshot() -> None:
+    from services.frontend.app.camera_wall import overlay_source_dimensions, scale_overlay_bbox
+
+    native = {
+        "CAM-01": (2560, 1440),
+        "CAM-02": (3200, 1800),
+        "CAM-03": (3200, 1800),
+        "CAM-04": (3200, 1800),
+        "CAM-05": (2560, 1440),
+        "CAM-06": (2560, 1440),
+    }
+    for camera, (width, height) in native.items():
+        snapshot = {
+            "camera_id": camera,
+            "source_frame_width": width,
+            "source_frame_height": height,
+        }
+        assert overlay_source_dimensions(camera, "live", snapshot) == (width, height)
+        assert scale_overlay_bbox((width / 2, height / 2, width, height),
+                                  1920, 1080, *overlay_source_dimensions(camera, "live", snapshot)) == (
+            960, 540, 1920, 1080
+        )
+
+    # A mismatched snapshot cannot alter another camera's coordinate space,
+    # and historical replay remains on its calibrated 1920x1080 canvas.
+    wrong_camera = {"camera_id": "CAM-01", "source_frame_width": 3200,
+                    "source_frame_height": 1800}
+    assert overlay_source_dimensions("CAM-02", "live", wrong_camera) == (1920, 1080)
+    assert overlay_source_dimensions("CAM-02", "replay", {
+        "camera_id": "CAM-02", "source_frame_width": 3200,
+        "source_frame_height": 1800,
+    }) == (1920, 1080)
+
+
 def test_preview_reader_reopens_when_deepstream_recreates_file(tmp_path: Path) -> None:
     from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameReader, PreviewFrameWriter
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QV
 from services.frontend.app.api_client import ApiClient
 from services.frontend.app.camera_wall import CameraWall, _write_timing_row
 from services.frontend.app.room_pair_panel import RoomPairPanel
-from services.frontend.app.config import load_settings
+from services.frontend.app.config import effective_frame_refresh_interval_ms, load_settings
 
 
 ALL_CAMERAS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
@@ -27,7 +28,7 @@ class MainWindow(QMainWindow):
         self.api_status = QLabel("API: checking...")
         self.ml_status = QLabel("ML: checking...")
         self.camera_count = QLabel("Camera wall: checking...")
-        self.dev_room_status = QLabel("Dev Room: checking...")
+        self.dev_room_status = QLabel("Local tracker: checking...")
 
         status_row = QHBoxLayout()
         status_row.addWidget(self.api_status)
@@ -79,7 +80,12 @@ class MainWindow(QMainWindow):
         self.api_timer.start()
 
         self.frame_timer = QTimer(self)
-        self.frame_timer.setInterval(self.settings.frame_refresh_interval_ms)
+        self.frame_timer_interval_ms = effective_frame_refresh_interval_ms(
+            self.settings.frame_refresh_interval_ms,
+            self.camera_wall.preview_notify_notifier is not None,
+            self.settings.notify_watchdog_interval_ms,
+        )
+        self.frame_timer.setInterval(self.frame_timer_interval_ms)
         self.frame_timer.timeout.connect(self._refresh_frames)
         self.frame_timer.start()
 
@@ -111,7 +117,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_frames(self) -> None:
         tick_start = time.monotonic_ns()
-        interval_ns = int(self.settings.frame_refresh_interval_ms) * 1_000_000
+        interval_ns = int(self.frame_timer.interval()) * 1_000_000
         actual_gap_ns = tick_start - self._frame_tick_previous_ns if self._frame_tick_previous_ns else None
         event_loop_lateness_ns = max(0, actual_gap_ns - interval_ns) if actual_gap_ns is not None else 0
         camera_metrics = self.camera_wall.refresh_frames()
@@ -123,7 +129,10 @@ class MainWindow(QMainWindow):
                 "type": "ui_refresh_tick",
                 "t_refresh_begin_monotonic_ns": tick_start,
                 "t_refresh_end_monotonic_ns": tick_end,
-                "scheduled_interval_ms": int(self.settings.frame_refresh_interval_ms),
+                "scheduled_interval_ms": int(self.frame_timer.interval()),
+                "configured_frame_refresh_interval_ms": int(self.settings.frame_refresh_interval_ms),
+                "notify_watchdog_interval_ms": int(self.settings.notify_watchdog_interval_ms),
+                "notification_driven": self.camera_wall.preview_notify_notifier is not None,
                 "actual_tick_gap_ns": actual_gap_ns,
                 "event_loop_lateness_ns": event_loop_lateness_ns,
                 "timer_type": int(self.frame_timer.timerType().value),
@@ -156,10 +165,16 @@ class MainWindow(QMainWindow):
     def _on_room_pair(self, data: dict) -> None:
         self.room_pair_panel.update_snapshot(data)
         readiness = data.get("readiness", {})
-        self.dev_room_status.setText("Dev Room: disabled (preview only)" if readiness.get("status") == "disabled"
-                                    else "Dev Room: ready" if readiness.get("ready") else "Dev Room: not ready")
+        self.dev_room_status.setText("Global identity: disabled · local tracker active"
+                                    if readiness.get("status") == "disabled"
+                                    else "Global identity: ready" if readiness.get("ready")
+                                    else "Global identity: warming")
         self.camera_wall.set_source_mode(str(data.get("source_mode", "live")))
         self.camera_wall.set_identity_snapshot(data.get("people", []))
+        self.camera_wall.set_tracked_object_snapshot(
+            data.get("tracked_objects", []),
+            bool(data.get("tracked_object_feed_available", False)),
+        )
 
     def _on_request_failed(self, request_name: str, reason: str) -> None:
         if request_name == "api_health":
@@ -178,7 +193,21 @@ def main() -> None:
     app = QApplication(sys.argv)
     window = MainWindow()
     window.showMaximized()
-    raise SystemExit(app.exec())
+
+    def request_close(_signum, _frame) -> None:
+        # Keep signal handlers away from QWidget cleanup. Queue the close onto
+        # Qt's GUI thread so socket notifiers/readers and fullscreen windows
+        # are released through the normal closeEvent path.
+        QTimer.singleShot(0, window.close)
+
+    previous = {sig: signal.signal(sig, request_close)
+                for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        exit_code = app.exec()
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

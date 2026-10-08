@@ -110,6 +110,14 @@ async def monitoring_snapshot(request: Request) -> dict:
         return monitoring_degraded(str(exc))
 
 
+@app.get("/api/v1/tracked-objects")
+async def tracked_objects(request: Request) -> dict:
+    try:
+        return await get_ml_client(request).tracked_objects()
+    except MLServiceUnavailable as exc:
+        raise service_unavailable(exc) from exc
+
+
 @app.websocket("/ws/v1/monitoring")
 async def monitoring_websocket(websocket: WebSocket) -> None:
     await websocket.accept()

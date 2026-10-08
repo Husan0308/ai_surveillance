@@ -132,9 +132,63 @@ def test_ready_loss_clears_presence_and_recovery_reuses_gallery_without_ghost(wo
 def test_pending_is_not_published_as_trustworthy_presence(worker, tmp_path):
     write_health(tmp_path)
     worker._publish_state()
-    observe(worker, pending=True)
+    row, _ = observe(worker, pending=True)
+    row.update({"detector_confidence": 0.46, "tracker_confidence": 0.5, "pts_ns": None})
     worker._publish_state()
-    assert state_of(worker)["people"] == []
+    state = state_of(worker)
+    assert state["people"] == []
+    assert state["tracked_object_cameras"] == ["CAM-01", "CAM-04"]
+    assert state["tracked_objects"] == [{
+        "camera_id": "CAM-01", "frame": 1, "source_frame_number": None,
+        "pts_ns": None, "timestamp": None, "source_timestamp": None,
+        "native_track_id": 1, "bbox": [10, 20, 100, 200],
+        "detector_confidence": 0.46, "tracker_confidence": 0.5,
+        "visibility": None, "track_generation": 1,
+        "source_frame_width": 2560, "source_frame_height": 1440,
+        "world": [1.0, 2.0], "identity": None,
+    }]
+
+
+def test_tracked_objects_are_current_frame_only_and_identity_is_optional(worker, tmp_path):
+    write_health(tmp_path, False)
+    old, _ = observe(worker, frame=1, native=10, pending=True)
+    current, internal = observe(worker, frame=2, native=11)
+    current.update({"pts_ns": 123456789, "detector_confidence": 0.88, "tracker_confidence": 0.91})
+    worker._publish_state()
+    state = state_of(worker)
+    assert [row["native_track_id"] for row in state["tracked_objects"]] == [11]
+    assert state["tracked_objects"][0]["pts_ns"] == 123456789
+    assert state["tracked_objects"][0]["identity"] is None
+    assert state["people"] == []
+
+    write_health(tmp_path)
+    worker._publish_state()
+    # A READY transition does not retroactively enrich or publish the stale
+    # WARMING observation. Only a newly received current tracker observation
+    # may carry identity enrichment.
+    assert state_of(worker)["tracked_objects"][0]["identity"] is None
+    current, _ = observe(worker, frame=3, native=11, internal=internal)
+    current.update({"pts_ns": 123456790, "detector_confidence": 0.88, "tracker_confidence": 0.91})
+    worker._publish_state()
+    assert state_of(worker)["tracked_objects"][0]["identity"] == {
+        "application_id": worker.public_id(internal), "identity_state": "KNOWN"
+    }
+
+
+def test_nvds_event_confidences_are_exposed_without_changing_legacy_confidence(worker):
+    obs = worker._make_observation(
+        "CAM-04", 2125,
+        {"timestamp": "2026-10-04T09:57:34.945Z", "pts_ns": None},
+        {"id": "0", "bbox": {"leftX": 1655.625, "topY": 0.9375,
+                                "rightX": 1754.375, "bottomY": 206.5625},
+         "confidence": 0.5, "bbox3d": {"confidence": 0.46484375},
+         "info": {"footLocation3D": "41.297245,-10.502121", "visibility": "1.0"}},
+        monotonic_ns(), time.time_ns(),
+    )
+    assert obs["confidence"] == 0.5  # Preserve the existing identity input value.
+    assert obs["tracker_confidence"] == 0.5
+    assert obs["detector_confidence"] == pytest.approx(0.46484375)
+    assert obs["pts_ns"] is None
 
 
 def test_batch_events_are_published_for_both_accepted_rows_not_just_first(worker, tmp_path):
@@ -204,6 +258,19 @@ def test_api_hides_stale_presence_even_if_worker_is_frozen(worker, tmp_path):
     assert not snapshot["readiness"]["ready"]
 
 
+def test_api_keeps_live_tracker_box_but_strips_identity_during_warming(worker, tmp_path):
+    write_health(tmp_path, False)
+    row, _ = observe(worker, pending=True)
+    row.update({"detector_confidence": 0.74, "tracker_confidence": 0.8})
+    worker._publish_state()
+    snapshot = RoomPairState(tmp_path).snapshot()
+    assert not snapshot["readiness"]["ready"]
+    assert snapshot["people"] == []
+    assert snapshot["tracked_object_feed_available"] is True
+    assert snapshot["tracked_objects"][0]["identity"] is None
+    assert snapshot["tracked_objects"][0]["native_track_id"] == 1
+
+
 def test_barrier_never_controls_preview_and_opens_exactly_once_per_epoch(tmp_path):
     from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameReader, PreviewFrameWriter
 
@@ -258,4 +325,3 @@ def test_native_recovery_does_not_reset_sources_while_parent_pipeline_is_paused(
 
     assert "pipeline_playing = pipeline_state == GST_STATE_PLAYING;" in source
     assert "health->recovery_active && mux_stalled && pipeline_playing" in source
-

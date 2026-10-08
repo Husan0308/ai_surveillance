@@ -333,12 +333,26 @@ class RoomPairState:
         with self._lock:
             current_state = self._current_state()
             rows = list(self._identity_rows()) if current_state is None else list(current_state.get("people", []))
+            tracked_object_feed_available = (
+                isinstance(current_state, dict) and "tracked_objects" in current_state
+            )
+            tracked_objects = (
+                list(current_state.get("tracked_objects", []))
+                if tracked_object_feed_available else []
+            )
+            tracked_object_cameras = (
+                list(current_state.get("tracked_object_cameras", []))
+                if tracked_object_feed_available else []
+            )
             report = _json(self.identity_dir / "runtime_report.json", {})
             readiness = read_readiness(self.root)
         # Fail closed even if the worker froze before clearing its last state.
         publication = (current_state or {}).get("publication", {})
         if not readiness.get("ready") or publication.get("ready") is False:
             rows = []
+            # A tracker box is visualization only; canonical identity is
+            # still withheld until the existing readiness barrier is open.
+            tracked_objects = [dict(row, identity=None) for row in tracked_objects]
         rows = [row for row in rows if row_application_id(row).startswith("Person_")
                 and row.get("identity_state") != "PENDING"]
         if current_state is not None:
@@ -373,6 +387,8 @@ class RoomPairState:
             people.append({
                 "application_id": identity,
                 "camera_id": row.get("camera_id"),
+                "native_track_id": row.get("native_track_id"),
+                "track_generation": row.get("track_generation"),
                 "bbox": row.get("bbox"),
                 "world": row.get("world"),
                 "confidence": row.get("confidence"),
@@ -408,6 +424,9 @@ class RoomPairState:
             "cameras": list(CAMERAS),
             "face_recognition": False,
             "people": people,
+            "tracked_object_feed_available": tracked_object_feed_available,
+            "tracked_object_cameras": tracked_object_cameras,
+            "tracked_objects": tracked_objects,
             "presence": presence_assertions,
             "metrics": self._metrics(rows, active_rows, report),
             "runtime_report": report,

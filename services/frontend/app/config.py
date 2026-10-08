@@ -11,6 +11,7 @@ class FrontendSettings:
     ml_video_base_url: str
     refresh_interval_ms: int
     frame_refresh_interval_ms: int
+    notify_watchdog_interval_ms: int
 
 
 def load_settings() -> FrontendSettings:
@@ -20,4 +21,18 @@ def load_settings() -> FrontendSettings:
         ml_video_base_url=deployment.frontend_ml_video_base_url,
         refresh_interval_ms=int(os.getenv("FRONTEND_REFRESH_INTERVAL_MS", "200")),
         frame_refresh_interval_ms=int(os.getenv("FRONTEND_FRAME_REFRESH_INTERVAL_MS", "16")),
+        notify_watchdog_interval_ms=int(os.getenv("FRONTEND_NOTIFY_WATCHDOG_INTERVAL_MS", "100")),
     )
+
+
+def effective_frame_refresh_interval_ms(
+    configured_interval_ms: int,
+    notifications_available: bool,
+    notify_watchdog_interval_ms: int,
+) -> int:
+    """Keep event notifications immediate and use a slower poll only as backup."""
+    configured = max(1, int(configured_interval_ms))
+    if not notifications_available:
+        return configured
+    watchdog = max(1, int(notify_watchdog_interval_ms))
+    return max(configured, watchdog)

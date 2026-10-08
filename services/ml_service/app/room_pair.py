@@ -14,7 +14,9 @@ state = RoomPairState()
 def room_pair_identity() -> dict:
     if not analytics_enabled():
         return {"people": [], "source_mode": "live", "status": "disabled", "metrics": {},
-                "readiness": {"ready": False, "status": "disabled"}, "presence": {}}
+                "readiness": {"ready": False, "status": "disabled"}, "presence": {},
+                "tracked_object_feed_available": False, "tracked_object_cameras": [],
+                "tracked_objects": []}
     return state.snapshot()
 
 

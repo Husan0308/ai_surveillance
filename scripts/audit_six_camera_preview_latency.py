@@ -32,6 +32,7 @@ def stats(values: list[float]) -> dict:
         "samples": len(values),
         "p50_ms": percentile(values, 0.50),
         "p95_ms": percentile(values, 0.95),
+        "p99_ms": percentile(values, 0.99),
         "max_ms": max(values) if values else None,
     }
 
@@ -67,6 +68,10 @@ def main() -> int:
     for camera in CAMERAS:
         e2e = []
         decoder = []
+        prep = []
+        tracker = []
+        join_publish = []
+        publish_to_paint = []
         publish = []
         ui_receive = []
         paint = []
@@ -75,22 +80,43 @@ def main() -> int:
         for row in rows.get(camera, []):
             t0 = int(row.get("t0_decoder_reference_monotonic_ns") or 0)
             t1 = int(row.get("t1_decoder_out_monotonic_ns") or 0)
-            t6 = int(row.get("t6_ipc_publish_monotonic_ns") or 0)
+            t2 = int(row.get("t2_preview_prepare_complete_monotonic_ns") or 0)
+            t3 = int(row.get("t3_tracker_metadata_ready_monotonic_ns") or 0)
+            t4 = int(row.get("t4_shared_publish_monotonic_ns") or row.get("t6_ipc_publish_monotonic_ns") or 0)
+            t6 = int(row.get("t6_ui_paint_monotonic_ns") or row.get("t8_ui_paint_monotonic_ns") or 0)
+            t7a = int(row.get("t7a_reader_poll_begin_monotonic_ns") or 0)
+            t7b = int(row.get("t7b_reader_return_monotonic_ns") or 0)
             t7 = int(row.get("t7_ui_receive_monotonic_ns") or 0)
             t8 = int(row.get("t8_ui_paint_monotonic_ns") or 0)
             skipped += int(row.get("ui_skipped_preview_frames") or 0)
-            if not (0 < t0 <= t1 <= t6 <= t7 <= t8):
+            # read_latest() acquires LOCK_SH before it reads the published
+            # header/payload. Its poll can begin while the native writer holds
+            # LOCK_EX; in that normal overlap t7a may precede t4, while the
+            # completed read (t7b) must still follow the atomic publication.
+            if not (0 < t0 <= t1 <= t2 <= t4
+                    and t0 <= t3 <= t4):
+                invalid_timing += 1
+                continue
+            if not (0 < t7a <= t7b and t4 <= t7b <= t7 <= t6 == t8):
                 invalid_timing += 1
                 continue
             e2e.append((t8 - t0) / 1e6)
             decoder.append((t1 - t0) / 1e6)
-            publish.append((t6 - t1) / 1e6)
-            ui_receive.append((t7 - t6) / 1e6)
+            prep.append((t2 - t0) / 1e6)
+            tracker.append((t3 - t0) / 1e6)
+            join_publish.append((t4 - max(t2, t3)) / 1e6)
+            publish.append((t4 - t1) / 1e6)
+            publish_to_paint.append((t8 - t4) / 1e6)
+            ui_receive.append((t7 - t4) / 1e6)
             paint.append((t8 - t7) / 1e6)
 
         camera_report = {
             "decoder_reference_to_ui_paint": stats(e2e),
             "decoder_stage": stats(decoder),
+            "decoder_reference_to_preview_prepared": stats(prep),
+            "decoder_reference_to_tracker_metadata": stats(tracker),
+            "max_preview_or_tracker_to_shared_publish": stats(join_publish),
+            "shared_publish_to_ui_paint": stats(publish_to_paint),
             "decoder_out_to_ipc_publish": stats(publish),
             "ipc_publish_to_ui_receive": stats(ui_receive),
             "ui_receive_to_paint": stats(paint),
