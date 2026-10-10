@@ -3,6 +3,7 @@
 #pragma once
 
 #include "lowconf_contract.hpp"
+#include "track_birth_verification.hpp"
 #include <gst/app/gstappsrc.h>
 #include <nvdsmeta.h>
 #include <nvbufsurface.h>
@@ -116,6 +117,8 @@ static std::atomic_bool lowconf_worker_stop{false};
 static std::array<std::atomic_bool, 6> lowconf_eos_sent{};
 static std::atomic<guint64> lowconf_next_serial{0};
 static std::atomic<guint64> lowconf_submitted{0}, lowconf_queue_drops{0};
+static std::atomic<guint64> lowconf_stale_epoch_discards{0};
+static std::atomic<guint64> lowconf_stale_active_decisions{0};
 static std::atomic<guint64> lowconf_active_assign_calls{0};
 static std::atomic<guint64> lowconf_active_assign_hits{0};
 static std::atomic<guint64> lowconf_active_assign_misses{0};
@@ -216,7 +219,10 @@ static void lowconf_queue_active_decision_locked(const LowConfVerifierRequest &r
   if (queue.size() >= kDecisionQueueLimit) queue.pop_front();
   queue.push_back({request.candidate.native_track_id, request.key.frame_num,
       request.candidate.verifier_done && request.candidate.verifier_confirmed,
-      request.candidate.verifier_done && request.candidate.verifier_no_local_person});
+      request.candidate.verifier_done && request.candidate.verifier_no_local_person,
+      request.candidate.left, request.candidate.top,
+      request.candidate.width, request.candidate.height,
+      request.key.source_epoch});
 }
 
 static bool lowconf_verifier_enabled() {
@@ -379,23 +385,17 @@ static bool lowconf_strict_match(float expected_left, float expected_top,
   return score >= .30f && distance <= 50.0f && wr <= 2.0f && hr <= 2.0f;
 }
 
-// An active-track appearance verifier answers whether the candidate location
-// contains a person, not whether the crop detector reproduces the primary
-// detector's exact box geometry. A context crop often yields a fuller box, so
-// IoU/size-ratio gates intended for shadow fallback are inappropriate here.
-// Require the candidate center to lie inside exactly one local person proposal;
-// ambiguous overlaps fail closed as inconclusive.
+// Active-track birth verification can accept a fuller context-crop proposal,
+// but requires both candidate-center containment and minimum spatial overlap.
+// The overlap floor prevents an adjacent person proposal inside the context
+// crop from confirming a static object whose center happens to be covered.
+// Ambiguous overlaps fail closed as inconclusive.
 static bool lowconf_active_location_match(float expected_left, float expected_top,
     float expected_width, float expected_height,
     const LowConfVerifierProposal &proposal, float *iou_out) {
-  const float cx = expected_left + expected_width * 0.5f;
-  const float cy = expected_top + expected_height * 0.5f;
-  const bool contains = cx >= proposal.left && cx <= proposal.left + proposal.width &&
-      cy >= proposal.top && cy <= proposal.top + proposal.height;
-  if (iou_out) *iou_out = contains ? lowconf_iou(expected_left, expected_top,
-      expected_width, expected_height, proposal.left, proposal.top,
-      proposal.width, proposal.height) : 0.0f;
-  return contains;
+  return TrackBirthVerificationLedger::active_context_location_match(
+      expected_left, expected_top, expected_width, expected_height,
+      proposal.left, proposal.top, proposal.width, proposal.height, iou_out);
 }
 
 static GstElement *lowconf_make_element(const char *factory, const char *name) {
@@ -785,7 +785,8 @@ static void lowconf_complete_result(guint64 verifier_pts,
   request.candidate.verifier_runner_up_iou = runner_up_iou;
   request.candidate.verifier_uniqueness_margin = uniqueness_margin;
   request.candidate.verifier_center_distance = selected_distance;
-  if (request.candidate.shadow_context_refresh && request.crop_ready) {
+  if ((request.candidate.shadow_context_refresh ||
+       request.candidate.active_track_birth) && request.crop_ready) {
     request.candidate.verifier_boxes.clear();
     request.candidate.verifier_boxes.reserve(proposals.size());
     for (const auto &proposal : proposals) {
@@ -806,7 +807,8 @@ static void lowconf_complete_result(guint64 verifier_pts,
       request.candidate.verifier_boxes.push_back({proposal.confidence,
           mapped[0], mapped[1], mapped[2], mapped[3]});
     }
-    request.candidate.verifier_confirmed = !request.candidate.verifier_boxes.empty();
+    if (request.candidate.shadow_context_refresh)
+      request.candidate.verifier_confirmed = !request.candidate.verifier_boxes.empty();
   }
   if (uniquely_confirmed && request.candidate.shadow_context_refresh &&
       request.selected_proposal_index < proposals.size()) {
@@ -1924,6 +1926,7 @@ static LowConfSubmitResult lowconf_verifier_submit(GstBuffer *buffer, guint batc
   request.candidate.shadow_context_pretracker_scheduled = shadow_refresh;
   request.candidate.source_frame_num = key.frame_num;
   request.candidate.source_pts_ns = key.pts_ns;
+  request.candidate.source_epoch = key.source_epoch;
   request.frame_width = frame_width;
   request.frame_height = frame_height;
   request.candidate.submitted_monotonic_ns = static_cast<guint64>(g_get_monotonic_time()) * 1000;
@@ -2023,14 +2026,17 @@ static bool lowconf_verifier_assign_active_track(const LowConfFrameKey &key,
 }
 
 static std::vector<ActiveTrackVerificationDecision>
-lowconf_verifier_take_completed_active(guint source_id) {
+lowconf_verifier_take_completed_active(guint source_id, guint64 source_epoch) {
   if (!context_verifier_enabled() || source_id >= lowconf_completed_active_decisions.size()) return {};
   std::lock_guard<std::mutex> guard(lowconf_mutex);
   auto &queue = lowconf_completed_active_decisions[source_id];
   std::vector<ActiveTrackVerificationDecision> result;
   result.reserve(queue.size());
   while (!queue.empty()) {
-    result.push_back(queue.front());
+    if (queue.front().source_epoch == source_epoch)
+      result.push_back(queue.front());
+    else
+      ++lowconf_stale_active_decisions;
     queue.pop_front();
   }
   return result;
@@ -2134,9 +2140,17 @@ static void lowconf_verifier_publish_worker_main(guint source_id) {
       frame = std::move(lowconf_publish_queues[source_id].front());
       lowconf_publish_queues[source_id].pop_front();
     }
+    if (frame.key.source_epoch != source_tracking_epoch_current(source_id)) {
+      ++lowconf_stale_epoch_discards;
+      continue;
+    }
     auto verified = frame.wait_for_verifier
         ? lowconf_verifier_take_frame_wait(frame.key)
         : lowconf_verifier_take_frame(frame.key);
+    if (frame.key.source_epoch != source_tracking_epoch_current(source_id)) {
+      ++lowconf_stale_epoch_discards;
+      continue;
+    }
     if (frame.publish) frame.publish(std::move(verified));
   }
 }
@@ -2171,11 +2185,12 @@ static void lowconf_verifier_stats() {
   size_t publish_pending = 0;
   { std::lock_guard<std::mutex> guard(lowconf_publish_mutex);
     for (const auto &queue : lowconf_publish_queues) publish_pending += queue.size(); }
-  g_print("LOWCONF_VERIFIER submitted=%lu queue_drops=%lu queued=%zu crop_failures=%lu inferred=%lu confirmed=%lu rejected=%lu late_at_tracker=%lu deadline_expired=%lu unmatched_results=%lu inference_mean_ms=%.3f inference_max_ms=%.3f selective_wait_frames=%lu publisher_queue_high_water=%lu publisher_queue_full=%lu publisher_pending=%zu verifier_pending=%zu active_assign_calls=%lu active_assign_hits=%lu active_assign_misses=%lu\n",
+  g_print("LOWCONF_VERIFIER submitted=%lu queue_drops=%lu queued=%zu crop_failures=%lu inferred=%lu confirmed=%lu rejected=%lu late_at_tracker=%lu deadline_expired=%lu unmatched_results=%lu stale_epoch_discards=%lu stale_active_decisions=%lu inference_mean_ms=%.3f inference_max_ms=%.3f selective_wait_frames=%lu publisher_queue_high_water=%lu publisher_queue_full=%lu publisher_pending=%zu verifier_pending=%zu active_assign_calls=%lu active_assign_hits=%lu active_assign_misses=%lu\n",
       lowconf_submitted.load(), lowconf_queue_drops.load(), queued,
       lowconf_crop_failures.load(),
       completed, lowconf_confirmed.load(), lowconf_rejected.load(), lowconf_late.load(),
       lowconf_deadline_expired.load(), lowconf_unmatched_result.load(),
+      lowconf_stale_epoch_discards.load(), lowconf_stale_active_decisions.load(),
       completed ? lowconf_infer_total_us.load() / 1000.0 / completed : 0.0,
       lowconf_infer_max_us.load() / 1000.0, lowconf_selective_wait_frames.load(),
       lowconf_publish_queue_high_water.load(), lowconf_publish_queue_full.load(),

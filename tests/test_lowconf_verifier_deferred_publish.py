@@ -272,9 +272,10 @@ def test_pgie_sidecar_uses_bounded_exact_frame_pts_cache() -> None:
     assert "TRACKER_DETECTION_CACHE_LIMIT = 64" in tracker
     assert "ExactFrameRing<TrackerDetection, 6, TRACKER_DETECTION_CACHE_LIMIT>" in tracker
     assert "std::move(detections)" in tracker
-    assert "tracker_take_detections(frame->source_id, frame->frame_num, frame->buf_pts)" in tracker
-    assert "slot.frame != frame || slot.pts != pts" in ring
-    assert "if (!slot.valid || slot.frame != frame || slot.pts != pts)" in ring
+    assert "tracker_take_detections(frame->source_id, frame->frame_num," in tracker
+    assert "frame->buf_pts, current_source_epoch)" in tracker
+    assert "slot.source_epoch != source_epoch" in ring
+    assert "slot.frame != frame || slot.pts != pts ||" in ring
     assert "std::move(slot.values)" in ring
     assert "tracker_detection_cache_misses" in tracker
     assert "tracker-detection-join.jsonl" in tracker
@@ -289,7 +290,7 @@ def test_direct_file_clock_pacing_is_opt_in_and_file_only() -> None:
     assert 'std::strcmp(pace_files, "1") == 0' in pacing_branch
     assert 'ctx->uri.rfind("file://", 0) == 0' in pacing_branch
     assert 'make("identity", pacer_name.c_str())' in pacing_branch
-    assert '"sync", TRUE' in pacing_branch
+    assert '"sync", pace_to_pts' in pacing_branch
     assert 'PGIE_ISOLATION_REALTIME_PACE=1' in runner
     # The opt-in is compiled only into the PGIE isolation harness, never the
     # production camera graph.

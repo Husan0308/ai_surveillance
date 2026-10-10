@@ -31,9 +31,13 @@ def test_deduper_is_after_pgie_and_before_nvdcf_input() -> None:
     assert infer_exit.index("suppress_same_component_person_duplicates(frame)") < infer_exit.index(
         "for (NvDsMetaList *scan = frame->obj_meta_list"
     )
+    assert infer_exit.index("suppress_previous_track_supported_duplicates(frame, source_epoch)") < infer_exit.index(
+        "for (NvDsMetaList *scan = frame->obj_meta_list"
+    )
     assert "nvds_remove_obj_meta_from_frame(frame" in detection
     assert "tracker_record_detections(frame->source_id" in infer_exit
-    assert "PGIE_NESTED_DUPLICATES suppressed=" in detection
+    assert "PGIE_NESTED_DUPLICATES geometric_suppressed=" in detection
+    assert "history_supported_suppressed=" in detection
     assert "proposal-duplicate-suppressions.jsonl" in detection
 
 

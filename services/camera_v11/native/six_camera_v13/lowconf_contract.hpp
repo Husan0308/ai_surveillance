@@ -9,8 +9,10 @@ struct LowConfFrameKey {
   guint source_id = 0;
   gint frame_num = -1;
   guint64 pts_ns = GST_CLOCK_TIME_NONE;
+  guint64 source_epoch = 0;
   bool operator<(const LowConfFrameKey &other) const {
     if (source_id != other.source_id) return source_id < other.source_id;
+    if (source_epoch != other.source_epoch) return source_epoch < other.source_epoch;
     if (frame_num != other.frame_num) return frame_num < other.frame_num;
     return pts_ns < other.pts_ns;
   }
@@ -39,6 +41,7 @@ struct LowConfCandidate {
   // worker. They are checked again before a shadow-assisted box is published.
   gint source_frame_num = -1;
   guint64 source_pts_ns = GST_CLOCK_TIME_NONE;
+  guint64 source_epoch = 0;
   bool active_track_birth = false;
   // A current-frame crop confirmation may refresh a previously verified
   // auxiliary-born native target that is presently an INACTIVE NvDCF shadow.
@@ -71,6 +74,11 @@ struct ActiveTrackVerificationDecision {
   gint request_frame_num = -1;
   bool confirmed = false;
   bool definitive_no_local_person = false;
+  float bbox_left = 0.0f;
+  float bbox_top = 0.0f;
+  float bbox_width = 0.0f;
+  float bbox_height = 0.0f;
+  guint64 source_epoch = 0;
 };
 
 enum class LowConfSubmitResult : std::uint8_t {
@@ -98,7 +106,7 @@ static std::vector<LowConfCandidate> lowconf_verifier_frame_candidates(
 static bool lowconf_verifier_assign_active_track(const LowConfFrameKey &key,
     gint detector_index, guint64 native_track_id);
 static std::vector<ActiveTrackVerificationDecision>
-lowconf_verifier_take_completed_active(guint source_id);
+lowconf_verifier_take_completed_active(guint source_id, guint64 source_epoch);
 static bool lowconf_verifier_defer_frame(const LowConfFrameKey &key,
     std::function<void(std::vector<LowConfCandidate>)> publish,
     bool wait_for_verifier);

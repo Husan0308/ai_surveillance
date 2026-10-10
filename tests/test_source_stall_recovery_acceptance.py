@@ -1,6 +1,7 @@
 from scripts.run_source_stall_recovery_acceptance import (
     all_camera_feeds_ready, capture_recovered_preview, event_detail_int, planned_recovery_complete,
-    preview_pair_matches, read_latest_fresh, recovery_cycles, recovery_verifier_environment,
+    last_fresh_preview_sample_before, preview_pair_matches, read_latest_fresh, recovery_cycles,
+    recovery_verifier_environment,
     unexpected_recovery_events,
 )
 from scripts.run_six_camera_v13_wall_candidate import parse_source_stall_test_plan
@@ -129,6 +130,47 @@ def test_recovery_startup_readiness_requires_six_fresh_valid_preview_pairs():
     assert all_camera_feeds_ready(rows) is False
     rows["CAM-04"]["preview"] = {"age_ms": 1001.0, "embedded_metadata_matches": True}
     assert all_camera_feeds_ready(rows) is False
+
+
+def test_recovery_uses_last_healthy_preview_before_stall_marker_when_marker_sample_is_invalid():
+    observations = [
+        {
+            "sample_index": 0,
+            "ready": True,
+            "cameras": {
+                "CAM-03": {
+                    "preview": {"sequence": 44, "source_frame_num": 43,
+                                "tracker_frame_num": 43, "pts_ns": 4300,
+                                "age_ms": 35.0, "embedded_metadata_matches": True},
+                    "image_bbox_sync": True,
+                    "independent_latest_snapshot_matches_preview": True,
+                },
+            },
+        },
+        {
+            "sample_index": 1,
+            "ready": True,
+            "cameras": {"CAM-03": {"preview": None, "image_bbox_sync": False}},
+        },
+    ]
+    baseline = last_fresh_preview_sample_before(observations, 1, "CAM-03")
+    assert baseline == {
+        "sample_index": 0,
+        "sequence": 44,
+        "source_frame_num": 43,
+        "tracker_frame_num": 43,
+        "pts_ns": 4300,
+        "age_ms": 35.0,
+    }
+
+
+def test_recovery_pre_stall_baseline_fails_closed_when_no_valid_prior_preview_exists():
+    observations = [{
+        "sample_index": 0,
+        "ready": True,
+        "cameras": {"CAM-03": {"preview": None, "image_bbox_sync": False}},
+    }]
+    assert last_fresh_preview_sample_before(observations, 1, "CAM-03") is None
 
 
 def test_recovery_preview_capture_binds_pixels_to_embedded_same_frame_metadata():

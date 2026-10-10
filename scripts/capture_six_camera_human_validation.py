@@ -213,7 +213,7 @@ def command_reader(commands: queue.Queue, stop_event: threading.Event) -> None:
             return
 
 
-def run(output: Path) -> int:
+def run(output: Path, selected_cameras: tuple[str, ...] = CAMERAS) -> int:
     # QPainter can draw rectangles without an application object, but text/font
     # access is not safe until Qt's GUI application/font database is initialized.
     # This process is evidence-only and never creates a visible window.
@@ -224,12 +224,12 @@ def run(output: Path) -> int:
         raise ValueError("evidence directory must be a new path under .runtime")
     output.mkdir(parents=True)
     recorders: dict[str, CameraRecorder] = {}
-    last_sequences: dict[str, int | None] = {camera: None for camera in CAMERAS}
+    last_sequences: dict[str, int | None] = {camera: None for camera in selected_cameras}
     commands: queue.Queue[str] = queue.Queue()
     stop_event = threading.Event()
     ready = threading.Condition()
     ready_cameras: set[str] = set()
-    camera_locks = {camera: threading.Lock() for camera in CAMERAS}
+    camera_locks = {camera: threading.Lock() for camera in selected_cameras}
     worker_errors: list[str] = []
     worker_error_lock = threading.Lock()
     workers: list[threading.Thread] = []
@@ -266,19 +266,19 @@ def run(output: Path) -> int:
         finally:
             reader.close()
 
-    for camera in CAMERAS:
+    for camera in selected_cameras:
         worker = threading.Thread(target=capture_camera, args=(camera,),
                                   name=f"capture-{camera}", daemon=True)
         workers.append(worker)
         worker.start()
     with ready:
         deadline = time.monotonic() + 15.0
-        while len(ready_cameras) < len(CAMERAS) and not worker_errors:
+        while len(ready_cameras) < len(selected_cameras) and not worker_errors:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             ready.wait(timeout=remaining)
-    if len(ready_cameras) != len(CAMERAS):
+    if len(ready_cameras) != len(selected_cameras):
         stop_event.set()
         for worker in workers:
             worker.join(timeout=3)
@@ -290,7 +290,7 @@ def run(output: Path) -> int:
         raise RuntimeError("did not receive fresh synchronized preview frames for all six cameras")
 
     thread.start()
-    print("HUMAN_VALIDATION_RECORDER_READY cameras=6; commands: mark CAM-01 <phase>, ...; stop", flush=True)
+    print(f"HUMAN_VALIDATION_RECORDER_READY cameras={','.join(selected_cameras)}; commands: mark CAM-XX <phase>; stop", flush=True)
     try:
         while not stop_event.is_set():
             while True:
@@ -302,8 +302,9 @@ def run(output: Path) -> int:
                 if len(parts) == 1 and parts[0].lower() == "stop":
                     stop_event.set()
                     break
-                if len(parts) != 3 or parts[0].lower() != "mark" or parts[1] not in CAMERAS or parts[2] not in PHASES:
-                    print("Invalid command. Use: mark CAM-01 <phase> or stop", flush=True)
+                if (len(parts) != 3 or parts[0].lower() != "mark"
+                        or parts[1] not in selected_cameras or parts[2] not in PHASES):
+                    print(f"Invalid command. Use: mark {'|'.join(selected_cameras)} <phase> or stop", flush=True)
                     continue
                 camera, phase = parts[1], parts[2]
                 if camera not in recorders:
@@ -337,9 +338,14 @@ def run(output: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cameras", default=",".join(CAMERAS),
+                        help="comma-separated cameras to capture from shared-memory previews; no RTSP is opened")
     args = parser.parse_args()
+    selected = tuple(value.strip() for value in args.cameras.split(",") if value.strip())
+    if not selected or len(set(selected)) != len(selected) or any(camera not in CAMERAS for camera in selected):
+        parser.error("--cameras must be a nonempty unique subset of the six configured camera IDs")
     try:
-        return run(args.output)
+        return run(args.output, selected)
     except Exception as exc:
         print(f"HUMAN_VALIDATION_CAPTURE_FAIL: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return 1

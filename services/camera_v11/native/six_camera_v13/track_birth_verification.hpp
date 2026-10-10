@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
@@ -10,6 +12,31 @@
 class TrackBirthVerificationLedger {
  public:
   enum class State : std::uint8_t { Unverified, Pending, Verified, Rejected };
+
+  // A context-crop detector may return a larger person proposal than the
+  // primary detector, but center containment alone can let an adjacent
+  // garment/background proposal confirm an unrelated track. Require both
+  // containment and a small, explicit minimum geometry overlap. This is only
+  // used for active-track birth verification; shadow fallback keeps its own
+  // stricter association policy.
+  static bool active_context_location_match(
+      float target_left, float target_top, float target_width, float target_height,
+      float context_left, float context_top, float context_width, float context_height,
+      float *iou_out = nullptr, float minimum_iou = 0.25f) {
+    if (iou_out) *iou_out = 0.0f;
+    if (!valid_box(target_left, target_top, target_width, target_height) ||
+        !valid_box(context_left, context_top, context_width, context_height) ||
+        !std::isfinite(minimum_iou) || minimum_iou < 0.0f || minimum_iou > 1.0f)
+      return false;
+    const float cx = target_left + target_width * 0.5f;
+    const float cy = target_top + target_height * 0.5f;
+    const bool contains = cx >= context_left && cx <= context_left + context_width &&
+        cy >= context_top && cy <= context_top + context_height;
+    const float overlap = box_iou(target_left, target_top, target_width, target_height,
+        context_left, context_top, context_width, context_height);
+    if (iou_out) *iou_out = overlap;
+    return contains && overlap >= minimum_iou;
+  }
 
   bool begin(std::uint32_t source, std::uint64_t id, std::int32_t frame) {
     // NvDCF's native ID zero is a valid target ID (the first target on a
@@ -26,6 +53,57 @@ class TrackBirthVerificationLedger {
     return true;
   }
 
+  // A definitive negative is scoped to the crop geometry that was checked.
+  // One bounded recheck is allowed only after the same native target receives
+  // a materially different current detector box. The caller still requires a
+  // positive exact-frame verifier result before canonical publication.
+  bool begin_geometry_recheck(std::uint32_t source, std::uint64_t id,
+                              std::int32_t frame, float left, float top,
+                              float width, float height,
+                              float max_iou = 0.30f,
+                              std::uint32_t min_delay_frames = 5) {
+    if (source >= entries_.size() || frame < 0 ||
+        !valid_box(left, top, width, height) ||
+        !std::isfinite(max_iou) || max_iou < 0.0f || max_iou > 1.0f) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    prune_locked(source, static_cast<std::uint32_t>(frame));
+    auto camera = entries_[source].find(id);
+    if (camera == entries_[source].end()) return false;
+    auto &entry = camera->second;
+    if (entry.state != State::Rejected || !entry.has_rejected_geometry ||
+        entry.geometry_rechecks != 0 ||
+        static_cast<std::uint32_t>(frame) < entry.last_rejected_frame + min_delay_frames)
+      return false;
+    if (box_iou(left, top, width, height,
+                entry.rejected_left, entry.rejected_top,
+                entry.rejected_width, entry.rejected_height) >= max_iou)
+      return false;
+    entry.state = State::Pending;
+    entry.pending_frame = frame;
+    entry.last_seen = static_cast<std::uint32_t>(frame);
+    entry.geometry_rechecks = 1;
+    entry.geometry_recheck_pending = true;
+    return true;
+  }
+
+  void cancel_geometry_recheck(std::uint32_t source, std::uint64_t id,
+                               std::int32_t frame,
+                               std::uint32_t retry_delay_frames = 1) {
+    if (source >= entries_.size() || frame < 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto camera = entries_[source].find(id);
+    if (camera == entries_[source].end()) return;
+    auto &entry = camera->second;
+    if (entry.state != State::Pending || entry.pending_frame != frame ||
+        !entry.geometry_recheck_pending) return;
+    entry.state = State::Rejected;
+    entry.pending_frame = -1;
+    entry.geometry_recheck_pending = false;
+    entry.geometry_rechecks = 0;
+    entry.retry_after = static_cast<std::uint32_t>(frame) + retry_delay_frames;
+    entry.last_seen = std::max(entry.last_seen, static_cast<std::uint32_t>(frame));
+  }
+
   void finish(std::uint32_t source, std::uint64_t id, std::int32_t frame,
               std::uint32_t applied_frame, bool confirmed,
               bool definitive_no_local_person, std::uint32_t retry_delay_frames = 5) {
@@ -39,11 +117,13 @@ class TrackBirthVerificationLedger {
       entry.state = State::Verified;
       entry.negative_results = 0;
       entry.last_verified_support_frame = applied_frame;
+      entry.geometry_recheck_pending = false;
     } else if (definitive_no_local_person) {
       ++entry.negative_results;
       entry.state = entry.negative_results >= kRequiredNegativeResults
           ? State::Rejected : State::Unverified;
       if (entry.state == State::Rejected) entry.last_verified_support_frame = kNoFrame;
+      entry.geometry_recheck_pending = false;
     } else {
       entry.state = State::Unverified;
     }
@@ -75,17 +155,53 @@ class TrackBirthVerificationLedger {
     entry.retry_after = 0;
     entry.last_seen = frame;
     entry.last_verified_support_frame = static_cast<std::int32_t>(frame);
+    entry.geometry_recheck_pending = false;
   }
 
   void reject(std::uint32_t source, std::uint64_t id, std::uint32_t frame) {
+    reject_impl(source, id, frame, 0.0f, 0.0f, 0.0f, 0.0f, false);
+  }
+
+  void reject(std::uint32_t source, std::uint64_t id, std::uint32_t frame,
+              float left, float top, float width, float height) {
+    reject_impl(source, id, frame, left, top, width, height, true);
+  }
+
+  // A source reconnect starts a new local-ID namespace. Drop every pending,
+  // rejected, and verified decision for that source so IDs reused by NvDCF
+  // cannot inherit appearance evidence from the previous stream epoch.
+  void clear_source(std::uint32_t source) {
+    if (source >= entries_.size()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_[source].clear();
+  }
+
+ private:
+  void reject_impl(std::uint32_t source, std::uint64_t id, std::uint32_t frame,
+                   float left, float top, float width, float height,
+                   bool has_geometry) {
     if (source >= entries_.size()) return;
     std::lock_guard<std::mutex> lock(mutex_);
     auto &entry = entries_[source][id];
+    // A delayed result from an earlier frame cannot undo a newer positive or
+    // replace a more recent rejection decision.
+    if (entry.state != State::Pending && frame < entry.last_seen) return;
     entry.state = State::Rejected;
     entry.pending_frame = -1;
     entry.retry_after = 0;
     entry.last_seen = frame;
+    entry.last_rejected_frame = frame;
+    entry.geometry_recheck_pending = false;
+    entry.has_rejected_geometry = has_geometry && valid_box(left, top, width, height);
+    if (entry.has_rejected_geometry) {
+      entry.rejected_left = left;
+      entry.rejected_top = top;
+      entry.rejected_width = width;
+      entry.rejected_height = height;
+    }
   }
+
+ public:
 
   void touch(std::uint32_t source, std::uint64_t id, std::uint32_t frame) {
     if (source >= entries_.size()) return;
@@ -181,6 +297,14 @@ class TrackBirthVerificationLedger {
     std::uint32_t last_seen = 0;
     std::uint8_t negative_results = 0;
     std::int32_t last_verified_support_frame = -1;
+    std::uint32_t last_rejected_frame = 0;
+    std::uint8_t geometry_rechecks = 0;
+    bool geometry_recheck_pending = false;
+    bool has_rejected_geometry = false;
+    float rejected_left = 0.0f;
+    float rejected_top = 0.0f;
+    float rejected_width = 0.0f;
+    float rejected_height = 0.0f;
   };
 
   static constexpr std::int32_t kNoFrame = -1;
@@ -191,6 +315,22 @@ class TrackBirthVerificationLedger {
   // completed result is sufficient to suppress this native target. Inconclusive
   // and late results still do not count as negatives.
   static constexpr std::uint8_t kRequiredNegativeResults = 1;
+
+  static bool valid_box(float left, float top, float width, float height) {
+    return std::isfinite(left) && std::isfinite(top) &&
+        std::isfinite(width) && std::isfinite(height) &&
+        width > 0.0f && height > 0.0f;
+  }
+
+  static float box_iou(float al, float at, float aw, float ah,
+                       float bl, float bt, float bw, float bh) {
+    const float x1 = std::max(al, bl), y1 = std::max(at, bt);
+    const float x2 = std::min(al + aw, bl + bw), y2 = std::min(at + ah, bt + bh);
+    const float intersection = std::max(0.0f, x2 - x1) * std::max(0.0f, y2 - y1);
+    const float area_a = aw * ah, area_b = bw * bh;
+    const float total = area_a + area_b - intersection;
+    return total > 0.0f ? intersection / total : 0.0f;
+  }
 
   void prune_locked(std::uint32_t source, std::uint32_t frame) {
     // Retain decisions through the local tracker's full shadow lifetime plus

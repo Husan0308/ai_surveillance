@@ -18,6 +18,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "source_reconnect_telemetry.hpp"
 
 struct Counter {
   std::atomic<guint64> frames{0};
@@ -64,6 +65,11 @@ struct SourceCtx {
   std::atomic_bool decoder_seen{false};
   guint errors = 0;
   guint warnings = 0;
+  std::atomic<guint> rtsp_reconnect_attempts{0};
+  // Bumped for each explicit RTSP retry or watchdog source replacement. The
+  // tracker uses this to invalidate per-source temporal state and async joins
+  // so a reused native ID cannot inherit pre-interruption evidence.
+  std::atomic<guint64> tracking_epoch{0};
   std::atomic<guint> queue_high_water{0};
   bool stale_recovery_pending = false;
   guint64 stale_recovery_baseline_frames = 0;
@@ -88,6 +94,8 @@ struct SourceCtx {
   std::atomic<guint32> decoded_output_frames{0};
 };
 
+#include "calibration_recording.hpp"
+
 #ifdef YOLO26_TRACKER
 static void f5r_preview_quality_capture_nv12(
     GstBuffer *buffer, guint source_id, guint32 source_frame_num,
@@ -100,6 +108,10 @@ static GstElement *encoder = nullptr;
 static GstElement *sink_element = nullptr;
 static GMainLoop *loop = nullptr;
 static std::vector<SourceCtx*> sources;
+static guint64 source_tracking_epoch_current(guint source_id) {
+  return source_id < sources.size() && sources[source_id]
+      ? sources[source_id]->tracking_epoch.load() : 0;
+}
 static Counter output_counter;
 static std::atomic_bool fatal{false};
 static bool stopping = false;
@@ -108,6 +120,9 @@ static gint64 start_us = 0, previous_us = 0, last_message_us = 0;
 static guint64 previous_output = 0;
 static double previous_cpu = 0.0;
 static std::string monitoring_path;
+#ifdef YOLO26_TRACKER
+static std::unique_ptr<calibration_recording::Controller> calibration_recorder;
+#endif
 // Recovery-completion counters deliberately span the translation-unit
 // boundaries: they let the watchdog require progress through PGIE, canonical
 // tracking, and preview publication before declaring a source healthy.
@@ -134,6 +149,7 @@ static guint pgie_isolation_batch_size = 2;
 static guint pgie_isolation_width = 1920;
 static guint pgie_isolation_height = 1080;
 static guint pgie_isolation_memory_type = 0;
+static guint pgie_isolation_sleep_us = 0;
 static bool pgie_isolation_live_source = false;
 static FILE *direct_file_frame_evidence = nullptr;
 static std::atomic_bool direct_file_frame_write_failed{false};
@@ -199,6 +215,12 @@ static void safe_print(const std::string &prefix, const std::string &detail) {
 static void event(SourceCtx *ctx, const char *kind, const std::string &detail) {
   safe_print((ctx ? ctx->id : std::string("GROUP")) + " " + kind, detail);
 }
+
+#ifdef YOLO26_TRACKER
+static void calibration_recorder_log(const char *kind, const std::string &detail) {
+  event(nullptr, kind, detail);
+}
+#endif
 
 static void fail(const std::string &detail) {
   event(nullptr, "FATAL", detail);
@@ -561,6 +583,7 @@ static bool replace_stalled_source(SourceCtx *target, gint64 now_us) {
   target->stale_recovery_started_us = now_us;
   ++target->stale_recovery_count;
   ++target->consecutive_stale_recoveries;
+  const guint64 tracking_epoch = ++target->tracking_epoch;
   target->last_stale_recovery_us = now_us;
   event(target, "SOURCE_STALL_RECOVERY_BEGIN",
       "elapsed_ms=" + std::to_string((now_us - start_us) / 1000) +
@@ -568,6 +591,7 @@ static bool replace_stalled_source(SourceCtx *target, gint64 now_us) {
       std::to_string(input_age_ms) + " decoded_age_ms=" + std::to_string(decoded_age_ms) +
       " ingress_age_ms=" + std::to_string(ingress_age_ms) +
       " queue_depth=0 owner_count_before=1 generation=" + std::to_string(target->source_generation) +
+      " tracking_epoch=" + std::to_string(tracking_epoch) +
       " decoded_frames=" + std::to_string(target->stale_recovery_baseline_decoded_frames) +
       " input_frames=" + std::to_string(target->stale_recovery_baseline_frames) +
       " pgie_frames=" + std::to_string(target->stale_recovery_baseline_pgie_frames) +
@@ -726,9 +750,24 @@ static gboolean bus_message(GstBus*, GstMessage *m, gpointer) {
     else gst_message_parse_warning(m, &e, &debug);
     std::string message = std::string(GST_OBJECT_NAME(m->src)) + ": " + (e ? e->message : "unknown");
     if (debug) message += " | " + std::string(debug);
+#ifdef YOLO26_TRACKER
+    if (calibration_recorder && calibration_recorder->owns(m->src)) {
+      if (error) calibration_recorder->handle_error(message);
+      else event(nullptr, "CALIBRATION_RECORDER_WARNING", message);
+      if (e) g_error_free(e);
+      g_free(debug);
+      return G_SOURCE_CONTINUE;
+    }
+#endif
     SourceCtx *ctx = owner_for_message(m);
     if (ctx) {
       if (error) ++ctx->errors; else ++ctx->warnings;
+      if (!error && is_nvurisrcbin_reconnect_attempt_warning(message)) {
+        const guint attempt = ++ctx->rtsp_reconnect_attempts;
+        const guint64 tracking_epoch = ++ctx->tracking_epoch;
+        event(ctx, "RTSP_RECONNECT_ATTEMPT", message + " attempt=" +
+            std::to_string(attempt) + " tracking_epoch=" + std::to_string(tracking_epoch));
+      }
     } else {
       if (error) ++shared_errors; else ++shared_warnings;
     }
@@ -855,6 +894,8 @@ static bool write_monitoring_snapshot() {
     const double age_ms = last ? std::max(0.0, (now_us - last) / 1000.0) : 1.0e9;
     const gint64 decoded_last = ctx->decoded.last_us.load();
     const double decoded_age_ms = decoded_last ? std::max(0.0, (now_us - decoded_last) / 1000.0) : 1.0e9;
+    const guint rtsp_reconnect_attempts = ctx->rtsp_reconnect_attempts.load();
+    const guint source_stall_recoveries = ctx->stale_recovery_count;
     guint queue = 0;
     if (ctx->queue) g_object_get(ctx->queue, "current-level-buffers", &queue, nullptr);
     guint previous_high = ctx->queue_high_water.load();
@@ -877,7 +918,13 @@ static bool write_monitoring_snapshot() {
         << ",\"current_box_count\":" << count << ",\"positive_inferences\":" << detections[i].persons.load()
         << ",\"detections_total\":" << detections[i].persons.load()
         << ",\"result_age_ms\":" << age_ms << ",\"infer_p95_ms\":null,\"render_gap_p95_ms\":null"
-        << ",\"reconnects\":" << ctx->stale_recovery_count
+        << ",\"reconnects\":" << (rtsp_reconnect_attempts + source_stall_recoveries)
+        << ",\"rtsp_reconnect_attempts\":" << rtsp_reconnect_attempts
+        << ",\"tracking_epoch\":" << ctx->tracking_epoch.load()
+        << ",\"source_stall_recoveries\":" << source_stall_recoveries
+        << ",\"input_pts_resets\":" << ctx->input.backwards.load()
+        << ",\"decoded_pts_resets\":" << ctx->decoded.backwards.load()
+        << ",\"decoder_max_interframe_gap_ms\":" << ctx->decoded.max_gap_us.load() / 1000.0
         << ",\"source_stall_recovery_pending\":" << (ctx->stale_recovery_pending ? "true" : "false")
         << ",\"source_stall_recovery_enabled\":" << (source_stall_recovery_enabled ? "true" : "false")
         << ",\"copy_errors\":0,\"infer_errors\":" << detections[i].errors.load()
@@ -1123,6 +1170,7 @@ int main(int argc, char **argv) {
   pgie_isolation_width = env_uint("PGIE_ISOLATION_MUX_WIDTH", 1920, 320, 4096);
   pgie_isolation_height = env_uint("PGIE_ISOLATION_MUX_HEIGHT", 1080, 240, 2160);
   pgie_isolation_memory_type = env_uint("PGIE_ISOLATION_MUX_MEMORY_TYPE", 0, 0, 3);
+  pgie_isolation_sleep_us = env_uint("PGIE_ISOLATION_SLEEP_PER_FRAME_US", 0, 0, 1000000);
   const char *live_source = g_getenv("PGIE_ISOLATION_LIVE_SOURCE");
   pgie_isolation_live_source = live_source && std::strcmp(live_source, "0") != 0;
   const char *timeout = g_getenv("PGIE_ISOLATION_BATCHED_PUSH_TIMEOUT_US");
@@ -1274,16 +1322,26 @@ int main(int argc, char **argv) {
     ctx->tee = make("tee", tee_name.c_str());
 #ifdef PGIE_ISOLATION
     const char *pace_files = g_getenv("PGIE_ISOLATION_REALTIME_PACE");
-    if (pace_files && std::strcmp(pace_files, "1") == 0 &&
+    const bool pace_to_pts = pace_files && std::strcmp(pace_files, "1") == 0;
+    if ((pace_to_pts || pgie_isolation_sleep_us > 0) &&
         ctx->uri.rfind("file://", 0) == 0) {
       const std::string pacer_name = ctx->id + "-direct-file-clock-pacer";
       ctx->replay_pacer = make("identity", pacer_name.c_str());
-      g_object_set(ctx->replay_pacer, "sync", TRUE, "silent", TRUE, nullptr);
+      if (pgie_isolation_sleep_us > 0 &&
+          !g_object_class_find_property(G_OBJECT_GET_CLASS(ctx->replay_pacer), "sleep-time")) {
+        fail(ctx->id + " direct-file identity has no sleep-time pacing property");
+        return 2;
+      }
+      g_object_set(ctx->replay_pacer, "sync", pace_to_pts,
+          "sleep-time", pgie_isolation_sleep_us, "silent", TRUE, nullptr);
       if (!gst_element_link(ctx->replay_pacer, ctx->tee)) {
         fail(ctx->id + " direct-file replay pacer -> decoded tee link failed");
         return 2;
       }
-      event(ctx, "DIRECT_FILE_PACING", "identity sync=1; source PTS preserved; file-only diagnostic mode");
+      event(ctx, "DIRECT_FILE_PACING", "identity sync=" +
+          std::to_string(pace_to_pts) + " sleep_time_us=" +
+          std::to_string(pgie_isolation_sleep_us) +
+          "; source PTS preserved; file-only diagnostic mode");
     }
 #endif
     if (!f5r_tee_link(ctx->tee, ctx->queue)) {
@@ -1306,6 +1364,28 @@ int main(int argc, char **argv) {
     gst_object_unref(qp);
     gst_object_unref(mp);
   }
+
+#ifdef YOLO26_TRACKER
+  const char *recording_enabled = g_getenv("V11_CALIBRATION_RECORDING_ENABLED");
+  if (recording_enabled && std::strcmp(recording_enabled, "1") == 0) {
+    const char *control_path = g_getenv("V11_CALIBRATION_RECORDING_CONTROL_PATH");
+    const char *status_path = g_getenv("V11_CALIBRATION_RECORDING_STATUS_PATH");
+    const char *output_root = g_getenv("V11_CALIBRATION_RECORDING_ROOT");
+    std::vector<calibration_recording::Source> recording_sources;
+    for (auto *ctx : sources) recording_sources.push_back({ctx->id, ctx->tee});
+    calibration_recorder = std::make_unique<calibration_recording::Controller>(
+        pipeline, std::move(recording_sources),
+        control_path ? control_path : "", status_path ? status_path : "",
+        output_root ? output_root : "", calibration_recorder_log);
+    if (!calibration_recorder->begin()) {
+      fail("calibration recorder control/status/output path preflight failed");
+      return 2;
+    }
+  } else if (recording_enabled && std::strcmp(recording_enabled, "0") != 0) {
+    g_printerr("GROUP invalid V11_CALIBRATION_RECORDING_ENABLED (expected 0 or 1)\n");
+    return 2;
+  }
+#endif
 
   GstElement *tiler = make("nvmultistreamtiler", "tiler");
   g_object_set(tiler, "rows", 3u, "columns", 2u, "width", 1920u, "height", 1620u, nullptr);
@@ -1417,6 +1497,9 @@ int main(int argc, char **argv) {
   g_timeout_add_seconds(5, tick, nullptr);
   if (!fatal) g_main_loop_run(loop);
 
+#ifdef YOLO26_TRACKER
+  if (calibration_recorder) calibration_recorder->shutdown();
+#endif
   stopping = true;
   gst_element_set_state(pipeline, GST_STATE_NULL);
 #ifdef YOLO26_PERSON

@@ -240,7 +240,9 @@ def run(candidate: Path, inputs: list[Path], output: Path, timeout_sec: int,
         tracker_nan_diagnostics: bool = False,
         tracker_frame_state_diagnostics: bool = False,
         shadow_context_refresh_diagnostic: bool = False,
-        candidate_centered_crop: bool = False) -> dict:
+        candidate_centered_crop: bool = False,
+        isolation_sleep_per_frame_us: int = 0,
+        runtime_budget_override_sec: int | None = None) -> dict:
     from scripts.run_six_camera_v13_wall_candidate import validate_candidate, validate_yolo_context_verifier
 
     candidate, output = candidate.resolve(), output.resolve()
@@ -310,6 +312,15 @@ def run(candidate: Path, inputs: list[Path], output: Path, timeout_sec: int,
         raise ValueError("all supplied files must have identical frame counts for the six-input diagnostic")
     expected_frames = frame_counts.pop()
     runtime_budget_sec = native_runtime_budget_seconds(input_metadata)
+    if not 0 <= isolation_sleep_per_frame_us <= 1_000_000:
+        raise ValueError("isolation sleep must be in the diagnostic range 0..1000000 us")
+    if realtime_pace and isolation_sleep_per_frame_us:
+        raise ValueError("choose either source-PTS pacing or fixed per-frame pacing")
+    if runtime_budget_override_sec is not None:
+        minimum_runtime = int(max(row["duration_sec"] for row in input_metadata) + 0.999999) + 30
+        if runtime_budget_override_sec < minimum_runtime:
+            raise ValueError("runtime budget must exceed the longest source duration plus 30s EOS margin")
+        runtime_budget_sec = runtime_budget_override_sec
     output.mkdir(parents=True, exist_ok=False)
     image_dir = output / "input-mount"
     image_dir.mkdir()
@@ -374,6 +385,9 @@ def run(candidate: Path, inputs: list[Path], output: Path, timeout_sec: int,
         IMAGE, "/candidate/cam-six-yolo-local6-direct-gatea", "/work/sources.ini",
         str(runtime_budget_sec),
     ]
+    if isolation_sleep_per_frame_us:
+        command[command.index(IMAGE):command.index(IMAGE)] = [
+            "-e", f"PGIE_ISOLATION_SLEEP_PER_FRAME_US={isolation_sleep_per_frame_us}"]
     if tracker_nan_diagnostics:
         command[command.index(IMAGE):command.index(IMAGE)] = [
             "-e", *tracker_nan_diagnostic_environment(True)]
@@ -457,6 +471,7 @@ def run(candidate: Path, inputs: list[Path], output: Path, timeout_sec: int,
         "candidate_centered_crop": candidate_centered_crop,
         "native_runtime_budget_sec": runtime_budget_sec,
         "realtime_paced_file_sources": realtime_pace,
+        "diagnostic_sleep_per_frame_us": isolation_sleep_per_frame_us,
     }, indent=2) + "\n")
     started = time.monotonic()
     with (output / "native.log").open("x") as log:
@@ -524,6 +539,7 @@ def run(candidate: Path, inputs: list[Path], output: Path, timeout_sec: int,
         "eos": True,
         "rtsp_connections": 0,
         "elapsed_sec": elapsed,
+        "diagnostic_sleep_per_frame_us": isolation_sleep_per_frame_us,
         "primary_input_note": "0.23-0.25 proposals were copied to verifier sidecar and removed before NvDCF; >=0.25 primary detections retained original box/confidence",
         "auxiliary_note": ("supplemental proposals were merged only at exact same-source PTS; auxiliary-born publication requires the frozen-640 context verifier"
                            if enable_auxiliary else "auxiliary branch disabled; only frozen 640 primary proposals enter NvDCF"),
@@ -551,6 +567,10 @@ def main() -> None:
                         help="diagnostic-only batch override within the selected engine profile")
     parser.add_argument("--realtime-pace", action="store_true",
                         help="pace direct-file sources at their recorded rate for live-equivalent latency testing")
+    parser.add_argument("--isolation-sleep-per-frame-us", type=int, default=0,
+                        help="diagnostic-only fixed sleep on each decoded file frame to limit GPU load")
+    parser.add_argument("--runtime-budget-sec", type=int,
+                        help="diagnostic-only wall-clock cap; must exceed source duration plus EOS margin")
     parser.add_argument("--tracker-nan-diagnostics", action="store_true",
                         help="emit source/frame-addressed invalid shadow geometry rows; diagnostic only")
     parser.add_argument("--tracker-frame-state-diagnostics", action="store_true",
@@ -568,7 +588,9 @@ def main() -> None:
         tracker_nan_diagnostics=args.tracker_nan_diagnostics,
         tracker_frame_state_diagnostics=args.tracker_frame_state_diagnostics,
         shadow_context_refresh_diagnostic=args.shadow_context_refresh_diagnostic,
-        candidate_centered_crop=args.candidate_centered_crop)
+        candidate_centered_crop=args.candidate_centered_crop,
+        isolation_sleep_per_frame_us=args.isolation_sleep_per_frame_us,
+        runtime_budget_override_sec=args.runtime_budget_sec)
 
 
 if __name__ == "__main__":

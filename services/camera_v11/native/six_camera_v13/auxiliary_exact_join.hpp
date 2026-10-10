@@ -19,14 +19,17 @@ struct AuxiliaryJoinKey {
   std::uint32_t source_id = 0;
   std::int64_t frame_num = -1;
   std::uint64_t pts_ns = 0;
+  std::uint64_t source_epoch = 0;
 
   bool operator<(const AuxiliaryJoinKey& other) const {
     if (source_id != other.source_id) return source_id < other.source_id;
+    if (source_epoch != other.source_epoch) return source_epoch < other.source_epoch;
     if (frame_num != other.frame_num) return frame_num < other.frame_num;
     return pts_ns < other.pts_ns;
   }
   bool operator==(const AuxiliaryJoinKey& other) const {
-    return source_id == other.source_id && frame_num == other.frame_num &&
+    return source_id == other.source_id && source_epoch == other.source_epoch &&
+        frame_num == other.frame_num &&
         pts_ns == other.pts_ns;
   }
 };

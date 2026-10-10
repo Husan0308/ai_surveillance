@@ -6,6 +6,8 @@
 #include "exact_frame_ring.hpp"
 #include "shadow_continuity.hpp"
 #include "latency_histogram.hpp"
+#include "tracker_output_dedupe.hpp"
+#include "cross_id_context_duplicate.hpp"
 #include "track_birth_verification.hpp"
 #include <atomic>
 #include <algorithm>
@@ -28,6 +30,9 @@ struct TrackerCounter {
   std::atomic<guint64> objects{0};
   std::atomic<guint64> untracked{0};
   std::atomic<guint64> duplicate_ids{0};
+  std::atomic<guint64> duplicate_track_outputs_suppressed{0};
+  std::atomic<guint64> duplicate_track_output_groups_withheld{0};
+  std::atomic<guint64> reconnect_epoch_stale_frames{0};
   std::atomic<guint64> canonical_objects{0};
   std::atomic<guint64> fallbacks{0};
   std::atomic<guint64> verified_lowconf_fallbacks{0};
@@ -35,6 +40,7 @@ struct TrackerCounter {
   std::atomic<guint64> shadow_context_fallbacks{0};
   std::atomic<guint64> active_birth_verifier_confirmed{0};
   std::atomic<guint64> active_birth_verifier_withheld{0};
+  std::atomic<guint64> cross_id_context_duplicate_outputs_suppressed{0};
   std::atomic<guint64> ambiguous_matches{0};
   std::atomic<guint64> invalid_shadow_geometry{0};
 };
@@ -65,6 +71,7 @@ struct TrackerInputStamp {
   gint frame_num = -1;
   guint64 pts_ns = 0;
   guint64 entered_ns = 0;
+  guint64 source_epoch = 0;
 };
 static constexpr size_t TRACKER_INPUT_STAMP_CAPACITY = 128;
 static TrackerInputStamp tracker_input_stamps[6][TRACKER_INPUT_STAMP_CAPACITY];
@@ -127,6 +134,7 @@ struct PublishedTrack {
   float association_iou = 0;
   int detection_index = -1;
   bool requires_birth_verification = false;
+  bool active_previous_frame = false;
 };
 // nvinfer and nvtracker may run on different streaming tasks. Keep a bounded
 // exact-key ring instead of one mutable "latest frame" slot: otherwise a
@@ -150,6 +158,8 @@ static std::unordered_map<guint64, ShadowStamp> tracker_previous_shadows[6];
 static std::unordered_map<guint64, ActiveStamp> tracker_previous_active_boxes[6];
 static std::unordered_map<guint64, guint32> tracker_last_primary_association_frame[6];
 static std::mutex tracker_previous_active_mutex[6];
+static std::mutex tracker_source_epoch_mutex[6];
+static guint64 tracker_observed_source_epoch[6]{};
 static std::unordered_set<guint64> tracker_previous_active_ids[6];
 static gint tracker_previous_active_frame[6] = {-1,-1,-1,-1,-1,-1};
 static std::atomic<guint32> tracker_canonical_counts[6]{};
@@ -159,13 +169,44 @@ static guint v11_tracker_width = 960;
 static guint v11_tracker_height = 544;
 static std::mutex tracker_feed_mutex;
 static TrackBirthVerificationLedger tracker_birth_verification;
+static CrossIdDuplicateLedger tracker_cross_id_duplicate_ledger;
 static std::unordered_map<guint64, guint> tracker_birth_attempt_diag_count[6];
 
+static guint64 tracker_source_epoch_for_id(guint source_id) {
+  return source_tracking_epoch_current(source_id);
+}
+
+static void tracker_reset_temporal_state_for_epoch(guint source_id) {
+  if (source_id >= 6) return;
+  const guint64 epoch = tracker_source_epoch_for_id(source_id);
+  std::lock_guard<std::mutex> epoch_guard(tracker_source_epoch_mutex[source_id]);
+  if (tracker_observed_source_epoch[source_id] == epoch) return;
+  tracker_previous_shadows[source_id].clear();
+  {
+    std::lock_guard<std::mutex> active_guard(tracker_previous_active_mutex[source_id]);
+    tracker_previous_active_boxes[source_id].clear();
+  }
+  tracker_previous_active_ids[source_id].clear();
+  tracker_previous_active_frame[source_id] = -1;
+  tracker_last_primary_association_frame[source_id].clear();
+  tracker_auxiliary_target_ids[source_id].clear();
+  tracker_birth_attempt_diag_count[source_id].clear();
+  tracker_birth_verification.clear_source(source_id);
+  tracker_cross_id_duplicate_ledger.clear_source(source_id);
+  tracker_canonical_counts[source_id] = 0;
+  tracker_canonical_frames[source_id] = -1;
+  tracker_observed_source_epoch[source_id] = epoch;
+  g_print("TRACKER_SOURCE_EPOCH_RESET source=%u epoch=%" G_GUINT64_FORMAT
+      "; temporal target, shadow, and verifier-ledger state cleared\n",
+      source_id, epoch);
+}
+
 static void tracker_record_detections(guint source_id, gint frame_num, guint64 pts_ns,
-                                      std::vector<TrackerDetection> &&detections) {
+                                      std::vector<TrackerDetection> &&detections,
+                                      guint64 source_epoch = 0) {
   if (source_id >= 6) return;
   const auto result = tracker_detector_frames.put(source_id, frame_num, pts_ns,
-      std::move(detections));
+      std::move(detections), source_epoch);
   if (result.overwritten) {
     if (tracker_detection_join_evidence) {
       char line[256];
@@ -180,9 +221,9 @@ static void tracker_record_detections(guint source_id, gint frame_num, guint64 p
 }
 
 static std::vector<TrackerDetection> tracker_take_detections(
-    guint source_id, gint frame_num, guint64 pts_ns) {
+    guint source_id, gint frame_num, guint64 pts_ns, guint64 source_epoch = 0) {
   if (source_id >= 6) return {};
-  auto result = tracker_detector_frames.take(source_id, frame_num, pts_ns);
+  auto result = tracker_detector_frames.take(source_id, frame_num, pts_ns, source_epoch);
   if (result) {
     ++tracker_detection_cache_hits;
     return std::move(*result);
@@ -202,16 +243,17 @@ static std::vector<TrackerDetection> tracker_take_detections(
 
 static void tracker_record_lowconf_candidates(
     guint source_id, gint frame_num, guint64 pts_ns,
-    std::vector<LowConfCandidate> &&candidates) {
+    std::vector<LowConfCandidate> &&candidates, guint64 source_epoch = 0) {
   if (source_id >= 6) return;
   tracker_lowconf_candidate_frames.put(source_id, frame_num, pts_ns,
-      std::move(candidates));
+      std::move(candidates), source_epoch);
 }
 
 static std::vector<LowConfCandidate> tracker_take_lowconf_candidates(
-    guint source_id, gint frame_num, guint64 pts_ns) {
+    guint source_id, gint frame_num, guint64 pts_ns, guint64 source_epoch = 0) {
   if (source_id >= 6) return {};
-  auto result = tracker_lowconf_candidate_frames.take(source_id, frame_num, pts_ns);
+  auto result = tracker_lowconf_candidate_frames.take(source_id, frame_num, pts_ns,
+      source_epoch);
   if (!result) return {};
   return std::move(*result);
 }
@@ -318,7 +360,8 @@ static bool tracker_atomic_snapshot(guint source_id, gint frame_num, guint64 pts
     if (i) out << ',';
     out << "{\"camera_id\":\"CAM-" << std::setw(2) << std::setfill('0') << source_id + 1
         << "\",\"frame_num\":" << frame_num << ",\"pts_ns\":" << pts_ns
-        << ",\"proposal_index\":" << i << ",\"class_id\":0,\"confidence\":"
+        << ",\"proposal_index\":" << i << ",\"class_id\":0,\"component_id\":"
+        << d.component_id << ",\"confidence\":"
         << std::fixed << std::setprecision(6) << d.confidence << ",\"bbox\":["
         << d.left << ',' << d.top << ',' << d.left + d.width << ',' << d.top + d.height << "],"
         << "\"bbox_coordinate_space\":\"pipeline\",\"bbox_coordinate_width\":" << proposal_width
@@ -921,12 +964,109 @@ static void tracker_apply_active_birth_verification(
         }
         if (decision && decision->verifier_done && decision->verifier_no_local_person)
           tracker_birth_verification.reject(source_id, row.id,
-              static_cast<std::uint32_t>(frame_num));
+              static_cast<std::uint32_t>(frame_num), decision->left,
+              decision->top, decision->width, decision->height);
         const bool reject = require_positive &&
             (!decision || !decision->verifier_done || !decision->verifier_confirmed);
         if (reject) ++tracker_counters[source_id].active_birth_verifier_withheld;
         return reject || tracker_birth_verification.rejected(source_id, row.id);
       }), published->end());
+}
+
+// A context crop for a new native ID can contain the existing person and nearby
+// people. When the current verifier proposals strongly and uniquely assign one
+// instance to an already-established track, do not publish a second new ID
+// that only weakly claims that same context instance. The candidate is
+// canonical-only: PGIE rows and NvDCF input/state are untouched. Every
+// ambiguous or incomplete case fails open.
+static void tracker_apply_cross_id_context_duplicate_filter(
+    guint source_id, guint64 source_epoch, gint frame_num, guint64 pts_ns,
+    bool exact_previous_frame_available, guint frame_width, guint frame_height,
+    std::vector<PublishedTrack> *published,
+    const std::vector<LowConfCandidate> &verifier_results,
+    const std::vector<ShadowCandidate> &shadows) {
+  if (!published || source_id >= 6 || frame_num < 0) return;
+  std::vector<CrossIdTrack> tracks;
+  tracks.reserve(published->size());
+  for (const auto &row : *published)
+    tracks.push_back({row.id,
+        {row.left, row.top, row.width, row.height}, row.active_previous_frame});
+
+  std::vector<CrossIdBirthContext> births;
+  births.reserve(verifier_results.size());
+  for (const auto &candidate : verifier_results) {
+    if (!candidate.active_track_birth || !candidate.active_track_id_assigned ||
+        !candidate.verifier_done || !candidate.verifier_confirmed ||
+        candidate.source_frame_num != frame_num || candidate.source_pts_ns != pts_ns ||
+        candidate.source_epoch != source_epoch ||
+        candidate.verifier_boxes.empty()) continue;
+    CrossIdBirthContext birth;
+    birth.candidate_id = candidate.native_track_id;
+    birth.verifier_confirmed = candidate.verifier_confirmed;
+    birth.proposals.reserve(candidate.verifier_boxes.size());
+    for (const auto &box : candidate.verifier_boxes)
+      birth.proposals.push_back({box.confidence,
+          {box.left, box.top, box.width, box.height}});
+    births.push_back(std::move(birth));
+  }
+  const auto decisions = cross_id_context_duplicate_birth_batch(
+      source_id, source_epoch, source_epoch, frame_num, frame_num,
+      pts_ns, pts_ns, exact_previous_frame_available, tracks, births,
+      static_cast<float>(frame_width), static_cast<float>(frame_height));
+  for (const auto &decision : decisions) {
+    if (!decision.suppress_candidate) continue;
+    const auto candidate_track = std::find_if(tracks.begin(), tracks.end(),
+        [&](const CrossIdTrack &track) { return track.id == decision.candidate_id; });
+    const auto owner_track = std::find_if(tracks.begin(), tracks.end(),
+        [&](const CrossIdTrack &track) { return track.id == decision.owner_id; });
+    if (candidate_track == tracks.end() || owner_track == tracks.end() ||
+        !tracker_cross_id_duplicate_ledger.link(source_id, source_epoch, frame_num,
+            *candidate_track, *owner_track)) continue;
+    if (tracker_decision_evidence) {
+      char line[768];
+      const int n = std::snprintf(line, sizeof(line),
+          "{\"event\":\"cross_id_context_duplicate\",\"camera_id\":\"CAM-%02u\","
+          "\"frame\":%d,\"pts_ns\":%lu,\"source_epoch\":%lu,"
+          "\"candidate_native_id\":%lu,\"owner_native_id\":%lu,"
+          "\"context_proposal_index\":%zu,\"owner_context_iou\":%.6f,"
+          "\"candidate_context_iou\":%.6f,\"context_iou_margin\":%.6f,"
+          "\"candidate_owner_area_ratio\":%.6f,\"decision\":\"LINK_PENDING_CONTINUITY\"}\n",
+          source_id + 1, frame_num, pts_ns, source_epoch,
+          decision.candidate_id, decision.owner_id, decision.proposal_index,
+          decision.owner_proposal_iou, decision.candidate_proposal_iou,
+          decision.proposal_iou_margin, decision.candidate_owner_area_ratio);
+      if (n > 0 && static_cast<size_t>(n) < sizeof(line))
+        tracker_write_line(tracker_decision_evidence, line, static_cast<size_t>(n));
+    }
+  }
+
+  std::unordered_map<guint64, CrossIdRect> shadow_tracks;
+  shadow_tracks.reserve(shadows.size());
+  for (const auto &shadow : shadows)
+    shadow_tracks.emplace(shadow.id,
+        CrossIdRect{shadow.left, shadow.top, shadow.width, shadow.height});
+  const auto filtered = tracker_cross_id_duplicate_ledger.filter_frame(
+      source_id, source_epoch, frame_num, tracks, shadow_tracks);
+  if (filtered.suppressed_ids.empty()) return;
+  const std::unordered_set<guint64> suppressed(filtered.suppressed_ids.begin(),
+      filtered.suppressed_ids.end());
+  published->erase(std::remove_if(published->begin(), published->end(),
+      [&](const PublishedTrack &row) { return suppressed.count(row.id) != 0; }),
+      published->end());
+  tracker_counters[source_id].cross_id_context_duplicate_outputs_suppressed +=
+      filtered.suppressed_ids.size();
+  if (tracker_decision_evidence) {
+    for (const auto id : filtered.suppressed_ids) {
+      char line[384];
+      const int n = std::snprintf(line, sizeof(line),
+          "{\"event\":\"cross_id_context_duplicate\",\"camera_id\":\"CAM-%02u\","
+          "\"frame\":%d,\"pts_ns\":%lu,\"source_epoch\":%lu,"
+          "\"candidate_native_id\":%lu,\"decision\":\"SUPPRESS_CANONICAL_CONTINUATION\"}\n",
+          source_id + 1, frame_num, pts_ns, source_epoch, id);
+      if (n > 0 && static_cast<size_t>(n) < sizeof(line))
+        tracker_write_line(tracker_decision_evidence, line, static_cast<size_t>(n));
+    }
+  }
 }
 
 static void tracker_schedule_shadow_context_before_nvdcf(
@@ -937,7 +1077,8 @@ static void tracker_schedule_shadow_context_before_nvdcf(
   const guint source_id = frame->source_id;
   const guint frame_width = tracker_bbox_coordinate_extent(frame, true);
   const guint frame_height = tracker_bbox_coordinate_extent(frame, false);
-  const LowConfFrameKey key{source_id, frame->frame_num, frame->buf_pts};
+  const LowConfFrameKey key{source_id, frame->frame_num, frame->buf_pts,
+      tracker_source_epoch_for_id(source_id)};
   std::unordered_map<guint64, ActiveStamp> prior_active;
   {
     std::lock_guard<std::mutex> guard(tracker_previous_active_mutex[source_id]);
@@ -1051,11 +1192,13 @@ static GstPadProbeReturn tracker_enter(GstPad*, GstPadProbeInfo *info, gpointer)
     auto *frame = static_cast<NvDsFrameMeta*>(node->data);
     if (!frame || frame->source_id >= 6 || frame->frame_num < 0 ||
         frame->buf_pts == GST_CLOCK_TIME_NONE) continue;
+    tracker_reset_temporal_state_for_epoch(frame->source_id);
+    const guint64 source_epoch = tracker_source_epoch_for_id(frame->source_id);
     const size_t slot_index = static_cast<size_t>(frame->frame_num) % TRACKER_INPUT_STAMP_CAPACITY;
     {
       std::lock_guard<std::mutex> guard(tracker_input_stamp_mutex[frame->source_id]);
       tracker_input_stamps[frame->source_id][slot_index] = {
-          frame->frame_num, frame->buf_pts, now_ns};
+          frame->frame_num, frame->buf_pts, now_ns, source_epoch};
     }
     tracker_schedule_shadow_context_before_nvdcf(buffer, frame);
   }
@@ -1083,32 +1226,63 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
       return GST_PAD_PROBE_DROP;
     }
     auto &counter = tracker_counters[frame->source_id];
+    guint64 entered_epoch = 0;
+    bool exact_enter_stamp = false;
     {
       const size_t slot_index = static_cast<size_t>(frame->frame_num) % TRACKER_INPUT_STAMP_CAPACITY;
       std::lock_guard<std::mutex> guard(tracker_input_stamp_mutex[frame->source_id]);
-      const auto &stamp = tracker_input_stamps[frame->source_id][slot_index];
+      auto &stamp = tracker_input_stamps[frame->source_id][slot_index];
       if (stamp.frame_num == frame->frame_num && stamp.pts_ns == frame->buf_pts &&
-          stamp.entered_ns && callback_start_ns >= stamp.entered_ns) {
+          stamp.entered_ns) {
+        exact_enter_stamp = true;
+        entered_epoch = stamp.source_epoch;
+      }
+      if (exact_enter_stamp && stamp.entered_ns && callback_start_ns >= stamp.entered_ns) {
         tracker_element_latency[frame->source_id].add(callback_start_ns - stamp.entered_ns);
-        tracker_input_stamps[frame->source_id][slot_index] = {};
       } else {
         ++tracker_input_stamp_misses[frame->source_id];
       }
+      if (exact_enter_stamp) stamp = {};
     }
+    const guint64 current_source_epoch = tracker_source_epoch_for_id(frame->source_id);
+    if (exact_enter_stamp && entered_epoch != current_source_epoch) {
+      tracker_reset_temporal_state_for_epoch(frame->source_id);
+      ++counter.reconnect_epoch_stale_frames;
+      g_print("TRACKER_RECONNECT_EPOCH_STALE_FRAME source=%u frame=%d pts=%" G_GUINT64_FORMAT
+          " entered_epoch=%" G_GUINT64_FORMAT " current_epoch=%" G_GUINT64_FORMAT
+          " action=withhold_canonical_output\n", frame->source_id, frame->frame_num,
+          frame->buf_pts, entered_epoch, current_source_epoch);
+      continue;
+    }
+    tracker_reset_temporal_state_for_epoch(frame->source_id);
     ++counter.frames;
     std::unordered_set<guint64> frame_ids;
     std::unordered_set<guint64> current_active_ids;
     std::vector<PublishedTrack> published;
+    std::vector<TrackerOutputBox> previous_active_boxes;
+    const bool exact_previous_frame_available = frame->frame_num > 0 &&
+        tracker_previous_active_frame[frame->source_id] == frame->frame_num - 1;
+    if (frame->frame_num > 0) {
+      std::lock_guard<std::mutex> guard(tracker_previous_active_mutex[frame->source_id]);
+      for (const auto &entry : tracker_previous_active_boxes[frame->source_id]) {
+        if (entry.second.frame_num + 1 != static_cast<guint32>(frame->frame_num)) continue;
+        previous_active_boxes.push_back({entry.first, entry.second.frame_num,
+            entry.second.left, entry.second.top, entry.second.width, entry.second.height});
+      }
+    }
     const guint64 shadow_scan_start_ns = static_cast<guint64>(g_get_monotonic_time()) * 1000;
     std::vector<ShadowCandidate> shadows = tracker_current_shadows(batch, frame);
     const guint64 shadow_scan_done_ns = static_cast<guint64>(g_get_monotonic_time()) * 1000;
     tracker_shadow_scan_latency[frame->source_id].add(shadow_scan_done_ns - shadow_scan_start_ns);
     tracker_log_frame_state(frame, shadows);
     std::vector<TrackerDetection> detections;
-    detections = tracker_take_detections(frame->source_id, frame->frame_num, frame->buf_pts);
-    const LowConfFrameKey lowconf_key{frame->source_id, frame->frame_num, frame->buf_pts};
+    detections = tracker_take_detections(frame->source_id, frame->frame_num,
+        frame->buf_pts, current_source_epoch);
+    const LowConfFrameKey lowconf_key{frame->source_id, frame->frame_num,
+        frame->buf_pts, current_source_epoch};
     std::vector<LowConfCandidate> lowconf_sidecars = context_verifier_enabled()
-        ? tracker_take_lowconf_candidates(frame->source_id, frame->frame_num, frame->buf_pts)
+        ? tracker_take_lowconf_candidates(frame->source_id, frame->frame_num,
+            frame->buf_pts, current_source_epoch)
         : std::vector<LowConfCandidate>{};
 
     for (NvDsMetaList *on = frame->obj_meta_list; on; on = on->next) {
@@ -1146,6 +1320,11 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
       }
       PublishedTrack row;
       row.id = obj->object_id;
+      row.active_previous_frame = std::any_of(previous_active_boxes.begin(),
+          previous_active_boxes.end(), [&](const TrackerOutputBox &previous) {
+            return previous.id == row.id &&
+                previous.frame_num + 1 == static_cast<guint32>(frame->frame_num);
+          });
       row.tracker_confidence = obj->tracker_confidence;
       row.left = r.left; row.top = r.top; row.width = r.width; row.height = r.height;
       if (obj->unique_component_id == TRACKER_AUXILIARY_GIE_ID)
@@ -1160,6 +1339,63 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
       row.requires_birth_verification = active_track_verifier_enabled() ||
           tracker_auxiliary_target_ids[frame->source_id].count(obj->object_id) != 0;
       published.push_back(row);
+    }
+
+    // NvDCF's output metadata has been observed to carry the same native ID on
+    // two spatially separate objects in one frame. Preserve raw rows above for
+    // diagnosis, but do not pass an invalid duplicate-ID frame into canonical
+    // association/publication. Resolve only a unique immediate-frame geometry
+    // continuation; ambiguous groups are withheld rather than arbitrarily
+    // choosing one or inventing a new ID.
+    std::vector<TrackerOutputBox> current_active_boxes;
+    current_active_boxes.reserve(published.size());
+    for (const auto &row : published)
+      current_active_boxes.push_back({row.id, static_cast<guint32>(frame->frame_num),
+          row.left, row.top, row.width, row.height});
+    const auto output_dedupe = dedupe_tracker_outputs_by_id_continuity(
+        current_active_boxes, previous_active_boxes);
+    if (output_dedupe.keep_indices.size() != published.size()) {
+      std::vector<PublishedTrack> unique_published;
+      unique_published.reserve(output_dedupe.keep_indices.size());
+      for (const auto index : output_dedupe.keep_indices)
+        if (index < published.size()) unique_published.push_back(published[index]);
+      tracker_counters[frame->source_id].duplicate_track_outputs_suppressed +=
+          published.size() - unique_published.size();
+      published = std::move(unique_published);
+      current_active_ids.clear();
+      for (const auto &row : published) current_active_ids.insert(row.id);
+    }
+    tracker_counters[frame->source_id].duplicate_track_output_groups_withheld +=
+        output_dedupe.withheld_ambiguous_ids.size();
+    if (tracker_decision_evidence) {
+      for (const auto &suppression : output_dedupe.suppressions) {
+        const auto &suppressed = current_active_boxes[suppression.suppressed_index];
+        const auto &retained = current_active_boxes[suppression.retained_index];
+        char line[768];
+        const int n = std::snprintf(line, sizeof(line),
+            "{\"event\":\"duplicate_tracker_output\",\"camera_id\":\"CAM-%02u\","
+            "\"frame\":%d,\"pts_ns\":%lu,\"native_id\":%lu,"
+            "\"decision\":\"SUPPRESS_NONCONTINUOUS_DUPLICATE\","
+            "\"retained_bbox_xywh\":[%.3f,%.3f,%.3f,%.3f],"
+            "\"suppressed_bbox_xywh\":[%.3f,%.3f,%.3f,%.3f],"
+            "\"retained_previous_iou\":%.6f,\"suppressed_previous_iou\":%.6f}\n",
+            frame->source_id + 1, frame->frame_num, frame->buf_pts, suppression.id,
+            retained.left, retained.top, retained.width, retained.height,
+            suppressed.left, suppressed.top, suppressed.width, suppressed.height,
+            suppression.retained_previous_iou, suppression.suppressed_previous_iou);
+        if (n > 0 && static_cast<size_t>(n) < sizeof(line))
+          tracker_write_line(tracker_decision_evidence, line, static_cast<size_t>(n));
+      }
+      for (const auto id : output_dedupe.withheld_ambiguous_ids) {
+        char line[320];
+        const int n = std::snprintf(line, sizeof(line),
+            "{\"event\":\"duplicate_tracker_output\",\"camera_id\":\"CAM-%02u\","
+            "\"frame\":%d,\"pts_ns\":%lu,\"native_id\":%lu,"
+            "\"decision\":\"WITHHOLD_AMBIGUOUS_DUPLICATE_ID_GROUP\"}\n",
+            frame->source_id + 1, frame->frame_num, frame->buf_pts, id);
+        if (n > 0 && static_cast<size_t>(n) < sizeof(line))
+          tracker_write_line(tracker_decision_evidence, line, static_cast<size_t>(n));
+      }
     }
 
     // Match detections to active objects with the approved v4 greedy IoU gate.
@@ -1216,11 +1452,17 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
             static_cast<size_t>(row.detection_index) >= detections.size()) continue;
         const auto state = tracker_birth_verification.state(frame->source_id, row.id);
         if (state == TrackBirthVerificationLedger::State::Verified ||
-            state == TrackBirthVerificationLedger::State::Pending ||
-            state == TrackBirthVerificationLedger::State::Rejected) continue;
-        if (!tracker_birth_verification.begin(frame->source_id, row.id,
-                static_cast<std::uint32_t>(frame->frame_num))) continue;
+            state == TrackBirthVerificationLedger::State::Pending) continue;
         const auto &detection = detections[static_cast<size_t>(row.detection_index)];
+        const bool geometry_recheck = state == TrackBirthVerificationLedger::State::Rejected;
+        const bool began = geometry_recheck
+            ? tracker_birth_verification.begin_geometry_recheck(
+                frame->source_id, row.id, frame->frame_num,
+                detection.left, detection.top, detection.width, detection.height,
+                0.30f, 5)
+            : tracker_birth_verification.begin(frame->source_id, row.id,
+                static_cast<std::uint32_t>(frame->frame_num));
+        if (!began) continue;
         LowConfCandidate candidate;
         candidate.confidence = detection.confidence;
         candidate.left = detection.left; candidate.top = detection.top;
@@ -1237,8 +1479,12 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
           // A queue/correlation failure is not a negative appearance result.
           // Keep the target unpublished and allow one controlled retry rather
           // than leaving its birth ledger permanently pending.
-          tracker_birth_verification.cancel(frame->source_id, row.id,
-              frame->frame_num, 1);
+          if (geometry_recheck)
+            tracker_birth_verification.cancel_geometry_recheck(frame->source_id,
+                row.id, frame->frame_num, 1);
+          else
+            tracker_birth_verification.cancel(frame->source_id, row.id,
+                frame->frame_num, 1);
         }
       }
     }
@@ -1298,7 +1544,8 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
     std::unordered_set<guint64> active_ids;
     for (const auto &row : published) active_ids.insert(row.id);
     if (active_track_verifier_enabled()) {
-      for (const auto &decision : lowconf_verifier_take_completed_active(frame->source_id)) {
+      for (const auto &decision : lowconf_verifier_take_completed_active(
+              frame->source_id, current_source_epoch)) {
         const gint age = frame->frame_num - decision.request_frame_num;
         const bool recent = age >= 0 && age <= 20;
         const bool target_current = active_ids.count(decision.native_track_id) != 0 ||
@@ -1312,7 +1559,8 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
           ++counter.active_birth_verifier_confirmed;
         } else if (applicable && decision.definitive_no_local_person) {
           tracker_birth_verification.reject(frame->source_id, decision.native_track_id,
-              static_cast<std::uint32_t>(frame->frame_num));
+              static_cast<std::uint32_t>(frame->frame_num), decision.bbox_left,
+              decision.bbox_top, decision.bbox_width, decision.bbox_height);
           ++counter.active_birth_verifier_withheld;
         } else {
           ++counter.active_birth_verifier_withheld;
@@ -1471,10 +1719,16 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
     // match may consume the measured verifier deadline; the NvDCF streaming
     // callback itself never waits for appearance inference.
     auto finalize = [source_id, tracker_frame_num, pts_ns, monotonic_ns, epoch_ns,
-        source_frame_num, width, height, proposal_width, proposal_height, tracker_ready_ns,
+        current_source_epoch,
+        exact_previous_frame_available, source_frame_num, width, height,
+        proposal_width, proposal_height, tracker_ready_ns,
         published = std::move(published), detections = std::move(detections),
         shadows = std::move(shadows), shadow_refresh_ids = std::move(shadow_refresh_ids)]
         (std::vector<LowConfCandidate> verified_lowconf) mutable {
+      if (tracker_source_epoch_for_id(source_id) != current_source_epoch) {
+        ++tracker_counters[source_id].reconnect_epoch_stale_frames;
+        return;
+      }
       tracker_apply_active_birth_verification(source_id, tracker_frame_num,
           pts_ns, &published, verified_lowconf);
       tracker_apply_verified_lowconf(source_id, tracker_frame_num, pts_ns, &published,
@@ -1482,6 +1736,15 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
       tracker_apply_verified_shadow_context(source_id, tracker_frame_num, pts_ns,
           proposal_width, proposal_height, &published, verified_lowconf, shadows,
           shadow_refresh_ids);
+      // Resolve linked duplicate IDs after all current-frame canonical rows
+      // have been assembled. An INACTIVE linked target may contribute a
+      // current PGIE fallback row; filtering before fallback creation misses
+      // that visible duplicate. The filter still receives only current
+      // canonical rows plus explicit shadow metadata, never shadow geometry.
+      tracker_apply_cross_id_context_duplicate_filter(source_id,
+          current_source_epoch, tracker_frame_num, pts_ns,
+          exact_previous_frame_available, proposal_width, proposal_height,
+          &published, verified_lowconf, shadows);
       std::string frame_snapshot;
       if (!tracker_atomic_snapshot(source_id, tracker_frame_num, pts_ns,
               monotonic_ns, epoch_ns, source_frame_num, width, height,
@@ -1641,17 +1904,22 @@ static void tracker_stats() {
     }
     g_print(
         "CAM-%02d TRACK frames=%lu objects=%lu untracked=%lu "
-        "duplicate_ids=%lu unique_ids=%lu canonical_objects=%lu fallbacks=%lu verified_lowconf_fallbacks=%lu trusted_track_lowconf_fallbacks=%lu active_birth_verified=%lu active_birth_withheld=%lu ambiguous=%lu invalid_shadow_geometry=%lu\n",
+        "duplicate_ids=%lu duplicate_track_outputs_suppressed=%lu duplicate_track_output_groups_withheld=%lu reconnect_epoch_stale_frames=%lu "
+        "unique_ids=%lu canonical_objects=%lu fallbacks=%lu verified_lowconf_fallbacks=%lu trusted_track_lowconf_fallbacks=%lu active_birth_verified=%lu active_birth_withheld=%lu cross_id_context_duplicate_outputs_suppressed=%lu ambiguous=%lu invalid_shadow_geometry=%lu\n",
         i + 1,
         tracker_counters[i].frames.load(),
         tracker_counters[i].objects.load(),
         tracker_counters[i].untracked.load(),
         tracker_counters[i].duplicate_ids.load(),
+        tracker_counters[i].duplicate_track_outputs_suppressed.load(),
+        tracker_counters[i].duplicate_track_output_groups_withheld.load(),
+        tracker_counters[i].reconnect_epoch_stale_frames.load(),
         unique, tracker_counters[i].canonical_objects.load(), tracker_counters[i].fallbacks.load(),
         tracker_counters[i].verified_lowconf_fallbacks.load(),
         tracker_counters[i].trusted_track_lowconf_fallbacks.load(),
         tracker_counters[i].active_birth_verifier_confirmed.load(),
         tracker_counters[i].active_birth_verifier_withheld.load(),
+        tracker_counters[i].cross_id_context_duplicate_outputs_suppressed.load(),
         tracker_counters[i].ambiguous_matches.load(),
         tracker_counters[i].invalid_shadow_geometry.load());
     g_print("CAM-%02d TRACK_LATENCY element_ms_p50=%.3f element_ms_p95=%.3f element_ms_p99=%.3f element_ms_max=%.3f shadow_scan_ms_p50=%.3f shadow_scan_ms_p95=%.3f shadow_scan_ms_p99=%.3f callback_to_metadata_ms_p50=%.3f callback_to_metadata_ms_p95=%.3f callback_to_metadata_ms_p99=%.3f input_stamp_misses=%lu\n",

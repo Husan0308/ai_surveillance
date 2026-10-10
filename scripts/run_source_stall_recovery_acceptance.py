@@ -214,6 +214,13 @@ def camera_snapshot(camera_id: str, monitor_row: dict, reader: PreviewFrameReade
         "queue_depth": int(monitor_row.get("queue_depth", -1)),
         "queue_high_water": int(monitor_row.get("queue_high_water", -1)),
         "reconnects": int(monitor_row.get("reconnects", 0)),
+        "rtsp_reconnect_attempts": int(monitor_row.get("rtsp_reconnect_attempts", 0)),
+        "source_stall_recoveries": int(monitor_row.get(
+            "source_stall_recoveries", monitor_row.get("reconnects", 0))),
+        "input_pts_resets": int(monitor_row.get("input_pts_resets", 0)),
+        "decoded_pts_resets": int(monitor_row.get("decoded_pts_resets", 0)),
+        "decoder_max_interframe_gap_ms": float(
+            monitor_row.get("decoder_max_interframe_gap_ms", 0.0)),
         "pipeline_errors": int(monitor_row.get("pipeline_errors", 0)),
         "preview": preview_info,
         "preview_read_attempts": preview_read_attempts,
@@ -285,6 +292,39 @@ def capture_recovered_preview(camera_id: str, reader: PreviewFrameReader) -> dic
         "payload_max": max(payload) if payload else None,
         "payload_mean": sum(payload) / len(payload) if payload else None,
     }
+
+
+def last_fresh_preview_sample_before(observations: list[dict], sample_index: int,
+                                     camera_id: str) -> dict | None:
+    """Return the last valid preview before an interruption marker.
+
+    A controlled source stall can invalidate the shared preview before its
+    TEST_SOURCE_STALL_BEGIN event is observed by the polling loop. In that
+    case the event-index sample is intentionally not a usable pre-stall
+    baseline. Use the nearest earlier, fresh, internally synchronized sample
+    instead; never compare against a preview published after the interruption.
+    """
+    for sample in reversed(observations[:sample_index]):
+        camera = (sample.get("cameras") or {}).get(camera_id) or {}
+        preview = camera.get("preview")
+        if not (
+            sample.get("ready") is True
+            and preview
+            and preview.get("age_ms", float("inf")) <= 1000.0
+            and preview.get("embedded_metadata_matches") is True
+            and camera.get("image_bbox_sync") is True
+            and camera.get("independent_latest_snapshot_matches_preview") is True
+        ):
+            continue
+        return {
+            "sample_index": sample.get("sample_index"),
+            "sequence": preview.get("sequence"),
+            "source_frame_num": preview.get("source_frame_num"),
+            "tracker_frame_num": preview.get("tracker_frame_num"),
+            "pts_ns": preview.get("pts_ns"),
+            "age_ms": preview.get("age_ms"),
+        }
+    return None
 
 
 def recovery_cycles(events: list[dict], expected_plan: list[dict]) -> list[dict]:
@@ -538,13 +578,15 @@ def run(output: Path, candidate: Path, duration_limit: int, plan_text: str) -> i
                 "independent_latest_snapshot_matches_preview"]
             cycle["zero_pipeline_errors_at_pass"] = target_after["pipeline_errors"] == 0
             cycle["target_reconnect_count_at_pass"] = target_after["reconnects"]
+            cycle["target_source_stall_recovery_count_at_pass"] = target_after[
+                "source_stall_recoveries"]
             cycle["expected_recovery_count"] = expected_recovery_count
             cycle["recovery_count_in_native_pass_event"] = event_detail_int(rows[-1], "recovery_count")
             cycle["passed"] = bool(
                 cycle["event_order_pass"] and target_progress and all(peer_progress.values())
                 and cycle["max_socket_count_during_test"] <= 6 and cycle["socket_count_at_pass"] == 6
                 and cycle["exact_preview_tracker_sync_at_pass"] and cycle["zero_pipeline_errors_at_pass"]
-                and cycle["target_reconnect_count_at_pass"] == expected_recovery_count
+                and cycle["target_source_stall_recovery_count_at_pass"] == expected_recovery_count
                 and cycle["recovery_count_in_native_pass_event"] == expected_recovery_count
             )
         # Each event contains its own pixel capture, sampled immediately when
@@ -556,11 +598,18 @@ def run(output: Path, candidate: Path, duration_limit: int, plan_text: str) -> i
             capture = cycle["events"][-1].get("post_recovery_pixel_capture")
             cycle["post_recovery_pixel_capture"] = capture
             begin_index = int(cycle["events"][0]["sample_index"])
-            before_preview = observations[begin_index]["cameras"][target].get("preview")
-            if capture and before_preview:
-                capture["sequence_advanced_since_stall"] = capture["sequence"] > before_preview["sequence"]
+            baseline = last_fresh_preview_sample_before(observations, begin_index, target)
+            cycle["pre_stall_preview_baseline"] = baseline
+            if capture and baseline:
+                capture["sequence_advanced_since_stall"] = capture["sequence"] > baseline["sequence"]
+                capture["source_frame_advanced_since_stall"] = (
+                    capture["source_frame_num"] > baseline["source_frame_num"]
+                )
+                capture["pts_advanced_since_stall"] = capture["pts_ns"] > baseline["pts_ns"]
             cycle["passed"] = bool(cycle.get("passed") and capture and capture["image_bbox_sync"]
                                     and capture.get("sequence_advanced_since_stall")
+                                    and capture.get("source_frame_advanced_since_stall")
+                                    and capture.get("pts_advanced_since_stall")
                                     and capture.get("age_ms", 1e9) <= 1000
                                     and not capture["payload_all_zero"])
         if stop_sent and proc.poll() is None:
@@ -590,7 +639,8 @@ def run(output: Path, candidate: Path, duration_limit: int, plan_text: str) -> i
         expected_final_reconnects = {camera: (3 if camera == "CAM-02" else 1 if camera == "CAM-03" else 0)
                                      for camera in CAMERAS}
         final_reconnect_counts_exact = all(
-            int(final_cameras.get(camera, {}).get("reconnects", -1)) == expected
+            int(final_cameras.get(camera, {}).get("source_stall_recoveries",
+                final_cameras.get(camera, {}).get("reconnects", -1))) == expected
             for camera, expected in expected_final_reconnects.items()
         )
         qualified_observations = [sample for sample in observations if sample["ready"]]

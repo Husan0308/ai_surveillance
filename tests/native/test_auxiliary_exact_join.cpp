@@ -26,6 +26,18 @@ int main() {
   auto exact = join.take_until(a, std::chrono::steady_clock::now() + 1ms);
   assert(exact.status == Join::WaitStatus::Ready && exact.values == std::vector<int>({7, 8}));
 
+  // A post-reconnect source epoch cannot consume a pre-reconnect auxiliary
+  // inference result even if local frame and PTS values are reused.
+  const AuxiliaryJoinKey old_epoch{0, 4, 400, 8};
+  const AuxiliaryJoinKey new_epoch{0, 4, 400, 9};
+  assert(join.publish(old_epoch, {4}).accepted);
+  assert(join.take_until(new_epoch,
+      std::chrono::steady_clock::now() + 1ms).status == Join::WaitStatus::Timeout);
+  auto old_epoch_result = join.take_until(old_epoch,
+      std::chrono::steady_clock::now() + 1ms);
+  assert(old_epoch_result.status == Join::WaitStatus::Ready &&
+      old_epoch_result.values == std::vector<int>({4}));
+
   // A bounded timeout fails closed while a producer can still wake an exact waiter.
   const AuxiliaryJoinKey c{0, 12, 1200};
   std::thread producer([&] {

@@ -115,6 +115,7 @@ static ParserCount parser_errors, parser_rejected, parser_calls, parser_proposal
 static FILE *detection_evidence = nullptr, *frame_evidence = nullptr;
 static FILE *lowconf_candidate_evidence = nullptr;
 static FILE *proposal_duplicate_evidence = nullptr;
+static std::atomic<guint64> history_supported_duplicate_suppressed{0};
 static GQuark infer_stamp;
 
 static void auxiliary_queue_overrun(GstElement *, gpointer opaque) {
@@ -149,7 +150,8 @@ static GstPadProbeReturn auxiliary_sparse_preprocess_gate(
   for (auto *node = batch_meta->frame_meta_list; node; node = node->next) {
     auto *frame = static_cast<NvDsFrameMeta *>(node->data);
     if (!frame) continue;
-    const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts};
+    const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts,
+        source_tracking_epoch_current(frame->source_id)};
     auto result = auxiliary_exact_join.publish(key, std::vector<AuxiliaryProposal>{});
     if (!result.accepted) {
       auxiliary_sparse_skip_join_errors.fetch_add(1, std::memory_order_relaxed);
@@ -207,7 +209,8 @@ static GstPadProbeReturn auxiliary_infer_observer(GstPad *, GstPadProbeInfo *inf
         proposals.push_back({object->confidence, rect.left, rect.top, rect.width, rect.height});
       }
     }
-    const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts};
+    const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts,
+        source_tracking_epoch_current(frame->source_id)};
     const auto result = auxiliary_exact_join.publish(key, std::move(proposals));
     if (!result.accepted) {
       g_printerr("AUX_EXACT_JOIN_PUBLISH_REJECT source=%u frame=%u pts=%" G_GUINT64_FORMAT "\n",
@@ -268,7 +271,8 @@ static GstPadProbeReturn auxiliary_exact_join_before_tracker(
   for (auto *frame_node = batch_meta->frame_meta_list; frame_node; frame_node = frame_node->next) {
     auto *frame = static_cast<NvDsFrameMeta *>(frame_node->data);
     if (!frame || frame->source_id >= 6) continue;
-    const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts};
+    const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts,
+        source_tracking_epoch_current(frame->source_id)};
     auto result = auxiliary_exact_join.take_until(key, deadline);
     if (result.status != AuxiliaryExactJoin<AuxiliaryProposal, 6, 64>::WaitStatus::Ready) {
       ++timeout_frames;
@@ -1102,13 +1106,16 @@ static void suppress_same_component_person_duplicates(NvDsFrameMeta *frame) {
       const auto &k = retained->rect_params;
       std::fprintf(proposal_duplicate_evidence,
           "{\"camera_id\":\"CAM-%02u\",\"frame_num\":%d,\"pts_ns\":%lu,"
-          "\"component_id\":%u,\"decision\":\"SUPPRESS_LOWER_CONFIDENCE_NESTED_DUPLICATE\","
+          "\"component_id\":%u,\"decision\":\"SUPPRESS_NESTED_PERSON_DUPLICATE\","
+          "\"selection_rule\":\"%s\","
           "\"suppressed_confidence\":%.6f,\"suppressed_bbox_xywh\":[%.3f,%.3f,%.3f,%.3f],"
           "\"retained_confidence\":%.6f,\"retained_bbox_xywh\":[%.3f,%.3f,%.3f,%.3f],"
           "\"iou\":%.6f,\"containment\":%.6f,\"center_over_max_height\":%.6f,"
           "\"width_ratio\":%.6f,\"height_ratio\":%.6f}\n",
           frame->source_id + 1, frame->frame_num, frame->buf_pts,
-          suppressed->unique_component_id, suppressed->confidence,
+          suppressed->unique_component_id,
+          decision.retained_tighter_geometry ? "TIGHTER_GEOMETRY" : "HIGHER_CONFIDENCE",
+          suppressed->confidence,
           s.left, s.top, s.width, s.height, retained->confidence,
           k.left, k.top, k.width, k.height, decision.metrics.iou,
           decision.metrics.containment, decision.metrics.center_over_max_height,
@@ -1119,11 +1126,93 @@ static void suppress_same_component_person_duplicates(NvDsFrameMeta *frame) {
   }
 }
 
+// Suppress an NMS-surviving duplicate only when both current proposals point
+// unambiguously to the same ACTIVE target in the immediately preceding source
+// frame and one proposal has a materially stronger overlap with that target's
+// previous geometry. Missing/stale epoch history and ambiguous associations
+// fail open. Low-confidence sidecars are deliberately excluded; this does not
+// alter the frozen >=0.25 NvDCF input except for a proven duplicate proposal.
+static void suppress_previous_track_supported_duplicates(
+    NvDsFrameMeta *frame, guint64 source_epoch) {
+  if (!frame || frame->source_id >= 6 || frame->frame_num <= 0) return;
+
+  std::vector<PersonProposalHistoryTarget> previous_targets;
+  {
+    const guint source = frame->source_id;
+    std::lock_guard<std::mutex> epoch_guard(tracker_source_epoch_mutex[source]);
+    if (tracker_observed_source_epoch[source] != source_epoch ||
+        source_tracking_epoch_current(source) != source_epoch) return;
+    std::lock_guard<std::mutex> active_guard(tracker_previous_active_mutex[source]);
+    const auto immediately_previous = static_cast<guint32>(frame->frame_num - 1);
+    previous_targets.reserve(tracker_previous_active_boxes[source].size());
+    for (const auto &entry : tracker_previous_active_boxes[source]) {
+      const auto &stamp = entry.second;
+      if (stamp.frame_num != immediately_previous) continue;
+      previous_targets.push_back({entry.first, stamp.frame_num, stamp.left,
+          stamp.top, stamp.width, stamp.height});
+    }
+  }
+  if (previous_targets.empty()) return;
+
+  std::vector<NvDsObjectMeta *> objects;
+  std::vector<PersonProposalBox> proposals;
+  for (NvDsMetaList *node = frame->obj_meta_list; node; node = node->next) {
+    auto *object = static_cast<NvDsObjectMeta *>(node->data);
+    if (!object || object->class_id != 0) continue;
+#if defined(YOLO26_AUXILIARY_896) || defined(YOLO26_AUXILIARY_DETECTOR)
+    if (object->unique_component_id != 1 &&
+        object->unique_component_id != TRACKER_AUXILIARY_GIE_ID) continue;
+#else
+    if (object->unique_component_id != 1) continue;
+#endif
+    const auto &rect = object->rect_params;
+    if (!std::isfinite(object->confidence) || object->confidence < 0.25f ||
+        object->confidence > 1.0f || !std::isfinite(rect.left) ||
+        !std::isfinite(rect.top) || !std::isfinite(rect.width) ||
+        !std::isfinite(rect.height) || rect.width <= 0 || rect.height <= 0)
+      continue;
+    objects.push_back(object);
+    proposals.push_back({static_cast<unsigned>(object->unique_component_id),
+        object->confidence, rect.left, rect.top, rect.width, rect.height});
+  }
+  const auto decisions = person_proposal_duplicates_supported_by_previous_tracks(
+      proposals, previous_targets, static_cast<std::uint32_t>(frame->frame_num));
+  for (const auto &decision : decisions) {
+    if (decision.suppressed_index >= objects.size() ||
+        decision.retained_index >= objects.size()) continue;
+    const auto *suppressed = objects[decision.suppressed_index];
+    const auto *retained = objects[decision.retained_index];
+    if (proposal_duplicate_evidence) {
+      const auto &s = suppressed->rect_params;
+      const auto &k = retained->rect_params;
+      std::fprintf(proposal_duplicate_evidence,
+          "{\"camera_id\":\"CAM-%02u\",\"frame_num\":%d,\"pts_ns\":%lu,"
+          "\"source_epoch\":%lu,\"decision\":\"SUPPRESS_TRACK_HISTORY_SUPPORTED_DUPLICATE\","
+          "\"previous_native_track_id\":%lu,\"suppressed_component_id\":%u,"
+          "\"suppressed_confidence\":%.6f,\"suppressed_bbox_xywh\":[%.3f,%.3f,%.3f,%.3f],"
+          "\"retained_component_id\":%u,\"retained_confidence\":%.6f,"
+          "\"retained_bbox_xywh\":[%.3f,%.3f,%.3f,%.3f],"
+          "\"pair_iou\":%.6f,\"pair_containment\":%.6f,"
+          "\"suppressed_previous_iou\":%.6f,\"retained_previous_iou\":%.6f}\n",
+          frame->source_id + 1, frame->frame_num, frame->buf_pts, source_epoch,
+          decision.target_id, suppressed->unique_component_id,
+          suppressed->confidence, s.left, s.top, s.width, s.height,
+          retained->unique_component_id, retained->confidence,
+          k.left, k.top, k.width, k.height, decision.pair_metrics.iou,
+          decision.pair_metrics.containment, decision.suppressed_history_iou,
+          decision.retained_history_iou);
+    }
+    nvds_remove_obj_meta_from_frame(frame, const_cast<NvDsObjectMeta *>(suppressed));
+    ++history_supported_duplicate_suppressed;
+  }
+}
+
 static bool auxiliary_duplicate_of_primary(
     const NvDsObjectMeta *auxiliary, const std::vector<std::array<float, 5>> &primary) {
   if (!auxiliary) return false;
   const auto &a = auxiliary->rect_params;
   size_t strong_matches = 0;
+  size_t nested_matches = 0;
   for (const auto &candidate : primary) {
     const float iou = tracker_iou(a.left, a.top, a.width, a.height,
         candidate[0], candidate[1], candidate[2], candidate[3]);
@@ -1136,10 +1225,27 @@ static bool auxiliary_duplicate_of_primary(
     const float center_limit = .25f * std::max(a.height, candidate[3]);
     if (iou >= .30f && center <= center_limit && width_ratio <= 2.0f && height_ratio <= 2.0f)
       ++strong_matches;
+    else {
+      PersonProposalDuplicateMetrics metrics;
+      const PersonProposalBox aux_box{1, auxiliary->confidence, a.left, a.top, a.width, a.height};
+      const PersonProposalBox primary_box{1, candidate[4], candidate[0], candidate[1],
+          candidate[2], candidate[3]};
+      if (person_proposal_duplicate_metrics(aux_box, primary_box, &metrics) &&
+          metrics.containment >= .99f && metrics.center_over_max_height <= .35f &&
+          metrics.center_over_max_width <= .30f &&
+          metrics.bottom_edge_delta_over_max_height <= .04f &&
+          metrics.width_ratio <= 2.40f && metrics.height_ratio <= 2.20f &&
+          std::fabs(auxiliary->confidence - candidate[4]) >= .05f)
+        ++nested_matches;
+    }
   }
   // One or more strong primary overlaps means retain the 640 proposal and
   // withhold the auxiliary candidate. This is conservative under ambiguity.
-  return strong_matches != 0;
+  if (strong_matches != 0) return true;
+  // For the high-containment extension, suppress only a single unambiguous
+  // primary match. Multiple nested primary candidates may be distinct nearby
+  // people, so fail open in that case.
+  return nested_matches == 1;
 }
 
 // The auxiliary branch receives a tee reference to the decoded buffer. Its
@@ -1240,6 +1346,7 @@ static GstPadProbeReturn infer_exit(GstPad*, GstPadProbeInfo *info, gpointer) {
     }
     const guint pgie_frame_width = tracker_bbox_coordinate_extent(frame, true);
     const guint pgie_frame_height = tracker_bbox_coordinate_extent(frame, false);
+    const guint64 source_epoch = source_tracking_epoch_current(frame->source_id);
     auto &c = detections[frame->source_id];
     ++c.frames; ++c.batches; ++infer_frames;
     ++source_pgie_frames[frame->source_id];
@@ -1247,8 +1354,10 @@ static GstPadProbeReturn infer_exit(GstPad*, GstPadProbeInfo *info, gpointer) {
     std::vector<TrackerDetection> tracker_detections;
     std::vector<LowConfCandidate> lowconf_sidecar;
     std::vector<std::array<float, 5>> primary_boxes;
-    const LowConfFrameKey lowconf_key{frame->source_id, frame->frame_num, frame->buf_pts};
+    const LowConfFrameKey lowconf_key{frame->source_id, frame->frame_num,
+        frame->buf_pts, source_epoch};
     suppress_same_component_person_duplicates(frame);
+    suppress_previous_track_supported_duplicates(frame, source_epoch);
     for (NvDsMetaList *scan = frame->obj_meta_list; scan; scan = scan->next) {
       auto *candidate = static_cast<NvDsObjectMeta*>(scan->data);
       if (!candidate || candidate->class_id != 0 || candidate->unique_component_id != 1) continue;
@@ -1390,9 +1499,10 @@ static GstPadProbeReturn infer_exit(GstPad*, GstPadProbeInfo *info, gpointer) {
     // Transfer this exact source/frame/PTS proposal list into the bounded
     // tracker-side ring without a per-frame vector copy.
     tracker_record_detections(frame->source_id, frame->frame_num, frame->buf_pts,
-                              std::move(tracker_detections));
+        std::move(tracker_detections), source_epoch);
     tracker_record_lowconf_candidates(frame->source_id, frame->frame_num,
-        frame->buf_pts, std::move(lowconf_sidecar));
+        frame->buf_pts, std::move(lowconf_sidecar),
+        source_epoch);
 #endif
     c.persons += count;
     if (count) c.last_unix_ms = g_get_real_time()/1000;
@@ -1520,8 +1630,9 @@ static void detection_stats() {
         auxiliary_infer_frames[source].load(), auxiliary_infer_objects[source].load(),
         auxiliary_joined_frames[source].load(), auxiliary_joined_objects[source].load(),
         auxiliary_join_timeout_frames[source].load());
-  g_print("PGIE_NESTED_DUPLICATES suppressed=%lu policy=same-component,unique-match,iou>=0.30,containment>=0.95,center/max_height<=0.25,size_ratios<=2,confidence_margin>=0.05\n",
-      same_component_duplicate_suppressed.load());
+  g_print("PGIE_NESTED_DUPLICATES geometric_suppressed=%lu history_supported_suppressed=%lu policy=unique-same-component-or-immediate-active-history;ambiguous=fails-open\n",
+      same_component_duplicate_suppressed.load(),
+      history_supported_duplicate_suppressed.load());
   lowconf_verifier_stats();
   if (detection_evidence) std::fflush(detection_evidence);
   if (frame_evidence) std::fflush(frame_evidence);

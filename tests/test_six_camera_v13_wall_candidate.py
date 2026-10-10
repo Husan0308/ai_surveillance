@@ -13,6 +13,7 @@ from scripts.run_six_camera_v13_wall_candidate import (
     parse_source_stall_test_plan,
     validate_candidate,
     validate_lowconf_verifier_artifacts,
+    validate_candidate_source_snapshot,
 )
 
 
@@ -71,6 +72,62 @@ def test_candidate_manifest_pins_local6_yolo_engine_and_frozen_v13_reference():
     assert "uniquely continuous current INACTIVE-shadow candidate" in policy
     assert "deadline=26ms" in policy
     assert "streaming callbacks never wait" in policy
+
+
+def test_release_source_integrity_validates_embedded_snapshot_not_mutable_worktree(tmp_path, monkeypatch):
+    import hashlib
+    import json
+
+    from scripts import build_six_camera_v13_wall_candidate as mutable_build
+
+    candidate = tmp_path / "release"
+    native = candidate / "source/native"
+    native.mkdir(parents=True)
+    source_file = native / "main.cpp"
+    source_file.write_text("int main() { return 0; }\n", encoding="utf-8")
+    source_hash = hashlib.sha256(source_file.read_bytes()).hexdigest()
+    files = {"main.cpp": source_hash}
+    tree_hash = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    source_manifest = candidate / "source/source-manifest.json"
+    source_manifest.write_text(json.dumps({"source_sha256": files, "tree_sha256": tree_hash}),
+                               encoding="utf-8")
+    manifest = {
+        "source_sha256": files,
+        "source_snapshot": {
+            "directory": "source/native",
+            "manifest": "source/source-manifest.json",
+            "manifest_sha256": hashlib.sha256(source_manifest.read_bytes()).hexdigest(),
+            "tree_sha256": tree_hash,
+        },
+    }
+    monkeypatch.setattr(mutable_build, "source_hashes", lambda: (_ for _ in ()).throw(
+        AssertionError("mutable development tree must not be consulted")))
+    assert validate_candidate_source_snapshot(candidate, manifest) == files
+
+    source_file.write_text("tampered release source\n", encoding="utf-8")
+    try:
+        validate_candidate_source_snapshot(candidate, manifest)
+    except RuntimeError as exc:
+        assert "snapshot" in str(exc)
+    else:
+        raise AssertionError("tampered embedded native source was accepted")
+
+
+def test_legacy_release_source_integrity_keeps_strict_current_tree_check(monkeypatch):
+    from scripts import build_six_camera_v13_wall_candidate as mutable_build
+
+    monkeypatch.setattr(mutable_build, "source_hashes", lambda: {"main.cpp": "current"})
+    assert validate_candidate_source_snapshot(Path("unused"), {"source_sha256": {"main.cpp": "current"}}) == {
+        "main.cpp": "current"
+    }
+    try:
+        validate_candidate_source_snapshot(Path("unused"), {"source_sha256": {"main.cpp": "stale"}})
+    except RuntimeError as exc:
+        assert "native source changed" in str(exc)
+    else:
+        raise AssertionError("legacy mutable-tree mismatch was accepted")
 
 
 def test_camera_runtime_secret_profile_is_six_source_and_encodes_credentials():
@@ -284,6 +341,7 @@ def test_source_recovery_is_source_local_and_removes_old_owner_before_recreation
 
 def test_container_command_uses_single_pinned_pipeline_without_external_detector(monkeypatch):
     monkeypatch.delenv("V11_TRACKER_DECISION_DIAGNOSTICS", raising=False)
+    monkeypatch.delenv("V11_TRACKER_FRAME_STATE_DIAGNOSTICS", raising=False)
     monkeypatch.delenv("V11_TRACKER_NAN_DIAGNOSTICS", raising=False)
     command = docker_command(CANDIDATE, Path("/tmp/sixcam-run"), Path("/tmp/private-camera.ini"), 60)
     rendered = " ".join(command)
@@ -298,6 +356,7 @@ def test_container_command_uses_single_pinned_pipeline_without_external_detector
     assert "/run/camera-six-secret.ini" in rendered
     assert "--tracker" not in rendered
     assert "V11_TRACKER_DECISION_DIAGNOSTICS=1" not in rendered
+    assert "V11_TRACKER_FRAME_STATE_DIAGNOSTICS=1" not in rendered
 
 
 def test_lowconf_context_verifier_is_explicit_opt_in_and_keeps_normal_nvdcf_floor():
@@ -382,6 +441,22 @@ def test_tracker_decision_diagnostics_are_explicit_opt_in(monkeypatch):
     monkeypatch.setenv("V11_TRACKER_DECISION_DIAGNOSTICS", "1")
     command = docker_command(CANDIDATE, Path("/tmp/sixcam-run"), Path("/tmp/private-camera.ini"), 60)
     assert "V11_TRACKER_DECISION_DIAGNOSTICS=1" in " ".join(command)
+
+
+def test_tracker_frame_state_diagnostics_are_explicit_opt_in_and_strictly_boolean(monkeypatch):
+    monkeypatch.delenv("V11_TRACKER_FRAME_STATE_DIAGNOSTICS", raising=False)
+    command = docker_command(CANDIDATE, Path("/tmp/sixcam-run"), Path("/tmp/private-camera.ini"), 60)
+    assert "V11_TRACKER_FRAME_STATE_DIAGNOSTICS=1" not in " ".join(command)
+    monkeypatch.setenv("V11_TRACKER_FRAME_STATE_DIAGNOSTICS", "1")
+    command = docker_command(CANDIDATE, Path("/tmp/sixcam-run"), Path("/tmp/private-camera.ini"), 60)
+    assert "V11_TRACKER_FRAME_STATE_DIAGNOSTICS=1" in " ".join(command)
+    monkeypatch.setenv("V11_TRACKER_FRAME_STATE_DIAGNOSTICS", "true")
+    try:
+        docker_command(CANDIDATE, Path("/tmp/sixcam-run"), Path("/tmp/private-camera.ini"), 60)
+    except ValueError as exc:
+        assert "must be 0 or 1" in str(exc)
+    else:
+        raise AssertionError("ambiguous tracker frame-state diagnostic flag must fail closed")
 
 
 def test_tracker_nan_diagnostics_are_explicit_opt_in_and_strictly_boolean(monkeypatch):

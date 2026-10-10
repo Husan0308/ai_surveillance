@@ -17,7 +17,7 @@ def test_primary_detections_reach_nvdcf_unchanged() -> None:
     assert "if (auxiliary && auxiliary_duplicate_of_primary(obj, primary_boxes))" in source
 
 
-def test_active_context_verifier_is_async_and_suppresses_definitively_unmatched_tracks() -> None:
+def test_active_context_verifier_is_async_and_rechecks_changed_rejected_geometry() -> None:
     tracker = (NATIVE / "tracker.hpp").read_text()
     pretracker = tracker.split("static GstPadProbeReturn tracker_enter(", 1)[1].split(
         "static GstPadProbeReturn tracker_exit(", 1)[0]
@@ -29,11 +29,18 @@ def test_active_context_verifier_is_async_and_suppresses_definitively_unmatched_
     assert "candidate.detector_index = row.detection_index" in posttracker
     assert "candidate, true);" in posttracker  # typed as an active birth at submission
     assert "tracker_birth_verification.begin(frame->source_id, row.id" in tracker
+    assert "begin_geometry_recheck(" in tracker
+    assert "0.30f, 5)" in tracker
+    assert "cancel_geometry_recheck(" in tracker
+    ledger = (NATIVE / "track_birth_verification.hpp").read_text()
+    assert "entry.geometry_rechecks != 0" in ledger
+    assert "box_iou(left, top, width, height" in ledger
+    assert "void reject(std::uint32_t source, std::uint64_t id, std::uint32_t frame," in ledger
     assert "row.detection_index = static_cast<int>(mapping.first)" in tracker
     assert "lowconf_verifier_assign_active_track(" in tracker
     assert "lowconf_verifier_submit(buffer, frame->batch_id" in posttracker
     assert "tracker_apply_active_birth_verification(source_id, tracker_frame_num" in tracker
-    assert "lowconf_verifier_take_completed_active(frame->source_id)" in tracker
+    assert "lowconf_verifier_take_completed_active(\n              frame->source_id, current_source_epoch)" in tracker
     wait = tracker.split("static bool tracker_lowconf_wait_eligible(", 1)[1].split(
         "static void tracker_log_shadow_context_fallback", 1)[0]
     assert "candidate.active_track_birth" in wait
@@ -115,8 +122,12 @@ def test_active_context_match_uses_candidate_center_and_keeps_shadow_gates_separ
     verifier = (NATIVE / "lowconf_verifier.hpp").read_text()
     active = verifier.split("static bool lowconf_active_location_match(", 1)[1].split(
         "static GstElement *lowconf_make_element", 1)[0]
-    assert "cx >= proposal.left && cx <= proposal.left + proposal.width" in active
-    assert "cy >= proposal.top && cy <= proposal.top + proposal.height" in active
+    assert "active_context_location_match(" in active
+    ledger = (NATIVE / "track_birth_verification.hpp").read_text()
+    assert "cx >= context_left && cx <= context_left + context_width" in ledger
+    assert "cy >= context_top && cy <= context_top + context_height" in ledger
+    assert "overlap >= minimum_iou" in ledger
+    assert "minimum_iou = 0.25f" in ledger
     complete = verifier.split("static void lowconf_complete_result(", 1)[1].split(
         "static GstPadProbeReturn lowconf_infer_exit", 1)[0]
     assert "request.candidate.active_track_birth" in complete

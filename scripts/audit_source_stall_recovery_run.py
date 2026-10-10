@@ -181,7 +181,8 @@ def audit(run_dir: Path) -> dict:
     final = ready_samples[-1]["cameras"] if ready_samples else {}
     expected_reconnects = {camera: (3 if camera == "CAM-02" else 1 if camera == "CAM-03" else 0)
                            for camera in CAMERAS}
-    reconnect_counts = {camera: int(final.get(camera, {}).get("reconnects", -1)) for camera in CAMERAS}
+    reconnect_counts = {camera: int(final.get(camera, {}).get("source_stall_recoveries",
+        final.get(camera, {}).get("reconnects", -1))) for camera in CAMERAS}
     single_container = {tuple(row) for sample in observations for row in sample["containers"]}
     no_pipeline_restart = len(single_container) == 1 and all(
         len(sample["containers"]) == 1 for sample in ready_samples)

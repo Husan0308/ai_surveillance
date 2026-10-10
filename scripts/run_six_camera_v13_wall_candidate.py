@@ -46,6 +46,73 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_hash(value: dict) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def validate_candidate_source_snapshot(candidate: Path, manifest: dict) -> dict[str, str]:
+    """Validate native sources embedded in a release, not today’s mutable tree.
+
+    Historical candidates without an embedded snapshot retain the old strict
+    behavior: their source manifest must match the current development tree.
+    New releases name a snapshot directory and a separately hashed source
+    manifest; every file is re-hashed and the canonical tree digest is checked.
+    """
+    snapshot = manifest.get("source_snapshot")
+    if not isinstance(snapshot, dict):
+        current = __import__(
+            "scripts.build_six_camera_v13_wall_candidate", fromlist=["source_hashes"]
+        ).source_hashes()
+        if manifest.get("source_sha256") != current:
+            raise RuntimeError("native source changed after candidate build")
+        return current
+
+    candidate_root = candidate.resolve()
+
+    def contained_path(relative: object) -> Path:
+        if not isinstance(relative, str) or not relative:
+            raise RuntimeError("candidate source snapshot path is missing")
+        value = Path(relative)
+        if value.is_absolute() or ".." in value.parts:
+            raise RuntimeError("candidate source snapshot path escapes the release")
+        unresolved = candidate_root / value
+        cursor = candidate_root
+        for part in value.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise RuntimeError("candidate source snapshot path contains a symlink")
+        resolved = unresolved.resolve()
+        if not resolved.is_relative_to(candidate_root):
+            raise RuntimeError("candidate source snapshot path escapes the release")
+        return resolved
+
+    source_root = contained_path(snapshot.get("directory"))
+    source_manifest_path = contained_path(snapshot.get("manifest"))
+    if not source_root.is_dir():
+        raise RuntimeError("candidate native source snapshot is missing or unsafe")
+    actual: dict[str, str] = {}
+    for path in sorted(source_root.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError("candidate native source snapshot contains a symlink")
+        if path.is_file():
+            actual[path.relative_to(source_root).as_posix()] = sha256(path)
+    if actual != manifest.get("source_sha256"):
+        raise RuntimeError("candidate native source snapshot does not match its manifest")
+    tree_sha256 = _canonical_hash(actual)
+    if tree_sha256 != snapshot.get("tree_sha256"):
+        raise RuntimeError("candidate native source tree digest mismatch")
+    if not source_manifest_path.is_file():
+        raise RuntimeError("candidate native source manifest is missing or unsafe")
+    if sha256(source_manifest_path) != snapshot.get("manifest_sha256"):
+        raise RuntimeError("candidate native source manifest hash mismatch")
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    if (source_manifest.get("source_sha256") != actual
+            or source_manifest.get("tree_sha256") != tree_sha256):
+        raise RuntimeError("candidate native source manifest contents mismatch")
+    return actual
+
+
 def parse_source_stall_test_plan(value: str, recovery_enabled: str) -> list[dict[str, int | str]]:
     """Validate explicit test-only source interruptions; production default is empty."""
     if not value:
@@ -343,10 +410,7 @@ def validate_candidate(candidate: Path) -> dict:
         path = ((candidate / "config" / name) if name.startswith("config_") else (candidate / "models" / name))
         if not path.is_file() or sha256(path) != expected:
             raise RuntimeError(f"candidate frozen input hash mismatch: {name}")
-    if manifest.get("source_sha256") != __import__(
-            "scripts.build_six_camera_v13_wall_candidate", fromlist=["source_hashes"]
-    ).source_hashes():
-        raise RuntimeError("native source changed after candidate build")
+    validate_candidate_source_snapshot(candidate, manifest)
     if manifest.get("frozen_v13_reference_sha256") != EXPECTED["frozen_v13_reference.yml"]:
         raise RuntimeError("candidate does not pin the exact frozen V13 reference")
     if manifest.get("tracker_config_sha256") != EXPECTED["config_tracker_NvDCF_v13_local6.yml"]:
@@ -550,6 +614,9 @@ def docker_command(candidate: Path, output: Path, camera_file: Path, duration: i
     stage_timing = os.getenv("V11_PIPELINE_STAGE_TIMING", "0")
     if stage_timing not in {"0", "1"}:
         raise ValueError("V11_PIPELINE_STAGE_TIMING must be 0 or 1")
+    calibration_recording = os.getenv("V11_CALIBRATION_RECORDING_ENABLED", "0")
+    if calibration_recording not in {"0", "1"}:
+        raise ValueError("V11_CALIBRATION_RECORDING_ENABLED must be 0 or 1")
     command = [
         "docker", "run", "--rm", "--pull=never", "--init", "--name", name,
         "--network=host", "--gpus", "all", "--user", f"{os.getuid()}:{os.getgid()}",
@@ -575,6 +642,17 @@ def docker_command(candidate: Path, output: Path, camera_file: Path, duration: i
             *[item for setting in auxiliary_detector_environment(profile)
               for item in ("-e", setting)],
         ]
+    if calibration_recording == "1":
+        recording_root = ROOT / "calibration_recordings"
+        if not recording_root.is_dir():
+            raise RuntimeError("calibration_recordings/ must exist before enabling the optional native recorder")
+        command[command.index("--mount"):command.index("--mount")] = [
+            "-e", "V11_CALIBRATION_RECORDING_ENABLED=1",
+            "-e", "V11_CALIBRATION_RECORDING_CONTROL_PATH=/work/calibration-recording-command.tsv",
+            "-e", "V11_CALIBRATION_RECORDING_STATUS_PATH=/work/calibration-recording-status.json",
+            "-e", "V11_CALIBRATION_RECORDING_ROOT=/calibration_recordings",
+            "--mount", f"type=bind,src={recording_root},dst=/calibration_recordings",
+        ]
     if parsed_stall_plan:
         command[command.index("--mount"):command.index("--mount")] = [
             "-e", f"V11_TEST_SOURCE_STALL_PLAN={test_stall_plan}"
@@ -593,6 +671,13 @@ def docker_command(candidate: Path, output: Path, camera_file: Path, duration: i
     if os.getenv("V11_TRACKER_DECISION_DIAGNOSTICS") == "1":
         command[command.index("--mount"):command.index("--mount")] = [
             "-e", "V11_TRACKER_DECISION_DIAGNOSTICS=1"
+        ]
+    tracker_frame_state_diagnostics = os.getenv("V11_TRACKER_FRAME_STATE_DIAGNOSTICS", "0")
+    if tracker_frame_state_diagnostics not in {"0", "1"}:
+        raise ValueError("V11_TRACKER_FRAME_STATE_DIAGNOSTICS must be 0 or 1")
+    if tracker_frame_state_diagnostics == "1":
+        command[command.index("--mount"):command.index("--mount")] = [
+            "-e", "V11_TRACKER_FRAME_STATE_DIAGNOSTICS=1"
         ]
     tracker_nan_diagnostics = os.getenv("V11_TRACKER_NAN_DIAGNOSTICS", "0")
     if tracker_nan_diagnostics not in {"0", "1"}:

@@ -29,6 +29,13 @@ int main() {
 
   // A wrong PTS must not consume the exact frame entry.
   assert(!ring.take(0, 10, 1001));
+  // A reconnect may restart source-local frame numbers and PTS. Old-epoch
+  // proposals must not satisfy a new-epoch exact-frame join.
+  std::vector<int> prior_epoch{3};
+  assert(!ring.put(0, 4, 400, std::move(prior_epoch), 7).overwritten);
+  assert(!ring.take(0, 4, 400, 8));
+  auto same_epoch = ring.take(0, 4, 400, 7);
+  assert(same_epoch && *same_epoch == std::vector<int>({3}));
   auto got_zero = ring.take(0, 10, 1000);
   assert(got_zero && *got_zero == std::vector<int>({7, 8}));
   assert(!ring.take(0, 10, 1000));
