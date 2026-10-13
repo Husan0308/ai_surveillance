@@ -9,14 +9,10 @@ interface is preserved while cameras are replaced one by one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import random
-
-
-DAY0 = datetime(2026, 8, 16, 8, 0, tzinfo=timezone.utc)
 
 
 @dataclass
@@ -196,97 +192,16 @@ def next_camera_id() -> str:
 load_cameras()
 
 
-KNOWN_NAMES = [
-    "Javohir Zarifov",
-    "Dilnoza Karimova",
-    "Sardor Umarov",
-    "Malika Yusupova",
-    "Bekzod Rasulov",
-    "Nilufar Tosheva",
-    "Aziz Qodirov",
-    "Kamola Ergasheva",
-]
-
-
-def build_people() -> list[Person]:
-    rng = random.Random(42)
-    result: list[Person] = []
-    for i, name in enumerate(KNOWN_NAMES):
-        first = rng.randrange(90)
-        last = first + 20 + rng.randrange(200)
-        seen = [c.id for c in CAMERAS if rng.random() > 0.5][:3]
-        if not seen and CAMERAS:
-            seen = [CAMERAS[0].id]
-        inside = bool(CAMERAS) and rng.random() > 0.35
-        room_id = next((c.room_id for c in CAMERAS if seen and c.id == seen[-1]), None)
-        entered_at = datetime.now(timezone.utc) - timedelta(minutes=5 + rng.randrange(180)) if inside else None
-        result.append(Person(f"P-{1000+i}", name, True, DAY0 + timedelta(minutes=first),
-                             DAY0 + timedelta(minutes=last), room_id if inside else None,
-                             inside, rng.randrange(360), seen, entered_at=entered_at))
-    for i in range(6):
-        first = rng.randrange(200)
-        last = first + 5 + rng.randrange(120)
-        seen = [c.id for c in CAMERAS if rng.random() > 0.6]
-        if not seen and CAMERAS:
-            seen = [CAMERAS[0].id]
-        inside = bool(CAMERAS) and rng.random() > 0.4
-        room_id = next((c.room_id for c in CAMERAS if seen and c.id == seen[-1]), None)
-        entered_at = datetime.now(timezone.utc) - timedelta(minutes=5 + rng.randrange(180)) if inside else None
-        result.append(Person(f"P-{2000+i}", None, False, DAY0 + timedelta(minutes=first),
-                             DAY0 + timedelta(minutes=last), room_id if inside else None,
-                             inside, rng.randrange(360), seen, entered_at=entered_at))
-    return result
-
-
-PEOPLE = build_people()
-
+# No fabricated face-recognition identities or events in a live monitoring UI.
+# Real profiles/events must arrive from verified services or persisted records.
+PEOPLE: list[Person] = []
+EVENTS: list[Event] = []
+NOTIFICATIONS: list[tuple[str, str, str]] = []
 
 TYPE_LABEL = {
     "entry": "Kirish",
     "exit": "Chiqish",
 }
-
-
-def build_events() -> list[Event]:
-    if not CAMERAS:
-        return []
-    rng = random.Random(7)
-    result: list[Event] = []
-    event_number = 5000
-
-    def add_event(person, kind, at, camera, bbox_seed):
-        nonlocal event_number
-        action = "binoga kirdi" if kind == "entry" else "binodan chiqdi"
-        identity = person.label if person.known else f"Unknown shaxs ({person.label})"
-        bbox_x = 0.18 + (bbox_seed * 17 % 32) / 100
-        bbox = (bbox_x, 0.13, 0.24, 0.74)
-        result.append(Event(
-            f"E-{event_number}", kind, at, camera.id, camera.room_id,
-            person.id, f"{identity} {action}", bbox=bbox,
-        ))
-        event_number += 1
-
-    for index, person in enumerate(PEOPLE):
-        available = [camera for camera in CAMERAS if camera.id in person.cameras] or CAMERAS
-        entry_camera = rng.choice(available)
-        entry_at = DAY0 + timedelta(minutes=rng.randrange(15, 125))
-        add_event(person, "entry", entry_at, entry_camera, index * 2)
-
-        if not person.in_building:
-            exit_camera = rng.choice(available)
-            visit_minutes = rng.randrange(45, 151)
-            add_event(person, "exit", entry_at + timedelta(minutes=visit_minutes), exit_camera, index * 2 + 1)
-    return sorted(result, key=lambda event: event.at, reverse=True)
-
-
-EVENTS = build_events()
-
-
-NOTIFICATIONS = [
-    ("critical", "Kamera offline", "Ofis ochiq zona (cam-4) ulanmayapti — RTSP timeout"),
-    ("warning", "Yangi Unknown odam", "Unknown_05 lobbida aniqlandi"),
-    ("info", "Servis holati", "Re-ID servisi qayta ishga tushdi va normal ishlamoqda"),
-]
 
 
 def room_name(room_id: str | None) -> str:
