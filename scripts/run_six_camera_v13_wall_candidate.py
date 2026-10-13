@@ -110,6 +110,37 @@ def validate_candidate_source_snapshot(candidate: Path, manifest: dict) -> dict[
     if (source_manifest.get("source_sha256") != actual
             or source_manifest.get("tree_sha256") != tree_sha256):
         raise RuntimeError("candidate native source manifest contents mismatch")
+
+    # New reliability releases also freeze the Python/API/frontend files used
+    # alongside the native owner. Older immutable releases do not have this
+    # additive contract and retain their native-only validation behavior.
+    application = manifest.get("application_snapshot")
+    if isinstance(application, dict):
+        app_root = contained_path(application.get("directory"))
+        app_manifest_path = contained_path(application.get("manifest"))
+        if not app_root.is_dir() or not app_manifest_path.is_file():
+            raise RuntimeError("candidate application source snapshot is missing or unsafe")
+        app_actual: dict[str, str] = {}
+        for path in sorted(app_root.rglob("*")):
+            if path.is_symlink():
+                raise RuntimeError("candidate application source snapshot contains a symlink")
+            if path.is_file():
+                app_actual[path.relative_to(app_root).as_posix()] = sha256(path)
+        if app_actual != application.get("files_sha256"):
+            raise RuntimeError("candidate application source snapshot does not match its manifest")
+        app_tree_hash = _canonical_hash(app_actual)
+        if (app_tree_hash != application.get("tree_sha256")
+                or sha256(app_manifest_path) != application.get("manifest_sha256")):
+            raise RuntimeError("candidate application source integrity mismatch")
+        app_manifest = json.loads(app_manifest_path.read_text(encoding="utf-8"))
+        if (app_manifest.get("files_sha256") != app_actual
+                or app_manifest.get("tree_sha256") != app_tree_hash):
+            raise RuntimeError("candidate application source manifest contents mismatch")
+        live_root = Path(__file__).resolve().parents[1]
+        for relative, expected in app_actual.items():
+            live_path = live_root / relative
+            if not live_path.is_file() or sha256(live_path) != expected:
+                raise RuntimeError(f"application source changed after candidate build: {relative}")
     return actual
 
 
@@ -121,6 +152,7 @@ def parse_source_stall_test_plan(value: str, recovery_enabled: str) -> list[dict
         raise ValueError("V11_TEST_SOURCE_STALL_PLAN requires V11_SOURCE_STALL_RECOVERY=1")
     plan: list[dict[str, int | str]] = []
     previous_second = -1
+    previous_by_camera: dict[str, int] = {}
     for item in value.split(","):
         match = re.fullmatch(r"(CAM-0[1-6])@([0-9]+)", item)
         if not match:
@@ -129,10 +161,13 @@ def parse_source_stall_test_plan(value: str, recovery_enabled: str) -> list[dict
         second = int(raw_second)
         if not 20 <= second <= 86400:
             raise ValueError("source-stall test times must be within 20..86400 seconds")
-        if previous_second >= 0 and second - previous_second < 75:
-            raise ValueError("source-stall test entries must be at least 75 seconds apart")
+        if previous_second >= 0 and second < previous_second:
+            raise ValueError("source-stall test entries must be ordered by time")
+        if camera_id in previous_by_camera and second - previous_by_camera[camera_id] < 75:
+            raise ValueError("source-stall test entries for the same camera must be at least 75 seconds apart")
         plan.append({"camera_id": camera_id, "at_sec": second})
         previous_second = second
+        previous_by_camera[camera_id] = second
     return plan
 
 
@@ -603,12 +638,17 @@ def docker_command(candidate: Path, output: Path, camera_file: Path, duration: i
                    yolo_context_verifier: bool = False,
                    active_track_verifier: bool = False) -> list[str]:
     name = re.sub(r"[^A-Za-z0-9_.-]", "-", f"surv-sixcam-{output.name}")[:120]
+    manifest_path = candidate / "build-manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+    recovery_required = manifest.get("recovery", {}).get("required_environment") == "V11_SOURCE_STALL_RECOVERY=1"
     verbose_evidence = os.getenv("V11_VERBOSE_EVIDENCE", "0")
     if verbose_evidence not in {"0", "1"}:
         raise ValueError("V11_VERBOSE_EVIDENCE must be 0 or 1")
-    source_recovery = os.getenv("V11_SOURCE_STALL_RECOVERY", "0")
+    source_recovery = os.getenv("V11_SOURCE_STALL_RECOVERY", "1" if recovery_required else "0")
     if source_recovery not in {"0", "1"}:
         raise ValueError("V11_SOURCE_STALL_RECOVERY must be 0 or 1")
+    if recovery_required and source_recovery != "1":
+        raise ValueError("candidate manifest requires V11_SOURCE_STALL_RECOVERY=1")
     test_stall_plan = os.getenv("V11_TEST_SOURCE_STALL_PLAN", "")
     parsed_stall_plan = parse_source_stall_test_plan(test_stall_plan, source_recovery)
     stage_timing = os.getenv("V11_PIPELINE_STAGE_TIMING", "0")
@@ -634,9 +674,7 @@ def docker_command(candidate: Path, output: Path, camera_file: Path, duration: i
         "--mount", "type=bind,src=/dev/shm,dst=/dev/shm",
         IMAGE, "/candidate/bin/cam-six-yolo-local6-posttracker", "/run/camera-six-secret.ini", str(duration),
     ]
-    manifest_path = candidate / "build-manifest.json"
-    profile = (json.loads(manifest_path.read_text()).get("detector_profile", {})
-               if manifest_path.is_file() else {})
+    profile = manifest.get("detector_profile", {})
     if has_auxiliary_yolo_profile(profile):
         command[command.index("--mount"):command.index("--mount")] = [
             *[item for setting in auxiliary_detector_environment(profile)
@@ -814,9 +852,12 @@ def run(candidate: Path, output: Path, duration: int, lowconf_verifier: bool = F
         validate_yolo_context_verifier(candidate, manifest)
     if has_auxiliary_yolo_profile(manifest.get("detector_profile")) and not yolo_context_verifier:
         raise ValueError("the 640+896 cascade requires both low-confidence rescue and fail-closed auxiliary birth verification")
-    source_recovery = os.getenv("V11_SOURCE_STALL_RECOVERY", "0")
+    recovery_required = manifest.get("recovery", {}).get("required_environment") == "V11_SOURCE_STALL_RECOVERY=1"
+    source_recovery = os.getenv("V11_SOURCE_STALL_RECOVERY", "1" if recovery_required else "0")
     if source_recovery not in {"0", "1"}:
         raise ValueError("V11_SOURCE_STALL_RECOVERY must be 0 or 1")
+    if recovery_required and source_recovery != "1":
+        raise ValueError("candidate manifest requires V11_SOURCE_STALL_RECOVERY=1")
     parsed_stall_plan = parse_source_stall_test_plan(
         os.getenv("V11_TEST_SOURCE_STALL_PLAN", ""), source_recovery)
     settings = load_settings(ROOT / "config/cameras.yaml")

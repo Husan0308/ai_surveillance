@@ -15,6 +15,10 @@ from scripts.run_six_camera_v13_wall_candidate import (
     validate_lowconf_verifier_artifacts,
     validate_candidate_source_snapshot,
 )
+from scripts.run_verified_candidate_synthetic_six import (
+    parse_fixture_outage_plan,
+    summarize_steady_state_fps,
+)
 
 
 class _Camera:
@@ -115,6 +119,59 @@ def test_release_source_integrity_validates_embedded_snapshot_not_mutable_worktr
         raise AssertionError("tampered embedded native source was accepted")
 
 
+def test_release_integrity_covers_runtime_application_sources(tmp_path):
+    import hashlib
+    import json
+    import shutil
+
+    from scripts.run_six_camera_v13_wall_candidate import _canonical_hash
+
+    candidate = tmp_path / "release-app"
+    native = candidate / "source/native"
+    application = candidate / "source/application"
+    native.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (native / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+    native_files = {"main.cpp": hashlib.sha256((native / "main.cpp").read_bytes()).hexdigest()}
+    native_tree = _canonical_hash(native_files)
+    native_manifest = candidate / "source/native-manifest.json"
+    native_manifest.write_text(json.dumps({"source_sha256": native_files,
+                                           "tree_sha256": native_tree}), encoding="utf-8")
+
+    relative = "services/shared/deployment.py"
+    live_path = Path(__file__).resolve().parents[1] / relative
+    app_target = application / relative
+    app_target.parent.mkdir(parents=True)
+    shutil.copyfile(live_path, app_target)
+    app_files = {relative: hashlib.sha256(app_target.read_bytes()).hexdigest()}
+    app_tree = _canonical_hash(app_files)
+    app_manifest = candidate / "source/application-manifest.json"
+    app_manifest.write_text(json.dumps({"files_sha256": app_files,
+                                        "tree_sha256": app_tree}), encoding="utf-8")
+    manifest = {
+        "source_sha256": native_files,
+        "source_snapshot": {
+            "directory": "source/native", "manifest": "source/native-manifest.json",
+            "manifest_sha256": hashlib.sha256(native_manifest.read_bytes()).hexdigest(),
+            "tree_sha256": native_tree,
+        },
+        "application_snapshot": {
+            "directory": "source/application", "manifest": "source/application-manifest.json",
+            "manifest_sha256": hashlib.sha256(app_manifest.read_bytes()).hexdigest(),
+            "files_sha256": app_files, "tree_sha256": app_tree,
+        },
+    }
+    assert validate_candidate_source_snapshot(candidate, manifest) == native_files
+
+    app_target.write_text("tampered application code\n", encoding="utf-8")
+    try:
+        validate_candidate_source_snapshot(candidate, manifest)
+    except RuntimeError as exc:
+        assert "application source snapshot" in str(exc)
+    else:
+        raise AssertionError("tampered application snapshot was accepted")
+
+
 def test_legacy_release_source_integrity_keeps_strict_current_tree_check(monkeypatch):
     from scripts import build_six_camera_v13_wall_candidate as mutable_build
 
@@ -177,6 +234,26 @@ def test_source_stall_recovery_is_explicit_and_strictly_boolean(monkeypatch):
         assert "must be 0 or 1" in str(exc)
     else:
         raise AssertionError("source-stall recovery accepted an ambiguous value")
+
+
+def test_release_requiring_recovery_enables_it_by_default_and_cannot_disable(tmp_path, monkeypatch):
+    import json
+
+    candidate = tmp_path / "requires-recovery"
+    candidate.mkdir()
+    (candidate / "build-manifest.json").write_text(json.dumps({
+        "recovery": {"required_environment": "V11_SOURCE_STALL_RECOVERY=1"},
+    }))
+    monkeypatch.delenv("V11_SOURCE_STALL_RECOVERY", raising=False)
+    command = docker_command(candidate, tmp_path / "run", tmp_path / "camera.ini", 60)
+    assert "V11_SOURCE_STALL_RECOVERY=1" in command
+    monkeypatch.setenv("V11_SOURCE_STALL_RECOVERY", "0")
+    try:
+        docker_command(candidate, tmp_path / "run2", tmp_path / "camera.ini", 60)
+    except ValueError as exc:
+        assert "manifest requires" in str(exc)
+    else:
+        raise AssertionError("release-required source recovery was disabled")
 
 
 def test_auxiliary_detector_profile_is_enabled_by_artifact_contract_not_cadence_or_name(tmp_path):
@@ -281,7 +358,7 @@ def test_auxiliary_birth_verification_is_scoped_and_fail_closed_in_native_source
     assert '"canonical_birth_safety": "all newly born 640-primary and 896-auxiliary native targets' in builder
 
 
-def test_controlled_recovery_test_plan_is_opt_in_sequential_and_passed_to_native(monkeypatch):
+def test_controlled_recovery_test_plan_is_opt_in_and_passed_to_native(monkeypatch):
     plan = "CAM-02@30,CAM-02@110,CAM-02@190,CAM-03@270"
     monkeypatch.setenv("V11_SOURCE_STALL_RECOVERY", "1")
     monkeypatch.setenv("V11_TEST_SOURCE_STALL_PLAN", plan)
@@ -304,11 +381,106 @@ def test_controlled_recovery_test_plan_is_opt_in_sequential_and_passed_to_native
         raise AssertionError("test-only stalls were allowed with recovery disabled")
 
 
+def test_controlled_recovery_plan_allows_simultaneous_distinct_sources(monkeypatch):
+    plan = "CAM-05@30,CAM-03@30,CAM-02@110"
+    monkeypatch.setenv("V11_SOURCE_STALL_RECOVERY", "1")
+    parsed = parse_source_stall_test_plan(plan, "1")
+    assert parsed == [
+        {"camera_id": "CAM-05", "at_sec": 30},
+        {"camera_id": "CAM-03", "at_sec": 30},
+        {"camera_id": "CAM-02", "at_sec": 110},
+    ]
+
+
+def test_loopback_fixture_outage_plan_supports_required_short_and_long_intervals():
+    plan = "CAM-05@20+5,CAM-03@20+15,CAM-05@80+15,CAM-05@140+120"
+    parsed = parse_fixture_outage_plan(plan, 390)
+    assert parsed == [
+        {"camera_id": "CAM-05", "at_sec": 20, "down_sec": 5},
+        {"camera_id": "CAM-03", "at_sec": 20, "down_sec": 15},
+        {"camera_id": "CAM-05", "at_sec": 80, "down_sec": 15},
+        {"camera_id": "CAM-05", "at_sec": 140, "down_sec": 120},
+    ]
+    for invalid in (
+        ("CAM-05@20+5,CAM-05@40+5", 100),
+        ("CAM-05@80+5,CAM-03@20+5", 120),
+        ("CAM-05@140+120", 300),
+        ("CAM-05@20+5", 50),
+        ("CAM-07@20+5", 60),
+    ):
+        try:
+            parse_fixture_outage_plan(*invalid)
+        except ValueError:
+            continue
+        raise AssertionError(f"unsafe fixture outage plan accepted: {invalid[0]}")
+
+
+def test_steady_state_fps_uses_live_counter_window_not_shutdown_snapshot():
+    fields = (
+        "analytics_input_frames_total", "decoded_frames", "pgie_frames_total",
+        "canonical_tracker_updates_total", "preview_frames_total",
+    )
+    observations = []
+    for second in (350.0, 360.0, 375.0):
+        cameras = {}
+        for camera in CAMERAS:
+            counters = {field: int(second * 20) for field in fields}
+            cameras[camera] = {
+                **counters,
+                "online": True,
+                "current_state": "ONLINE",
+                "age_since_last_decoded_frame_ms": 50.0,
+                "age_since_last_pgie_frame_ms": 40.0,
+                "age_since_last_tracker_output_ms": 30.0,
+                "age_since_last_preview_ms": 20.0,
+                "source_fps": 6.224,
+            }
+        observations.append({"monotonic_sec": second, "cameras": cameras})
+    # This is the shutdown-only sample that previously made healthy runs fail.
+    observations.append({
+        "monotonic_sec": 379.0,
+        "cameras": {camera: {"source_fps": 6.224, "current_state": "ONLINE"}
+                    for camera in CAMERAS},
+    })
+    result = summarize_steady_state_fps(observations, CAMERAS, 350.0, 375.0)
+    assert result["pass"] is True
+    assert all(row["stage_fps"]["decoded"] == 20.0
+               for row in result["per_camera"].values())
+
+
+def test_steady_state_fps_fails_if_any_camera_is_not_fresh_and_online():
+    fields = (
+        "analytics_input_frames_total", "decoded_frames", "pgie_frames_total",
+        "canonical_tracker_updates_total", "preview_frames_total",
+    )
+    observations = []
+    for second in (350.0, 360.0, 375.0):
+        cameras = {}
+        for camera in CAMERAS:
+            cameras[camera] = {
+                **{field: int(second * 20) for field in fields},
+                "online": True,
+                "current_state": "ONLINE",
+                "age_since_last_decoded_frame_ms": 50.0,
+                "age_since_last_pgie_frame_ms": 40.0,
+                "age_since_last_tracker_output_ms": 30.0,
+                "age_since_last_preview_ms": 20.0,
+            }
+        if second == 360.0:
+            cameras["CAM-05"]["online"] = False
+            cameras["CAM-05"]["current_state"] = "BACKOFF"
+        observations.append({"monotonic_sec": second, "cameras": cameras})
+    result = summarize_steady_state_fps(observations, CAMERAS, 350.0, 375.0)
+    assert result["pass"] is False
+    assert result["per_camera"]["CAM-05"]["status"] == "FAIL"
+
+
 def test_controlled_recovery_plan_rejects_cycles_inside_cooldown():
     assert parse_source_stall_test_plan("CAM-04@30", "1") == [
         {"camera_id": "CAM-04", "at_sec": 30}
     ]
-    for plan in ("CAM-02@30,CAM-02@90", "CAM-07@30", "CAM-02@5"):
+    for plan in ("CAM-02@30,CAM-02@90", "CAM-02@90,CAM-02@30",
+                 "CAM-07@30", "CAM-02@5"):
         try:
             parse_source_stall_test_plan(plan, "1")
         except ValueError:
@@ -318,25 +490,69 @@ def test_controlled_recovery_plan_rejects_cycles_inside_cooldown():
 
 def test_source_recovery_is_source_local_and_removes_old_owner_before_recreation():
     native = (SOURCE / "main.cpp").read_text()
-    helper = native[native.index("static bool replace_stalled_source"):native.index("static gboolean source_stall_recovery_tick")]
+    helper = native[native.index("static void remove_stopped_source"):native.index("static gboolean source_stall_recovery_tick")]
     assert "GST_STATE_NULL" in helper
-    assert helper.index("gst_bin_remove") < helper.index("create_source_element(target)")
+    assert "gst_element_get_state(target->source" in helper
+    assert "SourceRecoveryPhase::RESETTING_MUX_INPUT" in helper
+    assert "SourceRecoveryPhase::WAIT_MUX_PAD_READD" in helper
+    assert "SOURCE_MUX_PAD_RESET_SETTLE_US" in helper
+    assert "gst_element_release_request_pad(mux, target->mux_sink_pad)" in helper
+    assert "create_source_element(target)" in helper
     assert "refusing to create a second RTSP owner" in helper
-    assert "queue_level != 0" in helper
-    assert "decoded_last && now_us - decoded_last <= SOURCE_STALL_RECOVERY_AFTER_US" in helper
+    assert "downstream_backpressure" in helper
+    assert "stale_source = input_stale && ingress_stale && decoded_stale" in helper
     assert "source_stall_recovery_tick" in native
     assert 'g_getenv("V11_SOURCE_STALL_RECOVERY")' in native
     assert 'g_timeout_add(500, source_stall_recovery_tick, nullptr)' in native
     assert 'V11_TEST_SOURCE_STALL_PLAN' in native
     assert 'TEST_SOURCE_STALL_BEGIN' in native
-    assert helper.index('gst_bin_remove') < helper.index('create_source_element(target)')
-    assert 'source_pgie_frames[ctx->source_id]' in native
-    assert 'source_tracker_updates[ctx->source_id]' in native
-    assert 'source_preview_published[ctx->source_id]' in native
+    assert "phase == SourceRecoveryPhase::WAIT_RETRY" in native
+    assert "phase == SourceRecoveryPhase::CONFIRMING" in native
+    dynamic_pad = native[native.index("static void dynamic_pad"):native.index("static GstElement *create_source_element")]
+    assert "source_pad_phase_accepts_link" in dynamic_pad
+    assert "source != ctx->source" in dynamic_pad
+    recovery_step = helper[helper.index("static void source_recovery_step"):]
+    stop_branch = recovery_step[recovery_step.index(
+        "if (target->recovery_phase == SourceRecoveryPhase::STOPPING_OWNER)"):]
+    reset_branch = recovery_step[recovery_step.index(
+        "if (target->recovery_phase == SourceRecoveryPhase::RESETTING_MUX_INPUT)"):]
+    retry_branch = recovery_step[recovery_step.index(
+        "if (target->recovery_phase == SourceRecoveryPhase::WAIT_RETRY)"):]
+    assert "state == GST_STATE_NULL" in stop_branch
+    assert "remove_stopped_source(target, now_us);" in stop_branch
+    assert "gst_bin_remove(GST_BIN(pipeline), old_source)" in helper
+    assert "SourceRecoveryPhase::WAIT_MUX_PAD_READD" in reset_branch
+    assert "retry_due(now_us)" in retry_branch
+    assert "create_source_element(target)" in retry_branch
+    assert helper.index("gst_bin_remove(GST_BIN(pipeline), old_source)") < helper.index(
+        "target->recovery_phase = SourceRecoveryPhase::RESETTING_MUX_INPUT")
+    detection = (SOURCE / "detection.hpp").read_text()
+    tracker = (SOURCE / "tracker.hpp").read_text()
+    assert 'source_pgie_frames[frame->source_id]' in detection
+    assert 'source_tracker_updates[source_id]' in tracker
+    assert 'source_preview_published[frame.source_id]' in detection
     removal = helper.index("gst_bin_remove")
     assert helper.index("const std::string old_source_name = GST_ELEMENT_NAME(old_source)") < removal
     assert "std::string(GST_ELEMENT_NAME(old_source))" not in helper[removal:]
     assert 'gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, count_buffer, &ctx->decoded, nullptr)' in native
+    assert '<< ",\\\"online\\\":"' in native
+    assert '<< "\\\",\\\"online\\\":"' not in native
+
+
+def test_replacement_frames_can_advance_recovery_confirmation_only_in_current_epoch():
+    native = (SOURCE / "main.cpp").read_text()
+    tracker = (SOURCE / "tracker.hpp").read_text()
+    current_check = native[native.index("static bool source_frame_epoch_is_current"):
+                           native.index("static Counter output_counter")]
+    tracker_enter = tracker[tracker.index("static GstPadProbeReturn tracker_enter"):
+                            tracker.index("static GstPadProbeReturn tracker_exit")]
+    assert "!source_recovery_active" not in current_check
+    assert "source_recovery_active" not in tracker_enter
+    assert "source_recovery_active(frame->source_id)" not in tracker
+    assert "frame_stamp.source_generation != current_generation" in tracker_enter
+    assert "frame_stamp.tracking_epoch != current_source_epoch" in tracker_enter
+    assert "ctx->tracking_epoch.store(ctx->recovery_policy.source_epoch()" in native
+    assert "ctx->recovery_policy.source_started(g_get_monotonic_time())" in native
 
 
 def test_container_command_uses_single_pinned_pipeline_without_external_detector(monkeypatch):

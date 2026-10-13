@@ -11,6 +11,7 @@ class Settings:
     port: int
     ml_base_url: str
     ml_timeout_seconds: float
+    access_token: str
 
 
 def load_settings() -> Settings:
@@ -20,4 +21,5 @@ def load_settings() -> Settings:
         port=deployment.api_port,
         ml_base_url=deployment.ml_service_url,
         ml_timeout_seconds=float(os.getenv("ML_SERVICE_TIMEOUT_SECONDS", "4.0")),
+        access_token=deployment.access_token,
     )

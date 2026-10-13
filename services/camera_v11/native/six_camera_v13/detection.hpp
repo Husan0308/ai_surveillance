@@ -23,6 +23,7 @@
 #include <thread>
 #include <optional>
 #include <tuple>
+#include <tuple>
 #include <nvbufsurface.h>
 #include "latency_histogram.hpp"
 #include "person_proposal_dedupe.hpp"
@@ -32,7 +33,7 @@
 static bool verbose_evidence_enabled();
 static guint32 f5r_source_frame_for_pts(guint source_id, guint64 pts_ns);
 static void f5r_tracker_frame_ready(guint source_id, guint tracker_frame_num,
-    guint source_frame_num, guint64 pts_ns, guint object_count,
+    guint source_frame_num, guint64 pts_ns, guint64 source_epoch, guint object_count,
     guint64 tracker_ready_ns, const char *snapshot_json, size_t snapshot_size);
 // Optional per-frame stage trace used only by isolated latency diagnostics.
 // Stages: 1=mux src, 2=PGIE sink, 3=PGIE src, 4=nvtracker sink, 5=nvtracker src.
@@ -150,8 +151,13 @@ static GstPadProbeReturn auxiliary_sparse_preprocess_gate(
   for (auto *node = batch_meta->frame_meta_list; node; node = node->next) {
     auto *frame = static_cast<NvDsFrameMeta *>(node->data);
     if (!frame) continue;
+    SourceEpochStamp source_stamp;
+    if (!source_frame_epoch_read(frame, &source_stamp)) {
+      fail("sparse auxiliary frame is missing immutable source epoch metadata");
+      return GST_PAD_PROBE_DROP;
+    }
     const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts,
-        source_tracking_epoch_current(frame->source_id)};
+        source_stamp.tracking_epoch};
     auto result = auxiliary_exact_join.publish(key, std::vector<AuxiliaryProposal>{});
     if (!result.accepted) {
       auxiliary_sparse_skip_join_errors.fetch_add(1, std::memory_order_relaxed);
@@ -209,8 +215,13 @@ static GstPadProbeReturn auxiliary_infer_observer(GstPad *, GstPadProbeInfo *inf
         proposals.push_back({object->confidence, rect.left, rect.top, rect.width, rect.height});
       }
     }
+    SourceEpochStamp source_stamp;
+    if (!source_frame_epoch_read(frame, &source_stamp)) {
+      fail("auxiliary inference frame is missing immutable source epoch metadata");
+      return GST_PAD_PROBE_DROP;
+    }
     const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts,
-        source_tracking_epoch_current(frame->source_id)};
+        source_stamp.tracking_epoch};
     const auto result = auxiliary_exact_join.publish(key, std::move(proposals));
     if (!result.accepted) {
       g_printerr("AUX_EXACT_JOIN_PUBLISH_REJECT source=%u frame=%u pts=%" G_GUINT64_FORMAT "\n",
@@ -271,8 +282,13 @@ static GstPadProbeReturn auxiliary_exact_join_before_tracker(
   for (auto *frame_node = batch_meta->frame_meta_list; frame_node; frame_node = frame_node->next) {
     auto *frame = static_cast<NvDsFrameMeta *>(frame_node->data);
     if (!frame || frame->source_id >= 6) continue;
+    SourceEpochStamp source_stamp;
+    if (!source_frame_epoch_read(frame, &source_stamp)) {
+      fail("pre-tracker auxiliary join frame is missing immutable source epoch metadata");
+      return GST_PAD_PROBE_DROP;
+    }
     const AuxiliaryJoinKey key{frame->source_id, frame->frame_num, frame->buf_pts,
-        source_tracking_epoch_current(frame->source_id)};
+        source_stamp.tracking_epoch};
     auto result = auxiliary_exact_join.take_until(key, deadline);
     if (result.status != AuxiliaryExactJoin<AuxiliaryProposal, 6, 64>::WaitStatus::Ready) {
       ++timeout_frames;
@@ -459,10 +475,10 @@ static constexpr const char *F5R_PREVIEW_NOTIFY_PATH = "/dev/shm/v11_ui_preview_
 static int f5r_preview_notify_fd = -1;
 static sockaddr_un f5r_preview_notify_address{};
 
-using F5RJoinKey = std::pair<guint32, guint64>;
+using F5RJoinKey = std::tuple<guint32, guint64, guint64>;
 struct F5RPreparedFrame {
   guint source_id = 0, frame_num = 0, width = 0, height = 0, stride = 0;
-  guint64 pts = 0, dts = 0, decoder_input_ns = 0, decoder_output_ns = 0;
+  guint64 pts = 0, dts = 0, source_epoch = 0, decoder_input_ns = 0, decoder_output_ns = 0;
   guint64 prepare_start_ns = 0, prepare_complete_ns = 0;
   bool fullscreen = false;
   GstBuffer *buffer = nullptr;
@@ -472,6 +488,7 @@ struct F5RPreparedFrame {
   F5RPreparedFrame(F5RPreparedFrame&& other) noexcept
       : source_id(other.source_id), frame_num(other.frame_num), width(other.width),
         height(other.height), stride(other.stride), pts(other.pts), dts(other.dts),
+        source_epoch(other.source_epoch),
         decoder_input_ns(other.decoder_input_ns), decoder_output_ns(other.decoder_output_ns),
         prepare_start_ns(other.prepare_start_ns), prepare_complete_ns(other.prepare_complete_ns),
         fullscreen(other.fullscreen), buffer(other.buffer) {
@@ -483,6 +500,7 @@ struct F5RPreparedFrame {
     source_id = other.source_id; frame_num = other.frame_num;
     width = other.width; height = other.height; stride = other.stride;
     pts = other.pts; dts = other.dts;
+    source_epoch = other.source_epoch;
     decoder_input_ns = other.decoder_input_ns; decoder_output_ns = other.decoder_output_ns;
     prepare_start_ns = other.prepare_start_ns; prepare_complete_ns = other.prepare_complete_ns;
     fullscreen = other.fullscreen; buffer = other.buffer; other.buffer = nullptr;
@@ -492,7 +510,7 @@ struct F5RPreparedFrame {
 };
 struct F5RTrackerReady {
   guint tracker_frame_num = 0, source_frame_num = 0, object_count = 0;
-  guint64 pts = 0, ready_ns = 0;
+  guint64 pts = 0, source_epoch = 0, ready_ns = 0;
   std::string snapshot_json;
 };
 struct F5RJoinedPreview {
@@ -704,6 +722,11 @@ static bool f5r_write_joined_preview(F5RJoinedPreview &joined) {
     ++f5r_preview_stale_drops[frame.source_id];
     return false;
   }
+  if (frame.source_epoch != tracker.source_epoch ||
+      frame.source_epoch != source_tracking_epoch_current(frame.source_id)) {
+    ++f5r_preview_stale_drops[frame.source_id];
+    return false;
+  }
   if (!writer.map || !frame.buffer ||
       tracker.snapshot_json.size() > F5R_PREVIEW_METADATA_MAX ||
       frame.frame_num != tracker.source_frame_num || frame.pts != tracker.pts) {
@@ -772,6 +795,7 @@ static bool f5r_write_joined_preview(F5RJoinedPreview &joined) {
   if (!frame.fullscreen) {
     ++f5r_preview_frames[frame.source_id];
     ++source_preview_published[frame.source_id];
+    source_preview_last_us[frame.source_id] = g_get_monotonic_time();
   }
   ++f5r_preview_joined[frame.source_id];
   if (f5r_join_evidence) {
@@ -853,7 +877,7 @@ static void f5r_prune_join_entries_locked(guint source_id) {
 
 static void f5r_add_prepared_frame(F5RPreparedFrame &&frame) {
   const guint source_id = frame.source_id;
-  const F5RJoinKey key{frame.frame_num, frame.pts};
+  const F5RJoinKey key{frame.frame_num, frame.pts, frame.source_epoch};
   std::vector<F5RJoinedPreview> ready;
   {
     std::lock_guard<std::mutex> guard(f5r_join_mutex);
@@ -881,11 +905,15 @@ static void f5r_add_prepared_frame(F5RPreparedFrame &&frame) {
 }
 
 static void f5r_tracker_frame_ready(guint source_id, guint tracker_frame_num,
-    guint source_frame_num, guint64 pts_ns, guint object_count,
+    guint source_frame_num, guint64 pts_ns, guint64 source_epoch, guint object_count,
     guint64 tracker_ready_ns, const char *snapshot_json, size_t snapshot_size) {
   if (source_id >= 6 || source_frame_num == G_MAXUINT32 || pts_ns == GST_CLOCK_TIME_NONE ||
       !snapshot_json || snapshot_size == 0) {
     if (source_id < 6) ++f5r_preview_reference_misses[source_id];
+    return;
+  }
+  if (source_epoch != source_tracking_epoch_current(source_id)) {
+    ++f5r_preview_stale_drops[source_id];
     return;
   }
   F5RTrackerReady tracker;
@@ -893,9 +921,10 @@ static void f5r_tracker_frame_ready(guint source_id, guint tracker_frame_num,
   tracker.source_frame_num = source_frame_num;
   tracker.object_count = object_count;
   tracker.pts = pts_ns;
+  tracker.source_epoch = source_epoch;
   tracker.ready_ns = tracker_ready_ns;
   tracker.snapshot_json.assign(snapshot_json, snapshot_size);
-  const F5RJoinKey key{source_frame_num, pts_ns};
+  const F5RJoinKey key{source_frame_num, pts_ns, source_epoch};
   std::vector<F5RJoinedPreview> ready;
   {
     std::lock_guard<std::mutex> guard(f5r_join_mutex);
@@ -911,6 +940,29 @@ static void f5r_tracker_frame_ready(guint source_id, guint tracker_frame_num,
   for (auto &job : ready) f5r_enqueue_preview(std::move(job));
 }
 
+static void f5r_preview_invalidate_source_epoch(guint source_id, guint64 source_epoch) {
+  if (source_id >= 6) return;
+  {
+    std::lock_guard<std::mutex> guard(f5r_join_mutex);
+    const size_t discarded = f5r_join_entries[source_id].size() +
+        f5r_prepare_starts[source_id].size();
+    f5r_join_entries[source_id].clear();
+    f5r_prepare_starts[source_id].clear();
+    if (discarded) f5r_preview_stale_drops[source_id].fetch_add(discarded);
+  }
+  {
+    std::lock_guard<std::mutex> guard(f5r_publish_mutex);
+    for (auto it = f5r_publish_jobs.begin(); it != f5r_publish_jobs.end();) {
+      if (it->frame.source_id == source_id && it->frame.source_epoch != source_epoch) {
+        it = f5r_publish_jobs.erase(it);
+        ++f5r_preview_stale_drops[source_id];
+      } else {
+        ++it;
+      }
+    }
+  }
+}
+
 static GstPadProbeReturn f5r_preview_prepare_start_probe(
     GstPad*, GstPadProbeInfo *info, gpointer opaque) {
   auto *branch = static_cast<F5RPreviewBranch*>(opaque);
@@ -919,7 +971,9 @@ static GstPadProbeReturn f5r_preview_prepare_start_probe(
   const guint64 pts = GST_BUFFER_PTS(buffer);
   const guint32 frame = f5r_source_frame_for_pts(branch->source_id, pts);
   if (frame == G_MAXUINT32 || pts == GST_CLOCK_TIME_NONE) return GST_PAD_PROBE_OK;
-  const F5RJoinKey key{frame, pts};
+  const auto stamp = f5r_decode_stamp_for_pts(branch->source_id, pts);
+  if (!stamp.output_ns) return GST_PAD_PROBE_OK;
+  const F5RJoinKey key{frame, pts, stamp.source_epoch};
   std::lock_guard<std::mutex> guard(f5r_join_mutex);
   f5r_prepare_starts[branch->source_id][key] =
       static_cast<guint64>(g_get_monotonic_time()) * 1000;
@@ -965,6 +1019,7 @@ static GstFlowReturn f5r_preview_sample(GstAppSink *sink, gpointer opaque) {
   prepared.height = branch->height;
   prepared.stride = branch->width * 4;
   prepared.pts = pts;
+  prepared.source_epoch = stamp.source_epoch;
   prepared.dts = GST_BUFFER_DTS(buffer);
   prepared.decoder_input_ns = stamp.input_ns;
   prepared.decoder_output_ns = stamp.output_ns;
@@ -1346,10 +1401,27 @@ static GstPadProbeReturn infer_exit(GstPad*, GstPadProbeInfo *info, gpointer) {
     }
     const guint pgie_frame_width = tracker_bbox_coordinate_extent(frame, true);
     const guint pgie_frame_height = tracker_bbox_coordinate_extent(frame, false);
-    const guint64 source_epoch = source_tracking_epoch_current(frame->source_id);
+    SourceEpochStamp source_stamp;
+    if (!source_frame_epoch_read(frame, &source_stamp)) {
+      ++infer_errors;
+      fail("PGIE frame is missing immutable source generation/epoch metadata");
+      return GST_PAD_PROBE_DROP;
+    }
+    if (!source_frame_epoch_is_current(frame, &source_stamp)) {
+      g_print("PGIE_SOURCE_EPOCH_STALE source=%u frame=%d pts=%" G_GUINT64_FORMAT
+          " frame_generation=%u frame_epoch=%" G_GUINT64_FORMAT
+          " current_generation=%u current_epoch=%" G_GUINT64_FORMAT
+          " action=withhold_tracker_input\n", frame->source_id, frame->frame_num,
+          frame->buf_pts, source_stamp.source_generation, source_stamp.tracking_epoch,
+          sources[frame->source_id]->source_generation.load(),
+          source_tracking_epoch_current(frame->source_id));
+      continue;
+    }
+    const guint64 source_epoch = source_stamp.tracking_epoch;
     auto &c = detections[frame->source_id];
     ++c.frames; ++c.batches; ++infer_frames;
     ++source_pgie_frames[frame->source_id];
+    source_pgie_last_us[frame->source_id] = g_get_monotonic_time();
     guint count = 0;
     std::vector<TrackerDetection> tracker_detections;
     std::vector<LowConfCandidate> lowconf_sidecar;

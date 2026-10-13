@@ -19,6 +19,19 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include "source_reconnect_telemetry.hpp"
+#include "camera_recovery_policy.hpp"
+#include "source_epoch_meta.hpp"
+#include "source_message_owner.hpp"
+
+enum class SourceRecoveryPhase {
+  NONE, STOPPING_OWNER, RESETTING_MUX_INPUT, WAIT_MUX_PAD_READD, WAIT_RETRY, CONFIRMING
+};
+
+static bool source_pad_phase_accepts_link(SourceRecoveryPhase phase) {
+  return phase == SourceRecoveryPhase::NONE ||
+      phase == SourceRecoveryPhase::WAIT_RETRY ||
+      phase == SourceRecoveryPhase::CONFIRMING;
+}
 
 struct Counter {
   std::atomic<guint64> frames{0};
@@ -32,6 +45,7 @@ struct Counter {
 struct DecoderFrameStamp {
   guint64 input_ns = 0;
   guint64 output_ns = 0;
+  guint64 source_epoch = 0;
   guint32 frame_num = 0;
   guint64 sequence = 0;
 };
@@ -52,6 +66,10 @@ struct SourceCtx {
   bool decoder_low_latency_mode = false;
   guint decoder_extra_surfaces = 4;
   GstElement *source = nullptr;
+  GstPad *source_video_pad = nullptr;
+  GstPad *mux_sink_pad = nullptr;
+  std::mutex source_pad_mutex;
+  gulong source_video_block_probe_id = 0;
   GstElement *tee = nullptr;
   GstElement *queue = nullptr;
 #ifdef PGIE_ISOLATION
@@ -65,6 +83,7 @@ struct SourceCtx {
   std::atomic_bool decoder_seen{false};
   guint errors = 0;
   guint warnings = 0;
+  std::atomic<guint64> stale_source_messages{0};
   std::atomic<guint> rtsp_reconnect_attempts{0};
   // Bumped for each explicit RTSP retry or watchdog source replacement. The
   // tracker uses this to invalidate per-source temporal state and async joins
@@ -78,10 +97,14 @@ struct SourceCtx {
   guint64 stale_recovery_baseline_tracker_updates = 0;
   guint64 stale_recovery_baseline_preview_frames = 0;
   guint stale_recovery_count = 0;
-  guint consecutive_stale_recoveries = 0;
   gint64 stale_recovery_started_us = 0;
-  gint64 last_stale_recovery_us = 0;
-  guint source_generation = 0;
+  gint64 recovery_phase_started_us = 0;
+  std::atomic<SourceRecoveryPhase> recovery_phase{SourceRecoveryPhase::NONE};
+  camera_recovery::SourceRecoveryPolicy recovery_policy;
+  bool recovery_authentication_failure = false;
+  bool recovery_timeout_reported = false;
+  std::string last_failure_reason = "none";
+  std::atomic<guint> source_generation{0};
   guint64 previous_ingress_frames = 0;
   guint64 previous_frames = 0;
   std::mutex decoded_clock_mutex;
@@ -93,6 +116,17 @@ struct SourceCtx {
   guint64 decoded_clock_sequence = 0;
   std::atomic<guint32> decoded_output_frames{0};
 };
+
+struct SourcePadBinding {
+  SourceCtx *owner = nullptr;
+  guint source_id = G_MAXUINT;
+  guint source_generation = 0;
+  guint64 tracking_epoch = 0;
+};
+
+static void source_pad_binding_destroy(gpointer data) {
+  delete static_cast<SourcePadBinding *>(data);
+}
 
 #include "calibration_recording.hpp"
 
@@ -112,6 +146,19 @@ static guint64 source_tracking_epoch_current(guint source_id) {
   return source_id < sources.size() && sources[source_id]
       ? sources[source_id]->tracking_epoch.load() : 0;
 }
+static bool source_frame_epoch_read(const NvDsFrameMeta *frame, SourceEpochStamp *stamp) {
+  return frame && stamp && frame->source_id < sources.size() && sources[frame->source_id] &&
+      source_epoch_meta_read_frame(frame, stamp) && stamp->source_id == frame->source_id;
+}
+static bool source_frame_epoch_is_current(const NvDsFrameMeta *frame,
+                                          SourceEpochStamp *stamp = nullptr) {
+  SourceEpochStamp local;
+  SourceEpochStamp *value = stamp ? stamp : &local;
+  if (!source_frame_epoch_read(frame, value)) return false;
+  SourceCtx *owner = sources[frame->source_id];
+  return value->source_generation == owner->source_generation.load(std::memory_order_acquire) &&
+      value->tracking_epoch == owner->tracking_epoch.load(std::memory_order_acquire);
+}
 static Counter output_counter;
 static std::atomic_bool fatal{false};
 static bool stopping = false;
@@ -129,6 +176,13 @@ static std::unique_ptr<calibration_recording::Controller> calibration_recorder;
 static std::atomic<guint64> source_pgie_frames[6]{};
 static std::atomic<guint64> source_tracker_updates[6]{};
 static std::atomic<guint64> source_preview_published[6]{};
+static std::atomic<gint64> source_pgie_last_us[6]{};
+static std::atomic<gint64> source_tracker_last_us[6]{};
+static std::atomic<gint64> source_preview_last_us[6]{};
+#ifdef YOLO26_TRACKER
+static void f5r_preview_invalidate_source_epoch(guint source_id, guint64 source_epoch);
+static bool tracker_clear_source_snapshot(guint source_id);
+#endif
 struct RecoveryTestStall {
   std::string camera_id;
   gint64 at_us = 0;
@@ -183,10 +237,12 @@ static gint64 monitoring_prev_us = 0;
 static int duration_sec = 60;
 static bool preview_enabled = false;
 static int preview_port = 5600;
-static bool source_stall_recovery_enabled = false;
+static bool source_stall_recovery_enabled = true;
 static constexpr gint64 SOURCE_STALL_RECOVERY_AFTER_US = 2'500'000;
 static constexpr gint64 SOURCE_STALL_RECOVERY_CONFIRM_US = 15'000'000;
-static constexpr gint64 SOURCE_STALL_RECOVERY_COOLDOWN_US = 60'000'000;
+static constexpr gint64 SOURCE_STALL_OWNER_STOP_TIMEOUT_US = 15'000'000;
+static constexpr gint64 SOURCE_STALL_TEST_MIN_GAP_US = 75'000'000;
+static constexpr gint64 SOURCE_MUX_PAD_RESET_SETTLE_US = 500'000;
 
 static std::string interrupt_camera = "none";
 static int interrupt_at = 20;
@@ -313,8 +369,15 @@ static GstPadProbeReturn decoder_input_stamp(GstPad*, GstPadProbeInfo *info, gpo
   return GST_PAD_PROBE_OK;
 }
 
-static void child_added(GstBin*, GstBin*, GstElement *e, gpointer data) {
+static void child_added(GstBin *source_bin, GstBin*, GstElement *e, gpointer data) {
   auto *ctx = static_cast<SourceCtx*>(data);
+  source_message_owner::Tag owner_tag;
+  if (!source_message_owner::nearest_tag(GST_OBJECT(source_bin), &owner_tag) ||
+      owner_tag.owner != ctx ||
+      !source_message_owner::attach(GST_OBJECT(e), ctx, owner_tag.generation)) {
+    fail(ctx->id + " could not attach source-generation ownership to a child element");
+    return;
+  }
   GstElementFactory *f = gst_element_get_factory(e);
   if (!f) return;
   const char *name = gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(f));
@@ -372,8 +435,17 @@ static void child_added(GstBin*, GstBin*, GstElement *e, gpointer data) {
   }
 }
 
-static void dynamic_pad(GstElement*, GstPad *pad, gpointer data) {
+static void dynamic_pad(GstElement *source, GstPad *pad, gpointer data) {
   auto *ctx = static_cast<SourceCtx*>(data);
+  guint owner_generation = 0;
+  guint64 owner_tracking_epoch = 0;
+  {
+    std::lock_guard<std::mutex> guard(ctx->source_pad_mutex);
+    if (source != ctx->source || !source_pad_phase_accepts_link(
+            ctx->recovery_phase.load(std::memory_order_acquire))) return;
+    owner_generation = ctx->source_generation.load(std::memory_order_acquire);
+    owner_tracking_epoch = ctx->tracking_epoch.load(std::memory_order_acquire);
+  }
   GstCaps *caps = gst_pad_get_current_caps(pad);
   if (!caps) caps = gst_pad_query_caps(pad, nullptr);
   if (!caps || gst_caps_is_any(caps) || gst_caps_is_empty(caps)) {
@@ -387,11 +459,49 @@ static void dynamic_pad(GstElement*, GstPad *pad, gpointer data) {
     // This is nvurisrcbin's decoded video output (NVDEC); track it separately
     // from the analytics queue so a freeze is localized before publication.
     gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, count_buffer, &ctx->decoded, nullptr);
+    auto *epoch_binding = new (std::nothrow) SourcePadBinding{
+        ctx, static_cast<guint>(ctx->source_id), owner_generation, owner_tracking_epoch};
+    if (!epoch_binding || !gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+            [](GstPad *, GstPadProbeInfo *probe_info, gpointer opaque) -> GstPadProbeReturn {
+              auto *binding = static_cast<SourcePadBinding *>(opaque);
+              GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(probe_info);
+              if (!binding || !buffer) return GST_PAD_PROBE_DROP;
+              if (!gst_buffer_is_writable(buffer)) {
+                buffer = gst_buffer_make_writable(buffer);
+                if (!buffer) {
+                  event(binding->owner, "SOURCE_EPOCH_META_FAILED",
+                      "decoded buffer could not be made writable; source frame withheld");
+                  return GST_PAD_PROBE_DROP;
+                }
+                GST_PAD_PROBE_INFO_DATA(probe_info) = buffer;
+              }
+              const SourceEpochStamp stamp{binding->source_id, binding->source_generation,
+                  binding->tracking_epoch};
+              if (!source_epoch_meta_add(buffer, stamp)) {
+                event(binding->owner, "SOURCE_EPOCH_META_FAILED",
+                    "failed to attach immutable source generation/epoch before nvstreammux");
+                return GST_PAD_PROBE_DROP;
+              }
+              return GST_PAD_PROBE_OK;
+            }, epoch_binding, source_pad_binding_destroy)) {
+      if (epoch_binding) delete epoch_binding;
+      fail(ctx->id + " could not install required source epoch metadata probe");
+      gst_caps_unref(caps);
+      return;
+    }
+    auto *stamp_binding = new (std::nothrow) SourcePadBinding{
+        ctx, static_cast<guint>(ctx->source_id), owner_generation, owner_tracking_epoch};
+    if (!stamp_binding) {
+      fail(ctx->id + " could not allocate source timestamp binding");
+      gst_caps_unref(caps);
+      return;
+    }
     gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
       [](GstPad*, GstPadProbeInfo *info, gpointer opaque) -> GstPadProbeReturn {
-        auto *owner = static_cast<SourceCtx*>(opaque);
+        auto *binding = static_cast<SourcePadBinding*>(opaque);
+        auto *owner = binding ? binding->owner : nullptr;
         GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-        if (!buffer) return GST_PAD_PROBE_OK;
+        if (!owner || !binding || !buffer) return GST_PAD_PROBE_DROP;
         const guint64 pts = GST_BUFFER_PTS(buffer);
         guint32 decoded_frame_num = G_MAXUINT32;
         guint64 decoded_sequence = 0;
@@ -404,6 +514,7 @@ static void dynamic_pad(GstElement*, GstPad *pad, gpointer data) {
             owner->decoder_input_clock_ns.erase(input_stamp);
           }
           stamp.output_ns = static_cast<guint64>(g_get_monotonic_time()) * 1000;
+          stamp.source_epoch = binding->tracking_epoch;
           stamp.frame_num = owner->decoded_output_frames.fetch_add(1);
           stamp.sequence = ++owner->decoded_clock_sequence;
           decoded_frame_num = stamp.frame_num;
@@ -430,16 +541,23 @@ static void dynamic_pad(GstElement*, GstPad *pad, gpointer data) {
         }
 #endif
         return GST_PAD_PROBE_OK;
-      }, ctx, nullptr);
+      }, stamp_binding, source_pad_binding_destroy);
     GstElement *link_target = ctx->tee;
 #ifdef PGIE_ISOLATION
     if (ctx->replay_pacer) link_target = ctx->replay_pacer;
 #endif
     GstPad *dest = gst_element_get_static_pad(link_target, "sink");
-    if (!gst_pad_is_linked(dest)) {
+    std::lock_guard<std::mutex> source_pad_guard(ctx->source_pad_mutex);
+    if (source == ctx->source && source_pad_phase_accepts_link(
+            ctx->recovery_phase.load(std::memory_order_acquire)) &&
+        !gst_pad_is_linked(dest)) {
       if (gst_pad_link(pad, dest) != GST_PAD_LINK_OK) {
         event(ctx, "ERROR", std::string("dynamic video link failed to ") + GST_ELEMENT_NAME(link_target));
       } else {
+        if (link_target == ctx->tee) {
+          if (ctx->source_video_pad) gst_object_unref(ctx->source_video_pad);
+          ctx->source_video_pad = GST_PAD(gst_object_ref(pad));
+        }
         gchar *s = gst_caps_to_string(caps);
         const bool nvmm = gst_caps_features_contains(gst_caps_get_features(caps, 0), "memory:NVMM");
         event(ctx, "SOURCE_LINK", std::string(GST_PAD_NAME(pad)) + " linked " + (nvmm ? "memory:NVMM " : "") + s);
@@ -458,10 +576,24 @@ static GstElement *create_source_element(SourceCtx *ctx) {
     fail(ctx->id + ": missing nvurisrcbin");
     return nullptr;
   }
+  if (!ctx->recovery_policy.source_started(g_get_monotonic_time())) {
+    gst_object_unref(source);
+    fail(ctx->id + ": invalid source-owner start transition");
+    return nullptr;
+  }
+  // Keep the immutable per-buffer tracking epoch aligned with the lifecycle
+  // epoch exposed in telemetry. Old-owner buffers remain stale because both
+  // generation and epoch advance before replacement is linked.
+  ctx->tracking_epoch.store(ctx->recovery_policy.source_epoch(), std::memory_order_release);
   gst_bin_add(GST_BIN(pipeline), source);
-  ++ctx->source_generation;
+  const guint generation = ++ctx->source_generation;
+  if (!source_message_owner::attach(GST_OBJECT(source), ctx, generation)) {
+    gst_bin_remove(GST_BIN(pipeline), source);
+    fail(ctx->id + " could not attach source-generation ownership to nvurisrcbin");
+    return nullptr;
+  }
   event(ctx, "SOURCE_OWNER_CREATED", "source=" + source_name +
-      " generation=" + std::to_string(ctx->source_generation) + " owner_count=1");
+      " generation=" + std::to_string(ctx->source_generation.load()) + " owner_count=1");
   g_signal_connect(source, "deep-element-added", G_CALLBACK(child_added), ctx);
   g_signal_connect(source, "pad-added", G_CALLBACK(dynamic_pad), ctx);
   g_object_set(
@@ -478,13 +610,31 @@ static GstElement *create_source_element(SourceCtx *ctx) {
       "drop-frame-interval", 0u,
       "dec-skip-frames", 0,
       "low-latency-mode", ctx->decoder_low_latency_mode,
-      "rtsp-reconnect-interval", 5u,
-      "init-rtsp-reconnect-interval", 5u,
-      "rtsp-reconnect-attempts", -1,
+      // The application watchdog owns retries. The two interval properties
+      // disable nvurisrcbin's inactivity and initial-error reconnect paths.
+      // On DS 9.1, attempts=0 reads back as -1 (unlimited); the attempt count
+      // is not itself a disable switch, so verify the zero intervals below.
+      "rtsp-reconnect-interval", 0u,
+      "init-rtsp-reconnect-interval", 0u,
+      "rtsp-reconnect-attempts", 0,
       "max-size-buffers", 12u,
       "leaky", 0,
       "message-forward", TRUE,
       nullptr);
+  guint reconnect_interval = G_MAXUINT32, init_reconnect_interval = G_MAXUINT32;
+  gint reconnect_attempts = -999;
+  g_object_get(source, "rtsp-reconnect-interval", &reconnect_interval,
+               "init-rtsp-reconnect-interval", &init_reconnect_interval,
+               "rtsp-reconnect-attempts", &reconnect_attempts, nullptr);
+  if (reconnect_interval != 0 || init_reconnect_interval != 0) {
+    fail(ctx->id + " nvurisrcbin internal reconnect intervals did not remain disabled");
+    return source;
+  }
+  event(ctx, "SOURCE_RECONNECT_PROPERTIES",
+      "rtsp-reconnect-interval=" + std::to_string(reconnect_interval) +
+      " init-rtsp-reconnect-interval=" + std::to_string(init_reconnect_interval) +
+      " rtsp-reconnect-attempts-effective=" + std::to_string(reconnect_attempts) +
+      " retry_owner=application_watchdog");
 #ifdef PGIE_ISOLATION
   if (ctx->uri.rfind("file://", 0) == 0) {
     GParamSpec *file_loop = g_object_class_find_property(G_OBJECT_GET_CLASS(source), "file-loop");
@@ -500,6 +650,9 @@ static GstElement *create_source_element(SourceCtx *ctx) {
       return source;
     }
     event(ctx, "DIRECT_FILE_SOURCE", "uri_scheme=file file_loop=0 rtsp_reconnect=not_applicable");
+  } else if (ctx->uri.rfind("rtsp://", 0) == 0) {
+    event(ctx, "SOURCE_RECOVERY_POLICY",
+        "owner=application_watchdog nvurisrcbin_inactivity_reconnect=disabled initial_error_reconnect=disabled");
   }
 #endif
   return source;
@@ -516,6 +669,7 @@ static bool parse_recovery_test_plan(const char *raw, std::string *error) {
   std::stringstream input(raw);
   std::string item;
   gint64 previous_at_us = -1;
+  std::unordered_map<std::string, gint64> previous_camera_at_us;
   while (std::getline(input, item, ',')) {
     const size_t delimiter = item.find('@');
     if (delimiter == std::string::npos || delimiter == 0 || delimiter + 1 >= item.size() ||
@@ -533,12 +687,19 @@ static bool parse_recovery_test_plan(const char *raw, std::string *error) {
       return false;
     }
     const gint64 at_us = static_cast<gint64>(seconds) * G_USEC_PER_SEC;
-    if (previous_at_us >= 0 && at_us - previous_at_us < SOURCE_STALL_RECOVERY_COOLDOWN_US + 15'000'000) {
-      *error = "V11_TEST_SOURCE_STALL_PLAN entries must be at least 75 seconds apart";
+    if (previous_at_us >= 0 && at_us < previous_at_us) {
+      *error = "V11_TEST_SOURCE_STALL_PLAN entries must be ordered by time";
+      return false;
+    }
+    const auto previous_camera = previous_camera_at_us.find(camera);
+    if (previous_camera != previous_camera_at_us.end() &&
+        at_us - previous_camera->second < SOURCE_STALL_TEST_MIN_GAP_US) {
+      *error = "V11_TEST_SOURCE_STALL_PLAN entries for the same camera must be at least 75 seconds apart";
       return false;
     }
     recovery_test_stalls.push_back({camera, at_us, false});
     previous_at_us = at_us;
+    previous_camera_at_us[camera] = at_us;
   }
   if (recovery_test_stalls.empty()) {
     *error = "V11_TEST_SOURCE_STALL_PLAN must contain at least one stall";
@@ -549,195 +710,452 @@ static bool parse_recovery_test_plan(const char *raw, std::string *error) {
 
 static SourceCtx *find_source(const std::string &id);
 
-static bool replace_stalled_source(SourceCtx *target, gint64 now_us) {
-  if (!target || !target->source || target->stale_recovery_pending) return false;
-  const gint64 input_last = target->input.last_us.load();
-  const gint64 ingress_last = target->ingress.last_us.load();
-  const gint64 decoded_last = target->decoded.last_us.load();
-  const double input_age_ms = input_last ? (now_us - input_last) / 1000.0 : -1.0;
-  const double ingress_age_ms = ingress_last ? (now_us - ingress_last) / 1000.0 : -1.0;
-  const double decoded_age_ms = decoded_last ? (now_us - decoded_last) / 1000.0 : -1.0;
-  guint queue_level = 0;
-  g_object_get(target->queue, "current-level-buffers", &queue_level, nullptr);
-
-  // Do not reset a source when decoded buffers are reaching its analytics
-  // queue. That points to downstream backpressure, not an RTSP/decoder stall.
-  if (queue_level != 0 ||
-      (decoded_last && now_us - decoded_last <= SOURCE_STALL_RECOVERY_AFTER_US) ||
-      (input_last && now_us - input_last <= SOURCE_STALL_RECOVERY_AFTER_US) ||
-      (ingress_last && now_us - ingress_last <= SOURCE_STALL_RECOVERY_AFTER_US)) {
-    return false;
-  }
-  if (target->stale_recovery_count > 0 &&
-      now_us - target->last_stale_recovery_us < SOURCE_STALL_RECOVERY_COOLDOWN_US) {
-    fail(target->id + " source remained stale after its bounded recovery; refusing a reconnect loop");
-    return false;
-  }
-
-  target->stale_recovery_pending = true;
+static void capture_recovery_baseline(SourceCtx *target) {
   target->stale_recovery_baseline_frames = target->input.frames.load();
   target->stale_recovery_baseline_decoded_frames = target->decoded.frames.load();
   target->stale_recovery_baseline_pgie_frames = source_pgie_frames[target->source_id].load();
   target->stale_recovery_baseline_tracker_updates = source_tracker_updates[target->source_id].load();
   target->stale_recovery_baseline_preview_frames = source_preview_published[target->source_id].load();
-  target->stale_recovery_started_us = now_us;
-  ++target->stale_recovery_count;
-  ++target->consecutive_stale_recoveries;
-  const guint64 tracking_epoch = ++target->tracking_epoch;
-  target->last_stale_recovery_us = now_us;
-  event(target, "SOURCE_STALL_RECOVERY_BEGIN",
-      "elapsed_ms=" + std::to_string((now_us - start_us) / 1000) +
-      " decoded ingress and analytics input stale; input_age_ms=" +
-      std::to_string(input_age_ms) + " decoded_age_ms=" + std::to_string(decoded_age_ms) +
-      " ingress_age_ms=" + std::to_string(ingress_age_ms) +
-      " queue_depth=0 owner_count_before=1 generation=" + std::to_string(target->source_generation) +
-      " tracking_epoch=" + std::to_string(tracking_epoch) +
-      " decoded_frames=" + std::to_string(target->stale_recovery_baseline_decoded_frames) +
-      " input_frames=" + std::to_string(target->stale_recovery_baseline_frames) +
-      " pgie_frames=" + std::to_string(target->stale_recovery_baseline_pgie_frames) +
-      " tracker_updates=" + std::to_string(target->stale_recovery_baseline_tracker_updates) +
-      " preview_frames=" + std::to_string(target->stale_recovery_baseline_preview_frames) +
-      "; replacing existing nvurisrcbin owner");
+}
 
-  GstElement *old_source = target->source;
-  const std::string old_source_name = GST_ELEMENT_NAME(old_source);
-  gst_element_set_state(old_source, GST_STATE_NULL);
-  const GstStateChangeReturn stopped = gst_element_get_state(
-      old_source, nullptr, nullptr, 3 * GST_SECOND);
-  if (stopped == GST_STATE_CHANGE_FAILURE || stopped == GST_STATE_CHANGE_ASYNC) {
-    target->stale_recovery_pending = false;
-    fail(target->id + " stale source did not stop cleanly; refusing to create a second RTSP owner");
-    return false;
-  }
-  if (!gst_bin_remove(GST_BIN(pipeline), old_source)) {
-    target->stale_recovery_pending = false;
-    fail(target->id + " stale source could not be removed; refusing to create a second RTSP owner");
-    return false;
-  }
-  target->source = nullptr;
-  event(target, "SOURCE_STALL_OLD_OWNER_REMOVED",
-      "old_source=" + old_source_name +
-      " elapsed_ms=" + std::to_string((g_get_monotonic_time() - start_us) / 1000) +
-      " owner_count=0; replacement creation may now begin");
-
+static void clear_source_generation_state(SourceCtx *target) {
   g_mutex_lock(&target->jitter_lock);
   if (target->jitterbuffer) {
     gst_object_unref(target->jitterbuffer);
     target->jitterbuffer = nullptr;
   }
   g_mutex_unlock(&target->jitter_lock);
+  std::lock_guard<std::mutex> guard(target->decoded_clock_mutex);
+  target->decoder_input_clock_ns.clear();
+  target->decoder_input_order.clear();
+  target->decoded_clock_ns.clear();
+  target->decoded_clock_order.clear();
+}
+
+static void begin_source_recovery(SourceCtx *target, gint64 now_us,
+                                  const std::string &reason, bool authentication_failure) {
+  if (!target) return;
+  if (target->recovery_phase.load(std::memory_order_acquire) != SourceRecoveryPhase::NONE) {
+    // An error from a replacement can arrive while its owner is being stopped
+    // or while full-stage progress is being confirmed. Retain authentication
+    // failures so confirmation timeout uses quarantine, not short retry.
+    if (authentication_failure) {
+      target->recovery_authentication_failure = true;
+      target->last_failure_reason = "authentication_rejected";
+      event(target, "SOURCE_AUTH_REJECTED_DURING_RECOVERY",
+          "source remains camera-local; credential retry will be quarantined");
+    } else {
+      event(target, "SOURCE_ERROR_DURING_RECOVERY", reason + "; source lifecycle remains serialized");
+    }
+    return;
+  }
+  target->recovery_policy.mark_suspect(now_us, reason);
+  if (!source_stall_recovery_enabled) {
+    guint64 tracking_epoch = 0;
+    {
+      std::lock_guard<std::mutex> pad_guard(target->source_pad_mutex);
+      tracking_epoch = target->tracking_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    }
+#ifdef YOLO26_TRACKER
+    f5r_preview_invalidate_source_epoch(target->source_id, tracking_epoch);
+    if (!tracker_clear_source_snapshot(target->source_id))
+      event(target, "CANONICAL_SNAPSHOT_CLEAR_FAILED",
+          "old per-camera canonical file could not be removed; API reader rejects it after its freshness deadline");
+#endif
+    target->recovery_policy.mark_offline(now_us, reason, authentication_failure);
+    target->last_failure_reason = authentication_failure ? "authentication_rejected" : reason;
+    event(target, authentication_failure ? "SOURCE_QUARANTINED" : "SOURCE_OFFLINE",
+        "application recovery disabled; shared pipeline remains running");
+    return;
+  }
+  if (!target->recovery_policy.begin_recovery(now_us)) return;
+
+  guint64 tracking_epoch = 0;
   {
-    std::lock_guard<std::mutex> guard(target->decoded_clock_mutex);
-    target->decoder_input_clock_ns.clear();
-    target->decoder_input_order.clear();
-    target->decoded_clock_ns.clear();
-    target->decoded_clock_order.clear();
+    // The pad-added callback takes the same lock before it captures the
+    // immutable owner epoch. This prevents old-owner buffers from being tagged
+    // with the new epoch between recovery detection and the stop request.
+    std::lock_guard<std::mutex> pad_guard(target->source_pad_mutex);
+    target->recovery_phase = SourceRecoveryPhase::STOPPING_OWNER;
+    tracking_epoch = target->tracking_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (target->source_video_pad && !target->source_video_block_probe_id) {
+      target->source_video_block_probe_id = gst_pad_add_probe(
+          target->source_video_pad, GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM,
+          [](GstPad*, GstPadProbeInfo*, gpointer) -> GstPadProbeReturn {
+            return GST_PAD_PROBE_OK;
+          }, nullptr, nullptr);
+    }
   }
+#ifdef YOLO26_TRACKER
+  f5r_preview_invalidate_source_epoch(target->source_id, tracking_epoch);
+  if (!tracker_clear_source_snapshot(target->source_id))
+    event(target, "CANONICAL_SNAPSHOT_CLEAR_FAILED",
+        "old per-camera canonical file could not be removed; API reader rejects it after its freshness deadline");
+#endif
+
+  target->stale_recovery_pending = true;
+  target->stale_recovery_started_us = now_us;
+  target->recovery_phase_started_us = now_us;
+  target->recovery_authentication_failure = authentication_failure;
+  target->recovery_timeout_reported = false;
+  target->last_failure_reason = authentication_failure ? "authentication_rejected" : reason;
+  capture_recovery_baseline(target);
+  event(target, "SOURCE_RECOVERY_BEGIN",
+      "reason=" + target->last_failure_reason + " owner_count_before=" +
+      std::to_string(target->source ? 1 : 0) + " generation=" +
+      std::to_string(target->source_generation.load()) + " source_epoch=" +
+      std::to_string(target->recovery_policy.source_epoch()) + " tracking_epoch=" +
+      std::to_string(tracking_epoch) + "; source-local recovery; shared pipeline continues");
+  if (target->source && gst_element_set_state(target->source, GST_STATE_NULL) == GST_STATE_CHANGE_FAILURE) {
+    event(target, "SOURCE_RECOVERY_STOP_REQUEST_FAILED",
+        "owner retained; no replacement will be created until old owner is confirmed stopped");
+  }
+}
+
+static void remove_stopped_source(SourceCtx *target, gint64 now_us) {
+  if (!target->source) {
+    target->recovery_policy.owner_removed(now_us, target->recovery_authentication_failure);
+    target->recovery_phase = SourceRecoveryPhase::WAIT_RETRY;
+    target->recovery_phase_started_us = now_us;
+    return;
+  }
+  GstElement *old_source = target->source;
+  const std::string old_source_name = GST_ELEMENT_NAME(old_source);
+  GstPad *tee_sink = gst_element_get_static_pad(target->tee, "sink");
+  {
+    std::lock_guard<std::mutex> pad_guard(target->source_pad_mutex);
+    if (target->source_video_pad && tee_sink && gst_pad_is_linked(target->source_video_pad))
+      gst_pad_unlink(target->source_video_pad, tee_sink);
+    if (target->source_video_pad && target->source_video_block_probe_id) {
+      gst_pad_remove_probe(target->source_video_pad, target->source_video_block_probe_id);
+      target->source_video_block_probe_id = 0;
+    }
+    if (target->source_video_pad) {
+      gst_object_unref(target->source_video_pad);
+      target->source_video_pad = nullptr;
+    }
+  }
+  if (tee_sink) gst_object_unref(tee_sink);
+  if (!gst_bin_remove(GST_BIN(pipeline), old_source)) {
+    target->last_failure_reason = "source_removal_failed";
+    target->recovery_policy.mark_offline(now_us, target->last_failure_reason,
+                                         target->recovery_authentication_failure);
+    event(target, "SOURCE_RECOVERY_REMOVE_FAILED",
+        "old owner remains referenced and stopped; refusing to create a second RTSP owner");
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> pad_guard(target->source_pad_mutex);
+    target->source = nullptr;
+  }
+  clear_source_generation_state(target);
   target->decoder_seen = false;
-  target->source = create_source_element(target);
-  if (!target->source || !gst_element_sync_state_with_parent(target->source)) {
-    target->stale_recovery_pending = false;
-    fail(target->id + " failed to recreate its single RTSP/NVDEC source owner");
-    return false;
+  const GstStateChangeReturn queue_stop = gst_element_set_state(target->queue, GST_STATE_NULL);
+  if (queue_stop == GST_STATE_CHANGE_FAILURE) {
+    target->last_failure_reason = "source_analytics_queue_stop_failed";
+    target->recovery_policy.mark_offline(now_us, target->last_failure_reason);
+    event(target, "SOURCE_RECOVERY_QUEUE_STOP_FAILED",
+        "old source owner removed; queue retained and no replacement will be created until input reset succeeds");
   }
-  event(target, "SOURCE_STALL_RECOVERY_RECONNECTED",
-      "elapsed_ms=" + std::to_string((g_get_monotonic_time() - start_us) / 1000) +
-      " old owner stopped and removed before replacement; owner_count=1 generation=" +
-      std::to_string(target->source_generation) +
-      " awaiting decoded+PGIE+tracker+preview progress");
-  return true;
+  event(target, "SOURCE_STALL_OLD_OWNER_REMOVED",
+      "old_source=" + old_source_name + " owner_count=0; draining only this camera input before reattach");
+  target->recovery_phase = SourceRecoveryPhase::RESETTING_MUX_INPUT;
+  target->recovery_phase_started_us = now_us;
+}
+
+static void source_recovery_step(SourceCtx *target, gint64 now_us) {
+  if (!target || target->uri.rfind("rtsp://", 0) != 0) return;
+  if (target->recovery_phase == SourceRecoveryPhase::NONE &&
+      target->recovery_policy.observe_online_stability(now_us)) {
+    event(target, "SOURCE_RECOVERY_STREAK_CLEARED",
+        "camera remained fully ONLINE for 30s; retry backoff reset after stable service");
+  }
+  if (target->recovery_phase == SourceRecoveryPhase::STOPPING_OWNER) {
+    if (!target->source) {
+      remove_stopped_source(target, now_us);
+      return;
+    }
+    GstState state = GST_STATE_VOID_PENDING;
+    const GstStateChangeReturn settled = gst_element_get_state(target->source, &state, nullptr, 0);
+    if (settled != GST_STATE_CHANGE_FAILURE && state == GST_STATE_NULL) {
+      remove_stopped_source(target, now_us);
+      return;
+    }
+    if (!target->recovery_timeout_reported &&
+        now_us - target->recovery_phase_started_us > SOURCE_STALL_OWNER_STOP_TIMEOUT_US) {
+      target->recovery_timeout_reported = true;
+      target->last_failure_reason = "source_stop_unconfirmed";
+      target->recovery_policy.mark_offline(now_us, target->last_failure_reason,
+                                           target->recovery_authentication_failure);
+      event(target, "SOURCE_QUARANTINED",
+          "old owner did not confirm NULL within 15s; no replacement is permitted; retrying stop confirmation");
+    }
+    return;
+  }
+
+  if (target->recovery_phase == SourceRecoveryPhase::RESETTING_MUX_INPUT) {
+    GstState state = GST_STATE_VOID_PENDING;
+    const GstStateChangeReturn settled = gst_element_get_state(target->queue, &state, nullptr, 0);
+    if (settled == GST_STATE_CHANGE_FAILURE || state != GST_STATE_NULL) {
+      if (!target->recovery_timeout_reported &&
+          now_us - target->recovery_phase_started_us > SOURCE_STALL_OWNER_STOP_TIMEOUT_US) {
+        target->recovery_timeout_reported = true;
+        target->last_failure_reason = "source_analytics_queue_stop_unconfirmed";
+        target->recovery_policy.mark_offline(now_us, target->last_failure_reason);
+        event(target, "SOURCE_QUARANTINED",
+            "camera-local analytics queue has not stopped; retaining zero RTSP owners and retrying safely");
+      }
+      return;
+    }
+    GstPad *queue_src = gst_element_get_static_pad(target->queue, "src");
+    if (!queue_src || !target->mux_sink_pad ||
+        (gst_pad_is_linked(queue_src) && !gst_pad_unlink(queue_src, target->mux_sink_pad))) {
+      if (queue_src) gst_object_unref(queue_src);
+      target->last_failure_reason = "source_mux_pad_unlink_failed";
+      target->recovery_policy.mark_offline(now_us, target->last_failure_reason);
+      event(target, "SOURCE_RECOVERY_MUX_UNLINK_FAILED",
+          "old RTSP owner is gone; no replacement will be opened until the old mux input is detached");
+      return;
+    }
+    gst_object_unref(queue_src);
+    gst_element_release_request_pad(mux, target->mux_sink_pad);
+    gst_object_unref(target->mux_sink_pad);
+    target->mux_sink_pad = nullptr;
+    target->recovery_phase = SourceRecoveryPhase::WAIT_MUX_PAD_READD;
+    target->recovery_phase_started_us = now_us;
+    event(target, "SOURCE_RECOVERY_MUX_INPUT_REMOVED",
+        "camera-local mux request pad released; downstream receives PAD_DELETED before tracker context is reused");
+    return;
+  }
+
+  if (target->recovery_phase == SourceRecoveryPhase::WAIT_MUX_PAD_READD) {
+    if (now_us - target->recovery_phase_started_us < SOURCE_MUX_PAD_RESET_SETTLE_US) return;
+    const std::string sink_name = "sink_" + std::to_string(target->source_id);
+    GstPad *new_mux_sink = gst_element_request_pad_simple(mux, sink_name.c_str());
+    GstPad *queue_src = gst_element_get_static_pad(target->queue, "src");
+    const bool linked = new_mux_sink && queue_src &&
+        gst_pad_link(queue_src, new_mux_sink) == GST_PAD_LINK_OK;
+    if (queue_src) gst_object_unref(queue_src);
+    if (!linked) {
+      if (new_mux_sink) {
+        gst_element_release_request_pad(mux, new_mux_sink);
+        gst_object_unref(new_mux_sink);
+      }
+      target->last_failure_reason = "source_mux_pad_readd_failed";
+      target->recovery_policy.mark_offline(now_us, target->last_failure_reason);
+      target->recovery_phase_started_us = now_us;
+      event(target, "SOURCE_RECOVERY_MUX_READD_FAILED",
+          "no source owner created; retrying only this mux input after a bounded settle interval");
+      return;
+    }
+    target->mux_sink_pad = new_mux_sink;
+    if (!gst_element_sync_state_with_parent(target->queue)) {
+      GstPad *qsrc = gst_element_get_static_pad(target->queue, "src");
+      if (qsrc) { gst_pad_unlink(qsrc, target->mux_sink_pad); gst_object_unref(qsrc); }
+      gst_element_release_request_pad(mux, target->mux_sink_pad);
+      gst_object_unref(target->mux_sink_pad);
+      target->mux_sink_pad = nullptr;
+      gst_element_set_state(target->queue, GST_STATE_NULL);
+      target->last_failure_reason = "source_queue_state_sync_failed";
+      target->recovery_policy.mark_offline(now_us, target->last_failure_reason);
+      target->recovery_phase = SourceRecoveryPhase::WAIT_MUX_PAD_READD;
+      target->recovery_phase_started_us = now_us;
+      event(target, "SOURCE_RECOVERY_QUEUE_SYNC_FAILED",
+          "retained zero RTSP owners; repeating camera-local queue/mux reset");
+      return;
+    }
+    target->recovery_policy.owner_removed(now_us, target->recovery_authentication_failure);
+    target->recovery_phase = SourceRecoveryPhase::WAIT_RETRY;
+    target->recovery_phase_started_us = now_us;
+    event(target, "SOURCE_RECOVERY_MUX_INPUT_READY",
+        "PAD_DELETED/PAD_ADDED cycle completed; next owner retry is backoff scheduled at monotonic_us=" +
+        std::to_string(target->recovery_policy.next_retry_us()));
+    return;
+  }
+
+  if (target->recovery_phase == SourceRecoveryPhase::WAIT_RETRY) {
+    if (!target->recovery_policy.retry_due(now_us)) return;
+    GstElement *replacement = create_source_element(target);
+    if (!replacement) {
+      if (!fatal) {
+        target->recovery_policy.recovery_failed(now_us, "source_create_failed");
+        target->recovery_phase = SourceRecoveryPhase::WAIT_RETRY;
+      }
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> pad_guard(target->source_pad_mutex);
+      target->source = replacement;
+    }
+    if (!gst_element_sync_state_with_parent(replacement)) {
+      target->last_failure_reason = "source_state_sync_failed";
+      target->recovery_policy.mark_suspect(now_us, target->last_failure_reason);
+      target->recovery_policy.begin_recovery(now_us);
+      target->recovery_phase = SourceRecoveryPhase::STOPPING_OWNER;
+      target->recovery_phase_started_us = now_us;
+      target->recovery_authentication_failure = false;
+      gst_element_set_state(replacement, GST_STATE_NULL);
+      event(target, "SOURCE_RECOVERY_START_FAILED",
+          "new owner did not enter parent state; will remove it before another attempt");
+      return;
+    }
+    ++target->stale_recovery_count;
+    capture_recovery_baseline(target);
+    target->recovery_phase = SourceRecoveryPhase::CONFIRMING;
+    target->recovery_phase_started_us = now_us;
+    target->recovery_timeout_reported = false;
+    target->decoder_seen = false;
+    event(target, "SOURCE_STALL_RECOVERY_RECONNECTED",
+        "old owner removed before replacement; owner_count=1 generation=" +
+        std::to_string(target->source_generation.load()) + " awaiting decode+PGIE+tracker+preview progress");
+    return;
+  }
+
+  if (target->recovery_phase == SourceRecoveryPhase::CONFIRMING) {
+    const gint64 retry_started_us = target->recovery_phase_started_us;
+    const bool advanced = target->input.frames.load() > target->stale_recovery_baseline_frames &&
+        target->decoded.frames.load() > target->stale_recovery_baseline_decoded_frames &&
+        source_pgie_frames[target->source_id].load() > target->stale_recovery_baseline_pgie_frames &&
+        source_tracker_updates[target->source_id].load() > target->stale_recovery_baseline_tracker_updates &&
+        source_preview_published[target->source_id].load() > target->stale_recovery_baseline_preview_frames &&
+        target->ingress.last_us.load() > retry_started_us && target->input.last_us.load() > retry_started_us &&
+        target->decoded.last_us.load() > retry_started_us &&
+        source_pgie_last_us[target->source_id].load() > retry_started_us &&
+        source_tracker_last_us[target->source_id].load() > retry_started_us &&
+        source_preview_last_us[target->source_id].load() > retry_started_us;
+    if (advanced) {
+      target->stale_recovery_pending = false;
+      target->stale_recovery_started_us = 0;
+      target->recovery_phase = SourceRecoveryPhase::NONE;
+      target->recovery_policy.mark_online(now_us);
+      target->last_failure_reason = "none";
+      event(target, "SOURCE_STALL_RECOVERY_PASS",
+          "decoded+PGIE+tracker+preview advanced; recovery_count=" +
+          std::to_string(target->stale_recovery_count) + " generation=" +
+          std::to_string(target->source_generation.load()) + " source_epoch=" +
+          std::to_string(target->recovery_policy.source_epoch()));
+      return;
+    }
+    if (now_us - target->recovery_phase_started_us > SOURCE_STALL_RECOVERY_CONFIRM_US) {
+      target->last_failure_reason = "replacement_no_stage_progress";
+      event(target, "SOURCE_RECOVERY_CONFIRM_TIMEOUT",
+          "no complete decode/PGIE/tracker/preview progress in 15s; scheduling camera-local retry");
+      target->recovery_policy.mark_suspect(now_us, target->last_failure_reason);
+      target->recovery_policy.begin_recovery(now_us);
+      target->recovery_phase = SourceRecoveryPhase::STOPPING_OWNER;
+      target->recovery_phase_started_us = now_us;
+      capture_recovery_baseline(target);
+      const guint64 tracking_epoch = ++target->tracking_epoch;
+#ifdef YOLO26_TRACKER
+      f5r_preview_invalidate_source_epoch(target->source_id, tracking_epoch);
+      if (!tracker_clear_source_snapshot(target->source_id))
+        event(target, "CANONICAL_SNAPSHOT_CLEAR_FAILED",
+            "old per-camera canonical file remains but is epoch-stale and freshness-bounded");
+#endif
+      if (target->source) gst_element_set_state(target->source, GST_STATE_NULL);
+    }
+    return;
+  }
+
+  const gint64 input_last = target->input.last_us.load();
+  const gint64 ingress_last = target->ingress.last_us.load();
+  const gint64 decoded_last = target->decoded.last_us.load();
+  guint queue_level = 0;
+  if (target->queue) g_object_get(target->queue, "current-level-buffers", &queue_level, nullptr);
+  const bool downstream_backpressure = queue_level != 0;
+  const bool input_stale = !input_last || now_us - input_last > SOURCE_STALL_RECOVERY_AFTER_US;
+  const bool ingress_stale = !ingress_last || now_us - ingress_last > SOURCE_STALL_RECOVERY_AFTER_US;
+  const bool decoded_stale = !decoded_last || now_us - decoded_last > SOURCE_STALL_RECOVERY_AFTER_US;
+  const bool stale_source = input_stale && ingress_stale && decoded_stale && !downstream_backpressure;
+
+  if (!stale_source) {
+    if (target->recovery_policy.state() == camera_recovery::SourceHealthState::STARTING &&
+        target->input.frames.load() && target->decoded.frames.load() &&
+        source_pgie_frames[target->source_id].load() &&
+        source_tracker_updates[target->source_id].load() &&
+        source_preview_published[target->source_id].load()) {
+      target->recovery_policy.mark_online(now_us);
+      event(target, "SOURCE_ONLINE", "decode+PGIE+tracker+preview all advancing");
+    }
+    return;
+  }
+
+  if (target->recovery_policy.state() == camera_recovery::SourceHealthState::ONLINE ||
+      target->recovery_policy.state() == camera_recovery::SourceHealthState::STARTING) {
+    target->recovery_policy.mark_suspect(now_us, "decoded_source_stalled");
+    event(target, "SOURCE_SUSPECT", "decoded, ingress and analytics input stopped; queue_depth=0");
+  }
+  if (target->recovery_policy.state() == camera_recovery::SourceHealthState::SUSPECT) {
+    begin_source_recovery(target, now_us, "decoded_source_stalled", false);
+  } else if (!source_stall_recovery_enabled &&
+             target->recovery_policy.state() != camera_recovery::SourceHealthState::OFFLINE) {
+    target->recovery_policy.mark_offline(now_us, "decoded_source_stalled");
+    target->last_failure_reason = "decoded_source_stalled";
+    event(target, "SOURCE_OFFLINE", "recovery disabled; other cameras and shared pipeline continue");
+  }
 }
 
 static void inject_scheduled_source_stall(gint64 now_us) {
-  if (recovery_test_next_stall >= recovery_test_stalls.size()) return;
-  auto &test = recovery_test_stalls[recovery_test_next_stall];
-  if (test.injected || now_us - start_us < test.at_us) return;
-  SourceCtx *target = find_source(test.camera_id);
-  if (!target || !target->source || target->stale_recovery_pending) {
-    fail("controlled source-stall test could not resolve an idle target owner");
-    return;
+  while (recovery_test_next_stall < recovery_test_stalls.size()) {
+    auto &test = recovery_test_stalls[recovery_test_next_stall];
+    if (test.injected || now_us - start_us < test.at_us) return;
+    SourceCtx *target = find_source(test.camera_id);
+    if (!target || !target->source || target->stale_recovery_pending) {
+      fail("controlled source-stall test could not resolve an idle target owner");
+      return;
+    }
+    const guint64 decoded = target->decoded.frames.load();
+    const guint64 input = target->input.frames.load();
+    const guint64 pgie = source_pgie_frames[target->source_id].load();
+    const guint64 tracker = source_tracker_updates[target->source_id].load();
+    const guint64 preview = source_preview_published[target->source_id].load();
+    const std::string old_name = GST_ELEMENT_NAME(target->source);
+    event(target, "TEST_SOURCE_STALL_BEGIN",
+        "elapsed_ms=" + std::to_string((now_us - start_us) / 1000) +
+        " mode=safe_source_state_null equivalent_to_decoded_stall=true old_source=" + old_name +
+        " generation=" + std::to_string(target->source_generation.load()) +
+        " decoded_frames=" + std::to_string(decoded) + " input_frames=" + std::to_string(input) +
+        " pgie_frames=" + std::to_string(pgie) + " tracker_updates=" + std::to_string(tracker) +
+        " preview_frames=" + std::to_string(preview) + " owner_count=1");
+    const GstStateChangeReturn result = gst_element_set_state(target->source, GST_STATE_NULL);
+    if (result == GST_STATE_CHANGE_FAILURE) {
+      fail(target->id + " controlled source interruption could not reach NULL state");
+      return;
+    }
+    test.injected = true;
+    ++recovery_test_next_stall;
   }
-  const guint64 decoded = target->decoded.frames.load();
-  const guint64 input = target->input.frames.load();
-  const guint64 pgie = source_pgie_frames[target->source_id].load();
-  const guint64 tracker = source_tracker_updates[target->source_id].load();
-  const guint64 preview = source_preview_published[target->source_id].load();
-  const std::string old_name = GST_ELEMENT_NAME(target->source);
-  event(target, "TEST_SOURCE_STALL_BEGIN",
-      "elapsed_ms=" + std::to_string((now_us - start_us) / 1000) +
-      " mode=safe_source_state_null equivalent_to_decoded_stall=true old_source=" + old_name +
-      " generation=" + std::to_string(target->source_generation) +
-      " decoded_frames=" + std::to_string(decoded) + " input_frames=" + std::to_string(input) +
-      " pgie_frames=" + std::to_string(pgie) + " tracker_updates=" + std::to_string(tracker) +
-      " preview_frames=" + std::to_string(preview) + " owner_count=1");
-  const GstStateChangeReturn result = gst_element_set_state(target->source, GST_STATE_NULL);
-  if (result == GST_STATE_CHANGE_FAILURE) {
-    fail(target->id + " controlled source interruption could not reach NULL state");
-    return;
-  }
-  test.injected = true;
-  ++recovery_test_next_stall;
 }
 
 static gboolean source_stall_recovery_tick(gpointer) {
-  if (!source_stall_recovery_enabled || stopping || fatal) return G_SOURCE_CONTINUE;
+  if (stopping || fatal) return G_SOURCE_CONTINUE;
   const gint64 now_us = g_get_monotonic_time();
   if ((now_us - start_us) < 15'000'000) return G_SOURCE_CONTINUE;
   inject_scheduled_source_stall(now_us);
   if (fatal) return G_SOURCE_REMOVE;
-  for (auto *ctx : sources) {
-    const guint64 input_frames = ctx->input.frames.load();
-    if (ctx->stale_recovery_pending) {
-      const guint64 decoded_frames = ctx->decoded.frames.load();
-      const guint64 pgie_frames = source_pgie_frames[ctx->source_id].load();
-      const guint64 tracker_updates = source_tracker_updates[ctx->source_id].load();
-      const guint64 preview_frames = source_preview_published[ctx->source_id].load();
-      if (input_frames > ctx->stale_recovery_baseline_frames &&
-          decoded_frames > ctx->stale_recovery_baseline_decoded_frames &&
-          pgie_frames > ctx->stale_recovery_baseline_pgie_frames &&
-          tracker_updates > ctx->stale_recovery_baseline_tracker_updates &&
-          preview_frames > ctx->stale_recovery_baseline_preview_frames) {
-        ctx->stale_recovery_pending = false;
-        ctx->consecutive_stale_recoveries = 0;
-        ctx->stale_recovery_started_us = 0;
-        event(ctx, "SOURCE_STALL_RECOVERY_PASS",
-            "elapsed_ms=" + std::to_string((now_us - start_us) / 1000) +
-            " decoded+analytics input+PGIE+canonical tracker+preview all advanced after replacement; "
-            "decoded_frames=" + std::to_string(decoded_frames) +
-            " input_frames=" + std::to_string(input_frames) +
-            " pgie_frames=" + std::to_string(pgie_frames) +
-            " tracker_updates=" + std::to_string(tracker_updates) +
-            " preview_frames=" + std::to_string(preview_frames) +
-            " recovery_count=" + std::to_string(ctx->stale_recovery_count) +
-            " generation=" + std::to_string(ctx->source_generation));
-        continue;
-      }
-      if (now_us - ctx->stale_recovery_started_us > SOURCE_STALL_RECOVERY_CONFIRM_US) {
-        ctx->stale_recovery_pending = false;
-        fail(ctx->id + " source replacement produced no decoded frame within 15 seconds");
-        return G_SOURCE_REMOVE;
-      }
-      continue;
-    }
-    const gint64 decoded_last = ctx->decoded.last_us.load();
-    const gint64 input_last = ctx->input.last_us.load();
-    const gint64 ingress_last = ctx->ingress.last_us.load();
-    const bool decoded_stale = !decoded_last || now_us - decoded_last > SOURCE_STALL_RECOVERY_AFTER_US;
-    const bool input_stale = !input_last || now_us - input_last > SOURCE_STALL_RECOVERY_AFTER_US;
-    const bool ingress_stale = !ingress_last || now_us - ingress_last > SOURCE_STALL_RECOVERY_AFTER_US;
-    if (decoded_stale && input_stale && ingress_stale) {
-      if (!replace_stalled_source(ctx, now_us) && fatal) return G_SOURCE_REMOVE;
-    }
-  }
+  for (auto *ctx : sources) source_recovery_step(ctx, now_us);
   return G_SOURCE_CONTINUE;
 }
 
-static SourceCtx *owner_for_message(GstMessage *m) {
+struct SourceMessageOwner {
+  SourceCtx *ctx = nullptr;
+  guint64 generation = 0;
+  bool stale = false;
+};
+
+static SourceMessageOwner owner_for_message(GstMessage *m) {
   for (auto *ctx : sources) {
-    if (m->src == GST_OBJECT(ctx->source) ||
-        gst_object_has_as_ancestor(m->src, GST_OBJECT(ctx->source))) return ctx;
+    source_message_owner::Tag tag;
+    const guint64 generation = ctx->source_generation.load(std::memory_order_acquire);
+    const bool active = ctx->source != nullptr;
+    const auto disposition = source_message_owner::resolve(
+        m->src, active ? GST_OBJECT(ctx->source) : nullptr, ctx, generation, active, &tag);
+    if (disposition == source_message_owner::Disposition::CURRENT_SOURCE)
+      return {ctx, tag.generation, false};
+    if (disposition == source_message_owner::Disposition::STALE_SOURCE)
+      return {ctx, tag.generation, true};
   }
-  return nullptr;
+  return {};
 }
 
 static gboolean bus_message(GstBus*, GstMessage *m, gpointer) {
@@ -759,14 +1177,32 @@ static gboolean bus_message(GstBus*, GstMessage *m, gpointer) {
       return G_SOURCE_CONTINUE;
     }
 #endif
-    SourceCtx *ctx = owner_for_message(m);
+    const SourceMessageOwner owner = owner_for_message(m);
+    SourceCtx *ctx = owner.ctx;
+    if (ctx && owner.stale) {
+      const guint64 count = ++ctx->stale_source_messages;
+      event(ctx, "STALE_SOURCE_GENERATION_MESSAGE",
+          "kind=" + std::string(error ? "ERROR" : "WARNING") +
+          " message_generation=" + std::to_string(owner.generation) +
+          " current_generation=" + std::to_string(ctx->source_generation.load()) +
+          " stale_message_count=" + std::to_string(count) + "; ignored, not shared-fatal");
+      if (e) g_error_free(e);
+      g_free(debug);
+      return G_SOURCE_CONTINUE;
+    }
     if (ctx) {
       if (error) ++ctx->errors; else ++ctx->warnings;
       if (!error && is_nvurisrcbin_reconnect_attempt_warning(message)) {
         const guint attempt = ++ctx->rtsp_reconnect_attempts;
-        const guint64 tracking_epoch = ++ctx->tracking_epoch;
-        event(ctx, "RTSP_RECONNECT_ATTEMPT", message + " attempt=" +
-            std::to_string(attempt) + " tracking_epoch=" + std::to_string(tracking_epoch));
+        event(ctx, "NATIVE_RTSP_RECONNECT_WARNING", message + " attempt=" +
+            std::to_string(attempt) + " policy=unexpected_internal_retry; source_epoch_unchanged");
+      }
+      if (error) {
+        const bool authentication_failure = e && e->domain == GST_RESOURCE_ERROR &&
+            e->code == GST_RESOURCE_ERROR_NOT_AUTHORIZED;
+        begin_source_recovery(ctx, g_get_monotonic_time(),
+            authentication_failure ? "authentication_rejected" : "source_gstreamer_error",
+            authentication_failure);
       }
     } else {
       if (error) ++shared_errors; else ++shared_warnings;
@@ -777,7 +1213,6 @@ static gboolean bus_message(GstBus*, GstMessage *m, gpointer) {
       last_message_us = now;
     }
     if (error && !ctx) fail("shared mux/output error: " + message);
-    if (error && message.find("Unauthorized") != std::string::npos) fail("RTSP authentication rejected");
     if (e) g_error_free(e);
     g_free(debug);
   } else if (type == GST_MESSAGE_EOS && stopping) {
@@ -791,7 +1226,20 @@ static gboolean bus_message(GstBus*, GstMessage *m, gpointer) {
   }
 #else
   else if (type == GST_MESSAGE_EOS && !stopping) {
-    fail("unexpected shared pipeline EOS");
+    const SourceMessageOwner owner = owner_for_message(m);
+    SourceCtx *ctx = owner.ctx;
+    if (ctx && owner.stale) {
+      const guint64 count = ++ctx->stale_source_messages;
+      event(ctx, "STALE_SOURCE_GENERATION_MESSAGE",
+          "kind=EOS message_generation=" + std::to_string(owner.generation) +
+          " current_generation=" + std::to_string(ctx->source_generation.load()) +
+          " stale_message_count=" + std::to_string(count) + "; ignored, not shared-fatal");
+    } else if (ctx) {
+      ++ctx->errors;
+      begin_source_recovery(ctx, g_get_monotonic_time(), "source_eos", false);
+    } else {
+      fail("unexpected shared pipeline EOS");
+    }
   }
 #endif
   return G_SOURCE_CONTINUE;
@@ -873,10 +1321,30 @@ static bool write_monitoring_snapshot() {
   const guint64 mono_ns = static_cast<guint64>(now_us) * 1000;
   const guint64 epoch_ms = static_cast<guint64>(g_get_real_time()) / 1000;
   const guint64 next_sequence = ++monitoring_sequence;
+  guint online_camera_count = 0;
+  for (guint i = 0; i < std::min<size_t>(6, sources.size()); ++i) {
+    auto *ctx = sources[i];
+    const auto frame_age_ms = [now_us](gint64 last_us) -> double {
+      return last_us ? std::max(0.0, (now_us - last_us) / 1000.0) : 1.0e9;
+    };
+    const bool fresh = ctx->decoder_seen.load() && frame_age_ms(ctx->input.last_us.load()) < 2000.0 &&
+        frame_age_ms(ctx->decoded.last_us.load()) < 2000.0 &&
+        frame_age_ms(source_pgie_last_us[ctx->source_id].load()) < 2000.0 &&
+        frame_age_ms(source_tracker_last_us[ctx->source_id].load()) < 2000.0 &&
+        frame_age_ms(source_preview_last_us[ctx->source_id].load()) < 2000.0 &&
+        ctx->recovery_policy.state() == camera_recovery::SourceHealthState::ONLINE;
+    if (fresh) ++online_camera_count;
+  }
+  const bool six_camera_ready = online_camera_count == 6 && sources.size() == 6;
   std::ostringstream out;
   out << "{\"schema_version\":1,\"sequence\":" << next_sequence
       << ",\"generated_monotonic_ns\":" << mono_ns << ",\"generated_epoch_ms\":" << epoch_ms
-      << ",\"runtime\":{\"status\":\"live\",\"camera_count\":6,\"rtsp_source_count\":6,"
+      << ",\"runtime\":{\"status\":\"live\",\"process_status\":\"running\",\"analytics_status\":\""
+      << (six_camera_ready ? "ready" : "degraded") << "\",\"six_camera_ready\":"
+      << (six_camera_ready ? "true" : "false") << ",\"six_camera_readiness\":\""
+      << (six_camera_ready ? "ready" : "not_ready") << "\",\"online_camera_count\":" << online_camera_count
+      << ",\"shared_pipeline_status\":\"" << (fatal ? "fatal" : "healthy") << "\""
+      << ",\"camera_count\":6,\"rtsp_source_count\":6,"
          "\"ui_rtsp_extra\":0,\"shared_trt_workers\":0,\"detector_enabled\":true,"
          "\"uptime_sec\":" << std::max(0.0, (now_us - start_us) / 1e6)
       << ",\"warnings_total\":" << shared_warnings << ",\"errors_total\":" << shared_errors << "},\"cameras\":[";
@@ -891,9 +1359,18 @@ static bool write_monitoring_snapshot() {
     const double infer_fps = (infer_frames_now - monitoring_prev_infer[i]) / elapsed;
     const double preview_fps = (preview_frames_now - monitoring_prev_preview[i]) / elapsed;
     const gint64 last = ctx->input.last_us.load();
-    const double age_ms = last ? std::max(0.0, (now_us - last) / 1000.0) : 1.0e9;
+    const double input_age_ms = last ? std::max(0.0, (now_us - last) / 1000.0) : 1.0e9;
     const gint64 decoded_last = ctx->decoded.last_us.load();
     const double decoded_age_ms = decoded_last ? std::max(0.0, (now_us - decoded_last) / 1000.0) : 1.0e9;
+    const auto stage_age_ms = [now_us](gint64 last_us) -> double {
+      return last_us ? std::max(0.0, (now_us - last_us) / 1000.0) : 1.0e9;
+    };
+    const double pgie_age_ms = stage_age_ms(source_pgie_last_us[ctx->source_id].load());
+    const double tracker_age_ms = stage_age_ms(source_tracker_last_us[ctx->source_id].load());
+    const double preview_age_ms = stage_age_ms(source_preview_last_us[ctx->source_id].load());
+    const bool camera_online = ctx->decoder_seen.load() && input_age_ms < 2000.0 && decoded_age_ms < 2000.0 &&
+        pgie_age_ms < 2000.0 && tracker_age_ms < 2000.0 && preview_age_ms < 2000.0 &&
+        ctx->recovery_policy.state() == camera_recovery::SourceHealthState::ONLINE;
     const guint rtsp_reconnect_attempts = ctx->rtsp_reconnect_attempts.load();
     const guint source_stall_recoveries = ctx->stale_recovery_count;
     guint queue = 0;
@@ -903,7 +1380,16 @@ static bool write_monitoring_snapshot() {
     const gint track_frame = tracker_canonical_frames[i].load();
     const guint count = tracker_canonical_count_for_frame(i, track_frame);
     out << "{\"camera_id\":\"CAM-" << std::setw(2) << std::setfill('0') << i + 1
-        << "\",\"online\":" << ((ctx->decoder_seen.load() && age_ms < 2000) ? "true" : "false")
+        << "\",\"source_id\":" << ctx->source_id
+        << ",\"online\":" << (camera_online ? "true" : "false")
+        << ",\"current_state\":\"" << camera_recovery::state_name(ctx->recovery_policy.state()) << "\""
+        << ",\"source_generation\":" << ctx->source_generation.load()
+        << ",\"stale_source_messages\":" << ctx->stale_source_messages.load()
+        << ",\"source_epoch\":" << ctx->recovery_policy.source_epoch()
+        << ",\"age_since_last_decoded_frame_ms\":" << decoded_age_ms
+        << ",\"age_since_last_pgie_frame_ms\":" << pgie_age_ms
+        << ",\"age_since_last_tracker_output_ms\":" << tracker_age_ms
+        << ",\"age_since_last_preview_ms\":" << preview_age_ms
         << ",\"source_fps\":" << std::fixed << std::setprecision(3) << source_fps
         << ",\"decoded_frames\":" << decoded_frames
         << ",\"analytics_input_frames_total\":" << source_frames
@@ -917,11 +1403,17 @@ static bool write_monitoring_snapshot() {
         << std::max<gint64>(0, static_cast<gint64>(source_frames) - static_cast<gint64>(infer_frames_now))
         << ",\"current_box_count\":" << count << ",\"positive_inferences\":" << detections[i].persons.load()
         << ",\"detections_total\":" << detections[i].persons.load()
-        << ",\"result_age_ms\":" << age_ms << ",\"infer_p95_ms\":null,\"render_gap_p95_ms\":null"
-        << ",\"reconnects\":" << (rtsp_reconnect_attempts + source_stall_recoveries)
+        << ",\"result_age_ms\":" << input_age_ms << ",\"infer_p95_ms\":null,\"render_gap_p95_ms\":null"
+        << ",\"reconnects\":" << source_stall_recoveries
+        << ",\"native_rtsp_reconnect_attempts\":" << rtsp_reconnect_attempts
         << ",\"rtsp_reconnect_attempts\":" << rtsp_reconnect_attempts
         << ",\"tracking_epoch\":" << ctx->tracking_epoch.load()
         << ",\"source_stall_recoveries\":" << source_stall_recoveries
+        << ",\"custom_source_replacements\":" << source_stall_recoveries
+        << ",\"consecutive_recovery_failures\":" << ctx->recovery_policy.consecutive_failures()
+        << ",\"last_failure_reason\":\"" << ctx->last_failure_reason << "\""
+        << ",\"next_retry_time_monotonic_ns\":"
+        << (ctx->recovery_policy.next_retry_us() > 0 ? ctx->recovery_policy.next_retry_us() * 1000 : 0)
         << ",\"input_pts_resets\":" << ctx->input.backwards.load()
         << ",\"decoded_pts_resets\":" << ctx->decoded.backwards.load()
         << ",\"decoder_max_interframe_gap_ms\":" << ctx->decoded.max_gap_us.load() / 1000.0
@@ -1067,15 +1559,6 @@ static gboolean tick(gpointer) {
     }
   }
 
-  for (auto *ctx : sources) {
-    const double age = ctx->input.last_us ? std::max(0.0, (now - ctx->input.last_us) / 1e6) : elapsed;
-    const bool target_is_off = interruption_started && !interruption_resumed && ctx->id == interrupt_camera;
-    if (!target_is_off && age > 90) {
-      fail(ctx->id + " has no advancing frames for 90 seconds");
-      return G_SOURCE_REMOVE;
-    }
-  }
-
   if (out_age > 30) {
     fail("mux/tiled output stalled for more than 30 seconds");
     return G_SOURCE_REMOVE;
@@ -1204,7 +1687,8 @@ int main(int argc, char **argv) {
     }
     source_stall_recovery_enabled = std::strcmp(source_recovery, "1") == 0;
   }
-  g_print("SOURCE_STALL_RECOVERY enabled=%d stale_after_ms=2500 confirm_timeout_ms=15000 cooldown_ms=60000\n",
+  g_print("SOURCE_STALL_RECOVERY enabled=%d owner=application_watchdog native_nvurisrcbin_reconnect=disabled "
+          "stale_after_ms=2500 confirm_timeout_ms=15000 retry_backoff_ms=1000..60000 auth_quarantine_sec=300\n",
           int(source_stall_recovery_enabled));
   std::string recovery_test_error;
   if (!parse_recovery_test_plan(g_getenv("V11_TEST_SOURCE_STALL_PLAN"), &recovery_test_error)) {
@@ -1362,7 +1846,7 @@ int main(int argc, char **argv) {
       return 2;
     }
     gst_object_unref(qp);
-    gst_object_unref(mp);
+    ctx->mux_sink_pad = mp;
   }
 
 #ifdef YOLO26_TRACKER
@@ -1492,7 +1976,7 @@ int main(int argc, char **argv) {
   }
 #ifndef PGIE_ISOLATION
   g_timeout_add(500, monitoring_tick, nullptr);
-  if (source_stall_recovery_enabled) g_timeout_add(500, source_stall_recovery_tick, nullptr);
+  g_timeout_add(500, source_stall_recovery_tick, nullptr);
 #endif
   g_timeout_add_seconds(5, tick, nullptr);
   if (!fatal) g_main_loop_run(loop);
@@ -1502,6 +1986,17 @@ int main(int argc, char **argv) {
 #endif
   stopping = true;
   gst_element_set_state(pipeline, GST_STATE_NULL);
+  for (auto *ctx : sources) {
+    if (ctx->source_video_pad) {
+      gst_object_unref(ctx->source_video_pad);
+      ctx->source_video_pad = nullptr;
+    }
+    if (ctx->mux_sink_pad) {
+      gst_element_release_request_pad(mux, ctx->mux_sink_pad);
+      gst_object_unref(ctx->mux_sink_pad);
+      ctx->mux_sink_pad = nullptr;
+    }
+  }
 #ifdef YOLO26_PERSON
   lowconf_verifier_shutdown();
   detection_stats();

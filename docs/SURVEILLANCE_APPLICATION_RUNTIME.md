@@ -5,8 +5,8 @@ The surveillance contract is centralized in `services/shared/deployment.py`.
 
 | Variable | Default |
 | --- | --- |
-| API_HOST / API_PORT | 0.0.0.0 / 8100 |
-| ML_HOST / ML_PORT | 0.0.0.0 / 8101 |
+| API_HOST / API_PORT | 127.0.0.1 / 8100 |
+| ML_HOST / ML_PORT | 127.0.0.1 / 8101 |
 | ML_SERVICE_URL | http://127.0.0.1:8101 |
 | FRONTEND_API_BASE_URL | http://127.0.0.1:8100 |
 | FRONTEND_ML_VIDEO_BASE_URL | http://127.0.0.1:8101 |
@@ -14,6 +14,14 @@ The surveillance contract is centralized in `services/shared/deployment.py`.
 Port overrides derive corresponding URLs unless explicitly overridden.
 Monitoring websocket: API base URL + `/ws/v1/monitoring`, ws/wss scheme.
 The ML video URL is compatibility metadata, **not** an MJPEG transport.
+
+Both services bind loopback by default. Binding either service to a non-loopback
+address requires `SURVEILLANCE_API_TOKEN` with at least 32 characters. The API
+and ML REST routes other than `/health`, plus the monitoring websocket, require
+that bearer token when configured. The unauthenticated health response reports
+service/readiness state only and never includes camera credentials. Do not put
+the token in source control; the operator UI reads it from its process
+environment.
 
 Run `bash scripts/start_full_live_stack.sh --preflight` for the frozen F1 import
 check; run without arguments to start the supervised camera-only application.

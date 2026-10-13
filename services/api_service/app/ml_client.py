@@ -10,12 +10,13 @@ class MLServiceUnavailable(RuntimeError):
 
 
 class MLServiceClient:
-    def __init__(self, base_url: str, timeout_seconds: float) -> None:
+    def __init__(self, base_url: str, timeout_seconds: float, access_token: str = "") -> None:
         timeout = httpx.Timeout(timeout_seconds)
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout,
-            headers={"User-Agent": "ai-surveillance-api/1.0"},
+            headers={"User-Agent": "ai-surveillance-api/1.0",
+                     **({"Authorization": f"Bearer {access_token}"} if access_token else {})},
         )
 
     async def close(self) -> None:

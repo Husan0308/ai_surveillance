@@ -64,10 +64,10 @@ def contiguous_miss(missed_frames):
     return best
 
 
-def analyze_camera(camera, run_dir, mux_width=2560, mux_height=1440):
+def analyze_camera(camera, run_dir, mux_width=2560, mux_height=1440, reference_dir=APPROVED):
     expected_by_frame = defaultdict(list)
     reference_pts_by_frame = {}
-    ref_path = APPROVED / f"{camera.replace('-', '')}-per-frame.csv"
+    ref_path = reference_dir / f"{camera.replace('-', '')}-per-frame.csv"
     with ref_path.open(newline="") as stream:
         for row in csv.DictReader(stream):
             b = box(row.get("chosen_bbox"))
@@ -241,6 +241,7 @@ def analyze_camera(camera, run_dir, mux_width=2560, mux_height=1440):
     unmatched_approved = len(misses)
     report = {
         "camera_id": camera,
+        "approved_reference_csv": str(ref_path),
         "approved_reference_frames": len(expected_frames),
         "approved_reference_boxes": expected_boxes,
         "candidate_rendered_boxes_on_reference_frames": rendered_boxes,
@@ -300,8 +301,11 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--mux-width", type=int, default=2560)
     parser.add_argument("--mux-height", type=int, default=1440)
+    parser.add_argument("--reference-dir", type=Path, default=APPROVED,
+                        help="directory containing CAM01-per-frame.csv and CAM04-per-frame.csv")
     args = parser.parse_args()
-    result = {camera: analyze_camera(camera, args.run, args.mux_width, args.mux_height)
+    result = {camera: analyze_camera(camera, args.run, args.mux_width, args.mux_height,
+                                     args.reference_dir.resolve())
               for camera in ("CAM-01", "CAM-04")}
     output = args.output or args.run / "approved-reference-comparison.json"
     output.write_text(json.dumps(result, indent=2) + "\n")

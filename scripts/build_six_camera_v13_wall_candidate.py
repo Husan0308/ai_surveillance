@@ -10,7 +10,10 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE = Path(os.getenv("SIXCAM_BBOX_CANDIDATE",
                            str(ROOT / ".runtime/sixcam-approved-bbox-20261006-r12-profile"))).resolve()
-IMAGE = "nvcr.io/nvidia/deepstream@sha256:10eca409b3894e91c1bac915c9f1346307e56695e552487cbe8cf2f58a3f998f"
+# Pin the official DeepStream 9.1 development image digest. The older local
+# digest carried the runtime headers but omitted CUDA development headers
+# needed by the TensorRT context verifier included by the production target.
+IMAGE = "nvcr.io/nvidia/deepstream@sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b"
 SOURCE = ROOT / "services/camera_v11/native/six_camera_v13"
 YOLO = ROOT / "config/deepstream/config_infer_primary_yolo26m_raw_otm.txt"
 V13 = ROOT / "config/deepstream/config_tracker_NvDCF_yolo26m_retention_v13_probation0.yml"
@@ -170,15 +173,20 @@ def build() -> dict:
     source_digest = source_hashes()
     binary = CANDIDATE / "bin/cam-six-yolo-local6-posttracker"
     command = [
-        "docker", "run", "--rm", "--pull=never", "--user", f"{os.getuid()}:{os.getgid()}",
+        "docker", "run", "--rm", "--pull=never", "--gpus", "all",
+        "--entrypoint", "/bin/bash",
+        "--user", f"{os.getuid()}:{os.getgid()}",
         "-v", f"{SOURCE}:/src:ro", "-v", f"{CANDIDATE}:/work",
-        IMAGE, "bash", "-lc",
+        IMAGE, "-lc",
         "g++ -std=c++17 -O2 -DYOLO26_PERSON -DYOLO26_TRACKER "
-        "-I/opt/nvidia/deepstream/deepstream/sources/includes "
+        "-I/opt/nvidia/deepstream/deepstream/sources/includes -I/usr/local/cuda/include "
         "$(pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0) "
         "/src/main.cpp -o /work/bin/cam-six-yolo-local6-posttracker "
         "$(pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0) "
-        "-L/opt/nvidia/deepstream/deepstream/lib -lnvdsgst_meta -lnvds_meta -ldl -pthread "
+        "-L/opt/nvidia/deepstream/deepstream/lib "
+        "-L/usr/local/cuda/targets/x86_64-linux/lib "
+        "-lnvdsgst_meta -lnvds_meta -lnvds_infer -lnvbufsurface -lnvbufsurftransform "
+        "-lnvinfer_plugin -lnvinfer -lcudart -ldl -pthread "
         "-Wl,-rpath,/opt/nvidia/deepstream/deepstream/lib",
     ]
     subprocess.run(command, cwd=ROOT, check=True)

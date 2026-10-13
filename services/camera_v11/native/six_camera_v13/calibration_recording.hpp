@@ -6,8 +6,11 @@
 #include <gst/video/video.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +20,7 @@
 #include <mutex>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace calibration_recording {
@@ -33,6 +37,25 @@ struct FrameStamp {
   guint64 monotonic_ns = 0;
 };
 
+struct MetadataRow {
+  bool encoded = false;
+  FrameStamp stamp;
+  guint width = 0;
+  guint height = 0;
+};
+
+inline bool source_pts_duration_elapsed(GstClockTime first_pts,
+                                        GstClockTime current_pts,
+                                        guint duration_sec) {
+  if (!GST_CLOCK_TIME_IS_VALID(first_pts) ||
+      !GST_CLOCK_TIME_IS_VALID(current_pts) || current_pts < first_pts)
+    return false;
+  const guint64 requested_ns = static_cast<guint64>(duration_sec) * GST_SECOND;
+  return current_pts - first_pts >= requested_ns;
+}
+
+static constexpr size_t METADATA_QUEUE_CAPACITY = 32768;
+
 struct Branch {
   std::string camera_id;
   std::string camera_name;
@@ -48,15 +71,24 @@ struct Branch {
   GstPad *tee_pad = nullptr;
   GstPad *sink_pad = nullptr;
   gulong input_probe_id = 0;
+  gulong queue_output_probe_id = 0;
+  gulong converter_output_probe_id = 0;
+  gulong encoder_input_probe_id = 0;
+  gulong encoder_output_probe_id = 0;
   gulong encoded_probe_id = 0;
   gulong eos_probe_id = 0;
   std::atomic<guint64> input_frames{0};
+  std::atomic<guint64> queue_output_frames{0};
+  std::atomic<guint64> converted_frames{0};
+  std::atomic<guint64> encoder_input_frames{0};
+  std::atomic<guint64> encoder_output_frames{0};
   std::atomic<guint64> encoded_frames{0};
   std::atomic<guint64> queue_overruns{0};
   std::atomic<bool> ready_seen{false};
   std::atomic<bool> eos_seen{false};
   std::atomic<bool> eos_scheduled{false};
   std::atomic<bool> eos_sent{false};
+  std::atomic<bool> source_pts_duration_boundary_reached{false};
   std::atomic<guint> width{0};
   std::atomic<guint> height{0};
   std::atomic<guint> fps_num{0};
@@ -71,6 +103,18 @@ struct Branch {
   std::vector<FrameStamp> input_stamps;
   std::vector<FrameStamp> encoded_stamps;
   std::mutex rows_mutex;
+  std::condition_variable rows_ready;
+  std::array<MetadataRow, METADATA_QUEUE_CAPACITY> metadata_queue{};
+  size_t metadata_queue_head = 0;
+  size_t metadata_queue_size = 0;
+  std::thread metadata_writer;
+  std::atomic<bool> metadata_writer_stop{false};
+  std::atomic<bool> metadata_writer_done{false};
+  std::atomic<bool> metadata_writer_failed{false};
+  std::atomic<guint64> metadata_rows_enqueued{0};
+  std::atomic<guint64> metadata_rows_written{0};
+  std::atomic<guint64> metadata_queue_drops{0};
+  std::atomic<guint64> stamp_history_overflows{0};
   std::ofstream rows;
 };
 
@@ -138,15 +182,40 @@ class Controller {
 
   gboolean tick() {
     if (!session_) return G_SOURCE_CONTINUE;
+    for (const auto &branch : session_->branches) {
+      if (branch->metadata_writer_failed.load(std::memory_order_acquire) ||
+          branch->metadata_queue_drops.load(std::memory_order_acquire) != 0 ||
+          branch->queue_overruns.load(std::memory_order_acquire) != 0) {
+        session_->error = branch->queue_overruns.load() != 0
+            ? "recorder branch queue overrun; frames may be missing"
+            : branch->metadata_queue_drops.load() != 0
+            ? "bounded JSONL metadata queue overflow; recording evidence is incomplete"
+            : "JSONL metadata writer failed; recording evidence is incomplete";
+        log("CALIBRATION_RECORDER_ERROR", branch->camera_id + " " + session_->error);
+        abort_session();
+        break;
+      }
+    }
+    if (!session_) return G_SOURCE_CONTINUE;
+    if (session_->state == "FAILED") {
+      finish_failed_session_if_ready();
+      write_status(session_ ? session_->state : last_state_);
+      return G_SOURCE_CONTINUE;
+    }
     if (session_->state == "ACTIVE" && monotonic_ns() - session_->start_monotonic_ns >=
                                                guint64(session_->duration_sec) * GST_SECOND) {
       request_stop("duration elapsed");
     }
     if (session_ && session_->state == "STOPPING" && monotonic_ns() - stop_requested_ns_ > 8 * GST_SECOND) {
       session_->error = "branch EOS/finalization timed out";
-      session_->state = "FAILED";
       log("CALIBRATION_RECORDER_ERROR", session_->error);
       abort_session();
+    }
+    if (session_ && session_->state == "STOPPING" &&
+        std::all_of(session_->branches.begin(), session_->branches.end(),
+                    [](const auto &b) { return b->eos_seen.load(); }) &&
+        !session_->finalize_scheduled.exchange(true)) {
+      g_idle_add(finalize_callback, this);
     }
     write_status(session_ ? session_->state : last_state_);
     return G_SOURCE_CONTINUE;
@@ -164,10 +233,22 @@ class Controller {
       g_usleep(10'000);
     }
     if (session_) abort_session();
+    // The parent pipeline is already shutting down here. Drain the bounded
+    // evidence writer before destroying its Branch storage; this wait is never
+    // performed by a streaming callback or during normal live recording.
+    while (session_) {
+      finish_failed_session_if_ready();
+      if (session_) {
+        while (g_main_context_iteration(nullptr, FALSE)) {}
+        g_usleep(10'000);
+      }
+    }
     write_status(last_state_);
   }
 
  private:
+  friend struct RecorderTestAccess;
+
   enum class StreamState { ARMING, ACTIVE, STOPPING, FAILED };
   GstElement *pipeline_ = nullptr;
   std::vector<Source> sources_;
@@ -207,6 +288,135 @@ class Controller {
       }
     }
     return result;
+  }
+
+  static bool enqueue_metadata(Branch *branch, const MetadataRow &row) {
+    if (!branch || branch->metadata_writer_stop.load(std::memory_order_acquire)) {
+      if (branch) branch->metadata_queue_drops.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    std::unique_lock<std::mutex> guard(branch->rows_mutex, std::try_to_lock);
+    if (!guard.owns_lock() || branch->metadata_queue_size == METADATA_QUEUE_CAPACITY) {
+      branch->metadata_queue_drops.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    const size_t tail = (branch->metadata_queue_head + branch->metadata_queue_size) % METADATA_QUEUE_CAPACITY;
+    branch->metadata_queue[tail] = row;
+    ++branch->metadata_queue_size;
+    branch->metadata_rows_enqueued.fetch_add(1, std::memory_order_relaxed);
+    guard.unlock();
+    branch->rows_ready.notify_one();
+    return true;
+  }
+
+  static void metadata_writer_loop(Branch *branch) noexcept {
+    try {
+      branch->rows.open(branch->rows_path, std::ios::out | std::ios::trunc);
+      if (!branch->rows) branch->metadata_writer_failed.store(true, std::memory_order_release);
+      guint64 rows_since_flush = 0;
+      for (;;) {
+        MetadataRow row;
+        bool have_row = false;
+        {
+          std::unique_lock<std::mutex> guard(branch->rows_mutex);
+          branch->rows_ready.wait_for(guard, std::chrono::milliseconds(100), [branch] {
+            return branch->metadata_queue_size != 0 ||
+                branch->metadata_writer_stop.load(std::memory_order_acquire);
+          });
+          if (branch->metadata_queue_size != 0) {
+            row = branch->metadata_queue[branch->metadata_queue_head];
+            branch->metadata_queue_head = (branch->metadata_queue_head + 1) % METADATA_QUEUE_CAPACITY;
+            --branch->metadata_queue_size;
+            have_row = true;
+          } else if (branch->metadata_writer_stop.load(std::memory_order_acquire)) {
+            break;
+          }
+        }
+        if (!have_row) continue;
+        if (!branch->metadata_writer_failed.load(std::memory_order_acquire)) {
+          const char *stage = row.encoded ? "encoded_access_unit" : "decoded_source";
+          branch->rows << "{\"stage\":\"" << stage << "\",\"frame_num\":" << row.stamp.frame_num
+                       << ",\"pts_ns\":" << row.stamp.pts_ns << ",\"dts_ns\":" << row.stamp.dts_ns
+                       << ",\"monotonic_ns\":" << row.stamp.monotonic_ns;
+          if (!row.encoded) {
+            branch->rows << ",\"width\":" << row.width << ",\"height\":" << row.height
+                         << ",\"format\":\"" << json_escape(branch->pixel_format) << "\"";
+          }
+          branch->rows << "}\n";
+          ++rows_since_flush;
+          if (!branch->rows) {
+            branch->metadata_writer_failed.store(true, std::memory_order_release);
+          } else {
+            branch->metadata_rows_written.fetch_add(1, std::memory_order_relaxed);
+            if (rows_since_flush >= 20) {
+              branch->rows.flush();
+              rows_since_flush = 0;
+              if (!branch->rows) branch->metadata_writer_failed.store(true, std::memory_order_release);
+            }
+          }
+        }
+      }
+      if (branch->rows.is_open()) {
+        branch->rows.flush();
+        if (!branch->rows) branch->metadata_writer_failed.store(true, std::memory_order_release);
+        branch->rows.close();
+      }
+    } catch (...) {
+      branch->metadata_writer_failed.store(true, std::memory_order_release);
+      if (branch->rows.is_open()) branch->rows.close();
+    }
+    branch->metadata_writer_done.store(true, std::memory_order_release);
+  }
+
+  static bool start_metadata_writer(Branch *branch) {
+    try {
+      branch->metadata_writer = std::thread(metadata_writer_loop, branch);
+      return true;
+    } catch (...) {
+      branch->metadata_writer_failed.store(true, std::memory_order_release);
+      branch->metadata_writer_done.store(true, std::memory_order_release);
+      return false;
+    }
+  }
+
+  static void request_metadata_writer_stop(Branch &branch) {
+    branch.metadata_writer_stop.store(true, std::memory_order_release);
+    branch.rows_ready.notify_all();
+  }
+
+  static bool metadata_writer_finished(const Branch &branch) {
+    return branch.metadata_writer_done.load(std::memory_order_acquire);
+  }
+
+  static void join_metadata_writer_if_finished(Branch &branch) {
+    if (branch.metadata_writer.joinable() && metadata_writer_finished(branch))
+      branch.metadata_writer.join();
+  }
+
+  static void detach_branch_probes(Branch &branch) {
+    if (branch.input_probe_id && branch.tee_pad) {
+      gst_pad_remove_probe(branch.tee_pad, branch.input_probe_id);
+      branch.input_probe_id = 0;
+    }
+    auto detach_stage = [](GstElement *element, const char *pad_name, gulong &probe_id) {
+      if (!probe_id || !element) return;
+      GstPad *pad = gst_element_get_static_pad(element, pad_name);
+      if (pad) { gst_pad_remove_probe(pad, probe_id); gst_object_unref(pad); }
+      probe_id = 0;
+    };
+    detach_stage(branch.queue, "src", branch.queue_output_probe_id);
+    detach_stage(branch.converter, "src", branch.converter_output_probe_id);
+    detach_stage(branch.encoder, "sink", branch.encoder_input_probe_id);
+    detach_stage(branch.encoder, "src", branch.encoder_output_probe_id);
+    if (branch.encoded_probe_id && branch.parser) {
+      GstPad *pad = gst_element_get_static_pad(branch.parser, "src");
+      if (pad) { gst_pad_remove_probe(pad, branch.encoded_probe_id); gst_object_unref(pad); }
+      branch.encoded_probe_id = 0;
+    }
+    if (branch.eos_probe_id && branch.sink_pad) {
+      gst_pad_remove_probe(branch.sink_pad, branch.eos_probe_id);
+      branch.eos_probe_id = 0;
+    }
   }
 
   void log(const char *kind, const std::string &detail) {
@@ -260,6 +470,12 @@ class Controller {
     static_cast<Branch *>(data)->queue_overruns.fetch_add(1);
   }
 
+  static GstPadProbeReturn count_stage_buffer(GstPad *, GstPadProbeInfo *info, gpointer data) {
+    if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER)
+      static_cast<std::atomic<guint64> *>(data)->fetch_add(1, std::memory_order_relaxed);
+    return GST_PAD_PROBE_OK;
+  }
+
   static GstPadProbeReturn input_probe(GstPad *pad, GstPadProbeInfo *info, gpointer data) {
     auto *branch = static_cast<Branch *>(data);
     GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
@@ -295,7 +511,15 @@ class Controller {
     }
     if (stream_state != 1) return GST_PAD_PROBE_DROP;
     const guint64 now = monotonic_ns();
-    if (now >= session->start_monotonic_ns + guint64(session->duration_sec) * GST_SECOND) {
+    const guint64 current_pts = GST_BUFFER_PTS(buffer);
+    const guint64 first_pts = branch->first_pts_ns.load(std::memory_order_acquire);
+    const bool pts_duration_elapsed = source_pts_duration_elapsed(
+        first_pts, current_pts, session->duration_sec);
+    const bool wall_duration_elapsed = now >= session->start_monotonic_ns +
+        guint64(session->duration_sec) * GST_SECOND;
+    if (pts_duration_elapsed || wall_duration_elapsed) {
+      if (pts_duration_elapsed)
+        branch->source_pts_duration_boundary_reached.store(true, std::memory_order_release);
       auto *controller = static_cast<Controller *>(g_object_get_data(G_OBJECT(branch->tee_pad), "recording-controller"));
       if (controller) schedule_eos(branch);
       return GST_PAD_PROBE_DROP;
@@ -308,16 +532,11 @@ class Controller {
     }
     branch->last_monotonic_ns.store(now);
     branch->last_pts_ns.store(stamp.pts_ns);
-    branch->input_stamps.push_back(stamp);
-    {
-      std::lock_guard<std::mutex> guard(branch->rows_mutex);
-      branch->rows << "{\"stage\":\"decoded_source\",\"frame_num\":" << n
-                   << ",\"pts_ns\":" << stamp.pts_ns << ",\"dts_ns\":" << stamp.dts_ns
-                   << ",\"monotonic_ns\":" << stamp.monotonic_ns << ",\"width\":" << branch->width.load()
-                   << ",\"height\":" << branch->height.load() << ",\"format\":\""
-                   << json_escape(branch->pixel_format) << "\"}\n";
-      if ((n + 1) % 20 == 0) branch->rows.flush();
-    }
+    if (branch->input_stamps.size() < branch->input_stamps.capacity())
+      branch->input_stamps.push_back(stamp);
+    else
+      branch->stamp_history_overflows.fetch_add(1, std::memory_order_relaxed);
+    enqueue_metadata(branch, MetadataRow{false, stamp, branch->width.load(), branch->height.load()});
     return GST_PAD_PROBE_OK;
   }
 
@@ -330,14 +549,12 @@ class Controller {
     const guint64 now = monotonic_ns();
     if (!n) branch->first_encoded_pts_ns.store(pts);
     branch->last_encoded_pts_ns.store(pts);
-    branch->encoded_stamps.push_back(FrameStamp{n, pts, GST_BUFFER_DTS(buffer), now});
-    {
-      std::lock_guard<std::mutex> guard(branch->rows_mutex);
-      branch->rows << "{\"stage\":\"encoded_access_unit\",\"frame_num\":" << n
-                   << ",\"pts_ns\":" << pts << ",\"dts_ns\":" << GST_BUFFER_DTS(buffer)
-                   << ",\"monotonic_ns\":" << now << "}\n";
-      if ((n + 1) % 20 == 0) branch->rows.flush();
-    }
+    const FrameStamp stamp{n, pts, GST_BUFFER_DTS(buffer), now};
+    if (branch->encoded_stamps.size() < branch->encoded_stamps.capacity())
+      branch->encoded_stamps.push_back(stamp);
+    else
+      branch->stamp_history_overflows.fetch_add(1, std::memory_order_relaxed);
+    enqueue_metadata(branch, MetadataRow{true, stamp, 0, 0});
     return GST_PAD_PROBE_OK;
   }
 
@@ -442,7 +659,8 @@ class Controller {
         log("CALIBRATION_RECORDER_REJECT", mapping.first[i] + " decoded tee is unavailable");
         return;
       }
-      auto branch = create_branch(*source, mapping.second[i], supplied.string(), i + 1);
+      auto branch = create_branch(*source, mapping.second[i], supplied.string(), i + 1,
+                                  recording->duration_sec);
       if (!branch) {
         destroy_partial(recording.get());
         log("CALIBRATION_RECORDER_ERROR", "failed to create both native recording branches");
@@ -463,7 +681,8 @@ class Controller {
   }
 
   std::unique_ptr<Branch> create_branch(Source &source, const std::string &camera_name,
-                                       const std::string &directory, size_t ordinal) {
+                                       const std::string &directory, size_t ordinal,
+                                       guint duration_sec) {
     auto branch = std::make_unique<Branch>();
     auto fail_branch = [&]() -> std::unique_ptr<Branch> {
       cleanup_branch(*branch);
@@ -474,8 +693,15 @@ class Controller {
     branch->video_path = directory + "/camera_" + std::to_string(ordinal) + ".mp4";
     branch->rows_path = directory + "/frames-" + branch->camera_id + ".jsonl";
     if (std::filesystem::exists(branch->video_path) || std::filesystem::exists(branch->rows_path)) return nullptr;
-    branch->rows.open(branch->rows_path, std::ios::out | std::ios::trunc);
-    if (!branch->rows) return fail_branch();
+    {
+      std::ofstream preflight(branch->rows_path, std::ios::out | std::ios::trunc);
+      if (!preflight) return fail_branch();
+    }
+    // Bound in-memory correlation history to 120 FPS. Any higher-rate source
+    // is recorded but marked REVIEW_REQUIRED instead of growing memory.
+    const size_t max_history_rows = static_cast<size_t>(duration_sec) * 120;
+    branch->input_stamps.reserve(max_history_rows);
+    branch->encoded_stamps.reserve(max_history_rows);
     const std::string suffix = std::to_string(++session_counter_) + "-" + branch->camera_id;
     auto create = [&](const char *factory, const std::string &name) {
       return gst_element_factory_make(factory, name.c_str());
@@ -495,7 +721,10 @@ class Controller {
       gst_element_set_locked_state(element, TRUE);
       if (!gst_bin_add(GST_BIN(pipeline_), element)) return fail_branch();
     }
-    g_object_set(branch->queue, "max-size-buffers", 8u, "max-size-bytes", 0u,
+    // Provide bounded headroom for short encoder scheduling bursts without
+    // blocking the shared tee. Sustained lag stays leaky and is rejected by
+    // frame counters during finalization.
+    g_object_set(branch->queue, "max-size-buffers", 24u, "max-size-bytes", 0u,
                  "max-size-time", guint64(0), "leaky", 2, "silent", TRUE, nullptr);
     g_signal_connect(branch->queue, "overrun", G_CALLBACK(queue_overrun), branch.get());
     g_object_set(branch->converter, "gpu-id", 0u, nullptr);
@@ -531,6 +760,33 @@ class Controller {
     gst_object_unref(queue_sink);
     branch->input_probe_id = gst_pad_add_probe(branch->tee_pad, GST_PAD_PROBE_TYPE_BUFFER,
                                                 input_probe, branch.get(), nullptr);
+    GstPad *queue_src = gst_element_get_static_pad(branch->queue, "src");
+    GstPad *converter_src = gst_element_get_static_pad(branch->converter, "src");
+    GstPad *encoder_sink = gst_element_get_static_pad(branch->encoder, "sink");
+    GstPad *encoder_src = gst_element_get_static_pad(branch->encoder, "src");
+    if (!queue_src || !converter_src || !encoder_sink || !encoder_src) {
+      if (queue_src) gst_object_unref(queue_src);
+      if (converter_src) gst_object_unref(converter_src);
+      if (encoder_sink) gst_object_unref(encoder_sink);
+      if (encoder_src) gst_object_unref(encoder_src);
+      return fail_branch();
+    }
+    branch->queue_output_probe_id = gst_pad_add_probe(
+        queue_src, GST_PAD_PROBE_TYPE_BUFFER, count_stage_buffer,
+        &branch->queue_output_frames, nullptr);
+    branch->converter_output_probe_id = gst_pad_add_probe(
+        converter_src, GST_PAD_PROBE_TYPE_BUFFER, count_stage_buffer,
+        &branch->converted_frames, nullptr);
+    branch->encoder_input_probe_id = gst_pad_add_probe(
+        encoder_sink, GST_PAD_PROBE_TYPE_BUFFER, count_stage_buffer,
+        &branch->encoder_input_frames, nullptr);
+    branch->encoder_output_probe_id = gst_pad_add_probe(
+        encoder_src, GST_PAD_PROBE_TYPE_BUFFER, count_stage_buffer,
+        &branch->encoder_output_frames, nullptr);
+    gst_object_unref(queue_src);
+    gst_object_unref(converter_src);
+    gst_object_unref(encoder_sink);
+    gst_object_unref(encoder_src);
     GstPad *parser_src = gst_element_get_static_pad(branch->parser, "src");
     branch->encoded_probe_id = gst_pad_add_probe(parser_src, GST_PAD_PROBE_TYPE_BUFFER,
                                                   encoded_probe, branch.get(), nullptr);
@@ -538,6 +794,7 @@ class Controller {
     branch->sink_pad = gst_element_get_static_pad(branch->sink, "sink");
     branch->eos_probe_id = gst_pad_add_probe(branch->sink_pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
                                               sink_event_probe, branch.get(), nullptr);
+    if (!start_metadata_writer(branch.get())) return fail_branch();
     return branch;
   }
 
@@ -581,15 +838,38 @@ class Controller {
       session_->end_monotonic_ns = monotonic_ns();
       session_->end_utc = utc_now();
     }
-    const bool ok = session_->error.empty() && session_->requested_duration_completed &&
+    for (auto &branch : session_->branches) {
+      detach_branch_probes(*branch);
+      request_metadata_writer_stop(*branch);
+    }
+    if (!std::all_of(session_->branches.begin(), session_->branches.end(),
+                     [](const auto &b) { return metadata_writer_finished(*b); })) {
+      session_->finalize_scheduled = false;
+      return;
+    }
+    for (auto &branch : session_->branches) join_metadata_writer_if_finished(*branch);
+    bool ok = session_->error.empty() && session_->requested_duration_completed &&
         std::all_of(session_->branches.begin(), session_->branches.end(), [](const auto &b) {
           return b->input_frames.load() > 0 && b->encoded_frames.load() > 0 &&
-                 b->queue_overruns.load() == 0 && b->input_frames.load() == b->encoded_frames.load();
+                 b->input_frames.load() == b->queue_output_frames.load() &&
+                 b->queue_output_frames.load() == b->converted_frames.load() &&
+                 b->converted_frames.load() == b->encoder_input_frames.load() &&
+                 b->encoder_input_frames.load() == b->encoder_output_frames.load() &&
+                 b->encoder_output_frames.load() == b->encoded_frames.load() &&
+                 b->queue_overruns.load() == 0 && b->input_frames.load() == b->encoded_frames.load() &&
+                 b->stamp_history_overflows.load() == 0 &&
+                 b->metadata_queue_drops.load() == 0 && !b->metadata_writer_failed.load() &&
+                 b->metadata_rows_enqueued.load() == b->metadata_rows_written.load() &&
+                 b->metadata_writer_done.load();
         });
     last_state_ = ok ? "COMPLETE" : "REVIEW_REQUIRED";
     session_->state = last_state_;
     last_session_id_ = session_->id;
-    write_metadata();
+    if (!write_metadata()) {
+      ok = false;
+      last_state_ = session_->state = "REVIEW_REQUIRED";
+      log("CALIBRATION_RECORDER_ERROR", "recording metadata could not be finalized; session cannot PASS");
+    }
     last_result_path_ = session_->directory + "/recording_metadata.json";
     log(ok ? "CALIBRATION_RECORDING_COMPLETE" : "CALIBRATION_RECORDING_REVIEW_REQUIRED",
         "metadata=" + last_result_path_ + " encoded_frames_match=" + std::to_string(ok));
@@ -607,7 +887,20 @@ class Controller {
     session_->stream_state.store(3, std::memory_order_release);
     session_->state = "FAILED";
     last_session_id_ = session_->id;
-    write_metadata();
+    for (auto &branch : session_->branches) {
+      detach_branch_probes(*branch);
+      request_metadata_writer_stop(*branch);
+    }
+    finish_failed_session_if_ready();
+  }
+
+  void finish_failed_session_if_ready() {
+    if (!session_ || session_->state != "FAILED" ||
+        !std::all_of(session_->branches.begin(), session_->branches.end(),
+                     [](const auto &b) { return metadata_writer_finished(*b); })) return;
+    for (auto &branch : session_->branches) join_metadata_writer_if_finished(*branch);
+    last_session_id_ = session_->id;
+    if (!write_metadata()) log("CALIBRATION_RECORDER_ERROR", "failed-session metadata could not be finalized");
     last_state_ = "FAILED";
     last_result_path_ = session_->directory + "/recording_metadata.json";
     remove_branches();
@@ -626,16 +919,9 @@ class Controller {
   }
 
   void cleanup_branch(Branch &branch) {
-    if (branch.rows.is_open()) { branch.rows.flush(); branch.rows.close(); }
-    if (branch.input_probe_id && branch.tee_pad)
-      gst_pad_remove_probe(branch.tee_pad, branch.input_probe_id);
-    if (branch.encoded_probe_id && branch.parser) {
-      GstPad *pad = gst_element_get_static_pad(branch.parser, "src");
-      if (pad) { gst_pad_remove_probe(pad, branch.encoded_probe_id); gst_object_unref(pad); }
-      branch.encoded_probe_id = 0;
-    }
-    if (branch.eos_probe_id && branch.sink_pad)
-      gst_pad_remove_probe(branch.sink_pad, branch.eos_probe_id);
+    detach_branch_probes(branch);
+    request_metadata_writer_stop(branch);
+    if (branch.metadata_writer.joinable()) branch.metadata_writer.join();
     if (branch.tee_pad && branch.queue) {
       GstPad *queue_sink = gst_element_get_static_pad(branch.queue, "sink");
       if (queue_sink) { gst_pad_unlink(branch.tee_pad, queue_sink); gst_object_unref(queue_sink); }
@@ -660,8 +946,8 @@ class Controller {
     }
   }
 
-  void write_metadata() {
-    if (!session_) return;
+  bool write_metadata() {
+    if (!session_) return false;
     std::ofstream out(session_->directory + "/recording_metadata.json.tmp", std::ios::trunc);
     out << "{\n  \"schema_version\":1,\n  \"session_id\":\"" << json_escape(session_->id)
         << "\",\n  \"room\":\"" << json_escape(session_->room)
@@ -687,21 +973,44 @@ class Controller {
           << ",\"pixel_format\":\"" << json_escape(b.pixel_format)
           << "\",\"fps_num\":" << b.fps_num.load() << ",\"fps_den\":" << b.fps_den.load()
           << ",\"decoded_input_frames\":" << b.input_frames.load()
+          << ",\"queue_output_frames\":" << b.queue_output_frames.load()
+          << ",\"converted_frames\":" << b.converted_frames.load()
+          << ",\"encoder_input_frames\":" << b.encoder_input_frames.load()
+          << ",\"encoder_output_frames\":" << b.encoder_output_frames.load()
           << ",\"encoded_access_units\":" << b.encoded_frames.load()
           << ",\"queue_overruns\":" << b.queue_overruns.load()
+          << ",\"metadata_rows_enqueued\":" << b.metadata_rows_enqueued.load()
+          << ",\"metadata_rows_written\":" << b.metadata_rows_written.load()
+          << ",\"metadata_queue_drops\":" << b.metadata_queue_drops.load()
+          << ",\"stamp_history_overflows\":" << b.stamp_history_overflows.load()
+          << ",\"metadata_writer_failed\":" << (b.metadata_writer_failed.load() ? "true" : "false")
+          << ",\"source_pts_duration_boundary_reached\":"
+          << (b.source_pts_duration_boundary_reached.load() ? "true" : "false")
           << ",\"first_pts_ns\":" << b.first_pts_ns.load() << ",\"last_pts_ns\":" << b.last_pts_ns.load()
           << ",\"first_encoded_pts_ns\":" << b.first_encoded_pts_ns.load()
           << ",\"last_encoded_pts_ns\":" << b.last_encoded_pts_ns.load()
           << ",\"first_frame_monotonic_ns\":" << b.first_monotonic_ns.load()
           << ",\"last_frame_monotonic_ns\":" << b.last_monotonic_ns.load() << "}";
     }
-    out << "\n  ],\n  \"synchronization\":{\"method\":\"common monotonic session gate; per-frame source PTS and host monotonic timestamps\",\"max_pair_frame_arrival_skew_ms\":"
+    out << "\n  ],\n  \"synchronization\":{\"method\":\"shared monotonic start; each camera stops at the earlier of host-duration or first-source-PTS duration; included source PTS retained\",\"max_pair_frame_arrival_skew_ms\":"
         << max_pair_skew_ms() << "}\n}\n";
     out.close();
+    if (!out) {
+      std::error_code remove_error;
+      std::filesystem::remove(session_->directory + "/recording_metadata.json.tmp", remove_error);
+      log("CALIBRATION_RECORDER_ERROR", "recording metadata write failed; refusing PASS");
+      return false;
+    }
     std::error_code ec;
     std::filesystem::rename(session_->directory + "/recording_metadata.json.tmp",
                              session_->directory + "/recording_metadata.json", ec);
-    if (ec) log("CALIBRATION_RECORDER_ERROR", "metadata atomic rename failed: " + ec.message());
+    if (ec) {
+      std::error_code remove_error;
+      std::filesystem::remove(session_->directory + "/recording_metadata.json.tmp", remove_error);
+      log("CALIBRATION_RECORDER_ERROR", "metadata atomic rename failed: " + ec.message());
+      return false;
+    }
+    return true;
   }
 
   double max_pair_skew_ms() const {

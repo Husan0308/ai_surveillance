@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import hmac
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import JSONResponse
 
 from services.camera_v11.monitoring_telemetry_ipc_v1 import DEFAULT_CAMERA_IDS, offline_snapshot
 from services.api_service.app.config import load_settings
@@ -18,6 +20,7 @@ async def lifespan(app: FastAPI):
     client = MLServiceClient(
         base_url=settings.ml_base_url,
         timeout_seconds=settings.ml_timeout_seconds,
+        access_token=settings.access_token,
     )
     app.state.ml_client = client
     try:
@@ -31,6 +34,25 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+def _authorized(header: str | None) -> bool:
+    if not settings.access_token:
+        return True
+    scheme, _, supplied = (header or "").partition(" ")
+    return scheme.lower() == "bearer" and hmac.compare_digest(
+        supplied, settings.access_token
+    )
+
+
+@app.middleware("http")
+async def authenticate_api_requests(request: Request, call_next):
+    if request.url.path != "/health" and not _authorized(request.headers.get("authorization")):
+        return JSONResponse(
+            {"detail": "unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
 
 
 def get_ml_client(request: Request) -> MLServiceClient:
@@ -52,10 +74,14 @@ def service_unavailable(exc: MLServiceUnavailable) -> HTTPException:
 async def health(request: Request) -> dict:
     try:
         ml = await get_ml_client(request).health()
-        return {"service": "api_service", "status": "ok" if ml.get("status") == "ok" else "degraded",
-                "ml_status": ml.get("status", "unknown")}
+        return {"service": "api_service", "status": "ok", "process_status": "running",
+                "ml_accessible": True, "ml_status": ml.get("status", "unknown"),
+                "analytics_status": ml.get("analytics_status", "unknown"),
+                "six_camera_readiness": ml.get("six_camera_readiness", "unknown")}
     except MLServiceUnavailable:
-        return {"service": "api_service", "status": "degraded", "ml_status": "unavailable"}
+        return {"service": "api_service", "status": "ok", "process_status": "running",
+                "ml_accessible": False, "ml_status": "unavailable",
+                "analytics_status": "unavailable", "six_camera_readiness": "unknown"}
 
 
 @app.get("/api/v1/ml/health")
@@ -120,6 +146,9 @@ async def tracked_objects(request: Request) -> dict:
 
 @app.websocket("/ws/v1/monitoring")
 async def monitoring_websocket(websocket: WebSocket) -> None:
+    if not _authorized(websocket.headers.get("authorization")):
+        await websocket.close(code=1008, reason="unauthorized")
+        return
     await websocket.accept()
     try:
         while True:

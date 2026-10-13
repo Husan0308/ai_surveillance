@@ -96,6 +96,50 @@ def child_exit_class(return_code: int | None, requested_signal: int | None) -> s
     return "failure"
 
 
+def spawn_owned_child(command: list[str], *, cwd: Path, env: dict[str, str], stdout):
+    """Start a supervised child outside the terminal's signal process group.
+
+    Ctrl-C is delivered to the supervisor's foreground process group. Keeping
+    children in their own sessions prevents the terminal SIGINT from reaching
+    them before the supervisor can perform its ordered SIGTERM shutdown.
+    """
+    return subprocess.Popen(
+        command, cwd=cwd, env=env, stdout=stdout, stderr=subprocess.STDOUT,
+        close_fds=True, start_new_session=True,
+    )
+
+
+def verified_analytics_sigterm_shutdown(
+    output: Path, return_code: int | None, requested_signal: int | None
+) -> bool:
+    """Accept Docker's TERM status only with explicit single-signal cleanup evidence."""
+    docker_term_status = 128 + signal.SIGTERM
+    if requested_signal != signal.SIGTERM or return_code != docker_term_status:
+        return False
+    try:
+        exit_row = json.loads((output / "analytics" / "exit.json").read_text())
+        native_log = (output / "analytics" / "native.log").read_text(errors="replace")
+    except (OSError, ValueError):
+        return False
+    if (exit_row.get("return_code") != docker_term_status
+            or exit_row.get("signal_received") != [signal.SIGTERM]
+            or not isinstance(exit_row.get("native_exit_monotonic_ns"), int)):
+        return False
+
+    ended_sources = {
+        line.split(" ", 1)[0]
+        for line in native_log.splitlines()
+        if line.startswith("CAM-") and " END " in line
+    }
+    group_end = [line for line in native_log.splitlines() if line.startswith("GROUP END ")]
+    return (
+        ended_sources == {f"CAM-{index:02d}" for index in range(1, 7)}
+        and len(group_end) == 1
+        and "fatal=0" in group_end[0].split()
+        and "shared_errors=0" in group_end[0].split()
+    )
+
+
 def check_ports(deployment) -> None:
     for host, port in ((deployment.api_host, deployment.api_port), (deployment.ml_host, deployment.ml_port)):
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
@@ -195,8 +239,8 @@ def main() -> int:
     def spawn(name: str, args: list[str]) -> None:
         log = (output / "logs" / f"{name}.log").open("x")
         logs.append(log)
-        children[name] = subprocess.Popen([str(python), "-B", "-u", *args], cwd=ROOT,
-            env=env, stdout=log, stderr=subprocess.STDOUT, close_fds=True)
+        children[name] = spawn_owned_child(
+            [str(python), "-B", "-u", *args], cwd=ROOT, env=env, stdout=log)
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
@@ -262,9 +306,19 @@ def main() -> int:
             name: code for name, code in child_exit_codes.items()
             if child_exit_class(code, requested_shutdown_signals.get(name)) == "expected_signal"
         }
+        orderly_analytics_sigterm = (
+            result == 0
+            and "analytics" not in expected_signal_children
+            and verified_analytics_sigterm_shutdown(
+                output, child_exit_codes.get("analytics"),
+                requested_shutdown_signals.get("analytics"))
+        )
+        if orderly_analytics_sigterm:
+            expected_signal_children["analytics"] = child_exit_codes["analytics"]
         unexpected_children = {
             name: code for name, code in child_exit_codes.items()
             if child_exit_class(code, requested_shutdown_signals.get(name)) == "failure"
+            and not (name == "analytics" and orderly_analytics_sigterm)
         }
         if unexpected_children:
             result = 1
@@ -276,6 +330,7 @@ def main() -> int:
             "nonzero_children": nonzero_children,
             "requested_shutdown_signals": requested_shutdown_signals,
             "expected_signal_children": expected_signal_children,
+            "verified_orderly_analytics_sigterm": orderly_analytics_sigterm,
             "unexpected_children": unexpected_children,
             "forced_kill": bool(forced_killed_children),
             "forced_killed_children": forced_killed_children,

@@ -5,7 +5,9 @@ import time
 from typing import Any, Iterable
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
+from PySide6.QtNetwork import QNetworkRequest
 from PySide6.QtWebSockets import QWebSocket
+import os
 
 
 class MonitoringMessageError(ValueError):
@@ -50,6 +52,7 @@ class MonitoringTelemetryClient(QObject):
         self.camera_ids = tuple(camera_ids)
         self.socket = QWebSocket()
         self.socket.setParent(self)
+        self.access_token = os.environ.get("SURVEILLANCE_API_TOKEN", "").strip()
         self.reconnect_timer = QTimer(self)
         self.reconnect_timer.setSingleShot(True)
         self.reconnect_timer.timeout.connect(self._open)
@@ -82,7 +85,10 @@ class MonitoringTelemetryClient(QObject):
     def _open(self) -> None:
         if self._running:
             self._emit_status("connecting")
-            self.socket.open(self.url)
+            request = QNetworkRequest(self.url)
+            if self.access_token:
+                request.setRawHeader(b"Authorization", f"Bearer {self.access_token}".encode("utf-8"))
+            self.socket.open(request)
 
     def _connected(self) -> None:
         self._backoff_index = 0

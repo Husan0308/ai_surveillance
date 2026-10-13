@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 import os
 from urllib.parse import urlsplit, urlunsplit
 
@@ -30,6 +31,7 @@ class Deployment:
     ml_service_url: str
     frontend_api_base_url: str
     frontend_ml_video_base_url: str
+    access_token: str = ""
 
     @property
     def monitoring_ws_url(self) -> str:
@@ -38,22 +40,42 @@ class Deployment:
                           parts.path + "/ws/v1/monitoring", "", ""))
 
     def environment(self) -> dict[str, str]:
-        return {"API_HOST": self.api_host, "API_PORT": str(self.api_port),
-                "ML_HOST": self.ml_host, "ML_PORT": str(self.ml_port),
-                "ML_SERVICE_URL": self.ml_service_url,
-                "FRONTEND_API_BASE_URL": self.frontend_api_base_url,
-                "FRONTEND_ML_VIDEO_BASE_URL": self.frontend_ml_video_base_url}
+        environment = {"API_HOST": self.api_host, "API_PORT": str(self.api_port),
+                       "ML_HOST": self.ml_host, "ML_PORT": str(self.ml_port),
+                       "ML_SERVICE_URL": self.ml_service_url,
+                       "FRONTEND_API_BASE_URL": self.frontend_api_base_url,
+                       "FRONTEND_ML_VIDEO_BASE_URL": self.frontend_ml_video_base_url}
+        if self.access_token:
+            environment["SURVEILLANCE_API_TOKEN"] = self.access_token
+        return environment
+
+
+def _is_loopback(host: str) -> bool:
+    normalized = host.strip().lower().strip("[]")
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def load_deployment() -> Deployment:
     api, ml = _port("API_PORT", 8100), _port("ML_PORT", 8101)
     if api == ml:
         raise ValueError("API_PORT and ML_PORT must differ")
-    return Deployment(os.getenv("API_HOST", "0.0.0.0"), api,
-                      os.getenv("ML_HOST", "0.0.0.0"), ml,
+    api_host = os.getenv("API_HOST", "127.0.0.1").strip()
+    ml_host = os.getenv("ML_HOST", "127.0.0.1").strip()
+    access_token = os.getenv("SURVEILLANCE_API_TOKEN", "").strip()
+    if (not _is_loopback(api_host) or not _is_loopback(ml_host)) and len(access_token) < 32:
+        raise ValueError(
+            "SURVEILLANCE_API_TOKEN with at least 32 characters is required when API_HOST or ML_HOST is not loopback"
+        )
+    return Deployment(api_host, api, ml_host, ml,
                       _url("ML_SERVICE_URL", f"http://127.0.0.1:{ml}"),
                       _url("FRONTEND_API_BASE_URL", f"http://127.0.0.1:{api}"),
-                      _url("FRONTEND_ML_VIDEO_BASE_URL", f"http://127.0.0.1:{ml}"))
+                      _url("FRONTEND_ML_VIDEO_BASE_URL", f"http://127.0.0.1:{ml}"),
+                      access_token)
 
 
 def analytics_enabled() -> bool:

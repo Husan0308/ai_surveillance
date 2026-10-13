@@ -11,6 +11,7 @@
 #include "track_birth_verification.hpp"
 #include <atomic>
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -71,7 +72,9 @@ struct TrackerInputStamp {
   gint frame_num = -1;
   guint64 pts_ns = 0;
   guint64 entered_ns = 0;
+  guint source_generation = 0;
   guint64 source_epoch = 0;
+  bool recovery_frame = false;
 };
 static constexpr size_t TRACKER_INPUT_STAMP_CAPACITY = 128;
 static TrackerInputStamp tracker_input_stamps[6][TRACKER_INPUT_STAMP_CAPACITY];
@@ -167,7 +170,7 @@ static std::atomic<gint> tracker_canonical_frames[6]{-1,-1,-1,-1,-1,-1};
 static std::string tracker_generation;
 static guint v11_tracker_width = 960;
 static guint v11_tracker_height = 544;
-static std::mutex tracker_feed_mutex;
+static std::mutex tracker_feed_mutex[6];
 static TrackBirthVerificationLedger tracker_birth_verification;
 static CrossIdDuplicateLedger tracker_cross_id_duplicate_ledger;
 static std::unordered_map<guint64, guint> tracker_birth_attempt_diag_count[6];
@@ -308,12 +311,20 @@ static void tracker_json_number(std::ostringstream &out, float value) {
   else out << "null";
 }
 static bool tracker_atomic_snapshot(guint source_id, gint frame_num, guint64 pts_ns,
+                                    guint64 source_epoch,
                                     guint64 monotonic_ns, guint64 epoch_ns,
                                     guint32 source_frame_num,
                                     guint width, guint height, guint proposal_width, guint proposal_height,
                                     const std::vector<PublishedTrack> &objects,
                                     const std::vector<TrackerDetection> &detections,
-                                    std::string *serialized_out = nullptr) {
+                                    std::string *serialized_out = nullptr,
+                                    bool *stale_epoch_out = nullptr) {
+  if (source_id >= 6) return false;
+  std::lock_guard<std::mutex> feed_guard(tracker_feed_mutex[source_id]);
+  if (source_tracking_epoch_current(source_id) != source_epoch) {
+    if (stale_epoch_out) *stale_epoch_out = true;
+    return true;
+  }
   const char *dir = g_getenv("V11_TRACKED_OBJECT_FEED_DIR");
   if (!dir || !*dir) dir = "/dev/shm";
   char path[512], temporary[560];
@@ -382,6 +393,17 @@ static bool tracker_atomic_snapshot(guint source_id, gint frame_num, guint64 pts
   close(fd);
   if (rename(temporary, path) != 0) { unlink(temporary); return false; }
   return true;
+}
+
+static bool tracker_clear_source_snapshot(guint source_id) {
+  if (source_id >= 6) return false;
+  const char *dir = g_getenv("V11_TRACKED_OBJECT_FEED_DIR");
+  if (!dir || !*dir) dir = "/dev/shm";
+  char path[512];
+  std::snprintf(path, sizeof(path), "%s/v11_tracked_objects_cam%02u_v1.json", dir, source_id + 1);
+  std::lock_guard<std::mutex> guard(tracker_feed_mutex[source_id]);
+  if (unlink(path) == 0 || errno == ENOENT) return true;
+  return false;
 }
 
 static std::vector<ShadowCandidate> tracker_current_shadows(NvDsBatchMeta *batch, NvDsFrameMeta *frame) {
@@ -1192,14 +1214,26 @@ static GstPadProbeReturn tracker_enter(GstPad*, GstPadProbeInfo *info, gpointer)
     auto *frame = static_cast<NvDsFrameMeta*>(node->data);
     if (!frame || frame->source_id >= 6 || frame->frame_num < 0 ||
         frame->buf_pts == GST_CLOCK_TIME_NONE) continue;
-    tracker_reset_temporal_state_for_epoch(frame->source_id);
-    const guint64 source_epoch = tracker_source_epoch_for_id(frame->source_id);
+    SourceEpochStamp frame_stamp;
+    if (!source_frame_epoch_read(frame, &frame_stamp)) {
+      ++tracker_input_stamp_misses[frame->source_id];
+      g_printerr("TRACKER_SOURCE_EPOCH_META_MISSING source=%u frame=%d pts=%" G_GUINT64_FORMAT
+          " action=withhold_canonical_output\n", frame->source_id, frame->frame_num, frame->buf_pts);
+      continue;
+    }
+    const guint64 current_source_epoch = tracker_source_epoch_for_id(frame->source_id);
+    const guint current_generation = sources[frame->source_id]->source_generation.load();
+    const bool recovery_frame = frame_stamp.tracking_epoch != current_source_epoch ||
+        frame_stamp.source_generation != current_generation;
+    if (!recovery_frame) tracker_reset_temporal_state_for_epoch(frame->source_id);
     const size_t slot_index = static_cast<size_t>(frame->frame_num) % TRACKER_INPUT_STAMP_CAPACITY;
     {
       std::lock_guard<std::mutex> guard(tracker_input_stamp_mutex[frame->source_id]);
       tracker_input_stamps[frame->source_id][slot_index] = {
-          frame->frame_num, frame->buf_pts, now_ns, source_epoch};
+          frame->frame_num, frame->buf_pts, now_ns, frame_stamp.source_generation,
+          frame_stamp.tracking_epoch, recovery_frame};
     }
+    if (recovery_frame) continue;
     tracker_schedule_shadow_context_before_nvdcf(buffer, frame);
   }
   // Active-target birth checks remain post-tracker because they require a new
@@ -1228,6 +1262,8 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
     auto &counter = tracker_counters[frame->source_id];
     guint64 entered_epoch = 0;
     bool exact_enter_stamp = false;
+    bool recovery_frame = false;
+    guint entered_generation = 0;
     {
       const size_t slot_index = static_cast<size_t>(frame->frame_num) % TRACKER_INPUT_STAMP_CAPACITY;
       std::lock_guard<std::mutex> guard(tracker_input_stamp_mutex[frame->source_id]);
@@ -1235,7 +1271,9 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
       if (stamp.frame_num == frame->frame_num && stamp.pts_ns == frame->buf_pts &&
           stamp.entered_ns) {
         exact_enter_stamp = true;
+        entered_generation = stamp.source_generation;
         entered_epoch = stamp.source_epoch;
+        recovery_frame = stamp.recovery_frame;
       }
       if (exact_enter_stamp && stamp.entered_ns && callback_start_ns >= stamp.entered_ns) {
         tracker_element_latency[frame->source_id].add(callback_start_ns - stamp.entered_ns);
@@ -1244,8 +1282,34 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
       }
       if (exact_enter_stamp) stamp = {};
     }
+    if (!exact_enter_stamp) {
+      tracker_reset_temporal_state_for_epoch(frame->source_id);
+      ++counter.reconnect_epoch_stale_frames;
+      g_print("TRACKER_INPUT_STAMP_MISSING source=%u frame=%d pts=%" G_GUINT64_FORMAT
+          " action=withhold_canonical_output\n", frame->source_id, frame->frame_num, frame->buf_pts);
+      continue;
+    }
+    if (recovery_frame) {
+      tracker_reset_temporal_state_for_epoch(frame->source_id);
+      ++counter.reconnect_epoch_stale_frames;
+      g_print("TRACKER_SOURCE_RECOVERY_FRAME source=%u frame=%d pts=%" G_GUINT64_FORMAT
+          " entered_epoch=%" G_GUINT64_FORMAT " current_epoch=%" G_GUINT64_FORMAT
+          " action=withhold_canonical_output\n", frame->source_id, frame->frame_num,
+          frame->buf_pts, entered_epoch, tracker_source_epoch_for_id(frame->source_id));
+      continue;
+    }
+    SourceEpochStamp frame_stamp;
+    if (!source_frame_epoch_read(frame, &frame_stamp)) {
+      ++counter.reconnect_epoch_stale_frames;
+      g_printerr("TRACKER_SOURCE_EPOCH_META_MISSING source=%u frame=%d pts=%" G_GUINT64_FORMAT
+          " action=withhold_canonical_output\n", frame->source_id, frame->frame_num, frame->buf_pts);
+      continue;
+    }
     const guint64 current_source_epoch = tracker_source_epoch_for_id(frame->source_id);
-    if (exact_enter_stamp && entered_epoch != current_source_epoch) {
+    const guint current_generation = sources[frame->source_id]->source_generation.load();
+    if (entered_epoch != frame_stamp.tracking_epoch ||
+        entered_generation != frame_stamp.source_generation ||
+        entered_epoch != current_source_epoch || entered_generation != current_generation) {
       tracker_reset_temporal_state_for_epoch(frame->source_id);
       ++counter.reconnect_epoch_stale_frames;
       g_print("TRACKER_RECONNECT_EPOCH_STALE_FRAME source=%u frame=%d pts=%" G_GUINT64_FORMAT
@@ -1746,15 +1810,22 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
           exact_previous_frame_available, proposal_width, proposal_height,
           &published, verified_lowconf, shadows);
       std::string frame_snapshot;
-      if (!tracker_atomic_snapshot(source_id, tracker_frame_num, pts_ns,
+      bool stale_epoch_snapshot = false;
+      if (!tracker_atomic_snapshot(source_id, tracker_frame_num, pts_ns, current_source_epoch,
               monotonic_ns, epoch_ns, source_frame_num, width, height,
-              proposal_width, proposal_height, published, detections, &frame_snapshot)) {
+              proposal_width, proposal_height, published, detections, &frame_snapshot,
+              &stale_epoch_snapshot)) {
         fail("canonical tracked-object IPC publish failed");
+        return;
+      }
+      if (stale_epoch_snapshot) {
+        ++tracker_counters[source_id].reconnect_epoch_stale_frames;
         return;
       }
       tracker_canonical_counts[source_id] = static_cast<guint32>(published.size());
       tracker_canonical_frames[source_id] = tracker_frame_num;
       ++source_tracker_updates[source_id];
+      source_tracker_last_us[source_id] = g_get_monotonic_time();
       tracker_counters[source_id].canonical_objects += published.size();
 #ifdef PGIE_ISOLATION
       if (!canonical_evidence || !tracker_write_line(canonical_evidence,
@@ -1764,7 +1835,7 @@ static GstPadProbeReturn tracker_exit(GstPad*, GstPadProbeInfo *info, gpointer) 
       }
 #else
       f5r_tracker_frame_ready(source_id, tracker_frame_num, source_frame_num,
-          pts_ns, static_cast<guint>(published.size()), tracker_ready_ns,
+          pts_ns, current_source_epoch, static_cast<guint>(published.size()), tracker_ready_ns,
           frame_snapshot.data(), frame_snapshot.size());
 #endif
     };

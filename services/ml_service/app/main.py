@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hmac
+import math
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from services.shared.deployment import analytics_enabled, load_deployment
 deployment = load_deployment()  # Service settings precede legacy credential dotenv.
@@ -18,21 +21,78 @@ telemetry = MonitoringTelemetryReader(camera_ids=camera_ids)
 app = FastAPI(title="AI Surveillance ML Service", version="0.4.0")
 app.include_router(room_pair_router)
 
+_REQUIRED_CAMERA_STAGES = (
+    "age_since_last_decoded_frame_ms",
+    "age_since_last_pgie_frame_ms",
+    "age_since_last_tracker_output_ms",
+    "age_since_last_preview_ms",
+)
+_CAMERA_FRESHNESS_LIMIT_MS = 2000.0
+
+
+def _camera_stages_fresh(row: dict) -> bool:
+    """Fail closed if any required per-source stage is missing or stale."""
+    if row.get("online") is not True or row.get("current_state") != "ONLINE":
+        return False
+    for stage in _REQUIRED_CAMERA_STAGES:
+        value = row.get(stage)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0 or value > _CAMERA_FRESHNESS_LIMIT_MS):
+            return False
+    return True
+
+
+def _authorized(header: str | None) -> bool:
+    token = deployment.access_token
+    if not token:
+        return True
+    scheme, _, supplied = (header or "").partition(" ")
+    return scheme.lower() == "bearer" and hmac.compare_digest(supplied, token)
+
+
+@app.middleware("http")
+async def authenticate_ml_requests(request: Request, call_next):
+    if request.url.path != "/health" and not _authorized(request.headers.get("authorization")):
+        return JSONResponse({"detail": "unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED,
+                            headers={"WWW-Authenticate": "Bearer"})
+    return await call_next(request)
+
 
 @app.get("/health")
 def health() -> dict:
     snapshot = telemetry.read()
     readiness = room_pair_state.readiness() if analytics_enabled() else {"status": "disabled", "ready": False}
     room_status = str(readiness.get("status", "not_ready"))
+    runtime = snapshot.get("runtime", {})
+    camera_rows = snapshot.get("cameras", [])
+    six_camera_ready = (
+        snapshot["telemetry_status"] == "fresh"
+        and len(camera_rows) == len(camera_ids) == 6
+        and tuple(row.get("camera_id") for row in camera_rows) == camera_ids
+        and all(_camera_stages_fresh(row) for row in camera_rows)
+        and runtime.get("shared_pipeline_status") == "healthy"
+        and runtime.get("detector_enabled") is True
+    )
+    if snapshot["telemetry_status"] == "offline":
+        analytics_status = "unavailable"
+    elif snapshot["telemetry_status"] != "fresh":
+        analytics_status = "degraded"
+    elif runtime.get("detector_enabled") is False:
+        analytics_status = "disabled"
+    else:
+        analytics_status = "ready" if six_camera_ready else "degraded"
     return {
         "service": "ml_service",
-        "status": "ok" if (snapshot["telemetry_status"] == "fresh"
-            and all(row["online"] for row in snapshot["cameras"])
-            and (not analytics_enabled() or room_status == "ready")) else "degraded",
+        "status": "ok",
+        "process_status": "running",
         "analytics_enabled": analytics_enabled(),
         "monitoring_status": snapshot["telemetry_status"],
+        "analytics_status": analytics_status,
         "camera_count": len(snapshot["cameras"]),
-        "online_camera_count": sum(bool(row["online"]) for row in snapshot["cameras"]),
+        "online_camera_count": sum(row.get("online") is True for row in snapshot["cameras"]),
+        "six_camera_readiness": "ready" if six_camera_ready else "not_ready",
+        "shared_pipeline_status": runtime.get("shared_pipeline_status", "unknown"),
+        "cameras": camera_rows,
         "room_pair_readiness": readiness,
     }
 

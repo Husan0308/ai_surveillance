@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -17,6 +18,7 @@ class ApiClient(QObject):
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.base_url = base_url.rstrip("/")
+        self.access_token = os.environ.get("SURVEILLANCE_API_TOKEN", "").strip()
         self.manager = QNetworkAccessManager(self)
         self.manager.setTransferTimeout(2500)
         self._inflight: set[str] = set()
@@ -36,6 +38,8 @@ class ApiClient(QObject):
         self._inflight.add(request_name)
         request = QNetworkRequest(QUrl(f"{self.base_url}{path}"))
         request.setRawHeader(b"Accept", b"application/json")
+        if self.access_token:
+            request.setRawHeader(b"Authorization", f"Bearer {self.access_token}".encode("utf-8"))
         reply = self.manager.get(request)
         reply.setProperty("request_name", request_name)
         reply.finished.connect(lambda r=reply: self._on_finished(r))

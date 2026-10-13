@@ -12,13 +12,22 @@ from services.camera_v11.preview_monitoring_bridge import PreviewMonitoringBridg
 from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameWriter
 
 
+@pytest.fixture(autouse=True)
+def _isolated_service_bind_environment(monkeypatch):
+    # API/ML modules load their bind settings at import time. Keep tests
+    # independent of a developer's shell or another test's remote-bind setup.
+    monkeypatch.setenv("API_HOST", "127.0.0.1")
+    monkeypatch.setenv("ML_HOST", "127.0.0.1")
+    monkeypatch.delenv("SURVEILLANCE_API_TOKEN", raising=False)
+
+
 def test_deployment_defaults_and_derived_overrides(monkeypatch):
     for key in ("API_HOST", "API_PORT", "ML_HOST", "ML_PORT", "ML_SERVICE_URL",
-                "FRONTEND_API_BASE_URL", "FRONTEND_ML_VIDEO_BASE_URL"):
+                "FRONTEND_API_BASE_URL", "FRONTEND_ML_VIDEO_BASE_URL", "SURVEILLANCE_API_TOKEN"):
         monkeypatch.delenv(key, raising=False)
     config = load_deployment()
     assert (config.api_port, config.ml_port) == (8100, 8101)
-    assert config.api_host == config.ml_host == "0.0.0.0"
+    assert config.api_host == config.ml_host == "127.0.0.1"
     assert config.monitoring_ws_url == "ws://127.0.0.1:8100/ws/v1/monitoring"
     monkeypatch.setenv("API_PORT", "18100")
     monkeypatch.setenv("ML_PORT", "18101")
@@ -27,6 +36,18 @@ def test_deployment_defaults_and_derived_overrides(monkeypatch):
     assert config.frontend_api_base_url == "http://127.0.0.1:18100"
     monkeypatch.setenv("FRONTEND_API_BASE_URL", "https://example.org/surveillance/")
     assert load_deployment().monitoring_ws_url == "wss://example.org/surveillance/ws/v1/monitoring"
+
+
+def test_remote_bind_requires_strong_token_and_propagates_only_when_configured(monkeypatch):
+    monkeypatch.setenv("API_HOST", "0.0.0.0")
+    monkeypatch.setenv("ML_HOST", "127.0.0.1")
+    monkeypatch.delenv("SURVEILLANCE_API_TOKEN", raising=False)
+    with pytest.raises(ValueError, match="SURVEILLANCE_API_TOKEN"):
+        load_deployment()
+    token = "t" * 40
+    monkeypatch.setenv("SURVEILLANCE_API_TOKEN", token)
+    deployment = load_deployment()
+    assert deployment.environment()["SURVEILLANCE_API_TOKEN"] == token
 
 
 @pytest.mark.parametrize("value", ["0", "65536", "bad"])
@@ -149,7 +170,11 @@ def test_ml_camera_only_health_and_no_historical_identity(tmp_path, monkeypatch)
         assert tracked["tracked_objects"][0]["camera_id"] == "CAM-06"
         payload["cameras"][0]["online"] = False
         MonitoringTelemetryWriter(path).publish(payload)
-        assert client.get("/health").json()["status"] == "degraded"
+        health = client.get("/health").json()
+        assert health["status"] == "ok"
+        assert health["process_status"] == "running"
+        assert health["six_camera_readiness"] == "not_ready"
+        assert health["online_camera_count"] == 5
 
 
 def test_api_health_does_not_claim_ok_when_ml_disappears():
@@ -160,8 +185,11 @@ def test_api_health_does_not_claim_ok_when_ml_disappears():
             raise MLServiceUnavailable("offline")
     with TestClient(api.app) as client:
         client.app.state.ml_client = Client()
-        assert client.get("/health").json() == {
-            "service": "api_service", "status": "degraded", "ml_status": "unavailable"}
+        health = client.get("/health").json()
+        assert health == {
+            "service": "api_service", "status": "ok", "process_status": "running",
+            "ml_accessible": False, "ml_status": "unavailable",
+            "analytics_status": "unavailable", "six_camera_readiness": "unknown"}
 
 
 def test_camera_wall_has_no_video_network_fallback_and_overlay_uses_frame(monkeypatch, tmp_path):
