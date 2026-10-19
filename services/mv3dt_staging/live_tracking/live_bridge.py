@@ -35,7 +35,10 @@ ROOT = Path(__file__).resolve().parents[3]
 APP_DIR = Path(__file__).resolve().parent
 DS_IMAGE = "nvcr.io/nvidia/deepstream:9.1-triton-multiarch"
 DS_IMAGE_ID = "sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b"
-YOLO_DS_IMAGE = "nvcr.io/nvidia/deepstream@sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b"
+# The frozen YOLO engine build manifest records this exact DeepStream image.
+# Keep the default PeopleNet path on DS_IMAGE; this pin is experimental-only.
+YOLO_DS_IMAGE = "nvcr.io/nvidia/deepstream@sha256:10eca409b3894e91c1bac915c9f1346307e56695e552487cbe8cf2f58a3f998f"
+YOLO_DS_IMAGE_ID = "sha256:10eca409b3894e91c1bac915c9f1346307e56695e552487cbe8cf2f58a3f998f"
 MODEL_DIR = Path("/home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/models/PeopleNetTransformer")
 BRIDGE_DEFAULT = Path("/tmp/entrance-live-rectification-bridge-20261019/rectification_bridge.py")
 CAMERAS = ("CAM-02", "CAM-05")
@@ -94,8 +97,31 @@ def safe_for_extended_review(gpu_samples: list[dict[str, Any]], limit_percent: i
     return sum(int(sample["gpu_utilization_percent"]) >= limit_percent for sample in recent) < 2
 
 
+def validate_offline_stage_crosswalk(rows: list[dict[str, Any]], frame_count: int, stage: str) -> None:
+    """Require exact, ordered per-source frame coverage for offline smoke stages."""
+    by_source: dict[int, list[dict[str, Any]]] = {0: [], 1: []}
+    for row in rows:
+        source_id = row.get("source_id")
+        if source_id not in by_source:
+            raise RuntimeError(f"{stage} emitted unexpected source_id {source_id}")
+        by_source[source_id].append(row)
+    expected_indices = list(range(frame_count))
+    for source_id, source_rows in by_source.items():
+        frame_indices = [row.get("input_frame_index") for row in source_rows]
+        if frame_indices != expected_indices:
+            raise RuntimeError(
+                f"{stage} frame crosswalk mismatch for source {source_id}: "
+                f"expected={expected_indices}, actual={frame_indices}"
+            )
+        source_pts = [row.get("source_pts_ns") for row in source_rows]
+        if any(value is None for value in source_pts) or any(
+            int(right) <= int(left) for left, right in zip(source_pts, source_pts[1:])
+        ):
+            raise RuntimeError(f"{stage} source PTS not strictly increasing for source {source_id}")
+
+
 def docker_command(*, mux_only: bool, output_root: Path, detector: str = "peoplenet",
-                   yolo_artifacts: Path | None = None) -> list[str]:
+                   yolo_artifacts: Path | None = None, lossless_input: bool = False) -> list[str]:
     if detector not in {"peoplenet", "yolo26m"}:
         raise ValueError("unsupported detector")
     source = str(APP_DIR.resolve())
@@ -109,7 +135,7 @@ def docker_command(*, mux_only: bool, output_root: Path, detector: str = "people
         from services.mv3dt_staging.live_tracking.yolo_candidate import (
             CONTAINER_CONFIG, stage_yolo_batch_two,
         )
-        profile = stage_yolo_batch_two(yolo_artifacts, output_root)
+        profile = stage_yolo_batch_two(yolo_artifacts, output_root, engine_only=True)
         image = YOLO_DS_IMAGE
         pgie_config = CONTAINER_CONFIG
         mounts = [
@@ -133,6 +159,7 @@ def docker_command(*, mux_only: bool, output_root: Path, detector: str = "people
         "-o /tmp/entrance_ds_appsrc; "
         "/tmp/entrance_ds_appsrc "
         + ("--mux-only" if mux_only else f"--pgie-config {pgie_config}")
+        + (" --lossless-input" if lossless_input else "")
     )
     return [
         "docker", "run", "--rm", *pull_policy, "--init", "--interactive", "--gpus", "all",
@@ -147,7 +174,8 @@ def docker_command(*, mux_only: bool, output_root: Path, detector: str = "people
 
 class DeepStreamProcess:
     def __init__(self, *, mux_only: bool, output_root: Path,
-                 detector: str = "peoplenet", yolo_artifacts: Path | None = None):
+                 detector: str = "peoplenet", yolo_artifacts: Path | None = None,
+                 lossless_input: bool = False):
         self.output_root = output_root
         self.output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.output_root, 0o700)
@@ -164,7 +192,8 @@ class DeepStreamProcess:
         self._input_lock = threading.Lock()
         self.process = subprocess.Popen(
             docker_command(mux_only=mux_only, output_root=output_root,
-                           detector=detector, yolo_artifacts=yolo_artifacts),
+                           detector=detector, yolo_artifacts=yolo_artifacts,
+                           lossless_input=lossless_input),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=0, env={**os.environ, "USE_NEW_NVSTREAMMUX": "no"},
         )
@@ -299,6 +328,7 @@ def run_mux_smoke(args) -> int:
         mux_only=mux_only, output_root=output,
         detector=args.detector,
         yolo_artifacts=Path(args.yolo_artifacts).expanduser() if args.yolo_artifacts else None,
+        lossless_input=True,
     )
     sent = {0: 0, 1: 0}
     try:
@@ -341,8 +371,9 @@ def run_mux_smoke(args) -> int:
             counts[sid] += 1
             if row.get("input_frame_index") is None: sidecar_ok = False
             frame_sequences[sid].append((row.get("frame_num"), row.get("input_frame_index"), row.get("buf_pts")))
-    if (not args.inference and counts != sent) or (args.inference and any(value == 0 for value in counts.values())) or not sidecar_ok:
+    if counts != sent or not sidecar_ok:
         raise RuntimeError(f"mux metadata mismatch: sent={sent}, muxed={counts}, sidecar_ok={sidecar_ok}")
+    validate_offline_stage_crosswalk(mux_rows, args.frames, "MUX")
     if args.inference:
         pgie_counts = {sid: sum(1 for row in pgie_rows if row.get("source_id") == sid) for sid in (0, 1)}
         track_counts = {sid: sum(1 for row in track_rows if row.get("source_id") == sid) for sid in (0, 1)}
@@ -350,10 +381,19 @@ def run_mux_smoke(args) -> int:
             raise RuntimeError(f"recorded inference did not reach PGIE/NvDCF for both sources: PGIE={pgie_counts}, NvDCF={track_counts}")
         if any(row.get("input_frame_index") is None for row in pgie_rows + track_rows):
             raise RuntimeError("PGIE/NvDCF output lost its input-frame sidecar crosswalk")
+        validate_offline_stage_crosswalk(pgie_rows, args.frames, "PGIE")
+        validate_offline_stage_crosswalk(track_rows, args.frames, "NvDCF")
+    pgie_config_sha256 = None
+    if args.inference and args.detector == "yolo26m":
+        from services.mv3dt_staging.live_tracking.yolo_candidate import STAGED_CONFIG_FILENAME
+        config_path = output / STAGED_CONFIG_FILENAME
+        if not config_path.is_file():
+            raise RuntimeError("staged engine-only PGIE config missing after inference")
+        pgie_config_sha256 = __import__("hashlib").sha256(config_path.read_bytes()).hexdigest()
     result = {
         "status": "PASS",
         "image": YOLO_DS_IMAGE if args.inference and args.detector == "yolo26m" else DS_IMAGE,
-        "image_id": DS_IMAGE_ID,
+        "image_id": (YOLO_DS_IMAGE_ID if args.inference and args.detector == "yolo26m" else DS_IMAGE_ID),
         "mux": "legacy via process-scoped USE_NEW_NVSTREAMMUX=no", "batch_size": 2,
         "geometry": "1920x1080 BGR→NV12→NVMM", "sent_by_source": sent,
         "muxed_by_source": counts, "bounded_queue_drops_before_mux": {str(k): sent[k]-counts[k] for k in sent},
@@ -362,10 +402,7 @@ def run_mux_smoke(args) -> int:
         "detector": args.detector if args.inference else None,
         "input_geometry": args.input_geometry,
         "double_rectification": False,
-        "pgie_config_sha256": (
-            __import__("hashlib").sha256((output / "pgie-yolo26m-b2.txt").read_bytes()).hexdigest()
-            if args.inference and args.detector == "yolo26m" else None
-        ),
+        "pgie_config_sha256": pgie_config_sha256,
         "inference_validation_scope": "PGIE and NvDCF actual frame/metadata flow only; not person recall, cross-camera ID, performance or GPU safety",
         "pgie_frames_by_source": ({str(k): v for k, v in pgie_counts.items()} if args.inference else None),
         "tracker_frames_by_source": ({str(k): v for k, v in track_counts.items()} if args.inference else None),

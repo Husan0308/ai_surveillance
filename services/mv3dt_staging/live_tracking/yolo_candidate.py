@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import shutil
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MODEL_DIR = ROOT / ".runtime/sixcam-approved-bbox-20261006-r12-profile/models"
@@ -18,7 +19,8 @@ ASSETS = (
     "libyolo26rawperson.so",
     "labels.txt",
 )
-CONTAINER_CONFIG = "/workspace/pgie-yolo26m-b2.txt"
+CONTAINER_CONFIG = "/workspace/pgie-yolo26m-b2-engine-only.txt"
+STAGED_CONFIG_FILENAME = "pgie-yolo26m-b2-engine-only.txt"
 
 
 def sha256_file(path: Path) -> str:
@@ -57,8 +59,8 @@ def validate_yolo_assets(model_dir: Path, *, expected: dict[str, str] | None = N
     return actual
 
 
-def render_batch_two_config(template: str) -> str:
-    """Only change explicit batch=6 to batch=2; no threshold/model changes."""
+def render_batch_two_config(template: str, *, engine_only: bool = False) -> str:
+    """Change only batch=6 to 2; optionally forbid ONNX engine-build fallback."""
     mandatory = (
         "model-engine-file=/models/yolo26m_raw_otm_b6_fp16.engine",
         "custom-lib-path=/models/libyolo26rawperson.so",
@@ -71,15 +73,25 @@ def render_batch_two_config(template: str) -> str:
     )
     if template.count("batch-size=6") != 1 or any(template.count(x) != 1 for x in mandatory):
         raise ValueError("frozen PGIE template contract changed; no silent fallback")
-    return template.replace("batch-size=6", "batch-size=2", 1)
+    rendered = template.replace("batch-size=6", "batch-size=2", 1)
+    if engine_only:
+        # DeepStream may try rebuilding from ONNX when a serialized plan fails
+        # to deserialize. Omitting the source-model key makes this run fail
+        # closed instead of starting an unapproved engine build.
+        rendered = rendered.replace("onnx-file=/models/yolo26m_raw_otm.onnx\n", "", 1)
+        if "onnx-file=" in rendered:
+            raise ValueError("engine-only config unexpectedly retains an ONNX source")
+    return rendered
 
 
 def stage_yolo_batch_two(model_dir: Path, output_dir: Path, *,
-                         expected: dict[str, str] | None = None, root: Path = ROOT) -> dict:
+                         expected: dict[str, str] | None = None, root: Path = ROOT,
+                         engine_only: bool = False) -> dict:
     """Prepare a private, read-only-mounted candidate config for one offline run."""
     actual = validate_yolo_assets(model_dir, expected=expected, root=root)
     config_text = render_batch_two_config(
-        (root / "config/deepstream/config_infer_primary_yolo26m_raw_otm.txt").read_text()
+        (root / "config/deepstream/config_infer_primary_yolo26m_raw_otm.txt").read_text(),
+        engine_only=engine_only,
     )
     output_dir = Path(output_dir).resolve()
     if not output_dir.is_relative_to((root / ".runtime").resolve()):
@@ -87,7 +99,8 @@ def stage_yolo_batch_two(model_dir: Path, output_dir: Path, *,
         if not output_dir.is_relative_to(Path("/tmp").resolve()):
             raise ValueError("candidate output must be under .runtime or /tmp")
     output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    config_file = output_dir / "pgie-yolo26m-b2.txt"
+    config_name = STAGED_CONFIG_FILENAME if engine_only else "pgie-yolo26m-b2.txt"
+    config_file = output_dir / config_name
     if config_file.exists():
         if config_file.read_text() != config_text:
             raise ValueError("existing staged YOLO config differs; do not overwrite")
@@ -95,13 +108,35 @@ def stage_yolo_batch_two(model_dir: Path, output_dir: Path, *,
         with config_file.open("x") as stream:
             stream.write(config_text)
     config_file.chmod(0o600)
+    runtime_model_dir = Path(model_dir).resolve()
+    if engine_only:
+        # The test container cannot build a replacement plan: mount only the
+        # already-validated engine, parser and labels, not the ONNX source.
+        runtime_model_dir = output_dir / "engine-only-models"
+        if runtime_model_dir.is_symlink():
+            raise ValueError("engine-only model directory must not be a symlink")
+        runtime_model_dir.mkdir(mode=0o700, exist_ok=True)
+        runtime_model_dir.chmod(0o700)
+        for name in ("yolo26m_raw_otm_b6_fp16.engine", "libyolo26rawperson.so", "labels.txt"):
+            target = runtime_model_dir / name
+            if target.exists():
+                if target.is_symlink() or not target.is_file() or sha256_file(target) != actual[name]:
+                    raise ValueError(f"existing engine-only asset differs; do not overwrite: {name}")
+            else:
+                with (Path(model_dir).resolve() / name).open("rb") as source, target.open("xb") as dest:
+                    shutil.copyfileobj(source, dest)
+                target.chmod(0o600)
+                if sha256_file(target) != actual[name]:
+                    raise ValueError(f"staged engine-only asset SHA256 mismatch: {name}")
     return {
         "name": "YOLO26m",
-        "model_dir": str(Path(model_dir).resolve()),
+        "model_dir": str(runtime_model_dir),
+        "source_model_dir": str(Path(model_dir).resolve()),
         "config_file": str(config_file),
         "config_sha256": sha256_file(config_file),
         "model_asset_sha256": actual,
         "batch_size": 2,
         "person_class": 0,
+        "engine_only": engine_only,
         "validated": "static hashes/config only; engine runtime and detection quality NOT TESTED",
     }

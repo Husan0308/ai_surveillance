@@ -69,6 +69,7 @@ std::atomic<bool> g_eos{false};
 std::array<GstElement*, 2> g_appsrc{{nullptr, nullptr}};
 GstElement* g_pipeline = nullptr;
 bool g_mux_only = false;
+bool g_lossless_input = false;
 
 static std::string json_quote(const char* text) {
     std::ostringstream out;
@@ -202,11 +203,20 @@ static bool add_branch(uint32_t source_id, GstElement* mux, uint32_t width, uint
         "format", G_TYPE_STRING, "BGR", "width", G_TYPE_INT, static_cast<int>(width),
         "height", G_TYPE_INT, static_cast<int>(height), "framerate", GST_TYPE_FRACTION, 20, 1, nullptr);
     g_object_set(g_appsrc[source_id], "caps", input_caps, "is-live", TRUE,
-        "format", GST_FORMAT_TIME, "do-timestamp", FALSE, "block", FALSE,
-        "max-buffers", static_cast<guint64>(2), "leaky-type", 2, nullptr);
+        "format", GST_FORMAT_TIME, "do-timestamp", FALSE, nullptr);
+    if (g_lossless_input) {
+        g_object_set(g_appsrc[source_id], "block", TRUE,
+            "max-buffers", static_cast<guint64>(2), "max-bytes", static_cast<guint64>(0),
+            "leaky-type", 0, nullptr);
+    } else {
+        // Keep the established live-preview bounded/drop-stale behavior unchanged.
+        g_object_set(g_appsrc[source_id], "block", FALSE,
+            "max-buffers", static_cast<guint64>(2), "leaky-type", 2, nullptr);
+    }
     gst_caps_unref(input_caps);
     g_object_set(queue, "max-size-buffers", 2u, "max-size-bytes", 0u,
-        "max-size-time", static_cast<guint64>(0), "leaky", 2, nullptr);
+        "max-size-time", static_cast<guint64>(0),
+        "leaky", g_lossless_input ? 0 : 2, nullptr);
     GstCaps* cpu_caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING,
         "NV12", "width", G_TYPE_INT, static_cast<int>(width), "height", G_TYPE_INT,
         static_cast<int>(height), "framerate", GST_TYPE_FRACTION, 20, 1, nullptr);
@@ -371,7 +381,8 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--mux-only") g_mux_only = true;
         else if (std::string(argv[i]) == "--pgie-config" && i + 1 < argc) pgie_config = argv[++i];
-        else { std::cerr << "usage: deepstream_appsrc [--mux-only] [--pgie-config PATH]" << std::endl; return 2; }
+        else if (std::string(argv[i]) == "--lossless-input") g_lossless_input = true;
+        else { std::cerr << "usage: deepstream_appsrc [--mux-only] [--pgie-config PATH] [--lossless-input]" << std::endl; return 2; }
     }
     gst_init(&argc, &argv);
     if (!build_pipeline(g_mux_only, pgie_config)) return 3;
