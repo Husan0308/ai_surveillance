@@ -10,7 +10,7 @@ import hashlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_MODEL_DIR = ROOT / ".runtime/sixcam-approved-bbox-20261006-r5/models"
+DEFAULT_MODEL_DIR = ROOT / ".runtime/sixcam-approved-bbox-20261006-r12-profile/models"
 FROZEN_PGIE = ROOT / "config/deepstream/config_infer_primary_yolo26m_raw_otm.txt"
 ASSETS = (
     "yolo26m_raw_otm.onnx",

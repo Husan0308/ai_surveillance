@@ -101,6 +101,7 @@ def docker_command(*, mux_only: bool, output_root: Path, detector: str = "people
     source = str(APP_DIR.resolve())
     mounts = []
     image = DS_IMAGE
+    pull_policy = ["--pull=never"] if not mux_only and detector == "yolo26m" else []
     pgie_config = "/workspace/app/config_pgie_pnt_batch2.txt"
     if not mux_only and detector == "yolo26m":
         if yolo_artifacts is None:
@@ -134,7 +135,7 @@ def docker_command(*, mux_only: bool, output_root: Path, detector: str = "people
         + ("--mux-only" if mux_only else f"--pgie-config {pgie_config}")
     )
     return [
-        "docker", "run", "--rm", "--pull=never", "--init", "--interactive", "--gpus", "all",
+        "docker", "run", "--rm", *pull_policy, "--init", "--interactive", "--gpus", "all",
         "--network", "none", "--env", "USE_NEW_NVSTREAMMUX=no",
         "--env", "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video",
         "--mount", f"type=bind,source={source},target=/workspace/app,readonly",

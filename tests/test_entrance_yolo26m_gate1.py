@@ -9,7 +9,7 @@ import sys
 import pytest
 
 from services.mv3dt_staging.live_tracking.yolo_candidate import (
-    ASSETS, FROZEN_PGIE, render_batch_two_config, stage_yolo_batch_two,
+    ASSETS, DEFAULT_MODEL_DIR, FROZEN_PGIE, ROOT, render_batch_two_config, stage_yolo_batch_two,
     validate_yolo_assets,
 )
 from services.mv3dt_staging.live_tracking import live_bridge
@@ -39,6 +39,10 @@ def test_batch_two_preserves_detector_contract():
     assert edited.count("batch-size=2") == 1
     assert "interval=0" in edited
     assert "parse-bbox-func-name=NvDsInferParseYolo26RawPerson" in edited
+
+
+def test_default_artifact_directory_matches_verified_frozen_profile():
+    assert DEFAULT_MODEL_DIR == ROOT / ".runtime/sixcam-approved-bbox-20261006-r12-profile/models"
 
 
 def test_rejects_nonfrozen_detector_settings():
@@ -106,6 +110,22 @@ def test_yolo_candidate_never_starts_an_rtsp_or_mqtt_network_session(tmp_path, m
     assert "--network" in cmd and cmd[cmd.index("--network") + 1] == "none"
     assert "--pull=never" in cmd
     assert "--gpus" in cmd
+    assert live_bridge.YOLO_DS_IMAGE in cmd
     assert any("target=/models,readonly" in item for item in cmd)
     assert any("pgie-yolo26m-b2.txt" in item for item in cmd)
+    assert not any("PeopleNetTransformer" in item or "config_pgie_pnt" in item for item in cmd)
     assert "rtsp://" not in " ".join(cmd)
+
+
+def test_default_peoplenet_command_keeps_its_existing_image_and_mount(monkeypatch, tmp_path):
+    model_dir = tmp_path / "PeopleNetTransformer"
+    model_dir.mkdir()
+    monkeypatch.setattr(live_bridge, "MODEL_DIR", model_dir)
+    cmd = live_bridge.docker_command(mux_only=False, output_root=tmp_path / "out")
+    assert "--pull=never" not in cmd
+    assert live_bridge.DS_IMAGE in cmd
+    assert "/workspace/app/config_pgie_pnt_batch2.txt" in cmd[-1]
+    assert any(
+        f"source={model_dir},target=/workspace/models/PeopleNetTransformer,readonly" in item
+        for item in cmd
+    )
