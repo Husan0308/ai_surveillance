@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -62,7 +63,10 @@ struct KeyHash {
 };
 
 std::unordered_map<Key, InputRecord, KeyHash> g_input_records;
+std::unordered_map<Key, uint64_t, KeyHash> g_pgie_input_ns;
+std::unordered_map<Key, uint64_t, KeyHash> g_tracker_input_ns;
 std::mutex g_record_mutex;
+std::mutex g_stage_mutex;
 std::mutex g_stdout_mutex;
 std::atomic<bool> g_failed{false};
 std::atomic<bool> g_eos{false};
@@ -120,6 +124,37 @@ static bool lookup_input(uint32_t source_id, uint64_t pts, InputRecord& record) 
     return true;
 }
 
+static uint64_t monotonic_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+static bool take_stage_start(const std::string& stage, const Key& key, uint64_t& start_ns) {
+    std::lock_guard<std::mutex> lock(g_stage_mutex);
+    auto& starts = stage == "PGIE" ? g_pgie_input_ns : g_tracker_input_ns;
+    const auto found = starts.find(key);
+    if (found == starts.end()) return false;
+    start_ns = found->second;
+    starts.erase(found);
+    return true;
+}
+
+static GstPadProbeReturn stage_input_probe(GstPad*, GstPadProbeInfo* info, gpointer user_data) {
+    GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (!buffer) return GST_PAD_PROBE_OK;
+    NvDsBatchMeta* batch = gst_buffer_get_nvds_batch_meta(buffer);
+    if (!batch) return GST_PAD_PROBE_OK;
+    const std::string stage = static_cast<const char*>(user_data);
+    auto& starts = stage == "PGIE" ? g_pgie_input_ns : g_tracker_input_ns;
+    const uint64_t now_ns = monotonic_ns();
+    std::lock_guard<std::mutex> lock(g_stage_mutex);
+    for (NvDsMetaList* node = batch->frame_meta_list; node; node = node->next) {
+        auto* frame = static_cast<NvDsFrameMeta*>(node->data);
+        if (frame) starts[Key{frame->source_id, frame->buf_pts}] = now_ns;
+    }
+    return GST_PAD_PROBE_OK;
+}
+
 static void append_record_fields(std::ostringstream& out, uint32_t source_id, uint64_t pts) {
     InputRecord record{};
     if (!lookup_input(source_id, pts, record)) {
@@ -135,6 +170,7 @@ static void append_record_fields(std::ostringstream& out, uint32_t source_id, ui
 
 static GstPadProbeReturn metadata_probe(GstPad*, GstPadProbeInfo* info, gpointer user_data) {
     const char* stage = static_cast<const char*>(user_data);
+    const uint64_t stage_ns = monotonic_ns();
     GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
     if (!buffer) return GST_PAD_PROBE_OK;
     NvDsBatchMeta* batch = gst_buffer_get_nvds_batch_meta(buffer);
@@ -158,6 +194,21 @@ static GstPadProbeReturn metadata_probe(GstPad*, GstPadProbeInfo* info, gpointer
             << ",\"batch_id\":" << frame->batch_id
             << ",\"num_obj_meta\":" << frame->num_obj_meta;
         append_record_fields(out, sid, pts);
+        out << ",\"stage_mono_ns\":" << stage_ns;
+        InputRecord timing_record{};
+        if (lookup_input(sid, pts, timing_record) && timing_record.arrival_mono_ns >= 0 &&
+            stage_ns >= static_cast<uint64_t>(timing_record.arrival_mono_ns)) {
+            out << ",\"host_input_to_stage_ns\":"
+                << stage_ns - static_cast<uint64_t>(timing_record.arrival_mono_ns);
+        }
+        const std::string stage_name(stage);
+        if (stage_name == "PGIE" || stage_name == "TRACK") {
+            uint64_t start_ns = 0;
+            if (take_stage_start(stage_name, Key{sid, pts}, start_ns) && stage_ns >= start_ns) {
+                out << (stage_name == "PGIE" ? ",\"pgie_pad_latency_ns\":" : ",\"tracker_pad_latency_ns\":")
+                    << stage_ns - start_ns;
+            }
+        }
         if (std::string(stage) == "MUX") {
             out << '}';
             emit(out.str());
@@ -300,13 +351,21 @@ static bool build_pipeline(bool mux_only, const std::string& pgie_config) {
         }
         downstream = tracker;
         GstPad* pgie_src = gst_element_get_static_pad(pgie, "src");
+        GstPad* pgie_sink = gst_element_get_static_pad(pgie, "sink");
+        GstPad* tracker_sink = gst_element_get_static_pad(tracker, "sink");
         GstPad* tracker_src = gst_element_get_static_pad(tracker, "src");
-        if (!pgie_src || !tracker_src) return false;
+        if (!pgie_src || !pgie_sink || !tracker_src || !tracker_sink) return false;
+        gst_pad_add_probe(pgie_sink, GST_PAD_PROBE_TYPE_BUFFER, stage_input_probe,
+            const_cast<char*>("PGIE"), nullptr);
         gst_pad_add_probe(pgie_src, GST_PAD_PROBE_TYPE_BUFFER, metadata_probe,
             const_cast<char*>("PGIE"), nullptr);
+        gst_pad_add_probe(tracker_sink, GST_PAD_PROBE_TYPE_BUFFER, stage_input_probe,
+            const_cast<char*>("TRACK"), nullptr);
         gst_pad_add_probe(tracker_src, GST_PAD_PROBE_TYPE_BUFFER, metadata_probe,
             const_cast<char*>("TRACK"), nullptr);
         gst_object_unref(pgie_src);
+        gst_object_unref(pgie_sink);
+        gst_object_unref(tracker_sink);
         gst_object_unref(tracker_src);
     }
     GstPad* mux_src = gst_element_get_static_pad(mux, "src");

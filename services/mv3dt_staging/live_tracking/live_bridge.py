@@ -13,6 +13,7 @@ import argparse
 from collections import OrderedDict, deque
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
 import importlib.util
 import json
 import os
@@ -27,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import shutil
 from typing import Any
 
 import numpy as np
@@ -49,6 +51,14 @@ FRAME_MAGIC = 0x454E5446
 FRAME_VERSION = 1
 SENTINEL_SOURCE = 0xFFFF
 SOURCE_BY_ID = {0: "CAM-02", 1: "CAM-05"}
+PNT_CONFIG_SHA256 = "5f3f4e177e4f1e33743bc537bfcb3e331cab87cc3912982e1732f193e4214e79"
+PNT_ASSET_SHA256 = {
+    "peoplenet_transformer_model_op17.onnx": "974d6a77b4fde5ad83b18bbabc5e3771220e6ee22224e98cdc0cbf733da06038",
+    "peoplenet_transformer_model_op17.onnx_b2_gpu0_fp16.engine": "99451ab53e3c4b8f2bc50dbd4e33cb15bfcd28ba592e2fd766adfc08770cb3a8",
+    "detector_labels.txt": "5618c52db083cfdf40b81fd57d71fda73240738cefcdee7f97add8e0715737e4",
+    "custom_parser/libnvds_infercustomparser_tao.so": "0e01920c57fa6762887112d5c0e0e4239e10a094cd33ed4fd580add91d08e015",
+}
+PNT_ENGINE_ONLY_CONFIG = "/workspace/pgie-pnt-b2-engine-only.txt"
 
 
 def redact(text: str) -> str:
@@ -120,14 +130,91 @@ def validate_offline_stage_crosswalk(rows: list[dict[str, Any]], frame_count: in
             raise RuntimeError(f"{stage} source PTS not strictly increasing for source {source_id}")
 
 
+def stage_peoplenet_engine_only(model_dir: Path, config_path: Path, output_root: Path, *,
+                                expected_assets: dict[str, str] | None = None,
+                                expected_config_sha256: str = PNT_CONFIG_SHA256) -> dict[str, Any]:
+    """Stage the verified PeopleNet B2 plan/parser without an ONNX rebuild path."""
+    expected_assets = PNT_ASSET_SHA256 if expected_assets is None else expected_assets
+    model_dir, config_path, output_root = Path(model_dir), Path(config_path), Path(output_root).resolve()
+    if not output_root.is_relative_to(Path("/tmp").resolve()) and not output_root.is_relative_to((ROOT / ".runtime").resolve()):
+        raise ValueError("comparison artifacts must remain under /tmp or this checkout's .runtime")
+    if model_dir.is_symlink() or not model_dir.is_dir() or config_path.is_symlink() or not config_path.is_file():
+        raise ValueError("PeopleNet source model/config paths must be regular existing paths")
+
+    def digest(path: Path) -> str:
+        value = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                value.update(block)
+        return value.hexdigest()
+
+    actual = {}
+    for relative, expected in expected_assets.items():
+        source = model_dir / relative
+        if source.is_symlink() or not source.is_file() or digest(source) != expected:
+            raise ValueError(f"PeopleNet asset missing/changed: {relative}")
+        actual[relative] = expected
+    if digest(config_path) != expected_config_sha256:
+        raise ValueError("PeopleNet comparison config SHA256 mismatch")
+
+    template = config_path.read_text()
+    onnx_line = "onnx-file=/workspace/models/PeopleNetTransformer/peoplenet_transformer_model_op17.onnx\n"
+    engine_line = "model-engine-file=/workspace/models/PeopleNetTransformer/peoplenet_transformer_model_op17.onnx_b2_gpu0_fp16.engine\n"
+    if template.count(onnx_line) != 1 or template.count(engine_line) != 1:
+        raise ValueError("PeopleNet engine/config contract changed; refusing comparison staging")
+    engine_only = template.replace(onnx_line, "", 1)
+    if "onnx-file=" in engine_only:
+        raise ValueError("PeopleNet engine-only config unexpectedly retains ONNX fallback")
+
+    output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(output_root, 0o700)
+    staged_models = output_root / "peoplenet-engine-only-models"
+    staged_models.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(staged_models, 0o700)
+    staged_names = (
+        "peoplenet_transformer_model_op17.onnx_b2_gpu0_fp16.engine",
+        "detector_labels.txt",
+        "custom_parser/libnvds_infercustomparser_tao.so",
+    )
+    for relative in staged_names:
+        source, target = model_dir / relative, staged_models / relative
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if target.exists():
+            if target.is_symlink() or not target.is_file() or digest(target) != actual[relative]:
+                raise ValueError(f"refusing to overwrite changed staged PeopleNet asset: {relative}")
+        else:
+            shutil.copyfile(source, target)
+            target.chmod(0o600)
+            if digest(target) != actual[relative]:
+                raise ValueError(f"staged PeopleNet asset SHA256 mismatch: {relative}")
+    staged_config = output_root / "pgie-pnt-b2-engine-only.txt"
+    if staged_config.exists():
+        if staged_config.is_symlink() or staged_config.read_text() != engine_only:
+            raise ValueError("refusing to overwrite a divergent staged PeopleNet config")
+    else:
+        staged_config.write_text(engine_only)
+    staged_config.chmod(0o600)
+    return {
+        "model_dir": str(staged_models), "config_file": str(staged_config),
+        "config_sha256": hashlib.sha256(engine_only.encode()).hexdigest(),
+        "source_config_sha256": expected_config_sha256,
+        "model_asset_sha256": actual, "engine_only": True,
+    }
+
+
 def docker_command(*, mux_only: bool, output_root: Path, detector: str = "peoplenet",
-                   yolo_artifacts: Path | None = None, lossless_input: bool = False) -> list[str]:
+                   yolo_artifacts: Path | None = None, lossless_input: bool = False,
+                   comparison_runtime: bool = False, pnt_engine_only: bool = False) -> list[str]:
     if detector not in {"peoplenet", "yolo26m"}:
         raise ValueError("unsupported detector")
+    if comparison_runtime and (mux_only or detector != "peoplenet"):
+        raise ValueError("comparison runtime is restricted to offline PeopleNet inference")
+    if pnt_engine_only and (mux_only or detector != "peoplenet"):
+        raise ValueError("PeopleNet engine-only staging is restricted to offline PeopleNet inference")
     source = str(APP_DIR.resolve())
     mounts = []
     image = DS_IMAGE
-    pull_policy = ["--pull=never"] if not mux_only and detector == "yolo26m" else []
+    pull_policy = ["--pull=never"] if not mux_only and (detector == "yolo26m" or comparison_runtime or pnt_engine_only) else []
     pgie_config = "/workspace/app/config_pgie_pnt_batch2.txt"
     if not mux_only and detector == "yolo26m":
         if yolo_artifacts is None:
@@ -141,6 +228,16 @@ def docker_command(*, mux_only: bool, output_root: Path, detector: str = "people
         mounts = [
             "--mount", f"type=bind,source={profile['model_dir']},target=/models,readonly",
             "--mount", f"type=bind,source={profile['config_file']},target={CONTAINER_CONFIG},readonly",
+        ]
+    elif not mux_only and (comparison_runtime or pnt_engine_only):
+        profile = stage_peoplenet_engine_only(
+            MODEL_DIR, APP_DIR / "config_pgie_pnt_batch2.txt", output_root,
+        )
+        image = YOLO_DS_IMAGE if comparison_runtime else DS_IMAGE
+        pgie_config = PNT_ENGINE_ONLY_CONFIG
+        mounts = [
+            "--mount", f"type=bind,source={profile['model_dir']},target=/workspace/models/PeopleNetTransformer,readonly",
+            "--mount", f"type=bind,source={profile['config_file']},target={PNT_ENGINE_ONLY_CONFIG},readonly",
         ]
     elif not mux_only:
         models = str(MODEL_DIR.resolve())
@@ -175,12 +272,15 @@ def docker_command(*, mux_only: bool, output_root: Path, detector: str = "people
 class DeepStreamProcess:
     def __init__(self, *, mux_only: bool, output_root: Path,
                  detector: str = "peoplenet", yolo_artifacts: Path | None = None,
-                 lossless_input: bool = False):
+                 lossless_input: bool = False, comparison_runtime: bool = False,
+                 pnt_engine_only: bool = False):
         self.output_root = output_root
         self.output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.output_root, 0o700)
         self.stdout_path = self.output_root / "deepstream.stdout.log"
         self.stderr_path = self.output_root / "deepstream.stderr.log"
+        self.image = YOLO_DS_IMAGE if detector == "yolo26m" or comparison_runtime else DS_IMAGE
+        self.image_id = YOLO_DS_IMAGE_ID if detector == "yolo26m" or comparison_runtime else DS_IMAGE_ID
         self._stdout_file = self.stdout_path.open("w", encoding="utf-8")
         self._stderr_file = self.stderr_path.open("w", encoding="utf-8")
         os.chmod(self.stdout_path, 0o600)
@@ -193,7 +293,9 @@ class DeepStreamProcess:
         self.process = subprocess.Popen(
             docker_command(mux_only=mux_only, output_root=output_root,
                            detector=detector, yolo_artifacts=yolo_artifacts,
-                           lossless_input=lossless_input),
+                           lossless_input=lossless_input,
+                           comparison_runtime=comparison_runtime,
+                           pnt_engine_only=pnt_engine_only),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=0, env={**os.environ, "USE_NEW_NVSTREAMMUX": "no"},
         )
@@ -312,6 +414,7 @@ def run_mux_smoke(args) -> int:
         (1, "CAM-05", Path(args.cam05_video).expanduser(), "CAM-05"),
     ]
     captures = []
+    run_started_ns = time.monotonic_ns()
     for _, camera_id, path, _ in cameras:
         if not path.is_file(): raise FileNotFoundError(f"recorded input missing: {path}")
         cap = cv2.VideoCapture(str(path))
@@ -329,13 +432,20 @@ def run_mux_smoke(args) -> int:
         detector=args.detector,
         yolo_artifacts=Path(args.yolo_artifacts).expanduser() if args.yolo_artifacts else None,
         lossless_input=True,
+        comparison_runtime=bool(getattr(args, "comparison_runtime", False)),
+        pnt_engine_only=bool(getattr(args, "pnt_engine_only", False)),
     )
     sent = {0: 0, 1: 0}
+    feeder_start_ns = None
+    feeder_end_ns = None
+    pipe_end_ns = None
     try:
         pipe.wait_ready()
+        ready_ns = time.monotonic_ns()
         transforms = ({"CAM-02": bridge_mod.RectificationBridge("CAM-02"),
                        "CAM-05": bridge_mod.RectificationBridge("CAM-05")}
                       if bridge_mod is not None else {})
+        feeder_start_ns = time.monotonic_ns()
         for index in range(args.frames):
             for (source_id, camera_id, _path, _), cap in zip(cameras, captures):
                 ok, frame = cap.read()
@@ -347,18 +457,26 @@ def run_mux_smoke(args) -> int:
                 pipe.send_frame(source_id, index, rectified, pts_ns, -1, time.monotonic_ns())
                 sent[source_id] += 1
             time.sleep(0.05)
+        feeder_end_ns = time.monotonic_ns()
         pipe.end_input()
         if not pipe.done.wait(20): raise RuntimeError("recorded appsrc mux smoke did not reach EOS")
         try: pipe.process.wait(timeout=10)
         except subprocess.TimeoutExpired: raise RuntimeError("DeepStream reported EOS but did not exit")
         if pipe.process.returncode != 0: raise RuntimeError(f"DeepStream mux smoke exited {pipe.process.returncode}")
+        pipe_end_ns = time.monotonic_ns()
     finally:
         for cap in captures: cap.release()
         pipe.stop()
     mux_rows = []
     pgie_rows = []
     track_rows = []
-    for record in list(pipe.events.queue):
+    event_records = list(pipe.events.queue)
+    event_path = output / "mux-smoke-events.jsonl"
+    with event_path.open("w", encoding="utf-8") as stream:
+        for record in event_records:
+            stream.write(json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n")
+    os.chmod(event_path, 0o600)
+    for record in event_records:
         if record.get("type") == "MUX": mux_rows.append(record)
         elif record.get("type") == "PGIE": pgie_rows.append(record)
         elif record.get("type") == "TRACK": track_rows.append(record)
@@ -384,16 +502,65 @@ def run_mux_smoke(args) -> int:
         validate_offline_stage_crosswalk(pgie_rows, args.frames, "PGIE")
         validate_offline_stage_crosswalk(track_rows, args.frames, "NvDCF")
     pgie_config_sha256 = None
-    if args.inference and args.detector == "yolo26m":
-        from services.mv3dt_staging.live_tracking.yolo_candidate import STAGED_CONFIG_FILENAME
-        config_path = output / STAGED_CONFIG_FILENAME
+    if args.inference and (args.detector == "yolo26m" or getattr(args, "pnt_engine_only", False)):
+        if getattr(args, "pnt_engine_only", False):
+            config_name = "pgie-pnt-b2-engine-only.txt"
+        else:
+            from services.mv3dt_staging.live_tracking.yolo_candidate import STAGED_CONFIG_FILENAME
+            config_name = STAGED_CONFIG_FILENAME
+        config_path = output / config_name
         if not config_path.is_file():
             raise RuntimeError("staged engine-only PGIE config missing after inference")
-        pgie_config_sha256 = __import__("hashlib").sha256(config_path.read_bytes()).hexdigest()
+        pgie_config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+
+    person_class_id = 0 if args.detector == "yolo26m" else 1
+
+    def latency_summary(values_ns):
+        values_ms = [int(value) / 1_000_000 for value in values_ns if value is not None]
+        if not values_ms:
+            return "NOT_MEASURED"
+        return {"samples": len(values_ms), "p50_ms": round(float(np.percentile(values_ms, 50)), 3),
+                "p95_ms": round(float(np.percentile(values_ms, 95)), 3), "max_ms": round(max(values_ms), 3)}
+
+    def confidence_summary(values):
+        values = [float(value) for value in values if value is not None]
+        if not values:
+            return "NO_PERSON_DETECTIONS"
+        return {"samples": len(values), "p50": round(float(np.percentile(values, 50)), 4),
+                "p95": round(float(np.percentile(values, 95)), 4),
+                "min": round(min(values), 4), "max": round(max(values), 4)}
+
+    performance_by_source = {}
+    if args.inference:
+        for sid in (0, 1):
+            pgie_source = [row for row in pgie_rows if row.get("source_id") == sid]
+            track_source = [row for row in track_rows if row.get("source_id") == sid]
+            detections = [obj for row in pgie_source for obj in row.get("objects", [])
+                          if int(obj.get("class_id", -1)) == person_class_id]
+            tracked = [obj for row in track_source for obj in row.get("objects", [])
+                       if int(obj.get("class_id", -1)) == person_class_id]
+            local_ids = {int(obj["tracker_id"]) for obj in tracked if obj.get("tracker_id") is not None}
+            pgie_times = [int(row["stage_mono_ns"]) for row in pgie_source if row.get("stage_mono_ns") is not None]
+            tracker_times = [int(row["stage_mono_ns"]) for row in track_source if row.get("stage_mono_ns") is not None]
+            performance_by_source[str(sid)] = {
+                "person_class_id": person_class_id,
+                "pgie_frames": len(pgie_source), "tracker_frames": len(track_source),
+                "person_detections": len(detections), "person_track_observations": len(tracked),
+                "unique_local_tracker_ids": len(local_ids),
+                "confidence": confidence_summary([obj.get("confidence") for obj in detections]),
+                "pgie_pad_latency": latency_summary([row.get("pgie_pad_latency_ns") for row in pgie_source]),
+                "host_input_to_pgie": latency_summary([row.get("host_input_to_stage_ns") for row in pgie_source]),
+                "tracker_pad_latency": latency_summary([row.get("tracker_pad_latency_ns") for row in track_source]),
+                "host_input_to_tracker": latency_summary([row.get("host_input_to_stage_ns") for row in track_source]),
+                "pgie_output_fps": (round((len(pgie_times)-1) / ((max(pgie_times)-min(pgie_times))/1e9), 3)
+                                     if len(pgie_times) > 1 and max(pgie_times) > min(pgie_times) else None),
+                "tracker_output_fps": (round((len(tracker_times)-1) / ((max(tracker_times)-min(tracker_times))/1e9), 3)
+                                        if len(tracker_times) > 1 and max(tracker_times) > min(tracker_times) else None),
+            }
     result = {
         "status": "PASS",
-        "image": YOLO_DS_IMAGE if args.inference and args.detector == "yolo26m" else DS_IMAGE,
-        "image_id": (YOLO_DS_IMAGE_ID if args.inference and args.detector == "yolo26m" else DS_IMAGE_ID),
+        "image": pipe.image,
+        "image_id": pipe.image_id,
         "mux": "legacy via process-scoped USE_NEW_NVSTREAMMUX=no", "batch_size": 2,
         "geometry": "1920x1080 BGR→NV12→NVMM", "sent_by_source": sent,
         "muxed_by_source": counts, "bounded_queue_drops_before_mux": {str(k): sent[k]-counts[k] for k in sent},
@@ -403,6 +570,20 @@ def run_mux_smoke(args) -> int:
         "input_geometry": args.input_geometry,
         "double_rectification": False,
         "pgie_config_sha256": pgie_config_sha256,
+        "engine_only_runtime": bool(args.inference and (args.detector == "yolo26m" or getattr(args, "pnt_engine_only", False))),
+        "person_class_id": person_class_id if args.inference else None,
+        "performance_by_source": performance_by_source if args.inference else None,
+        "timing_scope": "PGIE/tracker pad-crossing wall time; host_input_to_* includes host pipe/appsrc/mux scheduling, not isolated CUDA kernel time",
+        "run_timing_sec": {
+            "initialization_until_ready": round((ready_ns-run_started_ns)/1e9, 3),
+            "host_frame_feeding": round((feeder_end_ns-feeder_start_ns)/1e9, 3),
+            "eos_drain_after_feed": round((pipe_end_ns-feeder_end_ns)/1e9, 3),
+            "total_wall": round((pipe_end_ns-run_started_ns)/1e9, 3),
+        },
+        "appsrc_advertised_fps": 20,
+        "input_clip_fps": 30,
+        "feeder_note": "consecutive 30-FPS source frames are paced through appsrc at 20 FPS; throughput is not reported as 30-FPS real-time",
+        "event_log": str(event_path),
         "inference_validation_scope": "PGIE and NvDCF actual frame/metadata flow only; not person recall, cross-camera ID, performance or GPU safety",
         "pgie_frames_by_source": ({str(k): v for k, v in pgie_counts.items()} if args.inference else None),
         "tracker_frames_by_source": ({str(k): v for k, v in track_counts.items()} if args.inference else None),
@@ -1049,6 +1230,10 @@ def main() -> int:
     mux.add_argument("--inference", action="store_true", help="exercise selected detector and stock NvDCF")
     mux.add_argument("--detector", choices=("peoplenet", "yolo26m"), default="peoplenet")
     mux.add_argument("--yolo-artifacts", help="read-only .runtime directory with SHA-pinned YOLO26m engine, ONNX, parser, labels")
+    mux.add_argument("--comparison-runtime", action="store_true",
+                     help="PeopleNet-only offline comparison with the pinned YOLO DeepStream/TensorRT image; engine-only staging")
+    mux.add_argument("--pnt-engine-only", action="store_true",
+                     help="PeopleNet offline test using its default pinned image and hash-checked engine-only staging")
     mux.add_argument("--input-geometry", choices=("rectified", "raw"), default="rectified",
                      help="existing AMC rectified MP4s must NOT be rectified again")
     mux.add_argument("--bridge", default=str(BRIDGE_DEFAULT))
@@ -1061,11 +1246,15 @@ def main() -> int:
     live.add_argument("--review-seconds", type=float, default=60.0)
     args = parser.parse_args()
     if args.mode == "mux-smoke":
-        if args.frames < 2 or args.frames > 30: parser.error("--frames must be 2..30")
+        if args.frames < 2 or args.frames > 600: parser.error("--frames must be 2..600 (30 seconds at the 20 FPS feeder rate)")
         if args.detector == "yolo26m" and not args.inference:
             parser.error("--detector yolo26m requires --inference")
         if args.detector == "yolo26m" and not args.yolo_artifacts:
             parser.error("--detector yolo26m requires --yolo-artifacts")
+        if args.comparison_runtime and args.detector != "peoplenet":
+            parser.error("--comparison-runtime is restricted to PeopleNet offline comparison")
+        if args.pnt_engine_only and args.detector != "peoplenet":
+            parser.error("--pnt-engine-only is restricted to PeopleNet offline inference")
         return run_mux_smoke(args)
     if args.smoke_seconds != 15.0 or args.review_seconds != 60.0:
         parser.error("the bounded live run is fixed at 15s smoke plus 60s review")
