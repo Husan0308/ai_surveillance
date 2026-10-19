@@ -93,11 +93,32 @@ def safe_for_extended_review(gpu_samples: list[dict[str, Any]], limit_percent: i
     return sum(int(sample["gpu_utilization_percent"]) >= limit_percent for sample in recent) < 2
 
 
-def docker_command(*, mux_only: bool, output_root: Path) -> list[str]:
+def docker_command(*, mux_only: bool, output_root: Path, detector: str = "peoplenet",
+                   yolo_artifacts: Path | None = None) -> list[str]:
+    if detector not in {"peoplenet", "yolo26m"}:
+        raise ValueError("unsupported detector")
     source = str(APP_DIR.resolve())
-    models = str(MODEL_DIR.resolve())
-    if not MODEL_DIR.is_dir():
-        raise FileNotFoundError(f"existing PeopleNet Transformer model directory missing: {MODEL_DIR}")
+    mounts = []
+    image = DS_IMAGE
+    pgie_config = "/workspace/app/config_pgie_pnt_batch2.txt"
+    if not mux_only and detector == "yolo26m":
+        if yolo_artifacts is None:
+            raise ValueError("YOLO26m requires explicit --yolo-artifacts under .runtime")
+        from services.mv3dt_staging.live_tracking.yolo_candidate import (
+            CONTAINER_CONFIG, stage_yolo_batch_two,
+        )
+        profile = stage_yolo_batch_two(yolo_artifacts, output_root)
+        image = "nvcr.io/nvidia/deepstream@sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b"
+        pgie_config = CONTAINER_CONFIG
+        mounts = [
+            "--mount", f"type=bind,source={profile['model_dir']},target=/models,readonly",
+            "--mount", f"type=bind,source={profile['config_file']},target={CONTAINER_CONFIG},readonly",
+        ]
+    elif not mux_only:
+        models = str(MODEL_DIR.resolve())
+        if not MODEL_DIR.is_dir():
+            raise FileNotFoundError(f"existing PeopleNet Transformer model directory missing: {MODEL_DIR}")
+        mounts = ["--mount", f"type=bind,source={models},target=/workspace/models/PeopleNetTransformer,readonly"]
     compile_and_run = (
         "set -euo pipefail; "
         "g++ -std=c++17 -O2 -Wall -Wextra "
@@ -109,21 +130,22 @@ def docker_command(*, mux_only: bool, output_root: Path) -> list[str]:
         "-lnvds_meta -lnvdsgst_meta $(pkg-config --libs gstreamer-app-1.0 gstreamer-video-1.0) "
         "-o /tmp/entrance_ds_appsrc; "
         "/tmp/entrance_ds_appsrc "
-        + ("--mux-only" if mux_only else "--pgie-config /workspace/app/config_pgie_pnt_batch2.txt")
+        + ("--mux-only" if mux_only else f"--pgie-config {pgie_config}")
     )
     return [
-        "docker", "run", "--rm", "--init", "--interactive", "--gpus", "all",
+        "docker", "run", "--rm", "--pull=never", "--init", "--interactive", "--gpus", "all",
         "--network", "none", "--env", "USE_NEW_NVSTREAMMUX=no",
         "--env", "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video",
         "--mount", f"type=bind,source={source},target=/workspace/app,readonly",
-        "--mount", f"type=bind,source={models},target=/workspace/models/PeopleNetTransformer,readonly",
+        *mounts,
         "--workdir", "/workspace/app", "--entrypoint", "/bin/bash",
-        DS_IMAGE, "-lc", compile_and_run,
+        image, "-lc", compile_and_run,
     ]
 
 
 class DeepStreamProcess:
-    def __init__(self, *, mux_only: bool, output_root: Path):
+    def __init__(self, *, mux_only: bool, output_root: Path,
+                 detector: str = "peoplenet", yolo_artifacts: Path | None = None):
         self.output_root = output_root
         self.output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.output_root, 0o700)
@@ -139,7 +161,8 @@ class DeepStreamProcess:
         self.failed = threading.Event()
         self._input_lock = threading.Lock()
         self.process = subprocess.Popen(
-            docker_command(mux_only=mux_only, output_root=output_root),
+            docker_command(mux_only=mux_only, output_root=output_root,
+                           detector=detector, yolo_artifacts=yolo_artifacts),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=0, env={**os.environ, "USE_NEW_NVSTREAMMUX": "no"},
         )
@@ -248,8 +271,11 @@ def run_mux_smoke(args) -> int:
     import cv2
 
     output = Path(args.output).resolve() if args.output else Path(tempfile.mkdtemp(prefix="entrance-appsrc-mux-"))
+    output.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(output, 0o700)
-    bridge_mod = import_bridge(Path(args.bridge).expanduser())
+    # AMC staging videos are ALREADY rectified. Applying the bridge a second
+    # time would invalidate any detector A/B comparison.
+    bridge_mod = import_bridge(Path(args.bridge).expanduser()) if args.input_geometry == "raw" else None
     cameras = [
         (0, "CAM-02", Path(args.cam02_video).expanduser(), "CAM-02"),
         (1, "CAM-05", Path(args.cam05_video).expanduser(), "CAM-05"),
@@ -260,16 +286,24 @@ def run_mux_smoke(args) -> int:
         cap = cv2.VideoCapture(str(path))
         if not cap.isOpened(): raise RuntimeError(f"OpenCV could not read recorded {camera_id} frames")
         w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if (w, h) != (1920, 1080):
-            cap.release(); raise RuntimeError(f"{camera_id} recorded test expected 1920x1080, got {w}x{h}")
+        expected_size = NATIVE_SIZE[camera_id] if args.input_geometry == "raw" else (1920, 1080)
+        if (w, h) != expected_size:
+            cap.release(); raise RuntimeError(
+                f"{camera_id} {args.input_geometry} input expected {expected_size}, got {(w, h)}"
+            )
         captures.append(cap)
     mux_only = not bool(args.inference)
-    pipe = DeepStreamProcess(mux_only=mux_only, output_root=output)
+    pipe = DeepStreamProcess(
+        mux_only=mux_only, output_root=output,
+        detector=args.detector,
+        yolo_artifacts=Path(args.yolo_artifacts).expanduser() if args.yolo_artifacts else None,
+    )
     sent = {0: 0, 1: 0}
     try:
         pipe.wait_ready()
-        transforms = {"CAM-02": bridge_mod.RectificationBridge("CAM-02"),
-                      "CAM-05": bridge_mod.RectificationBridge("CAM-05")}
+        transforms = ({"CAM-02": bridge_mod.RectificationBridge("CAM-02"),
+                       "CAM-05": bridge_mod.RectificationBridge("CAM-05")}
+                      if bridge_mod is not None else {})
         for index in range(args.frames):
             for (source_id, camera_id, _path, _), cap in zip(cameras, captures):
                 ok, frame = cap.read()
@@ -277,7 +311,7 @@ def run_mux_smoke(args) -> int:
                     raise RuntimeError(f"{camera_id}: recorded decode ended before frame {index}")
                 pts_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
                 pts_ns = int(pts_ms * 1_000_000) if np.isfinite(pts_ms) and pts_ms >= 0 else -1
-                rectified = transforms[camera_id](frame)
+                rectified = transforms[camera_id](frame) if transforms else frame
                 pipe.send_frame(source_id, index, rectified, pts_ns, -1, time.monotonic_ns())
                 sent[source_id] += 1
             time.sleep(0.05)
@@ -320,7 +354,14 @@ def run_mux_smoke(args) -> int:
         "geometry": "1920x1080 BGR→NV12→NVMM", "sent_by_source": sent,
         "muxed_by_source": counts, "bounded_queue_drops_before_mux": {str(k): sent[k]-counts[k] for k in sent},
         "source_mapping": {"0": "CAM-02", "1": "CAM-05"},
-        "mode": "PeopleNet Transformer + local NvDCF" if args.inference else "mux-only",
+        "mode": (f"{args.detector} + local NvDCF" if args.inference else "mux-only"),
+        "detector": args.detector if args.inference else None,
+        "input_geometry": args.input_geometry,
+        "double_rectification": False,
+        "pgie_config_sha256": (
+            __import__("hashlib").sha256((output / "pgie-yolo26m-b2.txt").read_bytes()).hexdigest()
+            if args.inference and args.detector == "yolo26m" else None
+        ),
         "pgie_frames_by_source": ({str(k): v for k, v in pgie_counts.items()} if args.inference else None),
         "tracker_frames_by_source": ({str(k): v for k, v in track_counts.items()} if args.inference else None),
         "recorded_person_detection_observations": (sum(int(row.get("num_obj_meta", 0)) for row in pgie_rows) if args.inference else None),
@@ -963,7 +1004,11 @@ def main() -> int:
     mux.add_argument("--cam02-video", required=True)
     mux.add_argument("--cam05-video", required=True)
     mux.add_argument("--frames", type=int, default=8)
-    mux.add_argument("--inference", action="store_true", help="also exercise the existing batch-2 PeopleNet Transformer and stock NvDCF")
+    mux.add_argument("--inference", action="store_true", help="exercise selected detector and stock NvDCF")
+    mux.add_argument("--detector", choices=("peoplenet", "yolo26m"), default="peoplenet")
+    mux.add_argument("--yolo-artifacts", help="read-only .runtime directory with SHA-pinned YOLO26m engine, ONNX, parser, labels")
+    mux.add_argument("--input-geometry", choices=("rectified", "raw"), default="rectified",
+                     help="existing AMC rectified MP4s must NOT be rectified again")
     mux.add_argument("--bridge", default=str(BRIDGE_DEFAULT))
     mux.add_argument("--output")
     live = sub.add_parser("live", help="one bounded live inference and Qt review")
@@ -975,6 +1020,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.mode == "mux-smoke":
         if args.frames < 2 or args.frames > 30: parser.error("--frames must be 2..30")
+        if args.detector == "yolo26m" and not args.inference:
+            parser.error("--detector yolo26m requires --inference")
+        if args.detector == "yolo26m" and not args.yolo_artifacts:
+            parser.error("--detector yolo26m requires --yolo-artifacts")
         return run_mux_smoke(args)
     if args.smoke_seconds != 15.0 or args.review_seconds != 60.0:
         parser.error("the bounded live run is fixed at 15s smoke plus 60s review")
