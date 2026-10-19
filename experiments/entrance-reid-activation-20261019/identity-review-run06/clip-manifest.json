@@ -1,0 +1,141 @@
+{
+  "annotation_template": [
+    {
+      "candidate": "prior_B_GID7_to_GID8_reappearance_window",
+      "current_run06_observation": "see paired clip; numeric IDs are run06-only and are not equated with B IDs",
+      "label": "UNCERTAIN",
+      "valid_labels": [
+        "SAME_PERSON",
+        "DIFFERENT_PEOPLE",
+        "UNCERTAIN"
+      ]
+    },
+    {
+      "candidate": "prior_B_GID12_to_GID13_reappearance_window",
+      "current_run06_observation": "see paired clip; numeric IDs are run06-only and are not equated with B IDs",
+      "label": "UNCERTAIN",
+      "valid_labels": [
+        "SAME_PERSON",
+        "DIFFERENT_PEOPLE",
+        "UNCERTAIN"
+      ]
+    },
+    {
+      "candidate": "prior_B_GID8_vs_GID10_overlap_window_CAM05",
+      "current_run06_observation": "actual raw IDs shown in clip; visual correspondence unreviewed",
+      "label": "UNCERTAIN",
+      "valid_labels": [
+        "SAME_PERSON",
+        "DIFFERENT_PEOPLE",
+        "UNCERTAIN"
+      ]
+    },
+    {
+      "candidate": "prior_B_GID8_vs_GID11_overlap_window_CAM05",
+      "current_run06_observation": "prior user note at frame 3087: likely duplicate box; carried as provisional only",
+      "label": "UNCERTAIN",
+      "valid_labels": [
+        "SAME_PERSON",
+        "DIFFERENT_PEOPLE",
+        "UNCERTAIN"
+      ]
+    }
+  ],
+  "camera_mapping": {
+    "0": "CAM-02",
+    "1": "CAM-05"
+  },
+  "clips": [
+    {
+      "note": "Review timeline only; the two cameras are not asserted exposure-synchronized.",
+      "output_frames": 630,
+      "path": "/home/apsidal/ai_surveillance-gate3j/experiments/entrance-reid-activation-20261019/identity-review-run06/return_candidate_7_to_8_timewindow_run06.mp4",
+      "per_source_frames": {
+        "0": 630,
+        "1": 630
+      },
+      "sha256": "667e81088aea0e985f6cfec12583ce896552fc39e2f0b1a89c563de10a05adcc",
+      "source_frame_ranges": {
+        "0": [
+          2160,
+          2789
+        ],
+        "1": [
+          2160,
+          2789
+        ]
+      },
+      "timeline_end_s": 93.0,
+      "timeline_start_s": 72.0
+    },
+    {
+      "note": "Review timeline only; the two cameras are not asserted exposure-synchronized.",
+      "output_frames": 480,
+      "path": "/home/apsidal/ai_surveillance-gate3j/experiments/entrance-reid-activation-20261019/identity-review-run06/return_candidate_12_to_13_timewindow_run06.mp4",
+      "per_source_frames": {
+        "0": 480,
+        "1": 480
+      },
+      "sha256": "76455cfbdb931a37252d83808226f8468f31648be9eab171c5cc8c749dfdf598",
+      "source_frame_ranges": {
+        "0": [
+          3570,
+          4049
+        ],
+        "1": [
+          3570,
+          4049
+        ]
+      },
+      "timeline_end_s": 135.0,
+      "timeline_start_s": 119.0
+    },
+    {
+      "note": "Review timeline only; the two cameras are not asserted exposure-synchronized.",
+      "output_frames": 135,
+      "path": "/home/apsidal/ai_surveillance-gate3j/experiments/entrance-reid-activation-20261019/identity-review-run06/overlap_candidate_8_vs_10_cam05_run06.mp4",
+      "per_source_frames": {
+        "1": 135
+      },
+      "sha256": "72f355b9f7f04c3f07f3e5c39d4bc9162313c61e4f10ed6c99316fdd7d6cfa74",
+      "source_frame_ranges": {
+        "1": [
+          2745,
+          2879
+        ]
+      },
+      "timeline_end_s": 96.0,
+      "timeline_start_s": 91.5
+    },
+    {
+      "note": "Review timeline only; the two cameras are not asserted exposure-synchronized.",
+      "output_frames": 225,
+      "path": "/home/apsidal/ai_surveillance-gate3j/experiments/entrance-reid-activation-20261019/identity-review-run06/overlap_candidate_8_vs_11_cam05_run06.mp4",
+      "per_source_frames": {
+        "1": 225
+      },
+      "sha256": "4a8a1333eb1651a7831cdcb171585a23c2c7d03c63ce018f9a547eb892b86726",
+      "source_frame_ranges": {
+        "1": [
+          2895,
+          3119
+        ]
+      },
+      "timeline_end_s": 104.0,
+      "timeline_start_s": 96.5
+    }
+  ],
+  "feature_observation_rows": 34622,
+  "feature_rows": 34622,
+  "limitations": [
+    "Camera timing is displayed from each source's encoded PTS; the paired panels do not imply exposure synchronization.",
+    "Raw IDs are run-scoped MV3DT outputs; no cross-run numeric-ID equivalence is asserted.",
+    "No persistent person IDs are assigned."
+  ],
+  "run": "/tmp/entrance-nvdcf-reid-globalid-20261019-run06",
+  "source_video_sha256": {
+    "0": "01f316f1146bfa7bc5dbc760012aaa562f15daca70e10a2cd7e408e117b32160",
+    "1": "dd9e851ba25013c88ad1059f44c3ba41e1060d018ed778f45f373152066ed813"
+  },
+  "tracker_frame_groups": 10800
+}

@@ -45,6 +45,81 @@ def test_current_valid_object_snapshot_is_read_from_atomic_latest_file(tmp_path,
     assert row["snapshot_age_ms"] == 100.0
 
 
+def test_every_native_canonical_bbox_source_is_accepted(tmp_path, monkeypatch):
+    monkeypatch.setenv("V11_TRACKED_OBJECT_FEED_DIR", str(tmp_path))
+    path = tmp_path / "v11_tracked_objects_cam01_v1.json"
+    sources = (
+        "TRACKER",
+        "PGIE_SHADOW_FALLBACK",
+        "SHADOW_CONTEXT_VERIFIED",
+        "PGIE_VERIFIED_LOWCONF_FALLBACK",
+        "PGIE_RECENT_VERIFIED_TRACK_LOWCONF_FALLBACK",
+    )
+    accepted = []
+    for source in sources:
+        row = _snapshot()
+        row["objects"] = [row["objects"][0] | {"bbox_source": source}]
+        path.write_text(json.dumps(row))
+        accepted.append(read_camera_snapshot("CAM-01", now_monotonic_ns=9_100_000_000) is not None)
+    assert accepted == [True] * len(sources)
+
+
+def test_unknown_bbox_source_and_invalid_object_geometry_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("V11_TRACKED_OBJECT_FEED_DIR", str(tmp_path))
+    path = tmp_path / "v11_tracked_objects_cam01_v1.json"
+    row = _snapshot()
+    row["objects"] = [row["objects"][0] | {"bbox_source": "UNREVIEWED_SOURCE"}]
+    path.write_text(json.dumps(row))
+    assert read_camera_snapshot("CAM-01", now_monotonic_ns=9_100_000_000) is None
+
+    row = _snapshot()
+    row["objects"] = [row["objects"][0] | {"bbox_source": ["TRACKER"]}]
+    path.write_text(json.dumps(row))
+    assert read_camera_snapshot("CAM-01", now_monotonic_ns=9_100_000_000) is None
+
+    row = _snapshot()
+    row["objects"] = [row["objects"][0] | {"bbox": [10, 10, float("nan"), 20]}]
+    path.write_text(json.dumps(row))
+    assert read_camera_snapshot("CAM-01", now_monotonic_ns=9_100_000_000) is None
+
+
+def test_multiple_mixed_tracker_and_fallback_objects_are_preserved(tmp_path, monkeypatch):
+    monkeypatch.setenv("V11_TRACKED_OBJECT_FEED_DIR", str(tmp_path))
+    path = tmp_path / "v11_tracked_objects_cam01_v1.json"
+    row = _snapshot()
+    first = row["objects"][0]
+    row["objects"] = [
+        first | {"native_track_id": 5, "bbox_source": "TRACKER", "bbox": [10, 20, 110, 220]},
+        first | {"native_track_id": 6, "bbox_source": "PGIE_VERIFIED_LOWCONF_FALLBACK",
+                 "bbox": [120, 20, 220, 220]},
+        first | {"native_track_id": 7, "bbox_source": "PGIE_RECENT_VERIFIED_TRACK_LOWCONF_FALLBACK",
+                 "bbox": [230, 20, 330, 220]},
+    ]
+    row["detector_proposals"] = []
+    path.write_text(json.dumps(row))
+    clean = read_camera_snapshot("CAM-01", now_monotonic_ns=9_100_000_000)
+    assert clean is not None
+    assert [item["native_track_id"] for item in clean["objects"]] == [5, 6, 7]
+    assert [item["bbox_source"] for item in clean["objects"]] == [
+        "TRACKER", "PGIE_VERIFIED_LOWCONF_FALLBACK",
+        "PGIE_RECENT_VERIFIED_TRACK_LOWCONF_FALLBACK",
+    ]
+
+
+def test_object_with_stale_or_mismatched_frame_pts_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("V11_TRACKED_OBJECT_FEED_DIR", str(tmp_path))
+    path = tmp_path / "v11_tracked_objects_cam01_v1.json"
+    row = _snapshot()
+    row["objects"] = [row["objects"][0] | {"frame_num": 99}]
+    path.write_text(json.dumps(row))
+    assert read_camera_snapshot("CAM-01", now_monotonic_ns=9_100_000_000) is None
+
+    row = _snapshot()
+    row["objects"] = [row["objects"][0] | {"pts_ns": 123}]
+    path.write_text(json.dumps(row))
+    assert read_camera_snapshot("CAM-01", now_monotonic_ns=9_100_000_000) is None
+
+
 def test_native_source_and_pipeline_bbox_dimensions_are_kept_distinct(tmp_path, monkeypatch):
     monkeypatch.setenv("V11_TRACKED_OBJECT_FEED_DIR", str(tmp_path))
     row = _snapshot(

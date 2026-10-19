@@ -32,3 +32,6 @@ artifacts/
 # Model weights/exports are reproducible local artifacts, never source files.
 *.pt
 *.onnx
+
+# Local camera recordings and review videos
+*.mp4

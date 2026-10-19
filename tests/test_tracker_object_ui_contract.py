@@ -20,12 +20,29 @@ def _tile():
     tile = CameraTile("CAM-01", "http://127.0.0.1:8101")
     tile.tracked_object_feed_supported = True
     tile.current_source_frame_num = 100
+    tile.current_tracker_frame_num = 100
     tile.current_pts_ns = 123456789
     tile.tracked_objects = [{
         "camera_id": "CAM-01", "frame": 100, "pts_ns": 123456789, "native_track_id": 42,
         "bbox": [0, 0, 2560, 1440],
     }]
     return tile
+
+
+class _RecordingPainter:
+    def __init__(self):
+        self.pen = None
+        self.rectangles = []
+        self.labels = []
+
+    def setPen(self, pen):
+        self.pen = pen
+
+    def drawRect(self, *rect):
+        self.rectangles.append((self.pen.color(), rect))
+
+    def drawText(self, *args):
+        self.labels.append((self.pen.color(), args[-1]))
 
 
 def test_tracker_box_paints_unknown_without_identity_and_never_duplicates():
@@ -190,3 +207,81 @@ def test_pipeline_box_missing_mux_extent_is_not_painted_at_native_scale():
     image = pixmap.toImage()
     # The wrong source-space scale would put the top-left edge near (378,318).
     assert image.pixelColor(378, 318) == QColor("black")
+
+
+def test_all_native_fallback_types_are_classified_and_deduplicated_against_detector():
+    fallback_sources = (
+        "PGIE_SHADOW_FALLBACK",
+        "SHADOW_CONTEXT_VERIFIED",
+        "PGIE_VERIFIED_LOWCONF_FALLBACK",
+        "PGIE_RECENT_VERIFIED_TRACK_LOWCONF_FALLBACK",
+    )
+    for source in fallback_sources:
+        tile = _tile()
+        tile.box_diagnostics = True
+        bbox = [40, 50, 140, 180]
+        tile.tracked_objects = [{
+            "camera_id": "CAM-01", "frame_num": 100, "pts_ns": 123456789,
+            "native_track_id": 42, "bbox": bbox, "bbox_source": source,
+            "bbox_coordinate_width": 2560, "bbox_coordinate_height": 1440,
+        }]
+        tile.detector_proposals = [{
+            "camera_id": "CAM-01", "frame_num": 100, "pts_ns": 123456789,
+            "proposal_index": 0, "confidence": 0.81, "bbox": bbox,
+            "source_frame_width": 2560, "source_frame_height": 1440,
+            "bbox_coordinate_width": 2560, "bbox_coordinate_height": 1440,
+        }]
+        painter = _RecordingPainter()
+        tile._paint_overlays(painter, 256, 144)
+
+        # The identical current-frame detector rectangle is suppressed; only
+        # the canonical fallback box is drawn, using fallback styling.
+        assert len(painter.rectangles) == 1, source
+        assert painter.rectangles[0][0] == QColor(40, 220, 255), source
+        assert any(label.startswith("FALLBACK native:") for _, label in painter.labels), source
+
+
+def test_stale_fallback_cannot_deduplicate_current_frame_detector_overlay():
+    tile = _tile()
+    tile.box_diagnostics = True
+    tile.tracked_objects = [{
+        # Even matching PTS cannot mask a different tracker frame identity.
+        "camera_id": "CAM-01", "frame_num": 99, "pts_ns": 123456789,
+        "native_track_id": 42, "bbox": [40, 50, 140, 180],
+        "bbox_source": "PGIE_VERIFIED_LOWCONF_FALLBACK",
+        "bbox_coordinate_width": 2560, "bbox_coordinate_height": 1440,
+    }]
+    tile.detector_proposals = [{
+        "camera_id": "CAM-01", "frame_num": 100, "pts_ns": 123456789,
+        "proposal_index": 0, "confidence": 0.81, "bbox": [40, 50, 140, 180],
+        "source_frame_width": 2560, "source_frame_height": 1440,
+        "bbox_coordinate_width": 2560, "bbox_coordinate_height": 1440,
+    }]
+    painter = _RecordingPainter()
+    tile._paint_overlays(painter, 256, 144)
+    assert len(painter.rectangles) == 1
+    assert painter.rectangles[0][0] == QColor(255, 170, 35)
+
+
+def test_overlay_uses_tracker_frame_identity_not_source_frame_number():
+    tile = _tile()
+    tile.box_diagnostics = True
+    tile.current_source_frame_num = 321
+    tile.current_tracker_frame_num = 100
+    tile.tracked_objects = [{
+        "camera_id": "CAM-01", "frame_num": 100, "pts_ns": 123456789,
+        "native_track_id": 42, "bbox": [50, 60, 180, 230],
+        "bbox_source": "TRACKER",
+        "bbox_coordinate_width": 2560, "bbox_coordinate_height": 1440,
+    }]
+    tile.detector_proposals = [{
+        "camera_id": "CAM-01", "frame_num": 100, "pts_ns": 123456789,
+        "proposal_index": 0, "confidence": 0.81, "bbox": [10, 20, 200, 200],
+        "source_frame_width": 2560, "source_frame_height": 1440,
+        "bbox_coordinate_width": 2560, "bbox_coordinate_height": 1440,
+    }]
+    painter = _RecordingPainter()
+    tile._paint_overlays(painter, 256, 144)
+    assert [color for color, _ in painter.rectangles] == [
+        QColor(255, 170, 35), QColor(70, 240, 100),
+    ]

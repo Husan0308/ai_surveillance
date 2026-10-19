@@ -1,0 +1,20 @@
+{
+  "schema_version":1,
+  "session_id":"entrance-20261009T124152Z",
+  "room":"entrance",
+  "status":"FAILED",
+  "requested_duration_sec":180,
+  "start_utc":"2026-10-09T12:41:52.925106Z",
+  "end_utc":"2026-10-09T12:44:52.965430Z",
+  "start_monotonic_ns":356698028334000,
+  "end_monotonic_ns":356878068661000,
+  "actual_duration_sec":180.04,
+  "capture_method":"single-owner decoded NVMM tee; NVENC H.264; native dimensions; source PTS preserved",
+  "mp4_mux":{"element":"qtmux","faststart":false,"finalization":"moov index written on EOS; MP4 playable after branch finalizes"},
+  "cross_camera_identity":"not emitted by current local-NvDCF candidate; native local IDs recorded",
+  "cameras":[
+    {"camera_id":"CAM-02","camera_name":"Entrance 2","video":"/calibration_recordings/entrance/entrance-20261009T124152Z/camera_1.mp4","frame_rows":"/calibration_recordings/entrance/entrance-20261009T124152Z/frames-CAM-02.jsonl","width":3200,"height":1800,"pixel_format":"NV12","fps_num":20,"fps_den":1,"decoded_input_frames":3580,"encoded_access_units":3577,"queue_overruns":0,"first_pts_ns":1468319187240,"last_pts_ns":1648240187240,"first_encoded_pts_ns":1468319187240,"last_encoded_pts_ns":1648240187240,"first_frame_monotonic_ns":356698107924000,"last_frame_monotonic_ns":356877985031000},
+    {"camera_id":"CAM-05","camera_name":"Entrance 1","video":"/calibration_recordings/entrance/entrance-20261009T124152Z/camera_2.mp4","frame_rows":"/calibration_recordings/entrance/entrance-20261009T124152Z/frames-CAM-05.jsonl","width":2560,"height":1440,"pixel_format":"NV12","fps_num":20,"fps_den":1,"decoded_input_frames":3572,"encoded_access_units":3572,"queue_overruns":0,"first_pts_ns":1468356239828,"last_pts_ns":1648256239828,"first_encoded_pts_ns":1468356239828,"last_encoded_pts_ns":1648256239828,"first_frame_monotonic_ns":356698078102000,"last_frame_monotonic_ns":356877985915000}
+  ],
+  "synchronization":{"method":"common monotonic session gate; per-frame source PTS and host monotonic timestamps","max_pair_frame_arrival_skew_ms":122.444}
+}

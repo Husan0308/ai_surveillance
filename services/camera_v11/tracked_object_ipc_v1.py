@@ -13,6 +13,14 @@ DEFAULT_DIR = Path("/dev/shm")
 CAMERA_IDS = tuple(f"CAM-{index:02d}" for index in range(1, 7))
 SCHEMA_VERSION = 1
 MAX_SNAPSHOT_BYTES = 256 * 1024
+TRACKER_BBOX_SOURCE = "TRACKER"
+FALLBACK_BBOX_SOURCES = frozenset({
+    "PGIE_SHADOW_FALLBACK",
+    "SHADOW_CONTEXT_VERIFIED",
+    "PGIE_VERIFIED_LOWCONF_FALLBACK",
+    "PGIE_RECENT_VERIFIED_TRACK_LOWCONF_FALLBACK",
+})
+CANONICAL_BBOX_SOURCES = frozenset({TRACKER_BBOX_SOURCE}) | FALLBACK_BBOX_SOURCES
 
 
 def feed_dir() -> Path:
@@ -91,8 +99,8 @@ def read_camera_snapshot(camera_id: str, *, max_age_sec: float = 0.25,
         if row.get("bbox_coordinate_space") == "pipeline" and (
                 (object_width, object_height) != (bbox_width, bbox_height)):
             return None
-        if row.get("bbox_source") not in {
-                "TRACKER", "PGIE_SHADOW_FALLBACK", "SHADOW_CONTEXT_VERIFIED"}:
+        bbox_source = row.get("bbox_source")
+        if not isinstance(bbox_source, str) or bbox_source not in CANONICAL_BBOX_SOURCES:
             return None
         seen.add(native)
         clean.append(row | {"bbox_coordinate_width": object_width,

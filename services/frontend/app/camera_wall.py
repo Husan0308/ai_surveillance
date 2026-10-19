@@ -12,6 +12,7 @@ from PySide6.QtCore import QSize, Qt, Signal, QSocketNotifier, QTimer, QRectF, S
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import QDialog, QFrame, QGridLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
+from services.camera_v11.tracked_object_ipc_v1 import FALLBACK_BBOX_SOURCES
 from services.camera_v11.ui_preview_ipc_v1 import PreviewFrameNotifyReceiver, PreviewFrameReader
 
 
@@ -236,6 +237,7 @@ class CameraTile(QFrame):
         # stale feed means no box; identity rows never become geometry.
         self.tracked_object_feed_supported = True
         self.current_source_frame_num: int | None = None
+        self.current_tracker_frame_num: int | None = None
         self.current_pts_ns: int | None = None
         self.current_source_dimensions: tuple[int, int] | None = None
         self.acceptance_candidates: list[dict] = []
@@ -372,6 +374,7 @@ class CameraTile(QFrame):
         self.current_payload = frame.payload
         self.last_version = frame.sequence
         self.current_source_frame_num = frame.source_frame_num
+        self.current_tracker_frame_num = None
         self.current_pts_ns = frame.pts_ns
         self.current_source_dimensions = (
             overlay_source_dimensions(self.camera_id, self.source_mode, snapshot)
@@ -386,6 +389,7 @@ class CameraTile(QFrame):
             feed, self.current_source_dimensions or (frame.width, frame.height))
             if feed_frame_matches else None)
         if feed_frame_matches and feed is not None and feed_bbox_dimensions is not None:
+            self.current_tracker_frame_num = int(feed["frame_num"])
             self.tracked_objects = snapshot_bbox_rows(feed, "objects", feed_bbox_dimensions)
             self.detector_proposals = snapshot_bbox_rows(
                 feed, "detector_proposals", feed_bbox_dimensions)
@@ -473,7 +477,8 @@ class CameraTile(QFrame):
                     if proposal.get("camera_id") != self.camera_id:
                         continue
                     try:
-                        if (int(proposal.get("frame_num", -1)) != int(self.current_source_frame_num)
+                        if (self.current_tracker_frame_num is None
+                                or int(proposal.get("frame_num", -1)) != self.current_tracker_frame_num
                                 or int(proposal.get("pts_ns", -1)) != int(self.current_pts_ns)):
                             continue
                     except (TypeError, ValueError):
@@ -481,22 +486,18 @@ class CameraTile(QFrame):
                     bbox = proposal.get("bbox")
                     if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
                         continue
-                    # The approved fallback rectangle is this exact current PGIE
-                    # proposal. Label it once as FALLBACK instead of painting a
-                    # visually duplicate DET rectangle over the same pixels.
-                    fallback_duplicate = any(
-                        row.get("bbox_source") == "PGIE_SHADOW_FALLBACK"
-                        and row.get("camera_id") == self.camera_id
-                        and all(abs(float(row["bbox"][i]) - float(bbox[i])) <= 1.0 for i in range(4))
-                        for row in self.tracked_objects
-                        if isinstance(row.get("bbox"), (list, tuple)) and len(row["bbox"]) >= 4
-                    )
-                    if fallback_duplicate:
-                        continue
                     dimensions = bbox_coordinate_dimensions(
                         proposal, self.current_source_dimensions or
                         overlay_source_dimensions(self.camera_id, self.source_mode))
                     if dimensions is None:
+                        continue
+                    # The approved fallback rectangle is this exact current PGIE
+                    # proposal. Label it once as FALLBACK instead of painting a
+                    # visually duplicate DET rectangle over the same pixels.
+                    fallback_duplicate = any(self._fallback_matches_proposal(
+                        row, bbox, dimensions
+                    ) for row in self.tracked_objects)
+                    if fallback_duplicate:
                         continue
                     coordinate_width, coordinate_height = dimensions
                     left, top, right, bottom = scale_overlay_bbox(
@@ -513,11 +514,9 @@ class CameraTile(QFrame):
                 if native is None or pts is None or self.current_pts_ns is None:
                     continue
                 # The feed and pixels are published from the same decoded
-                # source frame. Exact PTS matching prevents stale geometry.
-                try:
-                    if int(pts) != int(self.current_pts_ns):
-                        continue
-                except (TypeError, ValueError):
+                # source frame. Require frame identity and PTS so repeated or
+                # reset PTS values cannot attach geometry to another frame.
+                if not self._is_current_frame_row(row):
                     continue
                 bbox = row.get("bbox")
                 if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
@@ -533,8 +532,8 @@ class CameraTile(QFrame):
                 )
                 identity = self._matching_identity_row(row)
                 if self.box_diagnostics:
-                    if row.get("bbox_source") in {
-                            "PGIE_SHADOW_FALLBACK", "SHADOW_CONTEXT_VERIFIED"}:
+                    bbox_source = row.get("bbox_source")
+                    if isinstance(bbox_source, str) and bbox_source in FALLBACK_BBOX_SOURCES:
                         color, prefix = QColor(40, 220, 255), "FALLBACK"
                     else:
                         color, prefix = QColor(70, 240, 100), "TRACK"
@@ -604,6 +603,42 @@ class CameraTile(QFrame):
                     painter.setPen(QPen(QColor(255, 70, 220), 4))
                     painter.drawRect(left, top, right - left, bottom - top)
                     painter.drawText(left, max(20, top - 10), f"{tester} · ACCEPTANCE ONLY")
+
+    def _is_current_frame_row(self, row: dict) -> bool:
+        """Whether a tracked-object row belongs to the preview frame being painted."""
+        if self.current_tracker_frame_num is None or self.current_pts_ns is None:
+            return False
+        try:
+            row_frame = int(row.get("frame_num", row.get("frame", -1)))
+            row_pts = int(row.get("pts_ns", -1))
+            return (row_frame == int(self.current_tracker_frame_num)
+                    and row_pts == int(self.current_pts_ns))
+        except (TypeError, ValueError):
+            return False
+
+    def _fallback_matches_proposal(self, row: dict, proposal_bbox: list | tuple,
+                                   proposal_dimensions: tuple[int, int]) -> bool:
+        """Match fallback geometry only within the same frame and coordinate space."""
+        bbox_source = row.get("bbox_source") if isinstance(row, dict) else None
+        if (not isinstance(row, dict)
+                or not isinstance(bbox_source, str)
+                or bbox_source not in FALLBACK_BBOX_SOURCES
+                or row.get("camera_id") != self.camera_id
+                or not self._is_current_frame_row(row)):
+            return False
+        row_bbox = row.get("bbox")
+        if not isinstance(row_bbox, (list, tuple)) or len(row_bbox) < 4:
+            return False
+        dimensions = bbox_coordinate_dimensions(
+            row, self.current_source_dimensions or
+            overlay_source_dimensions(self.camera_id, self.source_mode))
+        if dimensions != proposal_dimensions:
+            return False
+        try:
+            return all(abs(float(row_bbox[index]) - float(proposal_bbox[index])) <= 1.0
+                       for index in range(4))
+        except (TypeError, ValueError, OverflowError):
+            return False
 
     def _draw_overlays(self, pixmap: QPixmap) -> None:
         painter = QPainter(pixmap)
@@ -684,6 +719,7 @@ class CameraTile(QFrame):
         saved_proposals = self.detector_proposals
         saved_pts = self.current_pts_ns
         saved_frame_num = self.current_source_frame_num
+        saved_tracker_frame_num = self.current_tracker_frame_num
         saved_source_dimensions = self.current_source_dimensions
         self.current_image = self.fullscreen_current_image
         self.current_source_dimensions = self.fullscreen_source_dimensions
@@ -692,12 +728,14 @@ class CameraTile(QFrame):
         current_frame = self.fullscreen_current_frame or {}
         self.current_pts_ns = current_frame.get("pts_ns")
         self.current_source_frame_num = current_frame.get("source_frame_num")
+        self.current_tracker_frame_num = current_frame.get("tracker_frame_num")
         self._draw_overlays(pixmap)
         self.current_image = saved_image
         self.tracked_objects = saved_objects
         self.detector_proposals = saved_proposals
         self.current_pts_ns = saved_pts
         self.current_source_frame_num = saved_frame_num
+        self.current_tracker_frame_num = saved_tracker_frame_num
         self.current_source_dimensions = saved_source_dimensions
         timing = getattr(self.fullscreen_video, "preview_timing_context", None)
         if (timing is not None and self.fullscreen_dialog is not None

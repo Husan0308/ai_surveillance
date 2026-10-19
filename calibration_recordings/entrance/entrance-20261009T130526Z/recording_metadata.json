@@ -1,0 +1,21 @@
+{
+  "schema_version":1,
+  "session_id":"entrance-20261009T130526Z",
+  "room":"entrance",
+  "status":"COMPLETE",
+  "requested_duration_sec":180,
+  "start_utc":"2026-10-09T13:05:27.138032Z",
+  "end_utc":"2026-10-09T13:08:27.216612Z",
+  "stop_reason":"duration elapsed",
+  "start_monotonic_ns":358112241257000,
+  "end_monotonic_ns":358292319843000,
+  "actual_duration_sec":180.079,
+  "capture_method":"single-owner decoded NVMM tee; NVENC H.264; native dimensions; source PTS preserved",
+  "mp4_mux":{"element":"qtmux","faststart":false,"finalization":"moov index written on EOS; MP4 playable after branch finalizes"},
+  "cross_camera_identity":"not emitted by current local-NvDCF candidate; native local IDs recorded",
+  "cameras":[
+    {"camera_id":"CAM-02","camera_name":"Entrance 2","video":"/calibration_recordings/entrance/entrance-20261009T130526Z/camera_1.mp4","frame_rows":"/calibration_recordings/entrance/entrance-20261009T130526Z/frames-CAM-02.jsonl","width":3200,"height":1800,"pixel_format":"NV12","fps_num":20,"fps_den":1,"decoded_input_frames":3598,"encoded_access_units":3598,"queue_overruns":0,"first_pts_ns":2488928845,"last_pts_ns":182561295412,"first_encoded_pts_ns":2488928845,"last_encoded_pts_ns":182561295412,"first_frame_monotonic_ns":358112342106000,"last_frame_monotonic_ns":358292235722000},
+    {"camera_id":"CAM-05","camera_name":"Entrance 1","video":"/calibration_recordings/entrance/entrance-20261009T130526Z/camera_2.mp4","frame_rows":"/calibration_recordings/entrance/entrance-20261009T130526Z/frames-CAM-05.jsonl","width":2560,"height":1440,"pixel_format":"NV12","fps_num":20,"fps_den":1,"decoded_input_frames":3600,"encoded_access_units":3600,"queue_overruns":0,"first_pts_ns":2517376948,"last_pts_ns":182467376948,"first_encoded_pts_ns":2517376948,"last_encoded_pts_ns":182467376948,"first_frame_monotonic_ns":358112251711000,"last_frame_monotonic_ns":358292197266000}
+  ],
+  "synchronization":{"method":"common monotonic session gate; per-frame source PTS and host monotonic timestamps","max_pair_frame_arrival_skew_ms":132}
+}

@@ -1,0 +1,5 @@
+candidate,label,notes
+prior_B_GID7_to_GID8_reappearance_window,UNCERTAIN,see paired clip; numeric IDs are run06-only and are not equated with B IDs
+prior_B_GID12_to_GID13_reappearance_window,UNCERTAIN,see paired clip; numeric IDs are run06-only and are not equated with B IDs
+prior_B_GID8_vs_GID10_overlap_window_CAM05,UNCERTAIN,actual raw IDs shown in clip; visual correspondence unreviewed
+prior_B_GID8_vs_GID11_overlap_window_CAM05,UNCERTAIN,prior user note at frame 3087: likely duplicate box; carried as provisional only

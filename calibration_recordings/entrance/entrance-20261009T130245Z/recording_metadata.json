@@ -1,0 +1,21 @@
+{
+  "schema_version":1,
+  "session_id":"entrance-20261009T130245Z",
+  "room":"entrance",
+  "status":"REVIEW_REQUIRED",
+  "requested_duration_sec":180,
+  "start_utc":"2026-10-09T13:02:46.000349Z",
+  "end_utc":"2026-10-09T13:04:58.428673Z",
+  "stop_reason":"operator cancellation",
+  "start_monotonic_ns":357951103575000,
+  "end_monotonic_ns":358083531904000,
+  "actual_duration_sec":132.428,
+  "capture_method":"single-owner decoded NVMM tee; NVENC H.264; native dimensions; source PTS preserved",
+  "mp4_mux":{"element":"qtmux","faststart":false,"finalization":"moov index written on EOS; MP4 playable after branch finalizes"},
+  "cross_camera_identity":"not emitted by current local-NvDCF candidate; native local IDs recorded",
+  "cameras":[
+    {"camera_id":"CAM-02","camera_name":"Entrance 2","video":"/calibration_recordings/entrance/entrance-20261009T130245Z/camera_1.mp4","frame_rows":"/calibration_recordings/entrance/entrance-20261009T130245Z/frames-CAM-02.jsonl","width":3200,"height":1800,"pixel_format":"NV12","fps_num":20,"fps_den":1,"decoded_input_frames":2633,"encoded_access_units":2633,"queue_overruns":0,"first_pts_ns":2454943794,"last_pts_ns":134869029143,"first_encoded_pts_ns":2454943794,"last_encoded_pts_ns":134869029143,"first_frame_monotonic_ns":357951150679000,"last_frame_monotonic_ns":358083468803000},
+    {"camera_id":"CAM-05","camera_name":"Entrance 1","video":"/calibration_recordings/entrance/entrance-20261009T130245Z/camera_2.mp4","frame_rows":"/calibration_recordings/entrance/entrance-20261009T130245Z/frames-CAM-05.jsonl","width":2560,"height":1440,"pixel_format":"NV12","fps_num":20,"fps_den":1,"decoded_input_frames":2648,"encoded_access_units":2648,"queue_overruns":0,"first_pts_ns":2508363674,"last_pts_ns":134968612984,"first_encoded_pts_ns":2508363674,"last_encoded_pts_ns":134968612984,"first_frame_monotonic_ns":357951139279000,"last_frame_monotonic_ns":358083489071000}
+  ],
+  "synchronization":{"method":"common monotonic session gate; per-frame source PTS and host monotonic timestamps","max_pair_frame_arrival_skew_ms":127.868}
+}

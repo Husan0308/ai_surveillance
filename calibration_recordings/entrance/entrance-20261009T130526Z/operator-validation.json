@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "room": "entrance",
+  "session_id": "entrance-20261009T130526Z",
+  "requested_duration_sec": 180,
+  "status": "REVIEW_REQUIRED",
+  "calibration_video_validation": "see recording_validation.json",
+  "human_review": "REVIEW_REQUIRED; visual classification is not inferred from counts",
+  "global_identity": "not emitted by the current local-NvDCF candidate; no cross-camera identity claim",
+  "tracking_evidence_directory": "/home/apsidal/ai_surveillance-gate3j/.runtime/human-validation-entrance-20261009T130526Z",
+  "markers": {
+    "CAM-02": [
+      "empty-baseline-start",
+      "person-positive-start",
+      "empty-baseline-end",
+      "movement",
+      "person-positive-end",
+      "person-exit"
+    ],
+    "CAM-05": [
+      "empty-baseline-start",
+      "empty-baseline-end",
+      "person-positive-start",
+      "movement",
+      "person-positive-end"
+    ]
+  },
+  "post_exit": {
+    "CAM-02": {
+      "zero_object_source_frames": 0,
+      "required_source_frames": 100,
+      "met": false
+    },
+    "CAM-05": {
+      "zero_object_source_frames": 0,
+      "required_source_frames": 100,
+      "met": false
+    }
+  },
+  "positive_native_track_ids": {
+    "CAM-02": [
+      1,
+      2,
+      3,
+      19,
+      23,
+      32,
+      33,
+      39,
+      41,
+      46,
+      48,
+      54,
+      56,
+      57,
+      60,
+      64,
+      65
+    ],
+    "CAM-05": [
+      9,
+      10,
+      11,
+      24,
+      28,
+      31,
+      36,
+      38,
+      43,
+      44,
+      49,
+      51,
+      53,
+      55,
+      59,
+      62,
+      66,
+      67
+    ]
+  },
+  "errors": [
+    "CAM-02 did not produce 100 consecutive empty source frames after exit"
+  ]
+}
