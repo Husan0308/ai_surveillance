@@ -71,5 +71,7 @@ comparison was performed. Gate 1 does not authorize proceeding automatically.
 
 ## Commit
 
-The implementation and this report were tested in the isolated experimental
-worktree. The final branch commit SHA is recorded in the delivery message.
+The implementation, regression tests, and initial report were committed as
+`345001e7479bb652049a458e43b07d411c1dc5d2` after the 15-test pass. A
+report-only follow-up commit may add this identifier to the archival report;
+the final branch HEAD is recorded in the delivery message.
