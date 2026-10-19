@@ -71,7 +71,7 @@ def test_external_model_directory_rejected(tmp_path):
     root, assets, expected = _fake_tree(tmp_path)
     external = tmp_path / "outside"
     external.mkdir()
-    with pytest.raises(ValueError, match="\.runtime"):
+    with pytest.raises(ValueError, match=r"\.runtime"):
         validate_yolo_assets(external, expected=expected, root=root)
 
 
