@@ -285,7 +285,7 @@ static bool build_pipeline(bool mux_only, const std::string& pgie_config) {
             "gpu-id", 0, "display-tracking-id", 1, nullptr);
         gst_bin_add_many(GST_BIN(g_pipeline), pgie, tracker, nullptr);
         if (!gst_element_link_many(mux, pgie, tracker, nullptr)) {
-            std::cerr << "failed linking nvstreammux -> PeopleNet -> NvDCF" << std::endl;
+            std::cerr << "failed linking nvstreammux -> selected PGIE -> NvDCF" << std::endl;
             return false;
         }
         downstream = tracker;
