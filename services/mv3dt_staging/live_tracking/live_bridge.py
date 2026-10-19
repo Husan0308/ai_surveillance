@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[3]
 APP_DIR = Path(__file__).resolve().parent
 DS_IMAGE = "nvcr.io/nvidia/deepstream:9.1-triton-multiarch"
 DS_IMAGE_ID = "sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b"
+YOLO_DS_IMAGE = "nvcr.io/nvidia/deepstream@sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b"
 MODEL_DIR = Path("/home/apsidal/nvidia/DeepStream/src/apps/reference_apps/deepstream-tracker-3d-multi-view/models/PeopleNetTransformer")
 BRIDGE_DEFAULT = Path("/tmp/entrance-live-rectification-bridge-20261019/rectification_bridge.py")
 CAMERAS = ("CAM-02", "CAM-05")
@@ -108,7 +109,7 @@ def docker_command(*, mux_only: bool, output_root: Path, detector: str = "people
             CONTAINER_CONFIG, stage_yolo_batch_two,
         )
         profile = stage_yolo_batch_two(yolo_artifacts, output_root)
-        image = "nvcr.io/nvidia/deepstream@sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b"
+        image = YOLO_DS_IMAGE
         pgie_config = CONTAINER_CONFIG
         mounts = [
             "--mount", f"type=bind,source={profile['model_dir']},target=/models,readonly",
@@ -349,7 +350,9 @@ def run_mux_smoke(args) -> int:
         if any(row.get("input_frame_index") is None for row in pgie_rows + track_rows):
             raise RuntimeError("PGIE/NvDCF output lost its input-frame sidecar crosswalk")
     result = {
-        "status": "PASS", "image": DS_IMAGE, "image_id": DS_IMAGE_ID,
+        "status": "PASS",
+        "image": YOLO_DS_IMAGE if args.inference and args.detector == "yolo26m" else DS_IMAGE,
+        "image_id": DS_IMAGE_ID,
         "mux": "legacy via process-scoped USE_NEW_NVSTREAMMUX=no", "batch_size": 2,
         "geometry": "1920x1080 BGR→NV12→NVMM", "sent_by_source": sent,
         "muxed_by_source": counts, "bounded_queue_drops_before_mux": {str(k): sent[k]-counts[k] for k in sent},
@@ -362,6 +365,7 @@ def run_mux_smoke(args) -> int:
             __import__("hashlib").sha256((output / "pgie-yolo26m-b2.txt").read_bytes()).hexdigest()
             if args.inference and args.detector == "yolo26m" else None
         ),
+        "inference_validation_scope": "PGIE and NvDCF actual frame/metadata flow only; not person recall, cross-camera ID, performance or GPU safety",
         "pgie_frames_by_source": ({str(k): v for k, v in pgie_counts.items()} if args.inference else None),
         "tracker_frames_by_source": ({str(k): v for k, v in track_counts.items()} if args.inference else None),
         "recorded_person_detection_observations": (sum(int(row.get("num_obj_meta", 0)) for row in pgie_rows) if args.inference else None),
