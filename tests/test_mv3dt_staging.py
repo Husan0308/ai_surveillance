@@ -240,6 +240,24 @@ def test_global_id_markers_preserve_distinct_ids_and_all_camera_evidence() -> No
     assert id5["world_position_unverified_units"] == rows[2]["world_position_unverified_units"]
 
 
+def test_camera_scoped_mode_keeps_same_numeric_id_separate_and_raw() -> None:
+    rows = _duplicate_frame_rows()
+    state = display_state(rows, current_frame=3599, visual_review=_exact_frame_review(),
+                          separate_by_camera=True)
+
+    assert state["unique_global_ids"] == 3
+    assert state["camera_scoped_track_labels"] == 4
+    assert state["display_unique_ids"] == 4
+    assert state["confirmed_visible_people"] is None
+    assert state["visual_review"] is None
+    assert state["visual_review_suppressed_reason"]
+    markers = {(row["camera_id"], row["raw_global_id"], row["mv3dt_global_id"], row["display_global_id"])
+               for row in state["primary_markers"]}
+    assert ("CAM-01", "5", "5", "CAM-01 / 5") in markers
+    assert ("CAM-04", "5", "5", "CAM-04 / 5") in markers
+    assert len(state["primary_markers"]) == 4
+
+
 def test_recent_rows_and_review_of_other_frame_cannot_create_confirmed_people() -> None:
     rows = _duplicate_frame_rows(frame=3598)
     state = display_state(rows, current_frame=3599, visual_review=_exact_frame_review())
@@ -664,6 +682,173 @@ def test_qt_full_review_video_mode_embeds_player_and_raw_display_table(tmp_path:
     assert window.table.horizontalHeaderItem(2).text() == "Raw Global ID"
     assert window.table.horizontalHeaderItem(3).text() == "Display ID"
     assert not window.alias_toggle.isEnabled()
+    window.close()
+    app.processEvents()
+
+
+def test_qt_camera_scoped_preview_shows_video_and_map_without_aliasing(tmp_path: Path, monkeypatch) -> None:
+    from services.mv3dt_staging import qt_ui
+
+    app = _qapp()
+    map_path = tmp_path / "entrance.png"
+    image = QImage(1200, 896, QImage.Format.Format_RGB32)
+    image.fill(QColor("#e8e1d5"))
+    assert image.save(str(map_path))
+    video_path = tmp_path / "cameras.mp4"
+    video_path.write_bytes(b"test media path fixture")
+
+    class Signal:
+        def connect(self, _callback) -> None:
+            pass
+
+    real_media_player = qt_ui.QMediaPlayer
+
+    class MediaPlayerFixture:
+        PlaybackState = real_media_player.PlaybackState
+
+        def __init__(self, _parent) -> None:
+            self.durationChanged = Signal()
+            self.positionChanged = Signal()
+            self.playbackStateChanged = Signal()
+            self.errorOccurred = Signal()
+
+        def setAudioOutput(self, _output) -> None:
+            pass
+
+        def setVideoOutput(self, _widget) -> None:
+            pass
+
+        def setSource(self, _source) -> None:
+            pass
+
+        def position(self) -> int:
+            return 1000
+
+        def playbackState(self):
+            return self.PlaybackState.StoppedState
+
+    monkeypatch.setattr(qt_ui, "QMediaPlayer", MediaPlayerFixture)
+    window = MainWindow(map_path, "ws://127.0.0.1:9/ws/replay?speed=1", auto_start=False,
+                        room_title="Entrance Room", review_video_path=video_path,
+                        camera_scoped_ids=True, show_map_with_video=True)
+    assert window.show_map_with_video
+    assert window.review_video_widget is not None
+    assert window.map_canvas is not None
+    assert not window.alias_toggle.isEnabled()
+    assert "Camera-scoped label" == window.table.horizontalHeaderItem(3).text()
+
+    shared_id = [
+        {"camera_id": camera, "source_id": source, "mv3dt_global_id": "7", "raw_global_id": "7",
+         "frame_id": 30, "world_position_unverified_units": [4.0, -5.0],
+         "bbox": {"leftX": 1, "topY": 2, "rightX": 3, "bottomY": 4},
+         "foot_location_2d_px": [2, 4]}
+        for camera, source in (("CAM-02", 0), ("CAM-05", 1))
+    ]
+    class Reply:
+        def readAll(self):
+            return json.dumps({"frame_id": 30, "observations": shared_id,
+                               "frame_messages": [{"camera_id": "CAM-02", "source_id": 0, "frame_id": 30},
+                                                  {"camera_id": "CAM-05", "source_id": 1, "frame_id": 30}]}).encode()
+
+        def deleteLater(self) -> None:
+            pass
+
+    window._frame_mode_initialized = True
+    window._frame_mode_first_frame = 30
+    window._frame_mode_last_frame = 60
+    window._on_video_timeline_frame(Reply(), 30)
+    app.processEvents()
+    assert len(window.map_canvas.primary_markers) == 2
+    assert {marker["display_global_id"] for marker in window.map_canvas.primary_markers} == {
+        "CAM-02 / 7", "CAM-05 / 7"
+    }
+    assert {marker["mv3dt_global_id"] for marker in window.map_canvas.primary_markers} == {"7"}
+    assert window.table.rowCount() == 2
+    assert {window.table.item(row, 3).text() for row in range(2)} == {"CAM-02 / 7", "CAM-05 / 7"}
+    assert "Cross-camera merge: OFF" in window.counters.text()
+    assert "event/video frame delta +0" in window.status.text()
+    window.close()
+    app.processEvents()
+
+
+def test_qt_standalone_recorded_demo_uses_embedded_three_panel_video_without_api(tmp_path: Path, monkeypatch) -> None:
+    from services.mv3dt_staging import qt_ui
+
+    app = _qapp()
+    map_path = tmp_path / "entrance.png"
+    image = QImage(1200, 896, QImage.Format.Format_RGB32)
+    image.fill(QColor("#e8e1d5"))
+    assert image.save(str(map_path))
+    video_path = tmp_path / "three-panel.mp4"
+    video_path.write_bytes(b"test media path fixture")
+
+    class Signal:
+        def connect(self, _callback) -> None:
+            pass
+
+    real_media_player = qt_ui.QMediaPlayer
+
+    class MediaPlayerFixture:
+        PlaybackState = real_media_player.PlaybackState
+
+        def __init__(self, _parent) -> None:
+            self.durationChanged = Signal()
+            self.positionChanged = Signal()
+            self.playbackStateChanged = Signal()
+            self.errorOccurred = Signal()
+            self._source = None
+            self._position = 0
+            self._state = self.PlaybackState.StoppedState
+            self.play_calls = 0
+
+        def setAudioOutput(self, _output) -> None:
+            pass
+
+        def setVideoOutput(self, _widget) -> None:
+            pass
+
+        def setSource(self, source) -> None:
+            self._source = source
+
+        def source(self):
+            return self._source
+
+        def play(self) -> None:
+            self.play_calls += 1
+            self._state = self.PlaybackState.PlayingState
+
+        def pause(self) -> None:
+            self._state = self.PlaybackState.PausedState
+
+        def stop(self) -> None:
+            self._state = self.PlaybackState.StoppedState
+
+        def setPosition(self, value: int) -> None:
+            self._position = value
+
+        def playbackState(self):
+            return self._state
+
+        def duration(self) -> int:
+            return 179900
+
+    monkeypatch.setattr(qt_ui, "QMediaPlayer", MediaPlayerFixture)
+    window = MainWindow(map_path, "ws://127.0.0.1:9/ws/replay", auto_start=False,
+                        room_title="Entrance Room", review_video_path=video_path,
+                        camera_scoped_ids=True, standalone_demo=True)
+    app.processEvents()
+    assert window.standalone_demo
+    assert not window.show_map_with_video
+    assert window.windowTitle().startswith("Entrance Room")
+    assert "DEMO / RECORDED VIDEO — NOT LIVE" in window.findChild(qt_ui.QLabel).text()
+    assert "EXPERIMENTAL / UNCALIBRATED" in window.warning.text()
+    assert window.video_player.play_calls == 1
+    assert window.video_play_button is not None
+    assert window.video_stop_button is not None
+    assert window.video_slider is not None
+    window._stop_standalone_demo()
+    assert window.video_player.playbackState() == real_media_player.PlaybackState.PausedState
+    assert window.video_player._position == 0
     window.close()
     app.processEvents()
 

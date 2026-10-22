@@ -13,6 +13,7 @@ def _source_stats(*, missing=0, mismatch=0, nonmonotonic=0):
         "display_frame_missing": missing,
         "source_id_mismatch": mismatch,
         "mux_frame_num_nonmonotonic": nonmonotonic,
+        "input_frame_nonmonotonic": 0,
     }
 
 
@@ -39,6 +40,14 @@ def test_live_smoke_requires_all_stages_and_exact_preview_matches_to_advance():
     no_tracker_progress["tracker_frames"] = 10
     stats = {0: _source_stats(), 1: no_tracker_progress}
     assert not smoke_gate_passed(stats, baseline)
+
+
+def test_live_smoke_rejects_nonmonotonic_input_frame_crosswalk():
+    baseline = {0: {key: 10 for key in ("mux_frames", "pgie_frames", "tracker_frames", "display_frame_matched")},
+                1: {key: 10 for key in ("mux_frames", "pgie_frames", "tracker_frames", "display_frame_matched")}}
+    bad_order = _source_stats()
+    bad_order["input_frame_nonmonotonic"] = 1
+    assert not smoke_gate_passed({0: _source_stats(), 1: bad_order}, baseline)
 
 
 def test_extended_review_fails_closed_on_missing_gpu_telemetry():

@@ -46,6 +46,7 @@ class OsnetEmbedder:
         self._last_batch_ms = 0.0
         self._batch_sizes: list[int] = []
         self._batch_latencies_ms: list[float] = []
+        self._batch_stage_timings_ms: list[dict[str, float]] = []
         self._last_download_ms = 0.0
 
     @staticmethod
@@ -163,18 +164,53 @@ class OsnetEmbedder:
             self._load()
         started = time.perf_counter()
         torch = self._torch
+        preprocess_started = time.perf_counter()
         batch = torch.stack([self._tensor(crop) for crop in crops], dim=0)
+        if self.device == "cuda":
+            # Finish host preprocessing and H2D transfer before timing model
+            # execution; the output is identical and remains inference-only.
+            torch.cuda.synchronize()
+        preprocess_transfer_ms = (time.perf_counter() - preprocess_started) * 1000.0
+        forward_started = time.perf_counter()
         with torch.inference_mode():
             features = self._model(batch)
             features = torch.nn.functional.normalize(features.float(), p=2, dim=1)
         if self.device == "cuda":
             torch.cuda.synchronize()
+        forward_gpu_ms = (time.perf_counter() - forward_started) * 1000.0
+        output_transfer_started = time.perf_counter()
         result = features.detach().cpu().numpy().astype(np.float32, copy=False)
+        output_transfer_ms = (time.perf_counter() - output_transfer_started) * 1000.0
         self._batches += 1
         self._images += len(crops)
         self._last_batch_ms = (time.perf_counter() - started) * 1000.0
         self._batch_sizes.append(len(crops))
         self._batch_latencies_ms.append(self._last_batch_ms)
+        self._batch_stage_timings_ms.append({
+            "preprocess_and_input_transfer_ms": preprocess_transfer_ms,
+            "forward_and_normalize_ms": forward_gpu_ms,
+            "output_transfer_ms": output_transfer_ms,
+            "total_ms": self._last_batch_ms,
+        })
+        if len(self._batch_stage_timings_ms) > 1000:
+            del self._batch_stage_timings_ms[:-1000]
+        return result
+
+    def _stage_timing_summary(self) -> dict[str, dict[str, float | int] | str]:
+        names = (
+            "preprocess_and_input_transfer_ms", "forward_and_normalize_ms",
+            "output_transfer_ms", "total_ms",
+        )
+        result: dict[str, dict[str, float | int] | str] = {}
+        for name in names:
+            values = [row[name] for row in self._batch_stage_timings_ms]
+            result[name] = ({
+                "samples": len(values),
+                "p50": float(np.percentile(values, 50)),
+                "p95": float(np.percentile(values, 95)),
+                "p99": float(np.percentile(values, 99)),
+                "max": max(values),
+            } if values else "NOT_MEASURED")
         return result
 
     def metrics(self) -> dict:
@@ -192,6 +228,7 @@ class OsnetEmbedder:
             "last_batch_ms": self._last_batch_ms,
             "batch_sizes": list(self._batch_sizes),
             "batch_latency_ms": list(self._batch_latencies_ms),
+            "batch_stage_timing_ms": self._stage_timing_summary(),
             "last_download_ms": self._last_download_ms,
             "loaded_for_sec": max(0.0, time.monotonic() - self._loaded_at)
             if self._loaded_at

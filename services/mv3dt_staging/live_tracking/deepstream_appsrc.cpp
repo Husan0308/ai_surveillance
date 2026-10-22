@@ -9,6 +9,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <ctime>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -19,6 +21,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <unistd.h>
 
 #pragma pack(push, 1)
 struct FrameHeader {
@@ -62,11 +65,15 @@ struct KeyHash {
 };
 
 std::unordered_map<Key, InputRecord, KeyHash> g_input_records;
+std::unordered_map<Key, uint64_t, KeyHash> g_pgie_input_ns;
+std::unordered_map<Key, uint64_t, KeyHash> g_tracker_input_ns;
 std::mutex g_record_mutex;
+std::mutex g_stage_mutex;
 std::mutex g_stdout_mutex;
 std::atomic<bool> g_failed{false};
 std::atomic<bool> g_eos{false};
 std::array<GstElement*, 2> g_appsrc{{nullptr, nullptr}};
+std::array<std::atomic<bool>, 2> g_first_appsrc_buffer{};
 GstElement* g_pipeline = nullptr;
 bool g_mux_only = false;
 
@@ -96,6 +103,29 @@ static void emit(const std::string& line) {
     std::cout << line << std::endl;
 }
 
+static uint64_t monotonic_ns();
+
+static std::string utc_now() {
+    const auto now = std::chrono::system_clock::now();
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+    const std::time_t time_value = std::chrono::system_clock::to_time_t(now);
+    std::tm utc{};
+    gmtime_r(&time_value, &utc);
+    std::ostringstream out;
+    out << std::put_time(&utc, "%Y-%m-%dT%H:%M:%S") << '.'
+        << std::setfill('0') << std::setw(3) << millis.count() << 'Z';
+    return out.str();
+}
+
+static void diag(const std::string& stage, const std::string& fields = "") {
+    std::cerr << "DS_DIAG {\"stage\":" << json_quote(stage.c_str())
+              << ",\"utc\":" << json_quote(utc_now().c_str())
+              << ",\"monotonic_ns\":" << monotonic_ns()
+              << ",\"pid\":" << getpid() << ",\"ppid\":" << getppid()
+              << fields << '}' << std::endl;
+}
+
 static bool read_exact(std::istream& input, char* data, size_t bytes) {
     input.read(data, static_cast<std::streamsize>(bytes));
     return static_cast<size_t>(input.gcount()) == bytes;
@@ -119,6 +149,37 @@ static bool lookup_input(uint32_t source_id, uint64_t pts, InputRecord& record) 
     return true;
 }
 
+static uint64_t monotonic_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+static bool take_stage_start(const std::string& stage, const Key& key, uint64_t& start_ns) {
+    std::lock_guard<std::mutex> lock(g_stage_mutex);
+    auto& starts = stage == "PGIE" ? g_pgie_input_ns : g_tracker_input_ns;
+    const auto found = starts.find(key);
+    if (found == starts.end()) return false;
+    start_ns = found->second;
+    starts.erase(found);
+    return true;
+}
+
+static GstPadProbeReturn stage_input_probe(GstPad*, GstPadProbeInfo* info, gpointer user_data) {
+    GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (!buffer) return GST_PAD_PROBE_OK;
+    NvDsBatchMeta* batch = gst_buffer_get_nvds_batch_meta(buffer);
+    if (!batch) return GST_PAD_PROBE_OK;
+    const std::string stage = static_cast<const char*>(user_data);
+    auto& starts = stage == "PGIE" ? g_pgie_input_ns : g_tracker_input_ns;
+    const uint64_t now_ns = monotonic_ns();
+    std::lock_guard<std::mutex> lock(g_stage_mutex);
+    for (NvDsMetaList* node = batch->frame_meta_list; node; node = node->next) {
+        auto* frame = static_cast<NvDsFrameMeta*>(node->data);
+        if (frame) starts[Key{frame->source_id, frame->buf_pts}] = now_ns;
+    }
+    return GST_PAD_PROBE_OK;
+}
+
 static void append_record_fields(std::ostringstream& out, uint32_t source_id, uint64_t pts) {
     InputRecord record{};
     if (!lookup_input(source_id, pts, record)) {
@@ -134,6 +195,7 @@ static void append_record_fields(std::ostringstream& out, uint32_t source_id, ui
 
 static GstPadProbeReturn metadata_probe(GstPad*, GstPadProbeInfo* info, gpointer user_data) {
     const char* stage = static_cast<const char*>(user_data);
+    const uint64_t stage_ns = monotonic_ns();
     GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
     if (!buffer) return GST_PAD_PROBE_OK;
     NvDsBatchMeta* batch = gst_buffer_get_nvds_batch_meta(buffer);
@@ -157,6 +219,21 @@ static GstPadProbeReturn metadata_probe(GstPad*, GstPadProbeInfo* info, gpointer
             << ",\"batch_id\":" << frame->batch_id
             << ",\"num_obj_meta\":" << frame->num_obj_meta;
         append_record_fields(out, sid, pts);
+        out << ",\"stage_mono_ns\":" << stage_ns;
+        InputRecord timing_record{};
+        if (lookup_input(sid, pts, timing_record) && timing_record.arrival_mono_ns >= 0 &&
+            stage_ns >= static_cast<uint64_t>(timing_record.arrival_mono_ns)) {
+            out << ",\"host_input_to_stage_ns\":"
+                << stage_ns - static_cast<uint64_t>(timing_record.arrival_mono_ns);
+        }
+        const std::string stage_name(stage);
+        if (stage_name == "PGIE" || stage_name == "TRACK") {
+            uint64_t start_ns = 0;
+            if (take_stage_start(stage_name, Key{sid, pts}, start_ns) && stage_ns >= start_ns) {
+                out << (stage_name == "PGIE" ? ",\"pgie_pad_latency_ns\":" : ",\"tracker_pad_latency_ns\":")
+                    << stage_ns - start_ns;
+            }
+        }
         if (std::string(stage) == "MUX") {
             out << '}';
             emit(out.str());
@@ -249,6 +326,8 @@ static bool add_branch(uint32_t source_id, GstElement* mux, uint32_t width, uint
 }
 
 static bool build_pipeline(bool mux_only, const std::string& pgie_config) {
+    diag("PIPELINE_CONSTRUCTION_BEGIN", std::string(",\"mux_only\":") +
+         (mux_only ? "true" : "false"));
     g_pipeline = gst_pipeline_new("entrance-live-local-tracking");
     GstElement* mux = gst_element_factory_make("nvstreammux", "mux");
     if (!g_pipeline || !mux) {
@@ -265,7 +344,13 @@ static bool build_pipeline(bool mux_only, const std::string& pgie_config) {
     gst_bin_add(GST_BIN(g_pipeline), mux);
     for (uint32_t sid = 0; sid < 2; ++sid) {
         g_appsrc[sid] = gst_element_factory_make("appsrc", ("src" + std::to_string(sid)).c_str());
-        if (!g_appsrc[sid] || !add_branch(sid, mux, 1920, 1080)) return false;
+        if (!g_appsrc[sid] || !add_branch(sid, mux, 1920, 1080)) {
+            diag("APPsrc_BRANCH_INITIALIZATION_FAILED", std::string(",\"source_id\":") +
+                 std::to_string(sid));
+            return false;
+        }
+        diag("APPSRC_BRANCH_INITIALIZED", std::string(",\"source_id\":") +
+             std::to_string(sid) + ",\"width\":1920,\"height\":1080");
     }
 
     GstElement* downstream = mux;
@@ -275,7 +360,7 @@ static bool build_pipeline(bool mux_only, const std::string& pgie_config) {
         pgie = gst_element_factory_make("nvinfer", "pgie");
         tracker = gst_element_factory_make("nvtracker", "nvtracker");
         if (!pgie || !tracker || pgie_config.empty()) {
-            std::cerr << "nvinfer/nvtracker or PGIE config unavailable" << std::endl;
+            std::cerr << "nvinfer/nvtracker or selected PGIE config unavailable" << std::endl;
             return false;
         }
         const char* tracker_yaml = "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml";
@@ -285,18 +370,26 @@ static bool build_pipeline(bool mux_only, const std::string& pgie_config) {
             "gpu-id", 0, "display-tracking-id", 1, nullptr);
         gst_bin_add_many(GST_BIN(g_pipeline), pgie, tracker, nullptr);
         if (!gst_element_link_many(mux, pgie, tracker, nullptr)) {
-            std::cerr << "failed linking nvstreammux -> PeopleNet -> NvDCF" << std::endl;
+            std::cerr << "failed linking nvstreammux -> selected PGIE -> NvDCF" << std::endl;
             return false;
         }
         downstream = tracker;
+        GstPad* pgie_sink = gst_element_get_static_pad(pgie, "sink");
         GstPad* pgie_src = gst_element_get_static_pad(pgie, "src");
+        GstPad* tracker_sink = gst_element_get_static_pad(tracker, "sink");
         GstPad* tracker_src = gst_element_get_static_pad(tracker, "src");
-        if (!pgie_src || !tracker_src) return false;
+        if (!pgie_sink || !pgie_src || !tracker_sink || !tracker_src) return false;
+        gst_pad_add_probe(pgie_sink, GST_PAD_PROBE_TYPE_BUFFER, stage_input_probe,
+            const_cast<char*>("PGIE"), nullptr);
         gst_pad_add_probe(pgie_src, GST_PAD_PROBE_TYPE_BUFFER, metadata_probe,
             const_cast<char*>("PGIE"), nullptr);
+        gst_pad_add_probe(tracker_sink, GST_PAD_PROBE_TYPE_BUFFER, stage_input_probe,
+            const_cast<char*>("TRACK"), nullptr);
         gst_pad_add_probe(tracker_src, GST_PAD_PROBE_TYPE_BUFFER, metadata_probe,
             const_cast<char*>("TRACK"), nullptr);
+        gst_object_unref(pgie_sink);
         gst_object_unref(pgie_src);
+        gst_object_unref(tracker_sink);
         gst_object_unref(tracker_src);
     }
     GstPad* mux_src = gst_element_get_static_pad(mux, "src");
@@ -311,6 +404,9 @@ static bool build_pipeline(bool mux_only, const std::string& pgie_config) {
         std::cerr << "failed linking DeepStream pipeline to bounded fakesink" << std::endl;
         return false;
     }
+    diag("PIPELINE_CONSTRUCTED", std::string(",\"detector\":") +
+         json_quote(mux_only ? "none" : "configured-pgie") +
+         ",\"tracker\":" + json_quote(mux_only ? "none" : "NvDCF"));
     return true;
 }
 
@@ -357,51 +453,112 @@ static void feeder_thread() {
         }
         GstFlowReturn flow = gst_app_src_push_buffer(GST_APP_SRC(g_appsrc[h.source_id]), buffer);
         if (flow != GST_FLOW_OK) {
+            diag("APPSRC_PUSH_FAILED", std::string(",\"source_id\":") +
+                 std::to_string(h.source_id) + ",\"frame_index\":" +
+                 std::to_string(h.frame_index) + ",\"flow_return\":" +
+                 std::to_string(static_cast<int>(flow)));
             std::cerr << "appsrc push failed for source " << h.source_id << ": " << flow << std::endl;
             g_failed = true;
             break;
         }
+        if (!g_first_appsrc_buffer[h.source_id].exchange(true)) {
+            diag("FIRST_APPSRC_BUFFER_PUSHED", std::string(",\"source_id\":") +
+                 std::to_string(h.source_id) + ",\"frame_index\":" +
+                 std::to_string(h.frame_index) + ",\"source_pts_ns\":" +
+                 std::to_string(h.source_pts_ns) + ",\"pipeline_pts_ns\":" +
+                 std::to_string(pts) + ",\"flow_return\":" +
+                 std::to_string(static_cast<int>(flow)));
+        }
     }
-    for (GstElement* src : g_appsrc) if (src) gst_app_src_end_of_stream(GST_APP_SRC(src));
+    diag("APPSRC_EOS_REQUESTED");
+    for (size_t sid = 0; sid < g_appsrc.size(); ++sid) {
+        GstElement* src = g_appsrc[sid];
+        if (src) {
+            GstFlowReturn flow = gst_app_src_end_of_stream(GST_APP_SRC(src));
+            diag("APPSRC_EOS_RESULT", std::string(",\"source_id\":") +
+                 std::to_string(sid) + ",\"flow_return\":" +
+                 std::to_string(static_cast<int>(flow)));
+        }
+    }
     g_eos = true;
 }
 
 int main(int argc, char** argv) {
+    diag("APP_ENTER", std::string(",\"argc\":") + std::to_string(argc));
     std::string pgie_config;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--mux-only") g_mux_only = true;
         else if (std::string(argv[i]) == "--pgie-config" && i + 1 < argc) pgie_config = argv[++i];
-        else { std::cerr << "usage: deepstream_appsrc [--mux-only] [--pgie-config PATH]" << std::endl; return 2; }
+        else {
+            std::cerr << "usage: deepstream_appsrc [--mux-only] [--pgie-config PATH]" << std::endl;
+            diag("APP_EXIT", ",\"exit_code\":2,\"reason\":\"invalid arguments\"");
+            return 2;
+        }
     }
+    diag("GST_INIT_BEGIN");
     gst_init(&argc, &argv);
-    if (!build_pipeline(g_mux_only, pgie_config)) return 3;
+    diag("GST_INIT_COMPLETE");
+    if (!build_pipeline(g_mux_only, pgie_config)) {
+        diag("PIPELINE_CONSTRUCTION_FAILED");
+        diag("APP_EXIT", ",\"exit_code\":3,\"reason\":\"pipeline construction failed\"");
+        return 3;
+    }
+    diag("PLAYING_REQUESTED");
     GstStateChangeReturn state = gst_element_set_state(g_pipeline, GST_STATE_PLAYING);
+    diag("PLAYING_REQUEST_RETURNED", std::string(",\"result\":") +
+         std::to_string(static_cast<int>(state)));
     if (state == GST_STATE_CHANGE_FAILURE) {
         std::cerr << "pipeline refused PLAYING" << std::endl;
-        gst_element_set_state(g_pipeline, GST_STATE_NULL);
+        diag("NULL_REQUESTED", ",\"reason\":\"PLAYING state failure\"");
+        GstStateChangeReturn null_state = gst_element_set_state(g_pipeline, GST_STATE_NULL);
+        diag("NULL_REQUEST_RETURNED", std::string(",\"result\":") +
+             std::to_string(static_cast<int>(null_state)));
+        diag("APP_EXIT", ",\"exit_code\":4,\"reason\":\"PLAYING state failure\"");
         return 4;
     }
+    diag("READY_EMITTED");
     emit("READY {\"mux\":\"legacy\",\"batch_size\":2,\"width\":1920,\"height\":1080,\"mode\":" +
          json_quote(g_mux_only ? "mux-only" : "pgie+nvdcf") + "}");
+    diag("FEEDER_STARTING");
     std::thread feeder(feeder_thread);
+    diag("FEEDER_STARTED");
     GstBus* bus = gst_element_get_bus(g_pipeline);
     int result = 0;
     bool done = false;
     while (!done) {
         GstMessage* message = gst_bus_timed_pop_filtered(bus, 100 * GST_MSECOND,
-            static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+            static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS |
+                                        GST_MESSAGE_STATE_CHANGED));
         if (!message) continue;
+        if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_STATE_CHANGED) {
+            if (GST_MESSAGE_SRC(message) == GST_OBJECT(g_pipeline)) {
+                GstState old_state, new_state, pending_state;
+                gst_message_parse_state_changed(message, &old_state, &new_state, &pending_state);
+                diag("PIPELINE_STATE_CHANGED", std::string(",\"old_state\":") +
+                     json_quote(gst_element_state_get_name(old_state)) +
+                     ",\"new_state\":" + json_quote(gst_element_state_get_name(new_state)) +
+                     ",\"pending_state\":" + json_quote(gst_element_state_get_name(pending_state)));
+            }
+            gst_message_unref(message);
+            continue;
+        }
         switch (GST_MESSAGE_TYPE(message)) {
             case GST_MESSAGE_ERROR: {
                 GError* err = nullptr; gchar* debug = nullptr;
                 gst_message_parse_error(message, &err, &debug);
                 std::cerr << "GSTREAMER_ERROR " << (GST_OBJECT_NAME(message->src) ? GST_OBJECT_NAME(message->src) : "unknown")
                     << ": " << (err ? err->message : "unknown") << " | " << (debug ? debug : "") << std::endl;
+                diag("PIPELINE_BUS_ERROR", std::string(",\"source\":") +
+                     json_quote(GST_OBJECT_NAME(message->src) ? GST_OBJECT_NAME(message->src) : "unknown") +
+                     ",\"message\":" + json_quote(err ? err->message : "unknown"));
                 if (err) g_error_free(err);
                 g_free(debug);
                 result = 5; done = true; break;
             }
-            case GST_MESSAGE_EOS: done = true; break;
+            case GST_MESSAGE_EOS:
+                diag("PIPELINE_BUS_EOS");
+                done = true;
+                break;
             default: break;
         }
         gst_message_unref(message);
@@ -410,11 +567,17 @@ int main(int argc, char** argv) {
     if (!g_eos && !g_failed) {
         // EOS can arise after the feeder closes; keep its join deterministic.
     }
+    diag("FEEDER_JOIN_BEGIN");
     if (feeder.joinable()) feeder.join();
-    gst_element_set_state(g_pipeline, GST_STATE_NULL);
+    diag("FEEDER_JOIN_COMPLETE", std::string(",\"failed\":") + (g_failed ? "true" : "false"));
+    diag("NULL_REQUESTED", ",\"reason\":\"application cleanup\"");
+    GstStateChangeReturn null_state = gst_element_set_state(g_pipeline, GST_STATE_NULL);
+    diag("NULL_REQUEST_RETURNED", std::string(",\"result\":") +
+         std::to_string(static_cast<int>(null_state)));
     gst_object_unref(bus);
     gst_object_unref(g_pipeline);
     g_pipeline = nullptr;
     emit(result == 0 ? "DONE {\"status\":\"eos\"}" : "DONE {\"status\":\"error\"}");
+    diag("APP_EXIT", std::string(",\"exit_code\":") + std::to_string(result));
     return result;
 }
