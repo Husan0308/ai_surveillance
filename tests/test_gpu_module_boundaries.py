@@ -75,3 +75,43 @@ def test_ml_api_frontend_have_distinct_existing_entrypoints():
 def test_no_change_to_frozen_video_validator_layout():
     old_header = (ROOT / "scripts/cam_six_validation/camera_source_plan.hpp").read_text()
     assert "shape = {6, 3, 2, 1920, 1620};" in old_header
+
+
+def test_shared_ownership_compatibility_import_and_lock_contention(tmp_path):
+    from services.camera_v11.source_ownership import SourceOwnership as LegacyOwnership
+    from services.shared.source_ownership import SourceOwnership
+
+    assert LegacyOwnership is SourceOwnership
+    with SourceOwnership(("CAM-01", "CAM-02"), tmp_path):
+        from pytest import raises
+        with raises(RuntimeError, match="another camera owner"):
+            with SourceOwnership(("CAM-01",), tmp_path):
+                pass
+    # Existing lockfiles must remain on disk to avoid inode-based races.
+    assert (tmp_path / "CAM-01.lock").exists()
+    with SourceOwnership(("CAM-01",), tmp_path):
+        pass
+
+
+def test_gpu_launcher_acquires_existing_source_ownership_before_docker():
+    file = ROOT / "services/gpu/runtime/live_launcher.py"
+    source = file.read_text(encoding="utf-8")
+    assert 'SourceOwnership(manifest["cameras"]' in source
+    assert 'ROOT / ".runtime/camera-owner-locks"' in source
+    assert "camera_ownership.__enter__()" in source
+    assert "camera_ownership.__exit__(None, None, None)" in source
+    assert source.index("camera_ownership.__enter__()") < source.index("proc = subprocess.Popen(")
+
+
+def test_gpu_live_launcher_keeps_runtime_approval_checks():
+    source = (ROOT / "services/gpu/runtime/live_launcher.py").read_text()
+    for needle in (
+        "args.authorize_physical_rtsp",
+        "args.nvr_readonly_authorized",
+        "args.network_egress_verified",
+        "args.expected_engine_sha256",
+        "checked_network(",
+        "display_preflight()",
+        "nvr_sessions_preflight(",
+    ):
+        assert needle in source
