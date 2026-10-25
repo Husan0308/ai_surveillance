@@ -23,6 +23,7 @@ import threading
 import time
 
 from services.gpu.runtime.live_config import Camera, build_app_config, validate_model_files
+from services.gpu.runtime.live_health import SourceFpsMonitor
 from services.shared.camera_config import load_settings
 from services.shared.source_ownership import SourceOwnership
 from services.shared.credential_redaction import (
@@ -126,18 +127,26 @@ def _stop_owned_container(name: str) -> None:
                    timeout=20, env=child_environment_without_camera_secrets())
 
 
-def _pump_lines(proc: subprocess.Popen, redactor: CredentialRedactor) -> None:
+def _pump_lines(proc: subprocess.Popen, redactor: CredentialRedactor,
+                monitor: SourceFpsMonitor) -> None:
     if proc.stdout:
         for line in proc.stdout:
             safe = redactor.sanitize_child_output(line)
+            if monitor.ingest(safe):
+                snap = monitor.snapshot()
+                if snap["camera_fps"]:
+                    status = " ".join(f"{cam}={fps:.1f}fps"
+                                      for cam, fps in snap["camera_fps"].items())
+                    print(f"LIVE SOURCE FPS: {status}", flush=True)
             print(safe, end="" if safe.endswith("\n") else "\n", flush=True)
 
 
-def _ask_operator(proc: subprocess.Popen) -> None:
+def _ask_operator(proc: subprocess.Popen, monitor: SourceFpsMonitor) -> None:
     if not sys.stdin.isatty():
         raise RuntimeError("interactive terminal required to confirm all six live tiles")
     print("Check all SIX physical camera tiles on the desktop.", flush=True)
-    print("Enter START only after all six have moving live frames; 120s maximum.", flush=True)
+    print("Enter START after checking all six moving tiles AND source FPS readiness.", flush=True)
+    print("The terminal confirms source progress, not camera identity or EGL rendering.", flush=True)
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         if proc.poll() is not None:
@@ -146,6 +155,8 @@ def _ask_operator(proc: subprocess.Popen) -> None:
         if ready:
             if sys.stdin.readline().strip() != "START":
                 raise RuntimeError("operator did not confirm six live feeds")
+            if not monitor.snapshot()["ready"]:
+                raise RuntimeError("six-source FPS readiness not established; refusing timer start")
             return
     raise RuntimeError("live-viewer startup was not confirmed within 120 seconds")
 
@@ -243,18 +254,21 @@ def main(argv: list[str] | None = None) -> int:
             stderr=subprocess.STDOUT, text=True, bufsize=1,
             env=child_environment_without_camera_secrets(),
         )
-        pump = threading.Thread(target=_pump_lines, args=(proc, redactor), daemon=True)
+        monitor = SourceFpsMonitor(min_fps=5.0, max_age_sec=15.0, min_consecutive=2)
+        pump = threading.Thread(target=_pump_lines, args=(proc, redactor, monitor), daemon=True)
         pump.start()
         assert proc.stdin is not None
         # stdin is the only credential delivery channel. No URI in Docker argv.
         proc.stdin.buffer.write(secret_tar(app_config, infer_config))
         proc.stdin.close()
-        _ask_operator(proc)
+        _ask_operator(proc, monitor)
         print("Six live feeds confirmed manually. Observing for 600 seconds.", flush=True)
         deadline = time.monotonic() + 600
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError("live viewer exited before 600-second observation")
+            if not monitor.snapshot()["ready"]:
+                raise RuntimeError("one or more DeepStream source FPS streams stalled or became unmeasurable")
             time.sleep(min(1.0, deadline - time.monotonic()))
         print("OBSERVATION WINDOW COMPLETE; stopping owned container.", flush=True)
         return 0
