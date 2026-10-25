@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -136,11 +137,16 @@ def _ask_operator(proc: subprocess.Popen) -> None:
         raise RuntimeError("interactive terminal required to confirm all six live tiles")
     print("Check all SIX physical camera tiles on the desktop.", flush=True)
     print("Enter START only after all six have moving live frames; 120s maximum.", flush=True)
-    ready, _, _ = select.select([sys.stdin], [], [], 120)
-    if not ready or proc.poll() is not None:
-        raise RuntimeError("live-viewer startup not confirmed")
-    if sys.stdin.readline().strip() != "START":
-        raise RuntimeError("operator did not confirm six live feeds")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError("live viewer exited before operator confirmation")
+        ready, _, _ = select.select([sys.stdin], [], [], 1)
+        if ready:
+            if sys.stdin.readline().strip() != "START":
+                raise RuntimeError("operator did not confirm six live feeds")
+            return
+    raise RuntimeError("live-viewer startup was not confirmed within 120 seconds")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -149,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="previously validated PeopleNet FP16 batch-6 nvinfer config")
     parser.add_argument("--models-root", type=Path, default=ROOT / ".runtime/models")
     parser.add_argument("--network", help="administrator-approved six-camera-only network")
+    parser.add_argument("--expected-engine-sha256", help="known-good batch-6 engine SHA256 from the validated manifest")
     parser.add_argument("--check", action="store_true", help="no Docker/RTSP connection")
     parser.add_argument("--run", action="store_true", help="bounded physical RTSP run")
     parser.add_argument("--authorize-physical-rtsp", action="store_true")
@@ -198,6 +205,12 @@ def main(argv: list[str] | None = None) -> int:
         if not (args.authorize_physical_rtsp and args.nvr_readonly_authorized
                 and args.network_egress_verified):
             raise RuntimeError("missing explicit live authorization, NVR ACL, or egress attestation")
+        expected = (args.expected_engine_sha256 or "").strip().lower()
+        if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+            raise RuntimeError("a verified 64-digit batch-6 engine SHA256 is required for live execution")
+        digest = hashlib.sha256(model_files["model-engine-file"].read_bytes()).hexdigest()
+        if digest != expected:
+            raise RuntimeError("batch-6 engine hash differs from validated evidence")
         display, xauth = display_preflight()
         nvr_sessions_preflight(manifest["nvr_host"], manifest["nvr_port"])
         checked_network(args.network or "", manifest["nvr_host"], manifest["nvr_port"])
