@@ -1,5 +1,9 @@
 # DeepStream 9.1 — six-camera live visual preview
 
+Canonical GPU runtime: `services/gpu/runtime/`. The old
+`python3 -m scripts.six_camera_live.launch` command is retained as a
+compatibility wrapper. See [module ownership](MODULE_BOUNDARIES.md).
+
 This is a **new, isolated** source path. It does not change the old YOLO26m
 V13 service, existing camera diagnostics, recorded validation evidence or AMC.
 
@@ -47,7 +51,7 @@ to a public GitHub repository.
 From the repository root, locate the validated Stage 5B nvinfer config.
 Supply its real path (do not use the older batch-two diagnostic file):
 
-    python3 -m scripts.six_camera_live.launch \
+    python3 -m services.gpu.runtime.live_launcher \
       --check \
       --infer-config /absolute/path/to/validated-peoplenet-b6.txt \
       --models-root .runtime/models
@@ -88,7 +92,7 @@ They must never be passed unless their facts were verified.
 
 Only *after* Step 2, and after the CPU-only check passed:
 
-    python3 -m scripts.six_camera_live.launch \
+    python3 -m services.gpu.runtime.live_launcher \
       --run \
       --infer-config /absolute/path/to/validated-peoplenet-b6.txt \
       --models-root .runtime/models \
