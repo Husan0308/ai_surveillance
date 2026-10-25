@@ -1,5 +1,7 @@
 # DeepStream 9.1 — six-camera live visual preview
 
+**New readiness checks:** [EGL and source FPS diagnostics](SIX_CAMERA_EGL_READINESS.md). The 600-second live timer requires two consecutive complete six-camera DeepStream FPS reports; it fails closed on missing or stale reports, but exact frame PTS, EGL rendering and visible CAM-XX overlays remain separate validation tasks.
+
 Canonical GPU runtime: `services/gpu/runtime/`. The old
 `python3 -m scripts.six_camera_live.launch` command is retained as a
 compatibility wrapper. See [module ownership](MODULE_BOUNDARIES.md).
