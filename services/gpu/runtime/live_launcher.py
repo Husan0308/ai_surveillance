@@ -24,6 +24,7 @@ import time
 
 from services.gpu.runtime.live_config import Camera, build_app_config, validate_model_files
 from services.shared.camera_config import load_settings
+from services.shared.source_ownership import SourceOwnership
 from scripts.cam_six_validation.credential_redaction import (
     CredentialRedactor, child_environment_without_camera_secrets,
 )
@@ -175,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     proc = None
     owned_name = None
     lock = None
+    camera_ownership = None
     try:
         settings = load_settings(ROOT / "config/cameras.yaml")
         cameras = [
@@ -227,6 +229,11 @@ def main(argv: list[str] | None = None) -> int:
         lock_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock = lock_file.open("a+")
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Use the same per-camera locks as the previously validated owners.
+        # A separate GPU lock alone cannot prevent duplicate NVR sessions.
+        camera_ownership = SourceOwnership(manifest["cameras"],
+                                           ROOT / ".runtime/camera-owner-locks")
+        camera_ownership.__enter__()
         owned_name = f"ai-surveillance-six-live-{os.getpid()}"
         image = platform["image"]
         cmd = _docker_args(image, args.models_root.resolve(), args.network,
@@ -269,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+        if camera_ownership is not None:
+            camera_ownership.__exit__(None, None, None)
         if lock is not None:
             lock.close()
 
