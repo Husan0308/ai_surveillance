@@ -213,3 +213,9 @@ def test_run_needs_three_explicit_approvals(monkeypatch, tmp_path):
                         lambda: (_ for _ in ()).throw(AssertionError("approval not reached")))
     assert module.main(["--run", "--infer-config", str(infer),
                         "--models-root", str(model_root)]) == 2
+    # Even explicit authorization is not enough without the pinned engine hash.
+    assert module.main(["--run", "--infer-config", str(infer),
+                        "--models-root", str(model_root),
+                        "--authorize-physical-rtsp",
+                        "--nvr-readonly-authorized",
+                        "--network-egress-verified"]) == 2
