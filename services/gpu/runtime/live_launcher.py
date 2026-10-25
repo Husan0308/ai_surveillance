@@ -25,7 +25,7 @@ import time
 from services.gpu.runtime.live_config import Camera, build_app_config, validate_model_files
 from services.shared.camera_config import load_settings
 from services.shared.source_ownership import SourceOwnership
-from scripts.cam_six_validation.credential_redaction import (
+from services.shared.credential_redaction import (
     CredentialRedactor, child_environment_without_camera_secrets,
 )
 
