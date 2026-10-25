@@ -49,7 +49,7 @@ def test_only_gpu_runtime_owns_new_live_implementation():
 def test_gpu_runtime_does_not_import_api_ml_or_qt_frontend():
     prohibited = (
         "services.api_service", "services.ml_service",
-        "services.frontend", "PySide6",
+        "services.frontend", "PySide6", "scripts",
     )
     for file in (ROOT / "services/gpu").rglob("*.py"):
         tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
@@ -115,3 +115,17 @@ def test_gpu_live_launcher_keeps_runtime_approval_checks():
         "nvr_sessions_preflight(",
     ):
         assert needle in source
+
+
+def test_shared_credential_redaction_is_one_implementation():
+    from services.shared import credential_redaction as canonical
+    from scripts.cam_six_validation import credential_redaction as legacy
+
+    assert legacy is canonical
+    redactor = canonical.CredentialRedactor()
+    redactor.add_credentials(
+        username="synthetic-user", password="synthetic-private-secret",
+        uri="rtsp://synthetic-user:synthetic-private-secret@unit.invalid/stream",
+    )
+    out = redactor.sanitize("synthetic-private-secret")
+    assert "synthetic-private-secret" not in out
