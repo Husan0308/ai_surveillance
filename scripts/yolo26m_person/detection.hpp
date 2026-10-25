@@ -3,6 +3,9 @@
 #include <nvdsmeta.h>
 #include <cmath>
 #include <dlfcn.h>
+#include <array>
+#include <cstdint>
+#include <atomic>
 #ifdef YOLO26_TRACKER
 #include "tracker.hpp"
 #endif
@@ -17,6 +20,244 @@ using ParserCount = unsigned long long (*)();
 static ParserCount parser_errors, parser_rejected, parser_calls, parser_proposals;
 static FILE *detection_evidence = nullptr, *frame_evidence = nullptr;
 static GQuark infer_stamp;
+
+// Enabled only by the validator's existing --trace-latency switch. Streaming
+// callbacks append fixed-size records to this one-shot bounded ring; they do
+// no file I/O, logging, allocation, or locking.
+enum PgieDiagStage : guint16 {
+  PGIE_DIAG_MUX = 1, PGIE_DIAG_PGIE, PGIE_DIAG_TRACKER, PGIE_DIAG_TILER,
+  PGIE_DIAG_OSD_CONVERT, PGIE_DIAG_OSD_CAPS, PGIE_DIAG_OSD,
+  PGIE_DIAG_OUTPUT_CONVERT, PGIE_DIAG_OUTPUT_CAPS, PGIE_DIAG_ENCODER,
+  PGIE_DIAG_FILE_QUEUE, PGIE_DIAG_FILE_PARSE, PGIE_DIAG_FILE_MUX,
+  PGIE_DIAG_FILE_SINK, PGIE_DIAG_PREVIEW_QUEUE, PGIE_DIAG_PREVIEW_PARSE,
+  PGIE_DIAG_PREVIEW_CAPS, PGIE_DIAG_PREVIEW_MUX, PGIE_DIAG_PREVIEW_SINK,
+  PGIE_DIAG_CAMERA_QUEUE_BASE = 100
+};
+static constexpr size_t PGIE_DIAG_CAPACITY = 131072;
+struct PgieDiagEvent {
+  gint64 monotonic_us;
+  guint64 pts_ns;
+  guint64 buffer_cookie;
+  guint64 batch_no;
+  guint64 source_mask;
+  guint64 frame_key;
+  guint64 value_a;
+  guint64 value_b;
+  guint32 frame_count;
+  guint16 stage;
+  guint8 edge; // 0=sink/input, 1=src/output, 2=queue sample
+  guint8 kind; // 0=buffer boundary, 1=queue levels
+};
+struct InferStamp { gint64 entered_us; guint64 batch_no; };
+struct PgieDiagProbeCtx { guint16 stage; guint8 edge; gint source_id; };
+struct PgieDiagQueue { GstElement *element; guint16 stage; };
+static std::array<PgieDiagEvent, PGIE_DIAG_CAPACITY> pgie_diag_events{};
+static std::atomic<guint64> pgie_diag_claimed{0}, pgie_diag_dropped{0};
+static std::atomic<guint64> pgie_diag_batch_seq{0};
+static std::atomic_bool pgie_diag_enabled{false};
+static std::atomic_bool pgie_diag_export_ready{false};
+static std::atomic_bool pgie_diag_dump_started{false};
+static PgieDiagQueue pgie_diag_queues[16]{};
+static guint pgie_diag_queue_count = 0;
+
+#ifndef PGIE_DIAG_TRACE_PATH
+#define PGIE_DIAG_TRACE_PATH "/work/pgie-stage-trace.jsonl"
+#endif
+
+static const char *pgie_diag_stage_name(guint16 stage) {
+  switch (stage) {
+    case PGIE_DIAG_MUX: return "streammux";
+    case PGIE_DIAG_PGIE: return "nvinfer";
+    case PGIE_DIAG_TRACKER: return "nvtracker";
+    case PGIE_DIAG_TILER: return "tiler";
+    case PGIE_DIAG_OSD_CONVERT: return "osd_convert";
+    case PGIE_DIAG_OSD_CAPS: return "osd_caps";
+    case PGIE_DIAG_OSD: return "nvdsosd";
+    case PGIE_DIAG_OUTPUT_CONVERT: return "output_convert";
+    case PGIE_DIAG_OUTPUT_CAPS: return "output_caps";
+    case PGIE_DIAG_ENCODER: return "nvenc";
+    case PGIE_DIAG_FILE_QUEUE: return "file_queue";
+    case PGIE_DIAG_FILE_PARSE: return "file_parse";
+    case PGIE_DIAG_FILE_MUX: return "file_mux";
+    case PGIE_DIAG_FILE_SINK: return "file_sink";
+    case PGIE_DIAG_PREVIEW_QUEUE: return "preview_queue";
+    case PGIE_DIAG_PREVIEW_PARSE: return "preview_parse";
+    case PGIE_DIAG_PREVIEW_CAPS: return "preview_caps";
+    case PGIE_DIAG_PREVIEW_MUX: return "preview_mux";
+    case PGIE_DIAG_PREVIEW_SINK: return "preview_sink";
+    default:
+      if (stage >= PGIE_DIAG_CAMERA_QUEUE_BASE &&
+          stage < PGIE_DIAG_CAMERA_QUEUE_BASE + 6) return "camera_queue";
+      return "unknown";
+  }
+}
+
+static guint64 pgie_diag_frame_key(NvDsBatchMeta *meta, guint64 &mask, guint32 &count) {
+  // FNV-1a over (source_id, frame_num) pairs, preserving an exact batch key
+  // when NvDs frame metadata is available at both sides of an element.
+  guint64 hash = 1469598103934665603ULL;
+  mask = 0; count = 0;
+  if (!meta) return 0;
+  for (NvDsMetaList *node = meta->frame_meta_list; node; node = node->next) {
+    auto *frame = static_cast<NvDsFrameMeta*>(node->data);
+    if (!frame) continue;
+    if (frame->source_id < 64) mask |= (guint64(1) << frame->source_id);
+    const guint32 values[2] = {frame->source_id, guint32(frame->frame_num)};
+    for (guint32 value : values) {
+      for (int byte = 0; byte < 4; ++byte) {
+        hash ^= guint8((value >> (byte * 8)) & 0xff);
+        hash *= 1099511628211ULL;
+      }
+    }
+    ++count;
+  }
+  return count ? hash : 0;
+}
+
+static void pgie_diag_append(PgieDiagEvent event) {
+  if (!pgie_diag_enabled.load(std::memory_order_relaxed)) return;
+  const guint64 slot = pgie_diag_claimed.fetch_add(1, std::memory_order_relaxed);
+  if (slot >= PGIE_DIAG_CAPACITY) {
+    pgie_diag_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  event.monotonic_us = g_get_monotonic_time();
+  pgie_diag_events[slot] = event;
+}
+
+static void pgie_diag_buffer(guint16 stage, guint8 edge, GstBuffer *buffer, gint source_id = -1) {
+  if (!pgie_diag_enabled.load(std::memory_order_relaxed) || !buffer) return;
+  PgieDiagEvent event{};
+  event.pts_ns = GST_BUFFER_PTS(buffer);
+  event.buffer_cookie = guint64(reinterpret_cast<uintptr_t>(buffer));
+  auto *meta = gst_buffer_get_nvds_batch_meta(buffer);
+  event.frame_key = pgie_diag_frame_key(meta, event.source_mask, event.frame_count);
+  if (source_id >= 0 && source_id < 64) {
+    event.source_mask |= (guint64(1) << source_id);
+    if (!event.frame_count) event.frame_count = 1;
+  }
+  if (auto *stamp = static_cast<InferStamp*>(gst_mini_object_get_qdata(
+          GST_MINI_OBJECT(buffer), infer_stamp))) event.batch_no = stamp->batch_no;
+  event.stage = stage;
+  event.edge = edge;
+  event.kind = 0;
+  pgie_diag_append(event);
+}
+
+static GstPadProbeReturn pgie_diag_probe_cb(GstPad*, GstPadProbeInfo *info, gpointer data) {
+  auto *ctx = static_cast<PgieDiagProbeCtx*>(data);
+  pgie_diag_buffer(ctx->stage, ctx->edge, GST_PAD_PROBE_INFO_BUFFER(info), ctx->source_id);
+  return GST_PAD_PROBE_OK;
+}
+
+static void pgie_diag_probe(GstElement *element, const char *pad_name,
+                            guint16 stage, guint8 edge, gint source_id = -1) {
+  if (!pgie_diag_enabled.load(std::memory_order_relaxed) || !element) return;
+  GstPad *pad = gst_element_get_static_pad(element, pad_name);
+  if (!pad) return; // Diagnostics must never turn a missing optional pad into a failure.
+  auto *ctx = g_new(PgieDiagProbeCtx, 1);
+  *ctx = {stage, edge, source_id};
+  gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, pgie_diag_probe_cb, ctx,
+                    [](gpointer p) { g_free(p); });
+  gst_object_unref(pad);
+}
+
+static void pgie_diag_trace_element(GstElement *element, guint16 stage) {
+  pgie_diag_probe(element, "sink", stage, 0);
+  pgie_diag_probe(element, "src", stage, 1);
+}
+
+static void pgie_diag_register_queue(GstElement *element, guint16 stage) {
+  if (!pgie_diag_enabled.load(std::memory_order_relaxed) || !element ||
+      pgie_diag_queue_count >= G_N_ELEMENTS(pgie_diag_queues)) return;
+  pgie_diag_queues[pgie_diag_queue_count++] = {element, stage};
+}
+
+static void pgie_diag_configure() {
+  const char *tracers = g_getenv("GST_TRACERS");
+  pgie_diag_enabled = tracers && std::strstr(tracers, "latency");
+  pgie_diag_export_ready = false;
+  pgie_diag_dump_started = false;
+  g_print("PGIE_DIAG enabled=%d capacity=%zu\n",
+          int(pgie_diag_enabled.load(std::memory_order_relaxed)), PGIE_DIAG_CAPACITY);
+}
+
+static void pgie_diag_sample_queues() {
+  if (!pgie_diag_enabled.load(std::memory_order_relaxed)) return;
+  for (guint i = 0; i < pgie_diag_queue_count; ++i) {
+    guint buffers = 0, bytes = 0;
+    guint64 time_ns = 0;
+    g_object_get(pgie_diag_queues[i].element,
+                 "current-level-buffers", &buffers,
+                 "current-level-bytes", &bytes,
+                 "current-level-time", &time_ns, nullptr);
+    PgieDiagEvent event{};
+    event.stage = pgie_diag_queues[i].stage;
+    event.edge = 2;
+    event.kind = 1;
+    event.value_a = buffers;
+    event.value_b = bytes;
+    event.pts_ns = time_ns;
+    pgie_diag_append(event);
+  }
+}
+
+static void pgie_diag_dump() {
+  if (!pgie_diag_enabled.load(std::memory_order_relaxed) ||
+      !pgie_diag_export_ready.load(std::memory_order_acquire)) return;
+  bool expected = false;
+  if (!pgie_diag_dump_started.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) return;
+  FILE *file = std::fopen(PGIE_DIAG_TRACE_PATH, "w");
+  if (!file) {
+    g_print("PGIE_DIAG dump=FAILED reason=trace_file_open\n");
+    return;
+  }
+  bool write_ok = true;
+  const guint64 claimed = pgie_diag_claimed.load(std::memory_order_relaxed);
+  const guint64 count = std::min<guint64>(claimed, PGIE_DIAG_CAPACITY);
+  write_ok = std::fprintf(file,
+      "{\"type\":\"header\",\"schema\":1,\"clock\":\"g_get_monotonic_time_us\","
+      "\"capacity\":%zu,\"claimed\":%llu,\"recorded\":%llu,\"dropped\":%llu}\n",
+      PGIE_DIAG_CAPACITY, (unsigned long long)claimed, (unsigned long long)count,
+      (unsigned long long)pgie_diag_dropped.load(std::memory_order_relaxed)) >= 0;
+  for (guint64 i = 0; i < count; ++i) {
+    const auto &e = pgie_diag_events[i];
+    int written = -1;
+    if (e.kind == 1) {
+      written = std::fprintf(file,
+          "{\"type\":\"queue\",\"monotonic_us\":%lld,\"stage\":\"%s\","
+          "\"source_id\":%d,\"buffers\":%llu,\"bytes\":%llu,\"level_time_ns\":%llu}\n",
+          (long long)e.monotonic_us, pgie_diag_stage_name(e.stage),
+          e.stage >= PGIE_DIAG_CAMERA_QUEUE_BASE && e.stage < PGIE_DIAG_CAMERA_QUEUE_BASE + 6
+              ? int(e.stage - PGIE_DIAG_CAMERA_QUEUE_BASE) : -1,
+          (unsigned long long)e.value_a, (unsigned long long)e.value_b,
+          (unsigned long long)e.pts_ns);
+    } else {
+      written = std::fprintf(file,
+          "{\"type\":\"buffer\",\"monotonic_us\":%lld,\"stage\":\"%s\","
+          "\"edge\":\"%s\",\"pts_ns\":%llu,\"buffer_cookie\":%llu,"
+          "\"batch_no\":%llu,\"source_mask\":%llu,\"frame_count\":%u,\"frame_key\":%llu}\n",
+          (long long)e.monotonic_us, pgie_diag_stage_name(e.stage),
+          e.edge == 0 ? "sink" : "src", (unsigned long long)e.pts_ns,
+          (unsigned long long)e.buffer_cookie, (unsigned long long)e.batch_no,
+          (unsigned long long)e.source_mask, e.frame_count, (unsigned long long)e.frame_key);
+    }
+    if (written < 0) {
+      write_ok = false;
+      break;
+    }
+  }
+  if (std::fflush(file) != 0 || std::ferror(file)) write_ok = false;
+  if (std::fclose(file) != 0) write_ok = false;
+  if (!write_ok) {
+    g_print("PGIE_DIAG dump=FAILED reason=trace_file_write\n");
+    return;
+  }
+  g_print("PGIE_DIAG dump=OK file=pgie-stage-trace.jsonl capacity=%zu claimed=%llu recorded=%llu dropped=%llu\n",
+      PGIE_DIAG_CAPACITY, (unsigned long long)claimed, (unsigned long long)count,
+      (unsigned long long)pgie_diag_dropped.load(std::memory_order_relaxed));
+}
 
 static bool write_all_json_line(FILE *file, const char *data, size_t len) {
   if (!file || !data || !len) return false;
@@ -59,18 +300,23 @@ static bool write_frame_json(
 static GstPadProbeReturn infer_enter(GstPad*, GstPadProbeInfo *info, gpointer) {
   GstBuffer *b = GST_PAD_PROBE_INFO_BUFFER(info);
   if (b) {
-    auto *stamp = g_new(gint64, 1); *stamp = g_get_monotonic_time();
+    auto *stamp = g_new(InferStamp, 1);
+    stamp->entered_us = g_get_monotonic_time();
+    stamp->batch_no = pgie_diag_enabled.load(std::memory_order_relaxed)
+        ? pgie_diag_batch_seq.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
     gst_mini_object_set_qdata(GST_MINI_OBJECT(b), infer_stamp, stamp, g_free);
+    pgie_diag_buffer(PGIE_DIAG_PGIE, 0, b);
   }
   return GST_PAD_PROBE_OK;
 }
 static GstPadProbeReturn infer_exit(GstPad*, GstPadProbeInfo *info, gpointer) {
   GstBuffer *b = GST_PAD_PROBE_INFO_BUFFER(info);
   if (!b) return GST_PAD_PROBE_OK;
+  pgie_diag_buffer(PGIE_DIAG_PGIE, 1, b);
   auto *meta = gst_buffer_get_nvds_batch_meta(b);
   if (!meta) { ++infer_errors; fail("YOLO missing batch metadata"); return GST_PAD_PROBE_DROP; }
-  if (auto *stamp = static_cast<gint64*>(gst_mini_object_get_qdata(GST_MINI_OBJECT(b), infer_stamp))) {
-    const guint64 dt = g_get_monotonic_time() - *stamp;
+  if (auto *stamp = static_cast<InferStamp*>(gst_mini_object_get_qdata(GST_MINI_OBJECT(b), infer_stamp))) {
+    const guint64 dt = g_get_monotonic_time() - stamp->entered_us;
     infer_us += dt; ++infer_timed;
     if (dt > infer_max_us) infer_max_us = dt;
   }
@@ -159,6 +405,7 @@ static void detection_link(GstElement *from, GstElement *tiler, GstElement *to) 
   std::setvbuf(detection_evidence, nullptr, _IOLBF, 0);
   std::setvbuf(frame_evidence, nullptr, _IOLBF, 0);
   infer_stamp=g_quark_from_static_string("yolo26-infer-entry");
+  pgie_diag_probe(from, "src", PGIE_DIAG_MUX, 1);
   auto *gie=make("nvinfer","YOLO26m-person");
   g_object_set(gie,"config-file-path","/config/config_infer_primary_yolo26m_raw_otm.txt",nullptr);
   auto *in=gst_element_get_static_pad(gie,"sink"), *out=gst_element_get_static_pad(gie,"src");
@@ -170,9 +417,15 @@ static void detection_link(GstElement *from, GstElement *tiler, GstElement *to) 
   g_object_set(filter,"caps",rgba,nullptr);gst_caps_unref(rgba);
   auto *osd=make("nvdsosd","person-overlay");
   g_object_set(osd,"process-mode",1,"display-text",TRUE,"display-bbox",TRUE,"display-mask",FALSE,"display-clock",FALSE,nullptr);
+  pgie_diag_trace_element(tiler, PGIE_DIAG_TILER);
+  pgie_diag_trace_element(convert, PGIE_DIAG_OSD_CONVERT);
+  pgie_diag_trace_element(filter, PGIE_DIAG_OSD_CAPS);
+  pgie_diag_trace_element(osd, PGIE_DIAG_OSD);
+  pgie_diag_trace_element(to, PGIE_DIAG_OUTPUT_CONVERT);
   link(from,gie);
 #ifdef YOLO26_TRACKER
   auto *tracker=create_nvdcf_tracker();
+  pgie_diag_trace_element(tracker, PGIE_DIAG_TRACKER);
   link(gie,tracker);link(tracker,tiler);
 #else
   link(gie,tiler);
