@@ -93,11 +93,12 @@ Only *after* Step 2, and after the CPU-only check passed:
       --infer-config /absolute/path/to/validated-peoplenet-b6.txt \
       --models-root .runtime/models \
       --network APPROVED_RESTRICTED_NETWORK \
+      --expected-engine-sha256 VERIFIED_SHA256_FROM_STAGE5_MANIFEST \
       --authorize-physical-rtsp \
       --nvr-readonly-authorized \
       --network-egress-verified
 
-The launcher makes a single Docker live-preview process. After all six
+The launcher checks the cached batch-six engine against the expected SHA256 from the verified offline manifest, then makes a single Docker live-preview process. After all six
 moving frames are visually confirmed, enter START in the terminal to begin
 a **600-second** window; otherwise it fails closed after the startup timeout.
 A successful process exit alone does not establish that seated-person recall,
