@@ -259,3 +259,16 @@ def test_disposable_real_systemd_user_deadline(tmp_path):
         assert marker.exists(), 'real systemd deadline or ExecStopPost failed'
     finally:
         subprocess.run(['systemctl', '--user', 'stop', unit], capture_output=True, timeout=10)
+
+
+def test_reaped_process_is_not_alive():
+    import sys
+    child = subprocess.Popen([sys.executable, '-c', 'pass'])
+    ticks = soak.proc_ticks(child.pid)
+    try:
+        child.wait(timeout=4)
+        assert soak.proc_identity_alive(child.pid, ticks) is False
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
