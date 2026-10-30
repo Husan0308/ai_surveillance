@@ -272,3 +272,26 @@ def test_reaped_process_is_not_alive():
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+def test_unreaped_zombie_process_not_running():
+    import sys
+    import time
+    child = subprocess.Popen([sys.executable, '-c', 'pass'])
+    ticks = soak.proc_ticks(child.pid)
+    assert ticks is not None
+    try:
+        observed = False
+        for _ in range(200):
+            try:
+                state = pathlib.Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+            except FileNotFoundError:
+                break
+            if state == 'Z':
+                observed = True
+                assert soak.proc_identity_alive(child.pid, ticks) is False
+                break
+            time.sleep(.01)
+        assert observed
+    finally:
+        child.wait(timeout=4)
