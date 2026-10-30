@@ -124,6 +124,17 @@ def proc_ticks(pid):
         return None
 
 
+
+def proc_identity_alive(pid, ticks):
+    """A matching zombie/reaped child is not a running monitor process."""
+    if not isinstance(pid, int) or not isinstance(ticks, int):
+        return False
+    try:
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        return int(fields[19]) == ticks and fields[0] not in ('Z', 'X', 'x')
+    except (OSError, ValueError, IndexError):
+        return False
+
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -235,7 +246,7 @@ def cleanup(data, *, reason, fallback=False):
             docker_ok = False
     except (OSError, subprocess.TimeoutExpired, RuntimeError):
         docker_ok = False
-    monitor_alive = proc_ticks(pid) == ticks and ticks is not None
+    monitor_alive = proc_identity_alive(pid, ticks)
     try:
         unfamiliar = [n for n in docker_names() if CONTAINER_RE.fullmatch(n) and n != name]
         if unfamiliar:
