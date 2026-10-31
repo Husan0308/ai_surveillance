@@ -1,0 +1,10 @@
+Fix 5E + Fix 6B review environment
+
+Native SDK: NVIDIA DeepStream 9.1
+CUDA: 13.2
+GStreamer: 1.24.2
+Pinned offline development image: sha256:fd31f5b44ababdbdee8cd397a375e888191b49e402ac237254a4cdc239130f5b
+Pinned validation runtime image: sha256:10eca409b3894e91c1bac915c9f1346307e56695e552487cbe8cf2f58a3f998f
+Offline regression host: Python 3.12.3; pytest 9.1.1; NumPy 2.5.3; PySide6 6.11.2.
+Candidate native executable was omitted; local verified SHA256: 3cea6475a2474f903400825dba8f6f5f705db2fc93d9f49d7b6a5202f582f3b4, Build ID: eee53522bf57a62ddba9e94e5783b56ea275accb.
+Candidate isolated launcher SHA256: 611130f49ba5e0e0e54d4dc654376777638aa0fba278a9e0f0118ab1d010a581.

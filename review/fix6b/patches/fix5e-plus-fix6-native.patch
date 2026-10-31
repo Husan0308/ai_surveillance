@@ -1,0 +1,1167 @@
+--- a/apps/sample_apps/deepstream-app/six_live_monitor.c
++++ b/apps/sample_apps/deepstream-app/six_live_monitor.c
+@@ -13,8 +13,10 @@
+ #define TELEMETRY_OBJECT_LIMIT 256u
+ #define TELEMETRY_OBJECT_SCAN_LIMIT 1024u
+ #define TELEMETRY_FRAME_META_LIMIT 6u
+-#define TELEMETRY_IDENTITY_HISTORY 16u
+ #define PREVIEW_PROGRESS_STAGE 4u
++#define SOURCE_OWNER_META_NAME "NVIDIA.SIXLIVE.SOURCE_GENERATION"
++#define SOURCE_OWNER_MAGIC G_GUINT64_CONSTANT (0x5349584c49564547)
++#define SOURCE_OWNER_VERSION 1u
+ 
+ typedef struct {
+   guint64 count, objects, last_frame, first_ns, last_ns, pts, pts_regressions, max_gap_ns;
+@@ -29,14 +31,28 @@
+ typedef struct {
+   gboolean valid, complete, pts_valid;
+   guint64 sequence, frame_num, pts, monotonic_ns, source_generation;
++  guint64 source_sequence;
+   guint source_id, source_width, source_height, pipeline_width, pipeline_height;
+   guint object_count;
+   TelemetryObject objects[TELEMETRY_OBJECT_LIMIT];
+ } TrackerFrameSnapshot;
+ typedef struct {
+-  gboolean valid;
+-  guint64 frame_num, source_pts, source_generation;
+-} SourceFrameIdentity;
++  guint64 magic;
++  guint64 generation;
++  guint64 source_sequence;
++  guint64 source_pts;
++  guint32 source_id;
++  guint32 version;
++} SourceOwnerToken;
++typedef enum {
++  SOURCE_OWNER_OK,
++  SOURCE_OWNER_MISSING,
++  SOURCE_OWNER_DUPLICATE,
++  SOURCE_OWNER_MALFORMED,
++  SOURCE_OWNER_WRONG_SOURCE,
++  SOURCE_OWNER_STALE,
++  SOURCE_OWNER_UNAVAILABLE
++} SourceOwnerResult;
+ typedef struct {
+   guint64 revision, generation;
+   const gchar *state;
+@@ -52,12 +68,17 @@
+ static gdouble fps[6];
+ static GMutex telemetry_lock;
+ static TrackerFrameSnapshot tracker_snapshots[6];
+-static SourceFrameIdentity source_frame_identities[6][TELEMETRY_IDENTITY_HISTORY];
+-static guint source_frame_identity_next[6];
+ static guint64 preview_stage_generation[6];
+ static SourceLifecycleSnapshot source_lifecycle[6];
+ static guint64 lifecycle_sent_revision[6];
+ static guint64 source_generation[6];
++static guint64 source_output_sequence[6];
++static gboolean source_epoch_ready[6];
++static gint source_owner_meta_type = NVDS_GST_INVALID_META;
++static gint source_owner_attach_failures[6];
++static gint source_owner_missing[6];
++static gint source_owner_rejected[6];
++static gint ownership_stopping;
+ static GThread *telemetry_thread;
+ static gint telemetry_stop;
+ static GstElement *live_pipeline;
+@@ -106,52 +127,234 @@
+ }
+ 
+ void six_live_source_reconnecting (guint id) {
+-  if (!enabled || !telemetry_enabled || id >= 6)
+-    return;
++  if (!enabled || id >= 6 || g_atomic_int_get (&ownership_stopping))
++    return;
++  /* Quarantine immediately, but do not claim a new epoch until the source
++   * bin has stopped every internal producer and reached GST_STATE_NULL. */
++  g_mutex_lock (&monitor_lock);
+   g_mutex_lock (&telemetry_lock);
+-  /* Gst may emit several ERROR messages while the existing source reset is
+-   * already pending. Count one generation per observed transition, not per
+-   * duplicate error message. Decoder progress changes the state back online. */
+-  if (g_strcmp0 (source_lifecycle[id].state, "reconnecting") != 0) {
++  source_epoch_ready[id] = FALSE;
++  if (g_strcmp0 (source_lifecycle[id].state, "reconnecting") != 0)
++    set_source_lifecycle_locked (id, "reconnecting");
++  g_mutex_unlock (&telemetry_lock);
++  g_mutex_unlock (&monitor_lock);
++}
++
++/* Called only after reset_source_pipeline() confirms the complete source bin
++ * is NULL with no pending state transition. All frames already beyond the
++ * source-bin output have immutable old tokens; all internal queues/decoder
++ * tasks have been stopped before the next generation is opened. */
++void six_live_source_generation_boundary (guint id) {
++  if (!enabled || id >= 6 || g_atomic_int_get (&ownership_stopping))
++    return;
++  g_mutex_lock (&monitor_lock);
++  g_mutex_lock (&telemetry_lock);
++  if (!source_epoch_ready[id]) {
+     source_generation[id]++;
+-    set_source_lifecycle_locked (id, "reconnecting");
++    for (guint stage = 0; stage < 5; stage++)
++      memset (&stages[stage][id], 0, sizeof stages[stage][id]);
++    last_counts[id] = 0;
++    tracker_snapshots[id].valid = FALSE;
++    preview_stage_generation[id] = source_generation[id];
++    source_epoch_ready[id] = TRUE;
++    source_lifecycle[id].generation = source_generation[id];
++    source_lifecycle[id].revision++;
+   }
+   g_mutex_unlock (&telemetry_lock);
+-}
+-
+-gboolean six_live_preview_identity_generation (guint id, guint frame_num,
+-    guint64 source_pts, guint64 *generation) {
+-  if (!enabled || !telemetry_enabled || id >= 6 || !generation ||
+-      !GST_CLOCK_TIME_IS_VALID (source_pts) || !g_mutex_trylock (&telemetry_lock))
++  g_mutex_unlock (&monitor_lock);
++}
++
++static gpointer source_owner_copy (gpointer data, gpointer user_data) {
++  (void) user_data;
++  if (!data)
++    return NULL;
++  SourceOwnerToken *copy = g_malloc (sizeof *copy);
++  memcpy (copy, data, sizeof *copy);
++  return copy;
++}
++
++static void source_owner_release (gpointer data, gpointer user_data) {
++  (void) user_data;
++  g_free (data);
++}
++
++/* DeepStream 9.1 calls the transform with an NvDsUserMeta that wraps the
++ * Gst-side data, as demonstrated by deepstream-gst-metadata-test. */
++static gpointer source_owner_to_frame_meta (gpointer data, gpointer user_data) {
++  (void) user_data;
++  NvDsUserMeta *gst_user_meta = data;
++  SourceOwnerToken *token = gst_user_meta ? gst_user_meta->user_meta_data : NULL;
++  if (!token || token->magic != SOURCE_OWNER_MAGIC ||
++      token->version != SOURCE_OWNER_VERSION || token->source_id >= 6 ||
++      token->source_sequence == 0)
++    return NULL;
++  return source_owner_copy (token, NULL);
++}
++
++static void source_owner_frame_meta_release (gpointer data, gpointer user_data) {
++  (void) user_data;
++  NvDsUserMeta *frame_user_meta = data;
++  if (!frame_user_meta)
++    return;
++  source_owner_release (frame_user_meta->user_meta_data, NULL);
++  frame_user_meta->user_meta_data = NULL;
++}
++
++static gboolean buffer_has_source_owner_meta (GstBuffer *buffer) {
++  gpointer iter = NULL;
++  GstMeta *gst_meta;
++  while ((gst_meta = gst_buffer_iterate_meta (buffer, &iter))) {
++    if (gst_meta->info->api != NVDS_META_API_TYPE)
++      continue;
++    NvDsMeta *nvds_meta = (NvDsMeta *) gst_meta;
++    if (nvds_meta->meta_type == source_owner_meta_type)
++      return TRUE;
++  }
++  return FALSE;
++}
++
++static GstPadProbeReturn source_lineage_probe (GstPad *pad,
++    GstPadProbeInfo *info, gpointer data) {
++  (void) pad;
++  guint id = GPOINTER_TO_UINT (data);
++  GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
++  if (!enabled || !buffer || id >= 6 || source_owner_meta_type < 0 ||
++      g_atomic_int_get (&ownership_stopping))
++    return GST_PAD_PROBE_OK;
++
++  /* This probe is on the source-bin ghost src pad, after decode/conversion
++   * and immediately before the corresponding nvstreammux sink pad. */
++  if (!g_mutex_trylock (&monitor_lock)) {
++    g_atomic_int_inc (&source_owner_attach_failures[id]);
++    return GST_PAD_PROBE_OK;
++  }
++  if (!g_mutex_trylock (&telemetry_lock)) {
++    g_mutex_unlock (&monitor_lock);
++    g_atomic_int_inc (&source_owner_attach_failures[id]);
++    return GST_PAD_PROBE_OK;
++  }
++  gboolean can_stamp = source_epoch_ready[id] &&
++      g_strcmp0 (source_lifecycle[id].state, "reconnecting") != 0 &&
++      g_strcmp0 (source_lifecycle[id].state, "offline") != 0;
++  SourceOwnerToken token = {0};
++  if (can_stamp) {
++    token.magic = SOURCE_OWNER_MAGIC;
++    token.version = SOURCE_OWNER_VERSION;
++    token.source_id = id;
++    token.generation = source_generation[id];
++    token.source_sequence = ++source_output_sequence[id];
++    token.source_pts = GST_BUFFER_PTS_IS_VALID (buffer) ?
++        GST_BUFFER_PTS (buffer) : GST_CLOCK_TIME_NONE;
++  }
++  g_mutex_unlock (&telemetry_lock);
++  g_mutex_unlock (&monitor_lock);
++  if (!can_stamp) {
++    g_atomic_int_inc (&source_owner_attach_failures[id]);
++    return GST_PAD_PROBE_OK;
++  }
++
++  /* A GstBuffer header may be shared after a converter/tee. Make only the
++   * header writable; this does not map or copy NVMM pixel payloads. */
++  GstBuffer *writable = gst_buffer_make_writable (buffer);
++  if (!writable) {
++    g_atomic_int_inc (&source_owner_attach_failures[id]);
++    return GST_PAD_PROBE_OK;
++  }
++  GST_PAD_PROBE_INFO_DATA (info) = writable;
++  if (buffer_has_source_owner_meta (writable)) {
++    g_atomic_int_inc (&source_owner_attach_failures[id]);
++    return GST_PAD_PROBE_OK;
++  }
++
++  SourceOwnerToken *owned = g_malloc (sizeof *owned);
++  memcpy (owned, &token, sizeof *owned);
++  NvDsMeta *meta = gst_buffer_add_nvds_meta (writable, owned, NULL,
++      source_owner_copy, source_owner_release);
++  if (!meta) {
++    source_owner_release (owned, NULL);
++    g_atomic_int_inc (&source_owner_attach_failures[id]);
++    return GST_PAD_PROBE_OK;
++  }
++  meta->meta_type = source_owner_meta_type;
++  meta->gst_to_nvds_meta_transform_func = source_owner_to_frame_meta;
++  meta->gst_to_nvds_meta_release_func = source_owner_frame_meta_release;
++  return GST_PAD_PROBE_OK;
++}
++
++static SourceOwnerResult source_frame_owner (NvDsFrameMeta *fm,
++    SourceOwnerToken *copy) {
++  if (!fm || fm->source_id >= 6 || fm->pad_index != fm->source_id)
++    return SOURCE_OWNER_WRONG_SOURCE;
++  if (source_owner_meta_type < 0)
++    return SOURCE_OWNER_MISSING;
++  NvDsUserMeta *found = NULL;
++  guint matches = 0;
++  for (NvDsMetaList *node = fm->frame_user_meta_list; node; node = node->next) {
++    NvDsUserMeta *user_meta = node->data;
++    if (user_meta && user_meta->base_meta.meta_type == source_owner_meta_type) {
++      found = user_meta;
++      matches++;
++    }
++  }
++  if (!matches)
++    return SOURCE_OWNER_MISSING;
++  if (matches != 1)
++    return SOURCE_OWNER_DUPLICATE;
++  SourceOwnerToken *token = found ? found->user_meta_data : NULL;
++  if (!token || token->magic != SOURCE_OWNER_MAGIC ||
++      token->version != SOURCE_OWNER_VERSION || token->source_id >= 6 ||
++      token->source_sequence == 0)
++    return SOURCE_OWNER_MALFORMED;
++  if (token->source_id != fm->source_id)
++    return SOURCE_OWNER_WRONG_SOURCE;
++  if (!g_mutex_trylock (&telemetry_lock))
++    return SOURCE_OWNER_UNAVAILABLE;
++  gboolean current = !g_atomic_int_get (&ownership_stopping) &&
++      source_epoch_ready[fm->source_id] &&
++      source_generation[fm->source_id] == token->generation &&
++      g_strcmp0 (source_lifecycle[fm->source_id].state, "reconnecting") != 0 &&
++      g_strcmp0 (source_lifecycle[fm->source_id].state, "offline") != 0;
++  g_mutex_unlock (&telemetry_lock);
++  if (!current)
++    return SOURCE_OWNER_STALE;
++  if (copy)
++    memcpy (copy, token, sizeof *copy);
++  return SOURCE_OWNER_OK;
++}
++
++gboolean six_live_preview_frame_generation (NvDsFrameMeta *frame_meta,
++    guint64 *generation) {
++  if (!enabled || !generation)
+     return FALSE;
+-  gboolean found = FALSE;
+-  guint64 current_generation = source_generation[id];
+-  for (guint i = 0; i < TELEMETRY_IDENTITY_HISTORY; i++) {
+-    SourceFrameIdentity *identity = &source_frame_identities[id][i];
+-    if (identity->valid && identity->frame_num == frame_num &&
+-        identity->source_pts == source_pts &&
+-        identity->source_generation == current_generation) {
+-      *generation = identity->source_generation;
+-      found = TRUE;
+-      break;
+-    }
+-  }
+-  g_mutex_unlock (&telemetry_lock);
+-  return found;
++  /* Resolve from the immutable user-meta token on this exact NvDsFrameMeta.
++   * Frame number and PTS may repeat after reconnect and cannot establish
++   * generation ownership for a cached tiler frame. */
++  SourceOwnerToken owner = {0};
++  if (source_frame_owner (frame_meta, &owner) != SOURCE_OWNER_OK)
++    return FALSE;
++  *generation = owner.generation;
++  return TRUE;
+ }
+ 
+ void six_live_preview_frame (guint id, guint frame_num, guint64 source_pts,
+     guint64 observed_generation) {
+   if (!enabled || !telemetry_enabled || id >= 6)
+     return;
+-  if (!GST_CLOCK_TIME_IS_VALID (source_pts) || !g_mutex_trylock (&telemetry_lock))
+-    return;
+-  gboolean current_generation = source_generation[id] == observed_generation;
++  if (!GST_CLOCK_TIME_IS_VALID (source_pts) || !g_mutex_trylock (&monitor_lock))
++    return;
++  if (!g_mutex_trylock (&telemetry_lock)) {
++    g_mutex_unlock (&monitor_lock);
++    return;
++  }
++  gboolean current_generation = source_epoch_ready[id] &&
++      source_generation[id] == observed_generation &&
++      g_strcmp0 (source_lifecycle[id].state, "reconnecting") != 0 &&
++      g_strcmp0 (source_lifecycle[id].state, "offline") != 0;
+   g_mutex_unlock (&telemetry_lock);
+-  if (!current_generation)
+-    return;
+-  if (!g_mutex_trylock (&monitor_lock))
+-    return;
++  if (!current_generation) {
++    g_mutex_unlock (&monitor_lock);
++    return;
++  }
+   Stage *stage = &stages[PREVIEW_PROGRESS_STAGE][id];
+   if (preview_stage_generation[id] != observed_generation) {
+     memset (stage, 0, sizeof *stage);
+@@ -213,6 +416,17 @@
+    * process alarm here terminated healthy daily monitoring with exit 124,
+    * bypassing six_live_stop() and its credential/telemetry cleanup. */
+   enabled = TRUE;
++  g_atomic_int_set (&ownership_stopping, 0);
++  g_mutex_lock (&monitor_lock);
++  g_mutex_lock (&telemetry_lock);
++  for (guint i = 0; i < 6; i++) {
++    source_epoch_ready[i] = TRUE; /* Initial generation 0 is a valid epoch. */
++    source_lifecycle[i].state = "starting";
++    source_lifecycle[i].generation = 0;
++    source_lifecycle[i].revision++;
++  }
++  g_mutex_unlock (&telemetry_lock);
++  g_mutex_unlock (&monitor_lock);
+   telemetry_enabled = g_strcmp0 (g_getenv ("SIX_ML_TELEMETRY_ENABLED"), "1") == 0;
+   return TRUE;
+ fail:
+@@ -253,10 +467,11 @@
+   return TRUE;
+ }
+ 
+-static void snapshot_tracker_frame (NvDsFrameMeta *fm, GstBuffer *buffer) {
+-  if (!fm || fm->source_id >= 6 || fm->pad_index != fm->source_id ||
++static gboolean snapshot_tracker_frame (NvDsFrameMeta *fm, GstBuffer *buffer,
++    const SourceOwnerToken *owner) {
++  if (!fm || !owner || fm->source_id >= 6 || fm->pad_index != fm->source_id ||
+       !g_mutex_trylock (&telemetry_lock))
+-    return;
++    return FALSE;
+   TrackerFrameSnapshot *snapshot = &tracker_snapshots[fm->source_id];
+   TrackerFrameSnapshot next;
+   memset (&next, 0, sizeof next);
+@@ -268,22 +483,13 @@
+   next.pts_valid = GST_CLOCK_TIME_IS_VALID (fm->buf_pts);
+   next.pts = next.pts_valid ? fm->buf_pts : 0;
+   next.monotonic_ns = monotonic_ns ();
+-  next.source_generation = source_generation[fm->source_id];
++  next.source_generation = owner->generation;
++  next.source_sequence = owner->source_sequence;
+   next.source_id = fm->source_id;
+   next.source_width = fm->source_frame_width;
+   next.source_height = fm->source_frame_height;
+   next.pipeline_width = fm->pipeline_width;
+   next.pipeline_height = fm->pipeline_height;
+-  if (next.pts_valid) {
+-    guint identity_index = source_frame_identity_next[fm->source_id]++ %
+-        TELEMETRY_IDENTITY_HISTORY;
+-    SourceFrameIdentity *identity =
+-        &source_frame_identities[fm->source_id][identity_index];
+-    identity->valid = TRUE;
+-    identity->frame_num = next.frame_num;
+-    identity->source_pts = next.pts;
+-    identity->source_generation = next.source_generation;
+-  }
+   guint scanned = 0;
+   for (NvDsMetaList *node = fm->obj_meta_list; node; node = node->next) {
+     if (++scanned > TELEMETRY_OBJECT_SCAN_LIMIT) {
+@@ -328,6 +534,7 @@
+     next.complete = FALSE;
+   *snapshot = next; /* Only copied scalar data survives this probe callback. */
+   g_mutex_unlock (&telemetry_lock);
++  return TRUE;
+ }
+ 
+ static void append_number (GString *line, gdouble value) {
+@@ -352,8 +559,10 @@
+   GString *line = g_string_sized_new (2048);
+   g_string_append_printf (line,
+       "SIX_TRACKER_FRAME {\"source_id\":%u,\"camera_id\":\"CAM-%02u\","
+-      "\"frame_num\":%" G_GUINT64_FORMAT ",\"pts_valid\":%s,\"pts_ns\":",
+-      s->source_id, s->source_id + 1, s->frame_num, s->pts_valid ? "true" : "false");
++      "\"frame_num\":%" G_GUINT64_FORMAT ",\"source_sequence\":%" G_GUINT64_FORMAT ","
++      "\"pts_valid\":%s,\"pts_ns\":",
++      s->source_id, s->source_id + 1, s->frame_num, s->source_sequence,
++      s->pts_valid ? "true" : "false");
+   if (s->pts_valid) g_string_append_printf (line, "%" G_GUINT64_FORMAT, s->pts);
+   else g_string_append (line, "null");
+   g_string_append_printf (line,
+@@ -456,12 +665,15 @@
+   if (caps) gst_caps_unref (caps);
+   g_mutex_lock (&monitor_lock);
+   if (!width || !height || id>=6) fatal=TRUE;
+-  else {
+-    update (0,id,stages[0][id].count,GST_BUFFER_PTS(buffer),width,height,0);
+-    if (telemetry_enabled && g_mutex_trylock (&telemetry_lock)) {
++  else if (!g_atomic_int_get (&ownership_stopping) &&
++      g_mutex_trylock (&telemetry_lock)) {
++    gboolean accepted = source_epoch_ready[id] &&
++        g_strcmp0 (source_lifecycle[id].state, "offline") != 0;
++    if (accepted) {
++      update (0,id,stages[0][id].count,GST_BUFFER_PTS(buffer),width,height,0);
+       set_source_lifecycle_locked (id, "online");
+-      g_mutex_unlock (&telemetry_lock);
+-    }
++    }
++    g_mutex_unlock (&telemetry_lock);
+   }
+   g_mutex_unlock (&monitor_lock); return GST_PAD_PROBE_OK;
+ }
+@@ -471,22 +683,34 @@
+ static GstPadProbeReturn metadata_probe (GstPad *pad, GstPadProbeInfo *info, gpointer data) {
+   (void) pad; guint stage=GPOINTER_TO_UINT(data); GstBuffer *buffer=GST_PAD_PROBE_INFO_BUFFER(info);
+   NvDsBatchMeta *batch=buffer?gst_buffer_get_nvds_batch_meta(buffer):NULL;
+-  if (!batch) return GST_PAD_PROBE_OK;
++  if (!enabled || g_atomic_int_get (&ownership_stopping) ||
++      stage < 1 || stage > 3 || !batch) return GST_PAD_PROBE_OK;
+   g_mutex_lock (&monitor_lock);
+   guint frame_meta_count = 0;
+   for (NvDsMetaList *l=batch->frame_meta_list;l;l=l->next) {
+     if (++frame_meta_count > TELEMETRY_FRAME_META_LIMIT) { fatal=TRUE; break; }
+     NvDsFrameMeta *fm=l->data; guint people=0;
+     if (!fm || fm->source_id>=6 || fm->pad_index!=fm->source_id) { fatal=TRUE; continue; }
++    SourceOwnerToken owner = {0};
++    SourceOwnerResult owner_result = source_frame_owner (fm, &owner);
++    if (owner_result != SOURCE_OWNER_OK) {
++      if (owner_result == SOURCE_OWNER_MISSING ||
++          owner_result == SOURCE_OWNER_UNAVAILABLE)
++        g_atomic_int_inc (&source_owner_missing[fm->source_id]);
++      else
++        g_atomic_int_inc (&source_owner_rejected[fm->source_id]);
++      continue;
++    }
+     guint object_meta_count = 0;
+     for (NvDsMetaList *o=fm->obj_meta_list;o;o=o->next) {
+       if (++object_meta_count > TELEMETRY_OBJECT_SCAN_LIMIT) { fatal=TRUE; break; }
+       NvDsObjectMeta *obj=o->data;
+       if (obj && obj->class_id==0) people++; else if (obj) fatal=TRUE;
+     }
++    if (stage == 3 && telemetry_enabled &&
++        !snapshot_tracker_frame (fm, buffer, &owner))
++      continue;
+     update(stage,fm->source_id,fm->frame_num,fm->buf_pts,fm->source_frame_width,fm->source_frame_height,people);
+-    if (stage == 3 && telemetry_enabled)
+-      snapshot_tracker_frame (fm, buffer);
+   }
+   g_mutex_unlock (&monitor_lock); return GST_PAD_PROBE_OK;
+ }
+@@ -523,19 +747,23 @@
+     GstStructure *st=gst_base_sink_get_stats(GST_BASE_SINK(display_sink));
+     if(st) {stats_ok=gst_structure_get_uint64(st,"rendered",&rendered);gst_structure_free(st);}
+   }
+-  guint64 generations[6];
+-  if (telemetry_enabled && g_mutex_trylock (&telemetry_lock)) {
+-    memcpy (generations, source_generation, sizeof generations);
+-    g_mutex_unlock (&telemetry_lock);
+-  } else {
+-    memset (generations, 0, sizeof generations);
+-  }
+-  g_mutex_lock(&monitor_lock);
++  guint64 generations[6] = {0};
++  /* A busy telemetry lock makes this sample unavailable. Never publish a
++   * fabricated generation, and hold monitor_lock across both snapshots so
++   * reconnect cannot pair old counters with a new generation. This applies
++   * even when detailed ML tracker telemetry is disabled. */
++  g_mutex_lock (&monitor_lock);
++  if (!g_mutex_trylock (&telemetry_lock)) {
++    g_mutex_unlock (&monitor_lock);
++    return G_SOURCE_CONTINUE;
++  }
++  memcpy (generations, source_generation, sizeof generations);
++  g_mutex_unlock (&telemetry_lock);
+   for(guint i=0;i<6;i++) {
+     if(last_tick && now>last_tick) fps[i]=(stages[3][i].count-last_counts[i])*1e9/(now-last_tick);
+     last_counts[i]=stages[3][i].count;
+     GString *line=g_string_new("SIX_PROGRESS ");
+-    g_string_append_printf(line,"{\"source_id\":%u,\"camera_id\":\"CAM-%02u\",\"monotonic_ns\":%"G_GUINT64_FORMAT",\"source_generation\":%"G_GUINT64_FORMAT",\"fatal_metadata\":%s,\"sink_rendered\":",i,i+1,now,generations[i],fatal?"true":"false");
++    g_string_append_printf(line,"{\"source_id\":%u,\"camera_id\":\"CAM-%02u\",\"monotonic_ns\":%"G_GUINT64_FORMAT",\"source_generation\":%"G_GUINT64_FORMAT",\"fatal_metadata\":%s,\"frame_owner_attached_failures\":%d,\"frame_owner_missing\":%d,\"frame_owner_rejected\":%d,\"sink_rendered\":",i,i+1,now,generations[i],fatal?"true":"false",g_atomic_int_get(&source_owner_attach_failures[i]),g_atomic_int_get(&source_owner_missing[i]),g_atomic_int_get(&source_owner_rejected[i]));
+     if(stats_ok)g_string_append_printf(line,"%"G_GUINT64_FORMAT,rendered);else g_string_append(line,"null");
+     g_string_append(line,",\"stages\":[");
+     for(guint j=0;j<5;j++) {
+@@ -576,6 +804,40 @@
+ 
+ gboolean six_live_attach (AppCtx *app) {
+   if(!enabled)return TRUE;
++  gchar owner_meta_name[] = SOURCE_OWNER_META_NAME;
++  source_owner_meta_type = nvds_get_user_meta_type (owner_meta_name);
++  if (source_owner_meta_type < NVDS_START_USER_META) {
++    g_printerr ("SIX_LIVE_ATTACH_ERROR stage=source_lineage code=USER_META_TYPE_INVALID\n");
++    return FALSE;
++  }
++  for (guint i = 0; i < app->pipeline.multi_src_bin.num_bins; i++) {
++    NvDsSrcBin *source = &app->pipeline.multi_src_bin.sub_bins[i];
++    if (!source->config || source->config->type != NV_DS_SOURCE_RTSP ||
++        source->bin_id >= 6 || source->config->camera_id != source->bin_id + 1) {
++      g_printerr ("SIX_LIVE_ATTACH_ERROR stage=source_lineage source_id=%u code=SOURCE_MAPPING_INVALID\n",
++          source->bin_id);
++      return FALSE;
++    }
++    source->generation_begin_hook = six_live_source_reconnecting;
++    source->generation_boundary_hook = six_live_source_generation_boundary;
++    GstPad *source_output = gst_element_get_static_pad (source->bin, "src");
++    if (!source_output) {
++      g_printerr ("SIX_LIVE_ATTACH_ERROR stage=source_lineage source_id=%u code=OUTPUT_PAD_MISSING\n",
++          source->bin_id);
++      return FALSE;
++    }
++    source->generation_probe_id = gst_pad_add_probe (source_output,
++        GST_PAD_PROBE_TYPE_BUFFER, source_lineage_probe,
++        GUINT_TO_POINTER (source->bin_id), NULL);
++    gst_object_unref (source_output);
++    if (!source->generation_probe_id) {
++      g_printerr ("SIX_LIVE_ATTACH_ERROR stage=source_lineage source_id=%u code=PROBE_ATTACH_FAILED\n",
++          source->bin_id);
++      return FALSE;
++    }
++    g_print ("SIX_FRAME_OWNER event=probe_installed source_id=%u camera_id=CAM-%02u boundary=source_bin_ghost_src\n",
++        source->bin_id, source->bin_id + 1);
++  }
+   if(!attach_probe(app->pipeline.multi_src_bin.streammux,"src",metadata_probe,1) ||
+      !attach_probe(app->pipeline.common_elements.primary_gie_bin.primary_gie,"src",metadata_probe,2) ||
+      !attach_probe(app->pipeline.common_elements.tracker_bin.tracker,"src",metadata_probe,3) ||
+@@ -618,6 +880,7 @@
+ }
+ void six_live_stop (void) {
+   g_print ("SIX_SHUTDOWN event=six_live_stop_entered\n");
++  g_atomic_int_set (&ownership_stopping, 1);
+   if(timer){g_source_remove(timer);timer=0;}
+   if(enabled)(void)tick(NULL);
+   if (telemetry_enabled) {
+--- a/apps/sample_apps/deepstream-app/six_live_monitor.h
++++ b/apps/sample_apps/deepstream-app/six_live_monitor.h
+@@ -7,8 +7,9 @@
+ void six_live_decode_pad (GstPad *pad, guint id);
+ void six_live_pipeline_state (const gchar *state);
+ void six_live_source_reconnecting (guint source_id);
+-gboolean six_live_preview_identity_generation (guint source_id, guint frame_num,
+-    guint64 source_pts, guint64 *generation);
++void six_live_source_generation_boundary (guint source_id);
++gboolean six_live_preview_frame_generation (NvDsFrameMeta *frame_meta,
++    guint64 *generation);
+ void six_live_preview_frame (guint source_id, guint frame_num, guint64 source_pts,
+     guint64 source_generation);
+ void six_live_stop (void);
+--- a/apps/sample_apps/deepstream-app/mosaic_preview_branch.c
++++ b/apps/sample_apps/deepstream-app/mosaic_preview_branch.c
+@@ -339,8 +339,7 @@
+     source->source_pts_valid = GST_CLOCK_TIME_IS_VALID (meta->buf_pts);
+     source->source_pts = source->source_pts_valid ? meta->buf_pts : 0;
+     source->source_generation_valid = source->source_pts_valid &&
+-        six_live_preview_identity_generation (source->source_id, source->frame_num,
+-            source->source_pts, &source->source_generation);
++        six_live_preview_frame_generation (meta, &source->source_generation);
+   }
+   if (!identity.source_count)
+     identity.valid = FALSE;
+--- a/apps/apps-common/includes/deepstream_sources.h
++++ b/apps/apps-common/includes/deepstream_sources.h
+@@ -105,6 +105,10 @@
+ 
+ typedef struct NvDsSrcParentBin NvDsSrcParentBin;
+ 
++/* Optional application callback invoked around an RTSP source reset.
++ * These hooks do not alter source topology or transport behavior. */
++typedef void (*NvDsSourceGenerationHook) (guint source_id);
++
+ typedef struct
+ {
+   GstElement *bin;
+@@ -154,9 +158,12 @@
+   gboolean async_state_watch_running;
+   NvDsDewarperBin dewarper_bin;
+   gulong probe_id;
++  gulong generation_probe_id;
+   guint64 accumulated_base;
+   guint64 prev_accumulated_base;
+   guint source_id;
++  NvDsSourceGenerationHook generation_begin_hook;
++  NvDsSourceGenerationHook generation_boundary_hook;
+   NvDsSourceConfig *config;
+   NvDsSrcParentBin *parent_bin;
+   gpointer recordCtx;
+--- a/apps/apps-common/src/deepstream_source_bin.c
++++ b/apps/apps-common/src/deepstream_source_bin.c
+@@ -730,6 +730,8 @@
+           check_rtsp_reconnection_attempts (src_bin);
+ 
+           GstElement *send_event_element = NULL;
++          if (src_bin->generation_begin_hook)
++            src_bin->generation_begin_hook (src_bin->bin_id);
+           if (src_bin->dewarper_bin.bin != NULL) {
+             send_event_element = src_bin->dewarper_bin.bin;
+           } else {
+@@ -786,6 +788,8 @@
+           check_rtsp_reconnection_attempts (src_bin);
+ 
+           GstElement *send_event_element = NULL;
++          if (src_bin->generation_begin_hook)
++            src_bin->generation_begin_hook (src_bin->bin_id);
+           if (src_bin->dewarper_bin.bin != NULL) {
+             send_event_element = src_bin->dewarper_bin.bin;
+           } else {
+@@ -1763,6 +1767,12 @@
+   GstState state = GST_STATE_NULL, pending = GST_STATE_NULL;
+   GstStateChangeReturn ret;
+ 
++  /* Quarantine this source's progress before resetting it. The application
++   * advances its generation only after the complete source bin is confirmed
++   * NULL, which joins its queue/decoder/converter streaming tasks. */
++  if (src_bin->generation_begin_hook)
++    src_bin->generation_begin_hook (src_bin->bin_id);
++
+   g_mutex_lock (&src_bin->bin_lock);
+   gettimeofday (&src_bin->last_buffer_time, NULL);
+   gettimeofday (&src_bin->last_reconnect_time, NULL);
+@@ -1778,11 +1788,24 @@
+       gst_event_new_flush_start ());
+   gst_element_send_event (GST_ELEMENT (send_event_element),
+       gst_event_new_flush_stop (TRUE));
+-  if (gst_element_set_state (src_bin->bin,
+-          GST_STATE_NULL) == GST_STATE_CHANGE_FAILURE) {
++  ret = gst_element_set_state (src_bin->bin, GST_STATE_NULL);
++  if (ret == GST_STATE_CHANGE_FAILURE) {
+     GST_ERROR_OBJECT (src_bin->bin, "Can't set source bin to NULL");
+     return FALSE;
+   }
++  ret = gst_element_get_state (src_bin->bin, &state, &pending,
++      3 * GST_SECOND);
++  if (ret != GST_STATE_CHANGE_SUCCESS || state != GST_STATE_NULL ||
++      pending != GST_STATE_VOID_PENDING) {
++    GST_ERROR_OBJECT (src_bin->bin,
++        "Source NULL boundary not confirmed; state=%s pending=%s result=%s",
++        gst_element_state_get_name (state),
++        gst_element_state_get_name (pending),
++        gst_element_state_change_return_get_name (ret));
++    return FALSE;
++  }
++  if (src_bin->generation_boundary_hook)
++    src_bin->generation_boundary_hook (src_bin->bin_id);
+   NVGSTDS_INFO_MSG_V ("Resetting source %d", src_bin->bin_id);
+ 
+   GST_CAT_INFO (NVDS_APP, "Reset source pipeline %s %p\n,", __func__, src_bin);
+--- a/apps/apps-common/src/deepstream_source_bin.c
++++ b/apps/apps-common/src/deepstream_source_bin.c
+@@ -22,6 +22,7 @@
+ #include "deepstream_common.h"
+ #include "deepstream_sources.h"
+ #include "deepstream_dewarper.h"
++#include "six_live_monitor.h"
+ #include <gst/rtp/gstrtcpbuffer.h>
+ #include <gst/rtsp/gstrtsptransport.h>
+ #include <cuda_runtime_api.h>
+@@ -517,6 +518,12 @@
+ 
+   if (g_strrstr (name, "x-rtp")) {
+     NvDsSrcBin *bin = (NvDsSrcBin *) data;
++    const gchar *media = gst_structure_get_string (str, "media");
++    if (!g_strcmp0 (media, "video") &&
++        !six_upstream_progress_attach (pad, bin->bin_id,
++            SIX_UPSTREAM_RTP_PAD))
++      g_printerr ("SIX_UPSTREAM_DIAG event=probe_attach_failed source_id=%u "
++          "stage=rtp_pad\n", bin->bin_id);
+     GstPad *sinkpad = gst_element_get_static_pad (bin->depay, "sink");
+     if (gst_pad_link (pad, sinkpad) != GST_PAD_LINK_OK) {
+ 
+@@ -525,6 +532,15 @@
+     gst_object_unref (sinkpad);
+   }
+   gst_caps_unref (caps);
++}
++
++static void
++cb_rtspsrc_pad_removed (GstElement *rtspsrc, GstPad *pad, gpointer data)
++{
++  (void) rtspsrc;
++  NvDsSrcBin *bin = (NvDsSrcBin *) data;
++  if (bin)
++    six_upstream_progress_detach (pad, bin->bin_id, SIX_UPSTREAM_RTP_PAD);
+ }
+ 
+ /* Returning FALSE from this callback will make rtspsrc ignore the stream.
+@@ -979,6 +995,8 @@
+   }
+   g_signal_connect (G_OBJECT (bin->src_elem), "pad-added",
+       G_CALLBACK (cb_newpad3), bin);
++  g_signal_connect (G_OBJECT (bin->src_elem), "pad-removed",
++      G_CALLBACK (cb_rtspsrc_pad_removed), bin);
+ 
+   g_snprintf (elem_name, sizeof (elem_name), "tee_rtsp_elem%d", bin->bin_id);
+   bin->tee_rtsp_pre_decode = gst_element_factory_make ("tee", elem_name);
+@@ -1021,6 +1039,14 @@
+     NVGSTDS_ERR_MSG_V ("Failed to create '%s'", elem_name);
+     goto done;
+   }
++
++  GstPad *compressed_sink = gst_element_get_static_pad (bin->dec_que, "sink");
++  if (!compressed_sink || !six_upstream_progress_attach (compressed_sink,
++          bin->bin_id, SIX_UPSTREAM_COMPRESSED_PRE_DECODE))
++    g_printerr ("SIX_UPSTREAM_DIAG event=probe_attach_failed source_id=%u "
++        "stage=compressed_pre_decode\n", bin->bin_id);
++  if (compressed_sink)
++    gst_object_unref (compressed_sink);
+ 
+   if (bin->rtsp_reconnect_interval_sec > 0) {
+     NVGSTDS_ELEM_ADD_PROBE (bin->rtspsrc_monitor_probe, bin->dec_que,
+--- a/apps/sample_apps/deepstream-app/six_live_monitor.c
++++ b/apps/sample_apps/deepstream-app/six_live_monitor.c
+@@ -62,6 +62,7 @@
+ static const gchar *rooms[6] = {"Dev Room", "Entrance", "Main Room", "Dev Room", "Entrance", "Main Room"};
+ static GMutex monitor_lock;
+ static gboolean enabled, fatal, telemetry_enabled;
++static gboolean upstream_progress_enabled;
+ static guint timer;
+ static GstElement *display_sink;
+ static guint64 last_counts[6], last_tick;
+@@ -87,6 +88,29 @@
+ static void update (guint stage, guint id, guint64 frame, guint64 pts,
+     guint width, guint height, guint objects);
+ 
++static void append_upstream_stage (GString *line, guint source_id,
++    guint64 generation, SixUpstreamStage stage)
++{
++  SixUpstreamSnapshot sample = {0};
++  (void) six_upstream_progress_snapshot (source_id, generation, stage, &sample);
++  g_string_append_printf (line,
++      "{\"probe_attached\":%s,\"valid\":%s,\"source_generation\":%"
++      G_GUINT64_FORMAT ",\"buffers\":",
++      sample.probe_attached ? "true" : "false",
++      sample.valid ? "true" : "false", sample.source_generation);
++  if (sample.valid)
++    g_string_append_printf (line, "%" G_GUINT64_FORMAT, sample.buffers);
++  else
++    g_string_append (line, "null");
++  g_string_append (line, ",\"last_progress_monotonic_ns\":");
++  if (sample.valid && sample.last_progress_monotonic_ns)
++    g_string_append_printf (line, "%" G_GUINT64_FORMAT,
++        sample.last_progress_monotonic_ns);
++  else
++    g_string_append (line, "null");
++  g_string_append_c (line, '}');
++}
++
+ static guint64 monotonic_ns (void) {
+   return (guint64) g_get_monotonic_time () * 1000;
+ }
+@@ -129,6 +153,7 @@
+ void six_live_source_reconnecting (guint id) {
+   if (!enabled || id >= 6 || g_atomic_int_get (&ownership_stopping))
+     return;
++  six_upstream_progress_generation_begin (id);
+   /* Quarantine immediately, but do not claim a new epoch until the source
+    * bin has stopped every internal producer and reached GST_STATE_NULL. */
+   g_mutex_lock (&monitor_lock);
+@@ -149,8 +174,12 @@
+     return;
+   g_mutex_lock (&monitor_lock);
+   g_mutex_lock (&telemetry_lock);
++  gboolean advanced = FALSE;
++  guint64 generation = 0;
+   if (!source_epoch_ready[id]) {
+     source_generation[id]++;
++    generation = source_generation[id];
++    advanced = TRUE;
+     for (guint stage = 0; stage < 5; stage++)
+       memset (&stages[stage][id], 0, sizeof stages[stage][id]);
+     last_counts[id] = 0;
+@@ -162,6 +191,8 @@
+   }
+   g_mutex_unlock (&telemetry_lock);
+   g_mutex_unlock (&monitor_lock);
++  if (advanced)
++    six_upstream_progress_generation_boundary (id, generation);
+ }
+ 
+ static gpointer source_owner_copy (gpointer data, gpointer user_data) {
+@@ -428,6 +459,13 @@
+   g_mutex_unlock (&telemetry_lock);
+   g_mutex_unlock (&monitor_lock);
+   telemetry_enabled = g_strcmp0 (g_getenv ("SIX_ML_TELEMETRY_ENABLED"), "1") == 0;
++  upstream_progress_enabled = g_strcmp0 (
++      g_getenv ("SIX_LIVE_UPSTREAM_DIAGNOSTICS"), "1") == 0;
++  six_upstream_progress_init (upstream_progress_enabled);
++  if (upstream_progress_enabled)
++    g_print ("SIX_UPSTREAM_DIAG event=enabled "
++        "rtp_pad=selected_video_x_rtp_pad_buffers "
++        "compressed_pre_decode=dec_que_sink_after_depay_parser_before_decodebin_buffers\n");
+   return TRUE;
+ fail:
+   if (fd >= 0) close (fd);
+@@ -770,7 +808,19 @@
+       Stage *st=&stages[j][i];
+       g_string_append_printf(line,"%s{\"count\":%"G_GUINT64_FORMAT",\"objects\":%"G_GUINT64_FORMAT",\"frame\":%"G_GUINT64_FORMAT",\"first_ns\":%"G_GUINT64_FORMAT",\"last_ns\":%"G_GUINT64_FORMAT",\"pts\":%"G_GUINT64_FORMAT",\"pts_regressions\":%"G_GUINT64_FORMAT",\"max_gap_ns\":%"G_GUINT64_FORMAT",\"width\":%u,\"height\":%u}",j?",":"",st->count,st->objects,st->last_frame,st->first_ns,st->last_ns,st->pts,st->pts_regressions,st->max_gap_ns,st->width,st->height);
+     }
+-    g_string_append(line,"]}\n");g_print("%s",line->str);g_string_free(line,TRUE);
++    g_string_append(line,"]");
++    if (upstream_progress_enabled) {
++      g_string_append_printf (line,
++          ",\"upstream_diagnostics\":{\"enabled\":true,"
++          "\"sample_monotonic_ns\":%" G_GUINT64_FORMAT ",\"rtp_pad\":",
++          now);
++      append_upstream_stage (line, i, generations[i], SIX_UPSTREAM_RTP_PAD);
++      g_string_append (line, ",\"compressed_pre_decode\":");
++      append_upstream_stage (line, i, generations[i],
++          SIX_UPSTREAM_COMPRESSED_PRE_DECODE);
++      g_string_append_c (line, '}');
++    }
++    g_string_append(line,"}\n");g_print("%s",line->str);g_string_free(line,TRUE);
+   }
+   last_tick=now;fflush(stdout);g_mutex_unlock(&monitor_lock);return G_SOURCE_CONTINUE;
+ }
+@@ -881,6 +931,7 @@
+ void six_live_stop (void) {
+   g_print ("SIX_SHUTDOWN event=six_live_stop_entered\n");
+   g_atomic_int_set (&ownership_stopping, 1);
++  six_upstream_progress_shutdown ();
+   if(timer){g_source_remove(timer);timer=0;}
+   if(enabled)(void)tick(NULL);
+   if (telemetry_enabled) {
+--- a/apps/sample_apps/deepstream-app/six_live_monitor.h
++++ b/apps/sample_apps/deepstream-app/six_live_monitor.h
+@@ -1,6 +1,7 @@
+ #ifndef SIX_LIVE_MONITOR_H
+ #define SIX_LIVE_MONITOR_H
+ #include "deepstream_app.h"
++#include "six_live_upstream_progress.h"
+ gboolean six_live_prepare (AppCtx *app);
+ gboolean six_live_attach (AppCtx *app);
+ gboolean six_live_source_auth (GstElement *source, guint id, const gchar *uri);
+--- /dev/null
++++ b/apps/sample_apps/deepstream-app/six_live_upstream_progress.c
+@@ -0,0 +1,277 @@
++/* Opt-in, payload-free upstream progress probes for the isolated Fix 6 build. */
++#include "six_live_upstream_progress.h"
++#include <string.h>
++
++typedef struct {
++  guint64 buffers;
++  guint64 last_progress_ns;
++  guint64 generation;
++  gint attached;
++} UpstreamCounter;
++
++typedef struct {
++  GstPad *pad;
++  gulong probe_id;
++} ProbeSlot;
++
++typedef struct {
++  guint source_id;
++  SixUpstreamStage stage;
++} ProbeContext;
++
++static UpstreamCounter counters[6][2];
++static guint64 source_generation[6];
++static gint source_active[6];
++static ProbeSlot slots[6][2];
++static GMutex slots_lock;
++static gsize initialized;
++static gboolean diagnostics_enabled;
++
++static void ensure_initialized (void)
++{
++  if (g_once_init_enter (&initialized)) {
++    g_mutex_init (&slots_lock);
++    diagnostics_enabled = g_strcmp0 (
++        g_getenv ("SIX_LIVE_UPSTREAM_DIAGNOSTICS"), "1") == 0;
++    for (guint source = 0; source < 6; source++) {
++      __atomic_store_n (&source_generation[source], 0, __ATOMIC_RELAXED);
++      __atomic_store_n (&source_active[source], diagnostics_enabled ? 1 : 0,
++          __ATOMIC_RELAXED);
++      for (guint stage = 0; stage < 2; stage++) {
++        __atomic_store_n (&counters[source][stage].buffers, 0, __ATOMIC_RELAXED);
++        __atomic_store_n (&counters[source][stage].last_progress_ns, 0,
++            __ATOMIC_RELAXED);
++        __atomic_store_n (&counters[source][stage].generation, 0,
++            __ATOMIC_RELAXED);
++        __atomic_store_n (&counters[source][stage].attached, 0,
++            __ATOMIC_RELAXED);
++      }
++    }
++    g_once_init_leave (&initialized, 1);
++  }
++}
++
++static gboolean stage_valid (SixUpstreamStage stage)
++{
++  return stage == SIX_UPSTREAM_RTP_PAD ||
++      stage == SIX_UPSTREAM_COMPRESSED_PRE_DECODE;
++}
++
++void six_upstream_progress_init (gboolean enabled)
++{
++  ensure_initialized ();
++  g_mutex_lock (&slots_lock);
++  gboolean has_attached_probe = FALSE;
++  for (guint source = 0; source < 6; source++)
++    for (guint stage = 0; stage < 2; stage++)
++      has_attached_probe |= slots[source][stage].pad != NULL;
++  if (has_attached_probe) {
++    /* The source-bin queue exists before the app's authenticated prepare
++     * hook. Preserve probes installed from the explicit environment opt-in. */
++    g_mutex_unlock (&slots_lock);
++    return;
++  }
++  diagnostics_enabled = enabled;
++  for (guint source = 0; source < 6; source++) {
++    __atomic_store_n (&source_generation[source], 0, __ATOMIC_RELEASE);
++    __atomic_store_n (&source_active[source], enabled ? 1 : 0, __ATOMIC_RELEASE);
++    for (guint stage = 0; stage < 2; stage++) {
++      __atomic_store_n (&counters[source][stage].buffers, 0, __ATOMIC_RELAXED);
++      __atomic_store_n (&counters[source][stage].last_progress_ns, 0,
++          __ATOMIC_RELAXED);
++      __atomic_store_n (&counters[source][stage].generation, 0,
++          __ATOMIC_RELEASE);
++      __atomic_store_n (&counters[source][stage].attached, 0, __ATOMIC_RELEASE);
++    }
++  }
++  g_mutex_unlock (&slots_lock);
++}
++
++static GstPadProbeReturn upstream_progress_probe (GstPad *pad,
++    GstPadProbeInfo *info, gpointer user_data)
++{
++  (void) pad;
++  const ProbeContext *context = user_data;
++  if (!diagnostics_enabled || !context || context->source_id >= 6 ||
++      !stage_valid (context->stage))
++    return GST_PAD_PROBE_OK;
++
++  guint64 count = 0;
++  GstPadProbeType type = GST_PAD_PROBE_INFO_TYPE (info);
++  if (type & GST_PAD_PROBE_TYPE_BUFFER) {
++    if (GST_PAD_PROBE_INFO_BUFFER (info))
++      count = 1;
++  } else if (type & GST_PAD_PROBE_TYPE_BUFFER_LIST) {
++    GstBufferList *list = GST_PAD_PROBE_INFO_BUFFER_LIST (info);
++    if (list)
++      count = gst_buffer_list_length (list);
++  }
++  if (!count)
++    return GST_PAD_PROBE_OK;
++
++  guint source = context->source_id;
++  guint stage = (guint) context->stage;
++  UpstreamCounter *counter = &counters[source][stage];
++  if (!__atomic_load_n (&source_active[source], __ATOMIC_ACQUIRE) ||
++      !__atomic_load_n (&counter->attached, __ATOMIC_ACQUIRE))
++    return GST_PAD_PROBE_OK;
++  guint64 generation = __atomic_load_n (&source_generation[source],
++      __ATOMIC_ACQUIRE);
++  if (generation != __atomic_load_n (&counter->generation, __ATOMIC_ACQUIRE))
++    return GST_PAD_PROBE_OK;
++
++  /* Probes do not take locks, map payloads, or perform I/O. The source-bin
++   * NULL transition is the existing quiescence boundary before generation
++   * reset, so these relaxed increments cannot cross into a later epoch. */
++  __atomic_fetch_add (&counter->buffers, count, __ATOMIC_RELAXED);
++  guint64 now_ns = (guint64) g_get_monotonic_time () * 1000;
++  guint64 previous = __atomic_load_n (&counter->last_progress_ns,
++      __ATOMIC_RELAXED);
++  while (previous < now_ns &&
++      !__atomic_compare_exchange_n (&counter->last_progress_ns, &previous,
++          now_ns, FALSE, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
++    ;
++  return GST_PAD_PROBE_OK;
++}
++
++static void detach_slot_locked (guint source, guint stage)
++{
++  ProbeSlot *slot = &slots[source][stage];
++  if (!slot->pad)
++    return;
++  __atomic_store_n (&counters[source][stage].attached, 0, __ATOMIC_RELEASE);
++  if (slot->probe_id)
++    gst_pad_remove_probe (slot->pad, slot->probe_id);
++  gst_object_unref (slot->pad);
++  slot->pad = NULL;
++  slot->probe_id = 0;
++}
++
++gboolean six_upstream_progress_attach (GstPad *pad, guint source_id,
++    SixUpstreamStage stage)
++{
++  ensure_initialized ();
++  if (!pad || source_id >= 6 || !stage_valid (stage))
++    return FALSE;
++  if (!diagnostics_enabled)
++    return TRUE; /* Default-off: intentional no-op, not an attach failure. */
++  guint stage_id = (guint) stage;
++  g_mutex_lock (&slots_lock);
++  ProbeSlot *slot = &slots[source_id][stage_id];
++  if (slot->pad == pad && slot->probe_id) {
++    g_mutex_unlock (&slots_lock);
++    return TRUE;
++  }
++  detach_slot_locked (source_id, stage_id);
++
++  ProbeContext *context = g_new0 (ProbeContext, 1);
++  context->source_id = source_id;
++  context->stage = stage;
++  gulong probe_id = gst_pad_add_probe (pad,
++      (GstPadProbeType) (GST_PAD_PROBE_TYPE_BUFFER |
++          GST_PAD_PROBE_TYPE_BUFFER_LIST), upstream_progress_probe, context,
++      g_free);
++  if (!probe_id) {
++    g_free (context);
++    g_mutex_unlock (&slots_lock);
++    return FALSE;
++  }
++  slot->pad = GST_PAD (gst_object_ref (pad));
++  slot->probe_id = probe_id;
++  __atomic_store_n (&counters[source_id][stage_id].attached, 1,
++      __ATOMIC_RELEASE);
++  g_mutex_unlock (&slots_lock);
++  return TRUE;
++}
++
++void six_upstream_progress_detach (GstPad *pad, guint source_id,
++    SixUpstreamStage stage)
++{
++  ensure_initialized ();
++  if (!pad || source_id >= 6 || !stage_valid (stage))
++    return;
++  guint stage_id = (guint) stage;
++  g_mutex_lock (&slots_lock);
++  if (slots[source_id][stage_id].pad == pad)
++    detach_slot_locked (source_id, stage_id);
++  g_mutex_unlock (&slots_lock);
++}
++
++void six_upstream_progress_generation_begin (guint source_id)
++{
++  ensure_initialized ();
++  if (!diagnostics_enabled || source_id >= 6)
++    return;
++  __atomic_store_n (&source_active[source_id], 0, __ATOMIC_RELEASE);
++}
++
++void six_upstream_progress_generation_boundary (guint source_id,
++    guint64 generation)
++{
++  ensure_initialized ();
++  if (!diagnostics_enabled || source_id >= 6)
++    return;
++  __atomic_store_n (&source_active[source_id], 0, __ATOMIC_RELEASE);
++  for (guint stage = 0; stage < 2; stage++) {
++    __atomic_store_n (&counters[source_id][stage].buffers, 0, __ATOMIC_RELAXED);
++    __atomic_store_n (&counters[source_id][stage].last_progress_ns, 0,
++        __ATOMIC_RELAXED);
++    __atomic_store_n (&counters[source_id][stage].generation, generation,
++        __ATOMIC_RELEASE);
++  }
++  __atomic_store_n (&source_generation[source_id], generation, __ATOMIC_RELEASE);
++  __atomic_store_n (&source_active[source_id], 1, __ATOMIC_RELEASE);
++}
++
++gboolean six_upstream_progress_snapshot (guint source_id,
++    guint64 expected_generation, SixUpstreamStage stage,
++    SixUpstreamSnapshot *snapshot)
++{
++  ensure_initialized ();
++  if (!snapshot || source_id >= 6 || !stage_valid (stage))
++    return FALSE;
++  memset (snapshot, 0, sizeof *snapshot);
++  if (!diagnostics_enabled)
++    return FALSE;
++  guint stage_id = (guint) stage;
++  UpstreamCounter *counter = &counters[source_id][stage_id];
++  gboolean active_before = __atomic_load_n (&source_active[source_id],
++      __ATOMIC_ACQUIRE) != 0;
++  guint64 generation_before = __atomic_load_n (&source_generation[source_id],
++      __ATOMIC_ACQUIRE);
++  guint64 counter_generation = __atomic_load_n (&counter->generation,
++      __ATOMIC_ACQUIRE);
++  guint64 buffers = __atomic_load_n (&counter->buffers, __ATOMIC_RELAXED);
++  guint64 last_ns = __atomic_load_n (&counter->last_progress_ns,
++      __ATOMIC_ACQUIRE);
++  gboolean attached = __atomic_load_n (&counter->attached, __ATOMIC_ACQUIRE) != 0;
++  guint64 generation_after = __atomic_load_n (&source_generation[source_id],
++      __ATOMIC_ACQUIRE);
++  gboolean active_after = __atomic_load_n (&source_active[source_id],
++      __ATOMIC_ACQUIRE) != 0;
++
++  snapshot->probe_attached = attached;
++  snapshot->source_generation = generation_after;
++  snapshot->valid = attached && active_before && active_after &&
++      generation_before == generation_after && counter_generation == generation_after &&
++      generation_after == expected_generation;
++  if (snapshot->valid) {
++    snapshot->buffers = buffers;
++    snapshot->last_progress_monotonic_ns = last_ns;
++  }
++  return TRUE;
++}
++
++void six_upstream_progress_shutdown (void)
++{
++  ensure_initialized ();
++  if (!diagnostics_enabled)
++    return;
++  for (guint source = 0; source < 6; source++)
++    __atomic_store_n (&source_active[source], 0, __ATOMIC_RELEASE);
++  g_mutex_lock (&slots_lock);
++  for (guint source = 0; source < 6; source++)
++    for (guint stage = 0; stage < 2; stage++)
++      detach_slot_locked (source, stage);
++  g_mutex_unlock (&slots_lock);
++}
+--- /dev/null
++++ b/apps/sample_apps/deepstream-app/six_live_upstream_progress.h
+@@ -0,0 +1,31 @@
++#ifndef SIX_LIVE_UPSTREAM_PROGRESS_H
++#define SIX_LIVE_UPSTREAM_PROGRESS_H
++#include <gst/gst.h>
++
++typedef enum {
++  SIX_UPSTREAM_RTP_PAD = 0,
++  SIX_UPSTREAM_COMPRESSED_PRE_DECODE = 1
++} SixUpstreamStage;
++
++typedef struct {
++  gboolean probe_attached;
++  gboolean valid;
++  guint64 source_generation;
++  guint64 buffers;
++  guint64 last_progress_monotonic_ns;
++} SixUpstreamSnapshot;
++
++void six_upstream_progress_init (gboolean enabled);
++gboolean six_upstream_progress_attach (GstPad *pad, guint source_id,
++    SixUpstreamStage stage);
++void six_upstream_progress_detach (GstPad *pad, guint source_id,
++    SixUpstreamStage stage);
++void six_upstream_progress_generation_begin (guint source_id);
++void six_upstream_progress_generation_boundary (guint source_id,
++    guint64 generation);
++gboolean six_upstream_progress_snapshot (guint source_id,
++    guint64 expected_generation, SixUpstreamStage stage,
++    SixUpstreamSnapshot *snapshot);
++void six_upstream_progress_shutdown (void);
++
++#endif
