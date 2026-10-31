@@ -37,6 +37,7 @@ class SourceFpsMonitor:
         self._native = {
             camera_id: {
                 "received_at": None,
+                "source_generation": None,
                 "event_ns": None,
                 "decode_count": None,
                 "tracker_count": None,
@@ -67,6 +68,12 @@ class SourceFpsMonitor:
         if (not self._nonnegative_int(source_id) or source_id >= len(CAMERA_IDS)
                 or sample.get("camera_id") != CAMERA_IDS[source_id]
                 or sample.get("fatal_metadata") is not False):
+            return False
+        generation = sample.get("source_generation")
+        # Old progress fixtures may omit generation. Once a source reports
+        # a known generation, however, subsequent unknown generations cannot
+        # safely be compared with that source's previous counters.
+        if generation is not None and not self._nonnegative_int(generation):
             return False
         event_ns = sample.get("monotonic_ns")
         stages = sample.get("stages")
@@ -100,8 +107,22 @@ class SourceFpsMonitor:
             self._native_progress_seen = True
             state = self._native[camera_id]
             previous_ns = state["event_ns"]
+            previous_generation = state["source_generation"]
+            # Ignore stale/unknown generations without corrupting a newer
+            # source's baseline. Native generations increase on reconnect.
+            if previous_generation is not None and (
+                    generation is None or generation < previous_generation):
+                return False
+            if previous_ns is not None and event_ns <= previous_ns:
+                return False
+            generation_changed = (previous_ns is not None
+                                  and generation != previous_generation)
             previous_decode = state["decode_count"]
             previous_tracker = state["tracker_count"]
+            if generation_changed:
+                # New source generation may restart frame counters at zero.
+                # Never divide deltas across the reconnect boundary.
+                previous_ns = previous_decode = previous_tracker = None
             decode_fps = tracker_fps = 0.0
             progressing = False
             if (previous_ns is not None and event_ns > previous_ns
@@ -120,6 +141,7 @@ class SourceFpsMonitor:
                     and stage_age_seconds <= self.max_age_sec)
             state.update({
                 "received_at": stamp,
+                "source_generation": generation,
                 "event_ns": event_ns,
                 "decode_count": decode_count,
                 "tracker_count": tracker_count,
@@ -202,6 +224,7 @@ class SourceFpsMonitor:
                     "camera_progress": {
                         camera_id: {
                             "native_monotonic_ns": state["event_ns"],
+                            "source_generation": state["source_generation"],
                             "received_age_seconds": ages[camera_id],
                             "decode_count": state["decode_count"],
                             "tracker_count": state["tracker_count"],
