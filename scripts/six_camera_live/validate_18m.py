@@ -39,12 +39,13 @@ EXPECTED = "52e781a755ebcdc5fe7e5252cb880e956775ccb5461ddbcfedab7710d0914d8d"
 ENGINE = "3b75d51182b9f4679c328ac339e5d063dde681874f83e388792a933f34e9e3d2"
 IMAGE = "nvcr.io/nvidia/deepstream@sha256:10eca409b3894e91c1bac915c9f1346307e56695e552487cbe8cf2f58a3f998f"
 UNIT = "ai-surveillance-18m-alarm-fix.service"
-TOTAL = 1080
-PRE = 960
+TOTAL = 1500
+PRE = 1380
 STOP = 90
 STOP_COMMAND_TIMEOUT = 25
 STOP_CLEANUP_MARGIN = 5
 PREFLIGHT_BUDGET = 40
+REQUIRED_NATIVE_OBSERVATION_SECONDS = 1080
 GPU_MIN_FREE_MIB = 5120
 CONTAINER_RE = re.compile(r"^ai-surveillance-six-live-(\d+)-[0-9a-f]{12}$")
 signal_reason: str | None = None
@@ -803,6 +804,28 @@ class NativeTimeline:
             return None
         return (end_ns - self.native_start_ns) / 1_000_000_000
 
+    def planned_observation_complete(self, now_ns: int | None = None) -> bool:
+        now_ns = time.monotonic_ns() if now_ns is None else now_ns
+        return (
+            self.native_start_ns is not None
+            and self.playing_ns is not None
+            and self.native_start_ns <= self.playing_ns <= now_ns
+            and now_ns - self.playing_ns >=
+                REQUIRED_NATIVE_OBSERVATION_SECONDS * 1_000_000_000
+        )
+
+    def native_observation_seconds(self) -> float | None:
+        """Conservative PLAYING-to-shutdown-request wall-clock span."""
+        start = self.playing_ns
+        end = self.shutdown_requested_ns
+        if start is None or end is None or end < start:
+            return None
+        return (end - start) / 1_000_000_000
+
+    def observation_met(self, required_seconds: int) -> bool:
+        elapsed = self.native_observation_seconds()
+        return elapsed is not None and elapsed >= required_seconds
+
     def crossed_800_seconds(self) -> bool | None:
         end_ns = self.pipeline_stopped_ns or self.native_exit_ns
         if self.native_start_ns is None:
@@ -902,6 +925,10 @@ def worker(runid: str, *, preflight_fn: Callable | None = None,
             if stop_event is not None and stop_event.is_set():
                 reason = "manual_or_systemd_stop"
                 break
+            if timeline.planned_observation_complete():
+                reason = "deadline"
+                termination_source = "planned_native_observation_completed"
+                break
             session_result = session_fn()
             if not session_result[0]:
                 reason = "x11_lost"
@@ -988,8 +1015,14 @@ def worker(runid: str, *, preflight_fn: Callable | None = None,
             termination_source = "zero_exit_before_planned_completion"
         if reason == "source_progress_failure":
             termination_source = "launcher_nonzero_exit"
-        successful_reason = reason in ("deadline", "manual_or_systemd_stop")
-        success = (successful_reason and exception_category is None and stop_result.exit_code == 0
+        successful_reason = (
+            reason == "deadline"
+            and termination_source == "planned_native_observation_completed"
+        )
+        observation_seconds = timeline.native_observation_seconds()
+        observation_met = timeline.observation_met(REQUIRED_NATIVE_OBSERVATION_SECONDS)
+        success = (successful_reason and observation_met
+                   and exception_category is None and stop_result.exit_code == 0
                    and rc == 0 and cleanup_ok)
         if termination_source != "worker_startup":
             try:
@@ -1015,6 +1048,9 @@ def worker(runid: str, *, preflight_fn: Callable | None = None,
                  "container_exit_code": timeline.container_exit_code,
                  "native_exit_code": timeline.native_exit_code,
                  "native_pipeline_uptime_seconds": timeline.native_pipeline_uptime_seconds(),
+                  "native_observation_seconds": observation_seconds,
+                  "required_native_observation_seconds": REQUIRED_NATIVE_OBSERVATION_SECONDS,
+                  "native_observation_met": observation_met,
                  "native_viewer_started_monotonic_ns": timeline.native_start_ns,
                  "native_playing_monotonic_ns": timeline.playing_ns,
                  "native_pipeline_stopped_monotonic_ns": timeline.pipeline_stopped_ns,

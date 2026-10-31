@@ -114,7 +114,7 @@ def test_transient_worker_imports_project_with_explicit_pythonpath():
 
 
 def test_total_deadline_includes_stop_reserve():
-    assert module.TOTAL == 1080
+    assert module.TOTAL == 1500
     assert module.PRE + module.STOP <= module.TOTAL
     assert module.TOTAL - module.PRE - module.STOP >= 15
     text = HELPER.read_text()
@@ -260,7 +260,7 @@ def test_transient_command_explicitly_sets_project_pythonpath(tmp_path, monkeypa
     assert report.exists()
 
 
-def test_worker_successful_fake_launcher_manual_stop_and_cleanup(tmp_path, monkeypatch):
+def test_worker_manual_stop_is_not_validation_pass(tmp_path, monkeypatch):
     run_dir, report = _fake_run(tmp_path, monkeypatch)
     child_script = tmp_path / ('graceful_fake_launcher_' + secrets.token_hex(3) + '.py')
     ready_path = tmp_path / ('fake_launcher_ready_' + secrets.token_hex(3))
@@ -298,12 +298,13 @@ def test_worker_successful_fake_launcher_manual_stop_and_cleanup(tmp_path, monke
         poll_interval=0.01, sample_interval=0.05, stop_event=stop_event)
     rows = _rows(report)
     final = rows[-1]
-    assert result == 0
+    assert result == 1
     assert any(row['type'] == 'pipeline_started' for row in rows)
     assert any(row['type'] == 'health' and row['api_http'] == 200 and row['ml_http'] == 200 for row in rows)
     assert final['reason'] == 'manual_or_systemd_stop'
     assert final['launcher_exit_code'] == 0
-    assert final['cleanup_ok'] is True and final['success'] is True
+    assert final['cleanup_ok'] is True
+    assert final['success'] is False
     assert child_envs and str(ROOT) in child_envs[0]['PYTHONPATH'].split(os.pathsep)
     assert (run_dir / 'launcher.log').exists()
     assert report.stat().st_mode & 0o777 == 0o600
@@ -371,6 +372,69 @@ def test_monitor_child_nonzero_exit_is_failed_and_preserved(tmp_path, monkeypatc
     assert final['termination_source'] == 'launcher_nonzero_exit'
     assert final['launcher_exit_code'] == 23
     assert final['success'] is False
+
+
+
+
+def test_planned_native_observation_boundary_and_budget(tmp_path):
+    timeline = module.NativeTimeline(tmp_path / "unused.log")
+
+    required = module.REQUIRED_NATIVE_OBSERVATION_SECONDS
+    assert required == 1080
+    assert module.PRE >= (
+        required + 2 * module.PREFLIGHT_BUDGET + 120 + 15
+    )
+    assert module.TOTAL >= module.PRE + module.STOP + 15
+
+    start = 1_000_000_000_000
+    playing = start + 1_000_000_000
+
+    # Missing native markers: fail closed.
+    assert not timeline.planned_observation_complete(
+        playing + required * 1_000_000_000
+    )
+
+    timeline.native_start_ns = start
+    timeline.playing_ns = playing
+
+    assert not timeline.planned_observation_complete(
+        playing + required * 1_000_000_000 - 1
+    )
+
+    assert timeline.planned_observation_complete(
+        playing + required * 1_000_000_000
+    )
+
+    # Invalid marker ordering: fail closed.
+    timeline.native_start_ns = playing + 1
+    assert not timeline.planned_observation_complete(
+        playing + required * 1_000_000_000
+    )
+
+
+def test_native_observation_must_reach_required_duration(tmp_path):
+    timeline = module.NativeTimeline(tmp_path / "missing.log")
+    begin = 1_000_000_000_000
+    required = module.REQUIRED_NATIVE_OBSERVATION_SECONDS
+
+    timeline.playing_ns = begin
+
+    # No shutdown marker: cannot establish valid observation.
+    assert timeline.native_observation_seconds() is None
+    assert timeline.observation_met(required) is False
+
+    # One second short must fail.
+    timeline.shutdown_requested_ns = begin + (required - 1) * 1_000_000_000
+    assert timeline.observation_met(required) is False
+
+    # Exact threshold qualifies.
+    timeline.shutdown_requested_ns = begin + required * 1_000_000_000
+    assert timeline.observation_met(required) is True
+
+    # Invalid timestamp ordering must fail closed.
+    timeline.shutdown_requested_ns = begin - 1
+    assert timeline.native_observation_seconds() is None
+    assert timeline.observation_met(required) is False
 
 
 def test_native_timeline_records_playing_800_null_and_distinct_exit_codes(tmp_path):
@@ -485,7 +549,7 @@ def test_health_records_use_native_monotonic_elapsed_seconds(tmp_path, monkeypat
         poll_interval=.01, sample_interval=.02, stop_event=stop_event)
     rows = _rows(report)
     health = next(row for row in rows if row.get('type') == 'health')
-    assert result == 0, rows
+    assert result == 1, rows
     assert health['elapsed_clock'] == 'CLOCK_MONOTONIC'
     assert isinstance(health['elapsed_seconds'], float)
     assert health['elapsed_seconds'] >= 0
@@ -494,6 +558,8 @@ def test_health_records_use_native_monotonic_elapsed_seconds(tmp_path, monkeypat
     final = rows[-1]
     assert final['native_viewer_started_monotonic_ns'] is not None
     assert final['reason'] == 'manual_or_systemd_stop'
+    assert final['success'] is False
+    assert final['cleanup_ok'] is True
 
 
 def test_nonzero_launcher_failure_diagnostic_is_not_misclassified_as_monitor_exit(tmp_path, monkeypatch):
@@ -686,3 +752,78 @@ def test_real_transient_service_manual_stop_and_abnormal_exit(tmp_path):
                         capture_output=True, text=True, timeout=4)
     assert st.returncode != 0
     (tmp_path / 'abnormal-result.txt').write_text(f'exit={bad.returncode}; unit={st.stdout.strip()}')
+
+
+def test_planned_observation_full_shutdown_integration(tmp_path, monkeypatch):
+    """Exercise planned observation, stop, NULL evidence and acceptance."""
+    _run_dir, report = _fake_run(tmp_path, monkeypatch)
+
+    # Accelerate only the test; production stays at 1080 seconds.
+    monkeypatch.setattr(
+        module, "REQUIRED_NATIVE_OBSERVATION_SECONDS", 0.3
+    )
+    monkeypatch.setattr(module, "gpu_snapshot", lambda: None)
+    monkeypatch.setattr(module, "host_snapshot", lambda: None)
+
+    child = tmp_path / "fake_planned_launcher.py"
+    child.write_text(
+        "import json, signal, sys, time\n"
+        "def mark(status):\n"
+        "    print('SIX_PIPELINE ' + json.dumps({"
+        "'status': status, 'monotonic_ns': time.monotonic_ns()"
+        "}), flush=True)\n"
+        "def stop(*_):\n"
+        "    print('DOCKER_SIGNAL event=stop_request_started "
+        "signal=SIGTERM monotonic_ns=%d' % time.monotonic_ns(), "
+        "flush=True)\n"
+        "    print('SIX_SHUTDOWN event=pipeline_null_observed "
+        "set_result=1 query_result=1 current_state=NULL "
+        "pending_state=VOID_PENDING', flush=True)\n"
+        "    mark('stopped')\n"
+        "    print('SIX_SHUTDOWN event=process_exit_initiated "
+        "code=0 monotonic_ns=%d' % time.monotonic_ns(), flush=True)\n"
+        "    print('DOCKER_RUN_EXIT code=0', flush=True)\n"
+        "    print('DOCKER_STATE {\"Status\":\"exited\","
+        "\"Running\":false,\"OOMKilled\":false,"
+        "\"ExitCode\":0,\"Dead\":false}', flush=True)\n"
+        "    print('CLEANUP_PREDICATES {\"cleanup_ok\":true}', "
+        "flush=True)\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "mark('starting')\n"
+        "mark('playing')\n"
+        "while True: time.sleep(.01)\n"
+    )
+
+    result = module.worker(
+        "fixture",
+        preflight_fn=lambda: {
+            "display": ":fixture",
+            "xauthority": "/tmp/fake",
+        },
+        command_factory=lambda: [sys.executable, str(child)],
+        health_fn=_good_health,
+        session_fn=lambda: (True, ":fixture", "/tmp/fake"),
+        cleanup_fn=lambda pid, rc: {
+            "launcher_reaped": rc == 0,
+            "owned_container_absent": True,
+        },
+        poll_interval=0.01,
+        sample_interval=0.1,
+        install_signal_handlers=False,
+    )
+
+    rows = _rows(report)
+    final = rows[-1]
+
+    assert result == 0, final
+    assert final["reason"] == "deadline"
+    assert final["termination_source"] == (
+        "planned_native_observation_completed"
+    )
+    assert final["native_observation_met"] is True
+    assert final["native_observation_seconds"] >= 0.3
+    assert final["null_state_completed"] is True
+    assert final["launcher_exit_code"] == 0
+    assert final["cleanup_ok"] is True
+    assert final["success"] is True

@@ -85,9 +85,15 @@ class SourceFpsMonitor:
         # Native monotonic time comes from the same host kernel clock inside
         # the default container time namespace. Rates use deltas of that clock;
         # receipt time is used separately for the supervisor's freshness check.
-        stage_age_ns = event_ns - max(decode_last_ns, tracker_last_ns)
-        if stage_age_ns < 0:
+        # Reject timestamps newer than the native sample.
+        if decode_last_ns > event_ns or tracker_last_ns > event_ns:
             return False
+
+        # Both required stages must be fresh; use the older stage.
+        stage_age_ns = max(
+            event_ns - decode_last_ns,
+            event_ns - tracker_last_ns,
+        )
 
         camera_id = CAMERA_IDS[source_id]
         with self._lock:
